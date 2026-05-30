@@ -12,6 +12,9 @@
       "default": "./src/index.ts"
     }
   },
+  "dependencies": {
+    "@papercusp/chat-protocol": "*"
+  },
   "scripts": {
     "test": "vitest",
     "build": "tsc -p tsconfig.build.json"

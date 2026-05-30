@@ -6,6 +6,7 @@ import type { RolesQuota, ToolResult } from './wire';
 import type { AgentRole } from './host-types';
 import type { z, ZodTypeAny } from 'zod';
 import type { EventsSchema, UnifiedToolContext, UserEvents } from './tool-projection';
+import type { OpenCardSnapshot as WireOpenCardSnapshot } from '@papercusp/chat-protocol';
 
 /** A Papercusp capability tier per spec/capabilities §10.6.1. */
 export type CapabilityTier = 'low' | 'medium' | 'high';
@@ -695,18 +696,40 @@ export type CardResponse<TSchema extends ZodTypeAny = ZodTypeAny> =
   | { action: 'cancel' };
 
 /**
+ * The streaming-chat wire event union — re-exported from the shared
+ * `@papercusp/chat-protocol` contract so a papercup client and a Scout client
+ * speak the same SSE protocol (Phase 6, option A —
+ * `scout-convergence-papercup-2026-05-30` D-002). papercup's richer server-side
+ * card types stay internal; only the wire contract is shared.
+ */
+export type { ChatEvent } from '@papercusp/chat-protocol';
+
+/**
  * The wire-serializable form of an open card, included in `state-snapshot`
  * payloads under `openCards[]`. Zod schemas are serialized as JSON Schema.
+ *
+ * Adopts the shared `@papercusp/chat-protocol` `OpenCardSnapshot` wire contract
+ * (Phase 6, option A — D-002/D-003): inherits the shared wire fields, but keeps
+ * papercup's richer *discriminated* `CardPresentation` and a *required*
+ * `dataSchemaJson` (papercup always serializes the zod schema server-side). The
+ * discriminated presentation is a structural subtype of the shared flat one, so
+ * this interface stays assignable to the shared wire snapshot — a shared client
+ * can parse papercup's card payloads (`_assertOpenCardSnapshotIsWireCompatible`
+ * below proves it at compile time; a diff that breaks wire-compat fails here).
  */
-export interface OpenCardSnapshot {
-  correlationId: string;
-  prompt: string;
-  dataSchemaJson: Record<string, unknown>;
+export interface OpenCardSnapshot
+  extends Omit<WireOpenCardSnapshot, 'presentation' | 'dataSchemaJson'> {
   presentation?: CardPresentation;
-  fallbackText?: string;
-  allowDecline?: boolean;
-  createdAt: number;
+  dataSchemaJson: Record<string, unknown>;
 }
+
+// Compile-time guarantee: papercup's OpenCardSnapshot satisfies the shared wire
+// contract. Errors here mean the card wire types drifted out of compatibility.
+// Type-only; zero runtime cost.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type _AssertWireCompatible<_T extends WireOpenCardSnapshot> = never;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type _assertOpenCardSnapshotIsWireCompatible = _AssertWireCompatible<OpenCardSnapshot>;
 
 export interface PromptDefinitionInput {
   name?: string;
