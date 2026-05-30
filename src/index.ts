@@ -83,7 +83,12 @@ export {
 } from './card-correlator';
 
 /* ─── Capability tiers ───────────────────────────────────────────────── */
-export { tierFor } from './capability-tiers';
+export {
+  tierFor,
+  setCapabilityTierResolver,
+  defaultTierResolver,
+  type CapabilityTierResolver,
+} from './capability-tiers';
 
 /* ─── Projected-tool registry (the function-as-truth core) ───────────── */
 export {
