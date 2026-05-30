@@ -11,28 +11,44 @@
  * threaded in through `DispatchProjectedDeps` by the host.
  */
 
-import type { ToolResult } from './wire';
+import type { RolesQuota, ToolResult } from './wire';
 import type { UnifiedToolContext } from './tool-projection';
 
-/* ─── Quota window keying ────────────────────────────────────────────── */
+/* ─── Quota windowing ────────────────────────────────────────────────── */
 
-/** Compute the quota window key from a context. */
-export function computeProjectedQuotaWindowKey(ctx: UnifiedToolContext): string | null {
-  if (ctx.role === 'worker') {
-    if (!ctx.chunkId) return null;
-    return `chunk:${ctx.chunkId}`;
-  }
-  // Power-user (`?power_user=1`) sessions get a fresh `runId` per MCP
-  // request — a run-keyed window would reset every call and never
-  // accumulate. Key on the stable auth session (`uiClientId` carries
-  // the `auth_session_id`) so the workspace's operator-tier quota
-  // actually applies across the session. See
-  // docs/plans/omp-power-user-bundle-2026-05-20.md §4.1.
-  if (ctx.isPowerUser && ctx.uiClientId) {
-    return `power-user:${ctx.uiClientId}`;
-  }
-  if (!ctx.runId) return null;
-  return `run:${ctx.runId}`;
+/**
+ * The quota window resolved for one call.
+ *   - `key`   groups telemetry rows AND scopes quota counting. `null` means
+ *             "no window" — the call is not quota-counted and telemetry
+ *             records an empty window key.
+ *   - `limit` is the ceiling within that window, or `null` for "unlimited"
+ *             (no quota gate). The dispatcher compares the host's count
+ *             against this and never reads the `RolesQuota` fields itself.
+ *
+ * Both the window scoping and the ceiling are host policy — which is why
+ * they are resolved together by a single `computeQuotaWindow` function
+ * (plan P-010 / P-011, D-006). The role→chunk/run/session mapping and the
+ * `perChunk`-vs-`perRun` choice are Papercusp specifics that live in the
+ * adapter, not here.
+ */
+export interface QuotaWindow {
+  key: string | null;
+  limit: number | null;
+}
+
+/**
+ * The framework's default quota windowing: run-scoped, `perRun` ceiling.
+ * A host with richer policy (per-chunk windows, session-keyed quotas, …)
+ * supplies `DispatchProjectedDeps.computeQuotaWindow` to override this.
+ */
+export function defaultComputeQuotaWindow(
+  ctx: UnifiedToolContext,
+  roleQuota: RolesQuota | undefined,
+): QuotaWindow {
+  return {
+    key: ctx.runId ? `run:${ctx.runId}` : null,
+    limit: roleQuota?.perRun ?? null,
+  };
 }
 
 /* ─── Dispatcher result ──────────────────────────────────────────────── */
@@ -84,6 +100,15 @@ export type ToolDispatchOverrideFn = (
   | typeof PASS_THROUGH;
 
 export interface DispatchProjectedDeps {
+  /**
+   * Resolve the quota window (telemetry grouping + quota scope) and ceiling
+   * for a call. Defaults to `defaultComputeQuotaWindow` (run-scoped, `perRun`
+   * ceiling) when unset. The host supplies this to encode its own policy —
+   * e.g. Papercusp keys workers on `chunk:<id>`/`perChunk`, power-user
+   * sessions on the stable auth session, everyone else on `run:<id>`/`perRun`.
+   * `roleQuota` is the tool's `rolesQuota[ctx.role]` entry (or undefined).
+   */
+  computeQuotaWindow?(ctx: UnifiedToolContext, roleQuota: RolesQuota | undefined): QuotaWindow;
   /** Read current quota usage. Return null to disable quota enforcement. */
   readQuotaState?(
     toolName: string,

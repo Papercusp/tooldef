@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   dispatchProjectedTool,
   dispatchProjectedToolStream,
-  computeProjectedQuotaWindowKey,
+  defaultComputeQuotaWindow,
   type DispatchProjectedDeps,
   type DispatchStreamEvent,
 } from './dispatch-projected';
@@ -52,31 +52,22 @@ const makeTool = (over: Partial<ProjectedTool> = {}): ProjectedTool => ({
 
 afterEach(() => _resetProjectionRegistryForTests());
 
-describe('computeProjectedQuotaWindowKey', () => {
-  it('uses chunk:<id> for workers', () => {
-    expect(computeProjectedQuotaWindowKey(MAKE_CTX({ role: 'worker', chunkId: 'ck_A' }))).toBe('chunk:ck_A');
+describe('defaultComputeQuotaWindow', () => {
+  // The engine's generic default is run-scoped, perRun-capped. Papercusp's
+  // role-aware policy (worker→chunk/perChunk, power-user→session) lives in the
+  // host adapter now and is covered by agent-mcp/src/quota-policy.test.ts.
+  it('keys on run:<id> regardless of role', () => {
+    expect(defaultComputeQuotaWindow(MAKE_CTX({ role: 'worker', runId: 'run_A' }), undefined).key).toBe('run:run_A');
+    expect(defaultComputeQuotaWindow(MAKE_CTX({ role: 'architect', runId: 'run_B' }), undefined).key).toBe('run:run_B');
   });
-  it('uses run:<id> for non-workers', () => {
-    expect(computeProjectedQuotaWindowKey(MAKE_CTX({ role: 'architect', runId: 'run_A', chunkId: null }))).toBe('run:run_A');
+  it('returns a null window when ctx has no runId', () => {
+    expect(defaultComputeQuotaWindow(MAKE_CTX({ runId: undefined }), { perRun: 5 }).key).toBeNull();
   });
-  it('returns null for workers without a chunk', () => {
-    expect(computeProjectedQuotaWindowKey(MAKE_CTX({ role: 'worker', chunkId: null }))).toBeNull();
+  it('takes the ceiling from roleQuota.perRun', () => {
+    expect(defaultComputeQuotaWindow(MAKE_CTX(), { perRun: 5 }).limit).toBe(5);
   });
-  it('keys power-user sessions on the auth session (uiClientId), not the per-request runId', () => {
-    // Power-user MCP calls get a fresh runId per request; a run-keyed
-    // window would never accumulate. The auth session is stable.
-    expect(
-      computeProjectedQuotaWindowKey(
-        MAKE_CTX({ role: 'operator', isPowerUser: true, uiClientId: 'pus-abc', runId: 'run_ephemeral', chunkId: null }),
-      ),
-    ).toBe('power-user:pus-abc');
-  });
-  it('falls back to run:<id> for a power-user ctx missing uiClientId', () => {
-    expect(
-      computeProjectedQuotaWindowKey(
-        MAKE_CTX({ role: 'operator', isPowerUser: true, uiClientId: null, runId: 'run_A', chunkId: null }),
-      ),
-    ).toBe('run:run_A');
+  it('reports a null limit when there is no roleQuota', () => {
+    expect(defaultComputeQuotaWindow(MAKE_CTX(), undefined).limit).toBeNull();
   });
 });
 
@@ -121,8 +112,11 @@ describe('dispatchProjectedTool', () => {
     expect(r.ok).toBe(true);
   });
 
+  // The default policy is run-scoped/perRun; these exercise the engine's
+  // generic enforcement. The worker→chunk/perChunk path is host policy and is
+  // covered end-to-end by the custom-computeQuotaWindow test below.
   it('rejects quota_exceeded when count is at the limit', async () => {
-    const tool = makeTool({ rolesQuota: { worker: { perChunk: 1 } } });
+    const tool = makeTool({ rolesQuota: { worker: { perRun: 1 } } });
     const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
       readQuotaState: vi.fn(async () => ({ count: 1 })),
     }));
@@ -132,7 +126,7 @@ describe('dispatchProjectedTool', () => {
   });
 
   it('allows when count under limit', async () => {
-    const tool = makeTool({ rolesQuota: { worker: { perChunk: 5 } } });
+    const tool = makeTool({ rolesQuota: { worker: { perRun: 5 } } });
     const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
       readQuotaState: vi.fn(async () => ({ count: 2 })),
     }));
@@ -140,11 +134,26 @@ describe('dispatchProjectedTool', () => {
   });
 
   it('fails-open when readQuotaState throws', async () => {
-    const tool = makeTool({ rolesQuota: { worker: { perChunk: 1 } } });
+    const tool = makeTool({ rolesQuota: { worker: { perRun: 1 } } });
     const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
       readQuotaState: vi.fn(async () => { throw new Error('pg down'); }),
     }));
     expect(r.ok).toBe(true);
+  });
+
+  it('honors a host-supplied computeQuotaWindow (window key + ceiling)', async () => {
+    const tool = makeTool({ rolesQuota: { worker: { perChunk: 1 } } });
+    const seen: string[] = [];
+    const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX({ chunkId: 'ck_Z' }), MAKE_DEPS({
+      // Host policy: key on the chunk, cap by perChunk — the engine reads
+      // neither field name itself.
+      computeQuotaWindow: (ctx, rq) => ({ key: `chunk:${ctx.chunkId}`, limit: rq?.perChunk ?? null }),
+      readQuotaState: vi.fn(async (_t, _c, windowKey) => { seen.push(windowKey); return { count: 1 }; }),
+    }));
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe('quota_exceeded');
+    expect(r.error?.meta).toMatchObject({ windowKey: 'chunk:ck_Z', used: 1, limit: 1 });
+    expect(seen).toEqual(['chunk:ck_Z']);
   });
 
   it('records ok invocations with output size', async () => {

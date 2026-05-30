@@ -112,9 +112,10 @@ export {
 export {
   dispatchProjectedTool,
   dispatchProjectedToolStream,
-  computeProjectedQuotaWindowKey,
+  defaultComputeQuotaWindow,
   UnauthorizedToolError,
   PASS_THROUGH,
+  type QuotaWindow,
   type DispatchProjectedDeps,
   type DispatchProjectedResult,
   type DispatchProjectedErrorCode,

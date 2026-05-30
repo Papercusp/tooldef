@@ -28,9 +28,10 @@ import {
 import type { DispatchProjectedDeps, DispatchProjectedResult } from './dispatch-types';
 
 export {
-  computeProjectedQuotaWindowKey,
+  defaultComputeQuotaWindow,
   PASS_THROUGH,
   UnauthorizedToolError,
+  type QuotaWindow,
   type DispatchProjectedDeps,
   type DispatchProjectedErrorCode,
   type DispatchProjectedResult,

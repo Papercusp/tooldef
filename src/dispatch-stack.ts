@@ -37,7 +37,7 @@ import type { ZodTypeAny } from 'zod';
 import {
   PASS_THROUGH,
   UnauthorizedToolError,
-  computeProjectedQuotaWindowKey,
+  defaultComputeQuotaWindow,
   type DispatchProjectedDeps,
   type DispatchProjectedErrorCode,
   type DispatchProjectedResult,
@@ -72,8 +72,10 @@ export interface DispatchExecution {
   readonly ctx: UnifiedToolContext;
   readonly deps: DispatchProjectedDeps;
   readonly startedAt: number;
-  /** Quota window key, or null when ctx has no run/chunk to scope to. */
+  /** Quota/telemetry window key, or null when ctx has no run/chunk to scope to. */
   readonly windowKey: string | null;
+  /** Quota ceiling within the window, or null when the call is unlimited. */
+  readonly quotaLimit: number | null;
 
   // ─── written by 'timeout' step ──────────────────────────────────────
   abort: AbortController;
@@ -107,6 +109,13 @@ function initExecution(
   ctx: UnifiedToolContext,
   deps: DispatchProjectedDeps,
 ): DispatchExecution {
+  // Resolve the quota window + ceiling once, up front: the window key feeds
+  // both the quota gate and telemetry, so it must be computed for every call
+  // (not just quota'd ones). `roleQuota` is the tool's entry for this role.
+  const roleQuota = ctx.role ? tool.rolesQuota?.[ctx.role] : undefined;
+  const { key: windowKey, limit: quotaLimit } = (
+    deps.computeQuotaWindow ?? defaultComputeQuotaWindow
+  )(ctx, roleQuota);
   return {
     tool,
     toolName,
@@ -114,7 +123,8 @@ function initExecution(
     ctx,
     deps,
     startedAt: Date.now(),
-    windowKey: computeProjectedQuotaWindowKey(ctx),
+    windowKey,
+    quotaLimit,
     abort: new AbortController(),
     timeoutSec: 0,
     idleSec: 0,
@@ -185,25 +195,26 @@ const capabilityCheckStep: DispatchStep = {
 const quotaStep: DispatchStep = {
   name: 'quota',
   async run(exec) {
-    const { tool, ctx, toolName, deps, windowKey } = exec;
-    const role = ctx.role as AgentRole | undefined;
-    const roleQuota = role && tool.rolesQuota?.[role];
+    const { ctx, toolName, deps, windowKey, quotaLimit } = exec;
     // Superuser bypasses quota; power-user does NOT — workspace quotas
     // apply to end users even though they share the operator-tier
     // catalog. See omp-power-user-bundle-2026-05-20.md §4.1.
     const quotaBypass = ctx.isSuperuser && !ctx.isPowerUser;
-    if (!windowKey || !role || !roleQuota || !deps.readQuotaState || quotaBypass) return null;
-    const limit = role === 'worker' ? roleQuota.perChunk : roleQuota.perRun;
-    if (typeof limit !== 'number' || limit <= 0) return null;
+    // The window key + ceiling were resolved at init by the host's
+    // `computeQuotaWindow` policy (worker→chunk, power-user→session, …);
+    // this step only enforces the count against the resolved limit.
+    if (!windowKey || quotaLimit == null || quotaLimit <= 0 || !deps.readQuotaState || quotaBypass) {
+      return null;
+    }
     try {
       const state = await deps.readQuotaState(toolName, ctx, windowKey);
-      if (state && state.count >= limit) {
+      if (state && state.count >= quotaLimit) {
         return {
           ok: false,
           error: {
             code: 'quota_exceeded' as DispatchProjectedErrorCode,
-            message: `Tool "${toolName}" exceeded ${role} quota (${state.count}/${limit}) in window "${windowKey}"`,
-            meta: { tool: toolName, role, windowKey, used: state.count, limit },
+            message: `Tool "${toolName}" exceeded quota (${state.count}/${quotaLimit}) in window "${windowKey}"`,
+            meta: { tool: toolName, role: ctx.role, windowKey, used: state.count, limit: quotaLimit },
           },
         };
       }
