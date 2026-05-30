@@ -1,0 +1,183 @@
+/**
+ * Tests for the dispatch-stack pipeline surface — enumeration, ordering,
+ * customization. Behavior tests live in dispatch-projected.test.ts (40
+ * tests) and exercise the same code through the public entrypoints.
+ */
+
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  DEFAULT_DISPATCH_STACK,
+  withReplacedStep,
+  runDispatchStack,
+  type DispatchStepName,
+} from './dispatch-stack';
+import {
+  _resetProjectionRegistryForTests,
+  type ProjectedTool,
+  type UnifiedToolContext,
+} from './tool-projection';
+
+const MAKE_CTX = (over: Partial<UnifiedToolContext> = {}): UnifiedToolContext => ({
+  log: vi.fn(),
+  signal: new AbortController().signal,
+  progress: vi.fn(),
+  emit: vi.fn(),
+  workspaceId: 'default',
+  harnessSlug: 'sheets',
+  role: 'worker',
+  featureId: 'F-AUTH-003',
+  chunkId: 'ck_X',
+  runId: 'run_X',
+  spawnId: 'spw_X',
+  parentSpawnId: null,
+  ...over,
+});
+
+const makeTool = (over: Partial<ProjectedTool> = {}): ProjectedTool => ({
+  pluginName: 'fixture',
+  description: 'fixture',
+  inputSchema: { type: 'object' },
+  capabilities: [],
+  expose: { mcp: { name: 'fix.tool' } },
+  fn: async () => ({ content: [{ type: 'text', text: 'ok' }] }),
+  ...over,
+});
+
+afterEach(() => _resetProjectionRegistryForTests());
+
+describe('DEFAULT_DISPATCH_STACK — enumeration', () => {
+  it('runs steps in this exact order: gates → timeout → idle → buffer → bindings → invoke', () => {
+    const expected: DispatchStepName[] = [
+      'role-allowlist',
+      'capability-check',
+      'quota',
+      'timeout',
+      'idle-watchdog',
+      'replay-buffer',
+      'ctx-bindings',
+      'invoke',
+    ];
+    expect(DEFAULT_DISPATCH_STACK.map((s) => s.name)).toEqual(expected);
+  });
+
+  it('is frozen — production callers cannot mutate it in place', () => {
+    expect(Object.isFrozen(DEFAULT_DISPATCH_STACK)).toBe(true);
+  });
+
+  it('has a unique name per step', () => {
+    const names = DEFAULT_DISPATCH_STACK.map((s) => s.name);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it('gates run before invoke', () => {
+    const names = DEFAULT_DISPATCH_STACK.map((s) => s.name);
+    const invokeIdx = names.indexOf('invoke');
+    for (const gate of ['role-allowlist', 'capability-check', 'quota'] as DispatchStepName[]) {
+      expect(names.indexOf(gate)).toBeLessThan(invokeIdx);
+    }
+  });
+
+  it('timeout arms before idle-watchdog (idle races against the same controller)', () => {
+    const names = DEFAULT_DISPATCH_STACK.map((s) => s.name);
+    expect(names.indexOf('timeout')).toBeLessThan(names.indexOf('idle-watchdog'));
+  });
+
+  it('replay-buffer + ctx-bindings run before invoke (handler emits go through wrapper)', () => {
+    const names = DEFAULT_DISPATCH_STACK.map((s) => s.name);
+    const invokeIdx = names.indexOf('invoke');
+    expect(names.indexOf('replay-buffer')).toBeLessThan(invokeIdx);
+    expect(names.indexOf('ctx-bindings')).toBeLessThan(invokeIdx);
+  });
+});
+
+describe('withReplacedStep', () => {
+  it('replaces a step by name; other entries unchanged', () => {
+    const custom = withReplacedStep(DEFAULT_DISPATCH_STACK, 'quota', async () => null);
+    expect(custom.map((s) => s.name)).toEqual(DEFAULT_DISPATCH_STACK.map((s) => s.name));
+    const quotaIdx = custom.findIndex((s) => s.name === 'quota');
+    expect(custom[quotaIdx].run).not.toBe(DEFAULT_DISPATCH_STACK[quotaIdx].run);
+    // Untouched entries should be reference-equal.
+    expect(custom[0]).toBe(DEFAULT_DISPATCH_STACK[0]);
+  });
+
+  it('throws when the named step is missing', () => {
+    // @ts-expect-error — intentionally bad name to exercise the throw
+    expect(() => withReplacedStep(DEFAULT_DISPATCH_STACK, 'nonexistent', async () => null)).toThrow(
+      /no step named/,
+    );
+  });
+
+  it('does not mutate the input stack', () => {
+    const before = DEFAULT_DISPATCH_STACK.map((s) => s.name);
+    withReplacedStep(DEFAULT_DISPATCH_STACK, 'invoke', async () => null);
+    expect(DEFAULT_DISPATCH_STACK.map((s) => s.name)).toEqual(before);
+  });
+});
+
+describe('runDispatchStack — custom stack', () => {
+  it('accepts a customized stack and routes through it', async () => {
+    let quotaRan = false;
+    const custom = withReplacedStep(DEFAULT_DISPATCH_STACK, 'quota', async () => {
+      quotaRan = true;
+      return null;
+    });
+    const r = await runDispatchStack(
+      makeTool(),
+      'fix.tool',
+      {},
+      MAKE_CTX(),
+      {},
+      custom,
+    );
+    expect(r.ok).toBe(true);
+    expect(quotaRan).toBe(true);
+  });
+
+  it('short-circuits at the first step that returns a result', async () => {
+    let invoked = false;
+    const tool = makeTool({
+      fn: async () => {
+        invoked = true;
+        return { content: [{ type: 'text', text: 'ok' }] };
+      },
+    });
+    const denyAll = withReplacedStep(DEFAULT_DISPATCH_STACK, 'role-allowlist', async () => ({
+      ok: false,
+      error: { code: 'role_not_allowed', message: 'always-deny' },
+    }));
+    const r = await runDispatchStack(tool, 'fix.tool', {}, MAKE_CTX(), {}, denyAll);
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe('role_not_allowed');
+    expect(invoked).toBe(false);
+  });
+
+  it('runs telemetry even on short-circuit', async () => {
+    const recorded: string[] = [];
+    const denyAll = withReplacedStep(DEFAULT_DISPATCH_STACK, 'capability-check', async () => ({
+      ok: false,
+      error: { code: 'missing_capability', message: 'denied' },
+    }));
+    await runDispatchStack(
+      makeTool(),
+      'fix.tool',
+      {},
+      MAKE_CTX({
+        principal: {
+          kind: 'system',
+          slug: 'test',
+          workspaceId: 'default',
+          capabilities: new Set(),
+          authMethod: 'process-internal',
+          trust: 'trusted',
+        },
+      }),
+      {
+        recordInvocation: vi.fn(async (i) => {
+          recorded.push(i.status);
+        }),
+      },
+      denyAll,
+    );
+    expect(recorded).toEqual(['role-not-allowed']);
+  });
+});
