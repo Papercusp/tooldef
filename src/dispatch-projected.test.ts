@@ -112,6 +112,45 @@ describe('dispatchProjectedTool', () => {
     expect(r.ok).toBe(true);
   });
 
+  // ctx.gateBypass is the engine's neutral "privileged caller" signal (P-014).
+  // The host (papercuspGateBypass) maps superuser/power-user onto it; the engine
+  // no longer reads isSuperuser/isPowerUser for gating.
+  it('gateBypass.role skips the role-allowlist gate', async () => {
+    const tool = makeTool({ roles: ['architect'] });
+    const denied = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX({ role: 'worker' }), MAKE_DEPS());
+    expect(denied.error?.code).toBe('role_not_allowed');
+    const bypassed = await dispatchProjectedTool(
+      tool, 'fix.tool', {}, MAKE_CTX({ role: 'worker', gateBypass: { role: true } }), MAKE_DEPS(),
+    );
+    expect(bypassed.ok).toBe(true);
+  });
+
+  it('gateBypass.capability skips the capability gate', async () => {
+    const tool = makeTool({ capabilities: ['secrets:read'] });
+    const principal = {
+      kind: 'system' as const, slug: 'p', workspaceId: 'default',
+      authMethod: 'process-internal' as const, trust: 'trusted' as const,
+      capabilities: new Set<string>(), // lacks 'secrets:read'
+    };
+    const denied = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX({ principal }), MAKE_DEPS());
+    expect(denied.error?.code).toBe('missing_capability');
+    const bypassed = await dispatchProjectedTool(
+      tool, 'fix.tool', {}, MAKE_CTX({ principal, gateBypass: { capability: true } }), MAKE_DEPS(),
+    );
+    expect(bypassed.ok).toBe(true);
+  });
+
+  it('gateBypass.quota skips the quota gate', async () => {
+    const tool = makeTool({ rolesQuota: { worker: { perRun: 1 } } });
+    const deps = MAKE_DEPS({ readQuotaState: vi.fn(async () => ({ count: 1 })) });
+    const denied = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), deps);
+    expect(denied.error?.code).toBe('quota_exceeded');
+    const bypassed = await dispatchProjectedTool(
+      tool, 'fix.tool', {}, MAKE_CTX({ gateBypass: { quota: true } }), deps,
+    );
+    expect(bypassed.ok).toBe(true);
+  });
+
   // The default policy is run-scoped/perRun; these exercise the engine's
   // generic enforcement. The worker→chunk/perChunk path is host policy and is
   // covered end-to-end by the custom-computeQuotaWindow test below.

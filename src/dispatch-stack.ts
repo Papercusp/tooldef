@@ -159,7 +159,7 @@ const roleAllowlistStep: DispatchStep = {
   name: 'role-allowlist',
   async run(exec) {
     const { tool, ctx, toolName } = exec;
-    if (!tool.roles || !ctx.role || ctx.isSuperuser) return null;
+    if (!tool.roles || !ctx.role || ctx.gateBypass?.role) return null;
     if (tool.roles.includes(ctx.role as AgentRole)) return null;
     return {
       ok: false,
@@ -175,7 +175,7 @@ const capabilityCheckStep: DispatchStep = {
   name: 'capability-check',
   async run(exec) {
     const { tool, ctx, toolName } = exec;
-    if (!ctx.principal || ctx.isSuperuser || tool.capabilities.length === 0) return null;
+    if (!ctx.principal || ctx.gateBypass?.capability || tool.capabilities.length === 0) return null;
     for (const cap of tool.capabilities) {
       if (!ctx.principal.capabilities.has(cap)) {
         return {
@@ -196,10 +196,10 @@ const quotaStep: DispatchStep = {
   name: 'quota',
   async run(exec) {
     const { ctx, toolName, deps, windowKey, quotaLimit } = exec;
-    // Superuser bypasses quota; power-user does NOT — workspace quotas
-    // apply to end users even though they share the operator-tier
-    // catalog. See omp-power-user-bundle-2026-05-20.md §4.1.
-    const quotaBypass = ctx.isSuperuser && !ctx.isPowerUser;
+    // The host decides quota bypass (Papercusp: superuser yes, power-user no —
+    // workspace quotas apply to end users; see omp-power-user-bundle-2026-05-20
+    // §4.1, encoded in papercuspGateBypass). The engine just reads the signal.
+    const quotaBypass = ctx.gateBypass?.quota ?? false;
     // The window key + ceiling were resolved at init by the host's
     // `computeQuotaWindow` policy (worker→chunk, power-user→session, …);
     // this step only enforces the count against the resolved limit.

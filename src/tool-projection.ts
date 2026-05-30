@@ -264,6 +264,25 @@ export function emitToSseSink(
  * Tool functions opt into whichever fields they need. The framework
  * doesn't care which transport triggered the call.
  */
+
+/**
+ * Per-gate bypass signals (plan P-014 / D-006). The dispatcher's role,
+ * capability, and quota gates each skip enforcement when the matching flag is
+ * true. This is the engine's *neutral* representation of "this caller is
+ * privileged" — it deliberately knows nothing about *why* (superuser,
+ * power-user, admin, …). The host's principal/auth layer decides the mapping
+ * and sets `ctx.gateBypass`; the engine never infers it. Absent ⇒ no bypass
+ * (fail-closed: every gate enforces).
+ */
+export interface GateBypass {
+  /** Skip the role-allowlist gate. */
+  role?: boolean;
+  /** Skip the capability gate. */
+  capability?: boolean;
+  /** Skip the quota gate. */
+  quota?: boolean;
+}
+
 export interface UnifiedToolContext {
   /** Tool-bound logger. Always populated. */
   log: (msg: string) => void;
@@ -306,11 +325,23 @@ export interface UnifiedToolContext {
   tx?: any;
 
   /**
+   * Per-gate bypass signals — the engine's neutral "this caller is
+   * privileged" input (plan P-014). The role/capability/quota gates read
+   * THIS, not the `isSuperuser`/`isPowerUser` fields below. The host maps its
+   * auth tiers onto it (Papercusp: `@papercusp/agent-mcp`'s `papercuspGateBypass`).
+   * Absent ⇒ every gate enforces (fail-closed).
+   */
+  gateBypass?: GateBypass;
+
+  /**
    * True when the call entered through the superuser endpoint
    * (loopback + bearer-token auth — see apps/operator/lib/superuser-token.ts
    * and apps/operator/content/docs/endpoint-system/superuser-mode.mdx).
-   * Bypasses role-allowlist and quota gates; capability gate still runs
-   * when a principal is attached.
+   *
+   * Host metadata only — the dispatcher no longer reads this for gating
+   * (P-014 moved the bypass decision to `gateBypass`, set by the host). Still
+   * consumed by profile resolution + host code (agent_tools:list, docs
+   * adapters). The transport that sets this also sets `gateBypass`.
    */
   isSuperuser?: boolean;
 
@@ -320,12 +351,11 @@ export interface UnifiedToolContext {
    * apps/operator/lib/power-user-token.ts and
    * apps/operator/docs/plans/omp-power-user-bundle-2026-05-20.md §4.1).
    *
-   * Power-user calls also set `isSuperuser` for the role-allowlist and
-   * capability bypass (they run the operator-tier catalog with a
-   * synthesized principal). The distinction matters for the **quota**
-   * gate: superuser bypasses quota, power-user does NOT — workspace
-   * quotas apply to end users. The quota window is keyed on the stable
-   * auth session (`uiClientId`), not the per-request `runId`.
+   * Host metadata only (see `isSuperuser`). The Papercusp bypass mapping
+   * (`papercuspGateBypass`) encodes the tier distinction the engine used to
+   * hardcode: superuser bypasses quota, power-user does NOT — workspace
+   * quotas apply to end users. The quota window is keyed on the stable auth
+   * session (`uiClientId`), not the per-request `runId`.
    */
   isPowerUser?: boolean;
   /**

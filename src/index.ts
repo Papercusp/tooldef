@@ -108,6 +108,7 @@ export {
   type ToolExposureHttp,
   type ToolExposureMcp,
   type UnifiedToolContext,
+  type GateBypass,
   type MinimalEventSink,
   type PapercuspBinaryEnvelope,
   type EventWireKind,
