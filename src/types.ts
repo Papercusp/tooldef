@@ -192,16 +192,25 @@ export interface RouteDefinition<TInputSchema extends ZodTypeAny | undefined = u
   ) => Response | Promise<Response>;
 }
 
-/** Per-call request context. */
-export interface ToolContext {
+/**
+ * Per-call request context.
+ *
+ * Generic over `Tx`, the host-supplied transaction/storage handle (plan
+ * P-010 / D-009). Defaults to `any` so the framework stays storage-agnostic
+ * and existing consumers that read `ctx.tx.<whatever>()` keep compiling; a
+ * host that wants type-safe storage re-exports `ToolContext<MyClient>` (e.g.
+ * a workspace-scoped SQL client) and gets a checked `ctx.tx`.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export interface ToolContext<Tx = any> {
   principal: Principal;
   /**
    * Host-supplied transaction handle. In Papercusp this is a workspace-scoped
-   * SQL client with the `app.workspace_id` GUC set. Typed `any` because the
-   * framework is storage-agnostic — the host narrows it. Phase 2 (P-010) makes
-   * ToolContext generic over the tx type.
+   * SQL client with the `app.workspace_id` GUC set. The framework never
+   * touches it — `Tx` defaults to `any` (storage-agnostic) and the host
+   * narrows it by binding the type parameter.
    */
-  tx: any;
+  tx: Tx;
   /** Logger bound to the tool name + principal. */
   log: (level: 'info' | 'warn' | 'error', msg: string, meta?: Record<string, unknown>) => void;
 }

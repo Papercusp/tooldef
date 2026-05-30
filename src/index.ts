@@ -22,6 +22,7 @@ export type {
 } from './wire';
 export type {
   AgentRole,
+  RoleRegistry,
   Capability,
   PluginSpawn,
   PluginSpawnOptions,
