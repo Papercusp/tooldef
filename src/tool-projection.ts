@@ -41,7 +41,7 @@ export type EventsSchema = Record<string, ZodTypeAny>;
  * - `done`: framework auto-emits when the handler returns successfully.
  * - `progress`: emitted via `ctx.progress` (the alias); reserved so
  *   tools don't redefine its payload shape.
- * - `heartbeat`: @restart/sse emits this every 15s to keep the
+ * - `heartbeat`: @papercusp/sse emits this every 15s to keep the
  *   connection alive; never a tool event.
  * - `result`: legacy pre-2026-05-12 terminal-event name; reserved for
  *   collision avoidance even though the framework no longer emits it.
@@ -185,7 +185,7 @@ export function classifyEventWire(schema: ZodTypeAny): EventWireKind {
  *                                       binary: EVENT_BIN raw bytes
  *                                       else: EVENT_JSON JSON
  *
- * The shape of the SSE sink interface is the @restart/sse SseSink; we
+ * The shape of the SSE sink interface is the @papercusp/sse SseSink; we
  * don't import the type here to keep this file dependency-free, so
  * we declare a structural minimum: `eventRaw(name, string)` for raw-text
  * payloads and `event(name, value)` for JSON-encoded ones.
@@ -298,7 +298,7 @@ export interface UnifiedToolContext {
   /**
    * Emit a typed named event. The active transport adapter decides what
    * happens:
-   *   - HTTP/SSE → `event: <name>\ndata: <JSON(data)>` via @restart/sse.
+   *   - HTTP/SSE → `event: <name>\ndata: <JSON(data)>` via @papercusp/sse.
    *   - MCP → `notifications/papercusp/event` with `{ event: name, data }`.
    *   - In-process (`fnStream`) → next value of the async iterator.
    *   - Non-streaming HTTP → no-op.
