@@ -234,6 +234,7 @@ function defineRoleGatedTool<TArgs extends ZodTypeAny>(
     state: input.state,
     handler: input.handler,
     guidance: input.guidance,
+    profile: input.profile,
   };
 
   registerRoleGatedAsProjected(def);
@@ -432,7 +433,7 @@ function registerRoleGatedAsProjected<TArgs extends ZodTypeAny>(
     description: def.description,
     inputSchema,
     capabilities: [def.capability as never],
-    profile: (def as { profile?: 'engineer' | 'all' }).profile,
+    profile: def.profile,
     roles: def.roles,
     rolesQuota: def.rolesQuota,
     timeoutSec: def.timeoutSec,

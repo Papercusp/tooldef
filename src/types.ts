@@ -413,6 +413,12 @@ export interface RoleToolDefinition<
   /** Capability string for tier classification + descriptive listings. Not enforced. */
   capability: string;
   tier: CapabilityTier;
+  /**
+   * Visibility profile gate. 'engineer' = engineer-only surfaces (hidden +
+   * rejected for the 'all' profile); 'all'/undefined = visible everywhere.
+   * Read by registerRoleGatedAsProjected → the projection profile filter.
+   */
+  profile?: 'engineer' | 'all';
   /** Marker — read by the projection wrapper to skip the principal check. */
   requirePrincipal: false;
   /** Allowed agent roles. Empty/undefined means any role. */
@@ -477,6 +483,8 @@ export interface RoleToolDefinitionInput<
   name?: string;
   description?: string;
   capability: string;
+  /** Visibility profile gate — see RoleToolDefinition.profile. */
+  profile?: 'engineer' | 'all';
   requirePrincipal: false;
   roles?: AgentRole[];
   rolesQuota?: Partial<Record<AgentRole, RolesQuota>>;
