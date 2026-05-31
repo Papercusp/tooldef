@@ -184,6 +184,7 @@ function definePrincipalGatedTool<TArgs extends ZodTypeAny>(
     handler: input.handler,
     guidance: input.guidance,
     profile: input.profile,
+    harness: input.harness,
   };
 
   register(def);
@@ -236,6 +237,7 @@ function defineRoleGatedTool<TArgs extends ZodTypeAny>(
     handler: input.handler,
     guidance: input.guidance,
     profile: input.profile,
+    harness: input.harness,
   };
 
   registerRoleGatedAsProjected(def);
@@ -376,6 +378,7 @@ function registerLegacyAsProjected<TArgs extends ZodTypeAny>(def: ToolDefinition
     inputSchema,
     capabilities: [def.capability as never],
     profile: def.profile,
+    harness: def.harness,
     expose: {
       mcp: { name: def.name },
       http: { path: httpPath, methods: ['POST'] },
@@ -434,6 +437,7 @@ function registerRoleGatedAsProjected<TArgs extends ZodTypeAny>(
     inputSchema,
     capabilities: [def.capability as never],
     profile: def.profile,
+    harness: def.harness,
     roles: def.roles,
     rolesQuota: def.rolesQuota,
     timeoutSec: def.timeoutSec,

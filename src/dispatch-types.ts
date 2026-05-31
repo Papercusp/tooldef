@@ -58,6 +58,7 @@ export type DispatchProjectedErrorCode =
   | 'unauthorized'
   | 'role_not_allowed'
   | 'missing_capability'
+  | 'harness_required'
   | 'quota_exceeded'
   | 'invalid_input'
   | 'handler_error'

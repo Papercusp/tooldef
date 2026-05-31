@@ -337,6 +337,8 @@ export interface ToolDefinition<TArgs extends ZodTypeAny = ZodTypeAny> {
   guidance?: ToolGuidance;
   /** See `ToolDefinitionInput.profile`. */
   profile?: 'engineer' | 'all';
+  /** See `ToolDefinitionInput.harness`. */
+  harness?: 'required' | 'optional' | 'none';
 }
 
 /** Input shape for `defineTool` — same as ToolDefinition minus derived fields. */
@@ -389,6 +391,14 @@ export interface ToolDefinitionInput<TArgs extends ZodTypeAny = ZodTypeAny> {
    * See `ProjectedTool.profile` and omp-profile-system-2026-05-24 plan.
    */
   profile?: 'engineer' | 'all';
+  /**
+   * Harness-scope requirement. `'required'` makes the dispatcher return a
+   * uniform `harness_required` error when `ctx.harnessSlug` is absent or
+   * `'*'` — for CTX-ONLY tools (no slug arg). Tools that take an explicit
+   * slug self-resolve; leave them `'optional'` (default) or `'none'`.
+   * See `ProjectedTool.harness` (su-prompt-audit-fixes P-020 / D-007).
+   */
+  harness?: 'required' | 'optional' | 'none';
 }
 
 /**
@@ -420,6 +430,8 @@ export interface RoleToolDefinition<
    * Read by registerRoleGatedAsProjected → the projection profile filter.
    */
   profile?: 'engineer' | 'all';
+  /** See `ToolDefinitionInput.harness`. */
+  harness?: 'required' | 'optional' | 'none';
   /** Marker — read by the projection wrapper to skip the principal check. */
   requirePrincipal: false;
   /** Allowed agent roles. Empty/undefined means any role. */
@@ -486,6 +498,8 @@ export interface RoleToolDefinitionInput<
   capability: string;
   /** Visibility profile gate — see RoleToolDefinition.profile. */
   profile?: 'engineer' | 'all';
+  /** Harness-scope requirement — see `ToolDefinitionInput.harness`. */
+  harness?: 'required' | 'optional' | 'none';
   requirePrincipal: false;
   roles?: AgentRole[];
   rolesQuota?: Partial<Record<AgentRole, RolesQuota>>;

@@ -281,6 +281,14 @@ export interface GateBypass {
   capability?: boolean;
   /** Skip the quota gate. */
   quota?: boolean;
+  /**
+   * Skip the harness-required gate. NOT set by Papercusp's superuser/
+   * power-user mapping — a harness:'required' tool genuinely can't function
+   * without a harness, so the gate fails closed even for privileged callers
+   * (the point is to return the uniform "harness required" hint, not to push
+   * the failure into the handler). Present as an explicit per-call escape hatch.
+   */
+  harness?: boolean;
 }
 
 export interface UnifiedToolContext {
@@ -633,6 +641,23 @@ export interface ProjectedTool {
    * See: apps/operator/docs/plans/omp-profile-system-2026-05-24.md
    */
   profile?: 'engineer' | 'all';
+  /**
+   * Harness-scope requirement (su-prompt-audit-fixes P-020 / D-007).
+   *
+   * - `'required'` — the tool needs a resolved harness in `ctx.harnessSlug`
+   *   (a non-wildcard slug). The dispatcher's `harness-check` step returns a
+   *   uniform `harness_required` error when it's absent or `'*'`, replacing
+   *   the per-handler grab-bag (harness_not_registered / require-slug /
+   *   primary-fallback / stub). Intended for CTX-ONLY tools (no slug arg);
+   *   tools that accept an explicit slug self-resolve and stay `'optional'`.
+   * - `'optional'` (or absent) — no gate; the handler resolves a harness
+   *   from an arg and/or `ctx.harnessSlug` as it sees fit. Default.
+   * - `'none'` — the tool is harness-agnostic. Informational; no gate.
+   *
+   * The gate fails closed even for superuser/power callers (it's a functional
+   * requirement, not a permission) — see `GateBypass.harness`.
+   */
+  harness?: 'required' | 'optional' | 'none';
   /**
    * State-shaped tool schema (bespoke-card-improvements #1 / T4.3).
    *

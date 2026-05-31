@@ -48,6 +48,7 @@ import {
 export type DispatchStepName =
   | 'role-allowlist'
   | 'capability-check'
+  | 'harness-check'
   | 'quota'
   | 'timeout'
   | 'idle-watchdog'
@@ -189,6 +190,43 @@ const capabilityCheckStep: DispatchStep = {
       }
     }
     return null;
+  },
+};
+
+/**
+ * Harness-required gate (su-prompt-audit-fixes P-020 / D-007).
+ *
+ * A tool declaring `harness: 'required'` (a CTX-ONLY harness-scoped tool —
+ * one with no slug arg, so `ctx.harnessSlug` is its only harness source)
+ * gets a UNIFORM `harness_required` error when no harness is resolvable —
+ * i.e. `ctx.harnessSlug` is unset or the `'*'` wildcard (the superuser
+ * "no harness picked" sentinel). This replaces the old per-handler grab-bag
+ * (harness_not_registered / require-slug / primary-fallback / stub) with one
+ * self-documenting message. Tools that accept an explicit slug self-resolve
+ * and stay `'optional'`; the gate is a no-op for them.
+ *
+ * Fails closed even for privileged callers: a missing harness is a FUNCTIONAL
+ * gap (the tool can't run), not a permission one, so superuser/power don't
+ * bypass it. `gateBypass.harness` is an explicit per-call escape hatch only.
+ */
+const harnessCheckStep: DispatchStep = {
+  name: 'harness-check',
+  async run(exec) {
+    const { tool, ctx, toolName } = exec;
+    if (tool.harness !== 'required' || ctx.gateBypass?.harness) return null;
+    const slug = ctx.harnessSlug?.trim();
+    if (slug && slug !== '*') return null;
+    return {
+      ok: false,
+      error: {
+        code: 'harness_required' as DispatchProjectedErrorCode,
+        message:
+          `Tool "${toolName}" requires a harness. Pass a harness slug (e.g. via ` +
+          `the spawn's ?harness= / X-Papercusp-Harness), or run \`harness:list\` ` +
+          `and relaunch scoped to one. For a different harness use \`cross_harness:*\`.`,
+        meta: { tool: toolName },
+      },
+    };
   },
 };
 
@@ -454,6 +492,7 @@ const invokeStep: DispatchStep = {
 export const DEFAULT_DISPATCH_STACK: ReadonlyArray<DispatchStep> = Object.freeze([
   roleAllowlistStep,
   capabilityCheckStep,
+  harnessCheckStep,
   quotaStep,
   timeoutStep,
   idleWatchdogStep,

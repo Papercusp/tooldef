@@ -151,6 +151,51 @@ describe('dispatchProjectedTool', () => {
     expect(bypassed.ok).toBe(true);
   });
 
+  // ── harness-required gate (P-020) ──────────────────────────────────────
+  it("harness:'required' with no harnessSlug → harness_required", async () => {
+    const tool = makeTool({ harness: 'required' });
+    const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX({ harnessSlug: undefined }), MAKE_DEPS());
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe('harness_required');
+  });
+
+  it("harness:'required' with the '*' wildcard → harness_required (superuser no-harness sentinel)", async () => {
+    const tool = makeTool({ harness: 'required' });
+    const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX({ harnessSlug: '*' }), MAKE_DEPS());
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe('harness_required');
+  });
+
+  it("harness:'required' with a concrete harnessSlug → passes", async () => {
+    const tool = makeTool({ harness: 'required' });
+    const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX({ harnessSlug: 'sheets' }), MAKE_DEPS());
+    expect(r.ok).toBe(true);
+  });
+
+  it('no harness declaration (default) → no gate even without a harnessSlug', async () => {
+    const tool = makeTool();
+    const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX({ harnessSlug: undefined }), MAKE_DEPS());
+    expect(r.ok).toBe(true);
+  });
+
+  it("harness:'optional' / 'none' → never gated", async () => {
+    for (const h of ['optional', 'none'] as const) {
+      const tool = makeTool({ harness: h });
+      const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX({ harnessSlug: '*' }), MAKE_DEPS());
+      expect(r.ok).toBe(true);
+    }
+  });
+
+  it('gateBypass.harness skips the harness gate (explicit escape hatch)', async () => {
+    const tool = makeTool({ harness: 'required' });
+    const denied = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX({ harnessSlug: undefined }), MAKE_DEPS());
+    expect(denied.error?.code).toBe('harness_required');
+    const bypassed = await dispatchProjectedTool(
+      tool, 'fix.tool', {}, MAKE_CTX({ harnessSlug: undefined, gateBypass: { harness: true } }), MAKE_DEPS(),
+    );
+    expect(bypassed.ok).toBe(true);
+  });
+
   // The default policy is run-scoped/perRun; these exercise the engine's
   // generic enforcement. The worker→chunk/perChunk path is host policy and is
   // covered end-to-end by the custom-computeQuotaWindow test below.
