@@ -111,6 +111,8 @@ export {
 export {
   registerProjectedTool,
   unregisterProjectedToolsForPlugin,
+  toolDeclaresGate,
+  listUngatedProjectedTools,
   lookupByMcpName,
   lookupByHttpPath,
   listAllProjectedTools,
@@ -137,6 +139,7 @@ export {
   dispatchProjectedToolStream,
   defaultComputeQuotaWindow,
   UnauthorizedToolError,
+  HarnessRequiredError,
   PASS_THROUGH,
   type QuotaWindow,
   type DispatchProjectedDeps,
@@ -145,6 +148,16 @@ export {
   type DispatchStreamEvent,
   type ToolDispatchOverrideFn,
 } from './dispatch-projected';
+
+/* ─── Resource authorization (RFC tooldef-auth-rfc Phase 1 — contract only) ─── */
+export { ownerOnly } from './authz';
+export type {
+  AuthzQuery,
+  AuthDecision,
+  PolicyDecisionPoint,
+  AuthAuditEvent,
+  Authorizer,
+} from './authz';
 
 /* ─── Core types ─────────────────────────────────────────────────────── */
 export type {

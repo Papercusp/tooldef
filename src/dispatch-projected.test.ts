@@ -17,6 +17,7 @@ import {
 } from './tool-projection';
 import { PASS_THROUGH } from './dispatch-projected';
 import type { ToolResult } from './wire';
+import type { AuthAuditEvent } from './authz';
 
 const MAKE_CTX = (over: Partial<UnifiedToolContext> = {}): UnifiedToolContext => ({
   log: vi.fn(),
@@ -96,7 +97,7 @@ describe('dispatchProjectedTool', () => {
   });
 
   it('rejects role-not-allowed when caller role outside allowlist', async () => {
-    const tool = makeTool({ roles: ['architect'] });
+    const tool = makeTool({ agentRoles: ['architect'] });
     const recorded: string[] = [];
     const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX({ role: 'worker' }), MAKE_DEPS({
       recordInvocation: vi.fn(async (i) => { recorded.push(i.status); }),
@@ -107,7 +108,7 @@ describe('dispatchProjectedTool', () => {
   });
 
   it('skips role check when ctx.role is unset (HTTP caller without role)', async () => {
-    const tool = makeTool({ roles: ['architect'] });
+    const tool = makeTool({ agentRoles: ['architect'] });
     const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX({ role: undefined }), MAKE_DEPS());
     expect(r.ok).toBe(true);
   });
@@ -116,7 +117,7 @@ describe('dispatchProjectedTool', () => {
   // The host (papercuspGateBypass) maps superuser/power-user onto it; the engine
   // no longer reads isSuperuser/isPowerUser for gating.
   it('gateBypass.role skips the role-allowlist gate', async () => {
-    const tool = makeTool({ roles: ['architect'] });
+    const tool = makeTool({ agentRoles: ['architect'] });
     const denied = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX({ role: 'worker' }), MAKE_DEPS());
     expect(denied.error?.code).toBe('role_not_allowed');
     const bypassed = await dispatchProjectedTool(
@@ -446,7 +447,7 @@ describe('dispatchProjectedToolStream', () => {
   });
 
   it('yields role_not_allowed when the calling role is not in the tool roles allowlist', async () => {
-    const tool = makeTool({ roles: ['operator'] });
+    const tool = makeTool({ agentRoles: ['operator'] });
     const ctx = MAKE_CTX({ role: 'worker' });
     const events: DispatchStreamEvent[] = [];
     for await (const ev of dispatchProjectedToolStream(tool, 'fix.tool', {}, ctx, MAKE_DEPS())) {
@@ -542,7 +543,7 @@ describe('replay buffer (Phase 4 T2.2)', () => {
   });
 
   it('eventCount = 0 on role-not-allowed gate-failure path', async () => {
-    const tool = makeTool({ roles: ['architect'] });
+    const tool = makeTool({ agentRoles: ['architect'] });
     let recordedEventCount: number | undefined;
     await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX({ role: 'worker' }), MAKE_DEPS({
       recordInvocation: vi.fn(async (i) => { recordedEventCount = i.eventCount; }),
@@ -745,5 +746,177 @@ describe('overrideTool dep (plan §10.4 — brain-subprocess injection)', () => 
     expect(seen).toEqual([
       { name: 'harness.status', args: { slug: 'sheets' }, uiClientId: 'llm-testing/abc' },
     ]);
+  });
+});
+
+describe('authorize gate (RFC tooldef-auth Phase 1b — resource authz + audited break-glass)', () => {
+  it('allow → handler runs, the allow is audited', async () => {
+    const events: AuthAuditEvent[] = [];
+    const tool = makeTool({ authorize: () => ({ allow: true, reason: 'owner' }) });
+    const r = await dispatchProjectedTool(
+      tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({ auditAuth: (e) => events.push(e) }),
+    );
+    expect(r.ok).toBe(true);
+    expect(events).toEqual([
+      expect.objectContaining({ gate: 'authorize', decision: 'allow', reason: 'owner', tool: 'fix.tool' }),
+    ]);
+  });
+
+  it('deny → authorization_denied, handler is NOT run, the deny is audited', async () => {
+    let ran = false;
+    const events: AuthAuditEvent[] = [];
+    const tool = makeTool({
+      fn: async () => { ran = true; return { content: [{ type: 'text', text: 'ok' }] }; },
+      authorize: () => ({ allow: false, reason: 'not owner' }),
+    });
+    const r = await dispatchProjectedTool(
+      tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({ auditAuth: (e) => events.push(e) }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe('authorization_denied');
+    expect(ran).toBe(false);
+    expect(events[0]).toMatchObject({ gate: 'authorize', decision: 'deny', reason: 'not owner' });
+  });
+
+  it('fails closed when authorize throws (deny + audit)', async () => {
+    const events: AuthAuditEvent[] = [];
+    const tool = makeTool({ authorize: () => { throw new Error('boom'); } });
+    const r = await dispatchProjectedTool(
+      tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({ auditAuth: (e) => events.push(e) }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe('authorization_denied');
+    expect(events[0]).toMatchObject({ gate: 'authorize', decision: 'deny' });
+    expect(events[0]?.reason).toContain('boom');
+  });
+
+  // Break-glass best practice: a privileged bypass must be policy-governed AND logged,
+  // never a silent super-admin (RFC §8 D2).
+  it('gateBypass.policy skips the hook BUT audits the bypass', async () => {
+    let ran = false;
+    const events: AuthAuditEvent[] = [];
+    const tool = makeTool({
+      fn: async () => { ran = true; return { content: [{ type: 'text', text: 'ok' }] }; },
+      authorize: () => ({ allow: false, reason: 'would-deny' }),
+    });
+    const r = await dispatchProjectedTool(
+      tool, 'fix.tool', {}, MAKE_CTX({ gateBypass: { policy: true } }),
+      MAKE_DEPS({ auditAuth: (e) => events.push(e) }),
+    );
+    expect(r.ok).toBe(true); // the deny was bypassed → handler ran
+    expect(ran).toBe(true);
+    expect(events[0]).toMatchObject({ gate: 'authorize', decision: 'allow', reason: 'gateBypass.policy' });
+  });
+
+  it('the role/capability/quota bypasses do NOT imply the authorize bypass', async () => {
+    const events: AuthAuditEvent[] = [];
+    const tool = makeTool({ authorize: () => ({ allow: false, reason: 'still enforced' }) });
+    const r = await dispatchProjectedTool(
+      tool, 'fix.tool', {}, MAKE_CTX({ gateBypass: { role: true, capability: true, quota: true } }),
+      MAKE_DEPS({ auditAuth: (e) => events.push(e) }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe('authorization_denied');
+    expect(events[0]).toMatchObject({ gate: 'authorize', decision: 'deny' });
+  });
+
+  it('a tool with no authorize hook is unaffected (additive — no decision, no audit)', async () => {
+    const events: AuthAuditEvent[] = [];
+    const tool = makeTool(); // no authorize
+    const r = await dispatchProjectedTool(
+      tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({ auditAuth: (e) => events.push(e) }),
+    );
+    expect(r.ok).toBe(true);
+    expect(events).toEqual([]);
+  });
+});
+
+describe('role-requirement gate (RFC tooldef-auth Phase 2 — declarative RBAC)', () => {
+  const withRoles = (roles: string[]) => ({
+    kind: 'system' as const,
+    slug: 'p',
+    workspaceId: 'default',
+    authMethod: 'process-internal' as const,
+    trust: 'trusted' as const,
+    capabilities: new Set<string>(),
+    roles: new Set(roles),
+  });
+
+  it('allows when the principal has one of the required roles (any-of)', async () => {
+    const tool = makeTool({ requireRoles: ['admin'] });
+    const r = await dispatchProjectedTool(
+      tool, 'fix.tool', {}, MAKE_CTX({ principal: withRoles(['staff', 'admin']) }), MAKE_DEPS(),
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  it('denies (missing_role) + audits when the principal lacks every required role', async () => {
+    const events: AuthAuditEvent[] = [];
+    const tool = makeTool({ requireRoles: ['admin'] });
+    const r = await dispatchProjectedTool(
+      tool, 'fix.tool', {}, MAKE_CTX({ principal: withRoles(['staff']) }),
+      MAKE_DEPS({ auditAuth: (e) => events.push(e) }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe('missing_role');
+    expect(events[0]).toMatchObject({ gate: 'role', decision: 'deny' });
+  });
+
+  it('fails closed for an anonymous call (no principal)', async () => {
+    const tool = makeTool({ requireRoles: ['admin'] });
+    const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX({ principal: undefined }), MAKE_DEPS());
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe('missing_role');
+  });
+
+  it('gateBypass.role bypasses the RBAC requirement (a superuser passes role gates)', async () => {
+    const tool = makeTool({ requireRoles: ['admin'] });
+    const r = await dispatchProjectedTool(
+      tool, 'fix.tool', {}, MAKE_CTX({ principal: withRoles([]), gateBypass: { role: true } }), MAKE_DEPS(),
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  it('a tool with no requireRoles is unaffected (additive)', async () => {
+    const tool = makeTool();
+    const r = await dispatchProjectedTool(
+      tool, 'fix.tool', {}, MAKE_CTX({ principal: withRoles([]) }), MAKE_DEPS(),
+    );
+    expect(r.ok).toBe(true);
+  });
+});
+
+describe('default-deny gate (RFC tooldef-auth Phase 3 — opt-in fail-closed posture)', () => {
+  it('off (default): an ungated tool is allowed (no behavior change)', async () => {
+    const tool = makeTool({ capabilities: [] }); // declares no gate
+    const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS());
+    expect(r.ok).toBe(true);
+  });
+
+  it('on: an ungated, non-public tool is denied (ungated)', async () => {
+    const tool = makeTool({ capabilities: [] });
+    const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({ defaultDeny: true }));
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe('ungated');
+  });
+
+  it('on: an ungated tool marked public is allowed (the [AllowAnonymous] equivalent)', async () => {
+    const tool = makeTool({ capabilities: [], public: true });
+    const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({ defaultDeny: true }));
+    expect(r.ok).toBe(true);
+  });
+
+  it('on: a tool declaring a capability gate is allowed (not ungated)', async () => {
+    const tool = makeTool({ capabilities: ['x'] }); // no principal → capability gate skips, but a gate IS declared
+    const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({ defaultDeny: true }));
+    expect(r.ok).toBe(true);
+  });
+
+  it('on: a tool gated only by agent roles is allowed (declares a gate)', async () => {
+    const tool = makeTool({ capabilities: [], agentRoles: ['worker'] });
+    const r = await dispatchProjectedTool(
+      tool, 'fix.tool', {}, MAKE_CTX({ role: 'worker' }), MAKE_DEPS({ defaultDeny: true }),
+    );
+    expect(r.ok).toBe(true);
   });
 });

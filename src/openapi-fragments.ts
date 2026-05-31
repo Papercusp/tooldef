@@ -171,8 +171,8 @@ export function toolToOpenApiFragment(
   };
 
   /* Vendor extensions — x-papercusp-* per Q5 */
-  if (tool.roles && tool.roles.length > 0) {
-    operation['x-papercusp-roles'] = [...tool.roles];
+  if (tool.agentRoles && tool.agentRoles.length > 0) {
+    operation['x-papercusp-roles'] = [...tool.agentRoles];
   }
   if (typeof tool.timeoutSec === 'number') {
     operation['x-papercusp-timeoutSec'] = tool.timeoutSec;

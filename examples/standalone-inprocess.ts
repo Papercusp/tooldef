@@ -3,7 +3,7 @@
  * extraction (plan papercusp-tooldef-extraction-2026-05-29, P-051).
  *
  * This file imports ONLY `@papercusp/tooldef`. No `@papercusp/agent-mcp`, no
- * `@papercusp/host-platform`, no `@restart/*`, no `postgres`, no Zod, no
+ * `@papercusp/host-platform`, no `@papercusp/*`, no `postgres`, no Zod, no
  * Next.js — nothing host-specific. It registers a tool and dispatches it
  * through the engine's in-process dispatcher, exercising the full gate stack
  * (role / capability / quota / timeout / telemetry) on the engine's *generic

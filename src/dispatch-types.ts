@@ -13,6 +13,7 @@
 
 import type { RolesQuota, ToolResult } from './wire';
 import type { UnifiedToolContext } from './tool-projection';
+import type { AuthAuditEvent } from './authz';
 
 /* ─── Quota windowing ────────────────────────────────────────────────── */
 
@@ -58,10 +59,13 @@ export type DispatchProjectedErrorCode =
   | 'unauthorized'
   | 'role_not_allowed'
   | 'missing_capability'
+  | 'missing_role'
   | 'harness_required'
   | 'quota_exceeded'
   | 'invalid_input'
   | 'handler_error'
+  | 'authorization_denied'
+  | 'ungated'
   | 'timeout';
 
 /**
@@ -72,6 +76,19 @@ export type DispatchProjectedErrorCode =
  */
 export class UnauthorizedToolError extends Error {
   override readonly name = 'UnauthorizedToolError';
+}
+
+/**
+ * Throw from a handler (or a shared resolver it calls) to signal that the
+ * tool needs a harness in scope and none was resolvable — no explicit
+ * `harness` arg, and `ctx.harnessSlug` unset or the `'*'` wildcard. The
+ * dispatcher surfaces this as the uniform `harness_required` code instead
+ * of a generic `handler_error`, so callers get a self-documenting "pass a
+ * slug / `all` / scope the session" message. See
+ * `apps/operator/lib/agent-tools/_harness-scope.ts`.
+ */
+export class HarnessRequiredError extends Error {
+  override readonly name = 'HarnessRequiredError';
 }
 
 export interface DispatchProjectedResult {
@@ -152,4 +169,20 @@ export interface DispatchProjectedDeps {
      */
     metadataJson?: Record<string, unknown> | null;
   }): Promise<void>;
+  /**
+   * Sink for resource-authorization decisions (RFC tooldef-auth Phase 1b). The
+   * dispatcher calls this for every `authorize` allow AND deny — and for every
+   * `GateBypass.policy` skip — so privileged bypasses are never silent. Best-effort;
+   * unset = decisions are not persisted (the host opted out of the audit trail).
+   */
+  auditAuth?(event: AuthAuditEvent): void;
+  /**
+   * Default-deny posture (RFC tooldef-auth Phase 3). When true, the dispatcher denies any
+   * tool that declares NO gate (no capabilities/roles/requireRoles/authorize) and is not
+   * marked `public` — the fail-closed "forgot to gate ⇒ deny" baseline. Default off
+   * (opt-in) during the migration: a host flips it once every tool (incl. plugins)
+   * declares a gate or is explicitly public. defineTool requires `capability`, so
+   * first-party tools are never ungated; the targets are plugin / direct registrations.
+   */
+  defaultDeny?: boolean;
 }

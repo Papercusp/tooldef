@@ -7,6 +7,7 @@ import type { AgentRole } from './host-types';
 import type { z, ZodTypeAny } from 'zod';
 import type { StandardSchemaV1 } from './standard-schema';
 import type { EventsSchema, UnifiedToolContext, UserEvents } from './tool-projection';
+import type { Authorizer } from './authz';
 import type { OpenCardSnapshot as WireOpenCardSnapshot } from '@papercusp/chat-protocol';
 
 /** A Papercusp capability tier per spec/capabilities §10.6.1. */
@@ -59,9 +60,9 @@ export type PrincipalAuthMethod =
 export type PrincipalTrust = 'trusted' | 'verified' | 'unverified-loopback';
 
 /** Resolved caller identity. */
-export interface Principal {
-  /** Who the caller is. */
-  kind: PrincipalKind;
+export interface Principal<TKind extends string = PrincipalKind> {
+  /** Who the caller is. Generic so a host can widen the kind union (RFC tooldef-auth Phase 2); defaults to the built-in `PrincipalKind`. */
+  kind: TKind;
   /** e.g. `"system:operator"`, `"pi:abc123"`, `"harness-foo"`, user id, mobile deviceId. */
   slug: string;
   /** Workspace the call is scoped to. No global principals. */
@@ -75,6 +76,15 @@ export interface Principal {
   trust: PrincipalTrust;
   /** Granted capability strings (e.g. `tasks:read`). Freeform; namespacing convention only. */
   capabilities: ReadonlySet<string>;
+  /**
+   * RBAC roles the caller holds (e.g. `'staff'`, `'admin'`) — RFC tooldef-auth Phase 2.
+   * A DISTINCT axis from `kind` (how the caller authenticated), from `capabilities`
+   * (OAuth-scope-like grants), and from agent `tool.roles` (the orchestration allowlist
+   * checked against `ctx.role`). This is what the declarative require-role gate checks —
+   * the typed replacement for ad-hoc `requireAdminKey`/`requireStaff` checks. Optional +
+   * freeform; the host's principal resolver populates it.
+   */
+  roles?: ReadonlySet<string>;
   /** Optional human-readable label for logging. Not load-bearing. */
   label?: string;
 }
@@ -295,31 +305,16 @@ export interface ToolGuidance {
   byRole?: Partial<Record<AgentRole, Partial<Omit<ToolGuidance, 'byRole'>>>>;
 }
 
-/**
- * Resolve a per-role view of `ToolGuidance` by merging `byRole[<role>]`
- * over the base fields. Returns `null` when the base has no guidance and
- * the role has no override (signals "render description only").
- */
-export function resolveGuidance(
-  guidance: ToolGuidance | undefined,
-  role: AgentRole | null,
-): { when?: string; notWhen?: string; chaining?: string } | null {
-  if (!guidance) return null;
-  const base = {
-    when: guidance.when,
-    notWhen: guidance.notWhen,
-    chaining: guidance.chaining,
-  };
-  const override = role ? guidance.byRole?.[role] : undefined;
-  const merged = override ? { ...base, ...override } : base;
-  if (!merged.when && !merged.notWhen && !merged.chaining) return null;
-  return merged;
-}
-
 /** Tool definition produced by `defineTool`. */
 export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV1> {
   /** Tool name, e.g. `"tasks:list"`. Defaults to file-path-derived. */
   name: string;
+  /** Resource-authorization hook (RFC tooldef-auth Phase 1b) — see `Authorizer`. */
+  authorize?: Authorizer<StandardSchemaV1.InferOutput<TArgs>, UnifiedToolContext, UnifiedToolContext['principal']>;
+  /** RBAC role requirement (RFC tooldef-auth Phase 2): caller's `principal.roles` must include one of these (any-of). See `ProjectedTool.requireRoles`. */
+  requireRoles?: readonly string[];
+  /** Opt out of default-deny (RFC tooldef-auth Phase 3): a tool that intentionally needs no auth gate (the `[AllowAnonymous]` equivalent). See `ProjectedTool.public`. */
+  public?: boolean;
   /** TSDoc-derived description for MCP `tools/list`. */
   description: string;
   /** Capability gate (e.g. `"tasks:read"`). One per tool. */
@@ -346,6 +341,12 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
 export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSchemaV1> {
   /** Optional explicit name; defaults to file-path-derived. */
   name?: string;
+  /** Resource-authorization hook (RFC tooldef-auth Phase 1b) — see `Authorizer`. */
+  authorize?: Authorizer<StandardSchemaV1.InferOutput<TArgs>, UnifiedToolContext, UnifiedToolContext['principal']>;
+  /** RBAC role requirement (RFC tooldef-auth Phase 2): caller's `principal.roles` must include one of these (any-of). See `ProjectedTool.requireRoles`. */
+  requireRoles?: readonly string[];
+  /** Opt out of default-deny (RFC tooldef-auth Phase 3): a tool that intentionally needs no auth gate (the `[AllowAnonymous]` equivalent). See `ProjectedTool.public`. */
+  public?: boolean;
   /** Optional explicit description; defaults to caller's TSDoc. */
   description?: string;
   capability: string;
@@ -421,6 +422,12 @@ export interface RoleToolDefinition<
   TEvents extends EventsSchema = EventsSchema,
 > {
   name: string;
+  /** Resource-authorization hook (RFC tooldef-auth Phase 1b) — see `Authorizer`. */
+  authorize?: Authorizer<StandardSchemaV1.InferOutput<TArgs>, UnifiedToolContext, UnifiedToolContext['principal']>;
+  /** RBAC role requirement (RFC tooldef-auth Phase 2): caller's `principal.roles` must include one of these (any-of). See `ProjectedTool.requireRoles`. */
+  requireRoles?: readonly string[];
+  /** Opt out of default-deny (RFC tooldef-auth Phase 3): a tool that intentionally needs no auth gate (the `[AllowAnonymous]` equivalent). See `ProjectedTool.public`. */
+  public?: boolean;
   description: string;
   /** Capability string for tier classification + descriptive listings. Not enforced. */
   capability: string;
@@ -436,7 +443,7 @@ export interface RoleToolDefinition<
   /** Marker — read by the projection wrapper to skip the principal check. */
   requirePrincipal: false;
   /** Allowed agent roles. Empty/undefined means any role. */
-  roles?: AgentRole[];
+  agentRoles?: AgentRole[];
   /** Per-role quota windows. Roles without an entry are unlimited. */
   rolesQuota?: Partial<Record<AgentRole, RolesQuota>>;
   /** Per-call wall-clock timeout, default 60s. */
@@ -495,6 +502,12 @@ export interface RoleToolDefinitionInput<
   TEvents extends EventsSchema = EventsSchema,
 > {
   name?: string;
+  /** Resource-authorization hook (RFC tooldef-auth Phase 1b) — see `Authorizer`. */
+  authorize?: Authorizer<StandardSchemaV1.InferOutput<TArgs>, UnifiedToolContext, UnifiedToolContext['principal']>;
+  /** RBAC role requirement (RFC tooldef-auth Phase 2): caller's `principal.roles` must include one of these (any-of). See `ProjectedTool.requireRoles`. */
+  requireRoles?: readonly string[];
+  /** Opt out of default-deny (RFC tooldef-auth Phase 3): a tool that intentionally needs no auth gate (the `[AllowAnonymous]` equivalent). See `ProjectedTool.public`. */
+  public?: boolean;
   description?: string;
   capability: string;
   /** Visibility profile gate — see RoleToolDefinition.profile. */
@@ -502,7 +515,7 @@ export interface RoleToolDefinitionInput<
   /** Harness-scope requirement — see `ToolDefinitionInput.harness`. */
   harness?: 'required' | 'optional' | 'none';
   requirePrincipal: false;
-  roles?: AgentRole[];
+  agentRoles?: AgentRole[];
   rolesQuota?: Partial<Record<AgentRole, RolesQuota>>;
   timeoutSec?: number;
   /** See RoleToolDefinition.idleTimeoutSec. */
@@ -697,6 +710,15 @@ export interface CardSpec<TSchema extends StandardSchemaV1 = StandardSchemaV1> {
   idempotencyKey?: string;
   /** When false, the renderer hides any decline affordance. Default true. */
   allowDecline?: boolean;
+  /**
+   * Fired synchronously once the card is registered, with the freshly-minted
+   * `correlationId` (and the run/workspace it's scoped to). Lets a caller link
+   * the live card to an external durable record — e.g. inbox-cards-unification
+   * Phase D writes a coord escalation carrying this id so the inbox and the
+   * live card resolve each other. Optional; existing callers are unaffected.
+   * NOT called on an idempotency-cache hit (no card is registered).
+   */
+  onCard?: (info: { correlationId: string; runId: string; workspaceId: string }) => void;
 }
 
 /**

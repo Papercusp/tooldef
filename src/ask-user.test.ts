@@ -125,6 +125,49 @@ describe('ctx.askUser dispatcher integration', () => {
     }
   });
 
+  it('onCard fires with the freshly-minted correlationId (P-032 — Phase D link hook)', async () => {
+    let captured: { correlationId: string; runId: string; workspaceId: string } | null = null;
+    const tool: ProjectedTool = {
+      pluginName: 'test',
+      description: 'ask',
+      capabilities: [],
+      expose: { mcp: { name: 'test:ask' } },
+      inputSchema: { type: 'object' },
+      fn: async (_input, ctx) => {
+        const r = await ctx.askUser!({
+          prompt: 'pick',
+          dataSchema: choiceSchema,
+          presentation: { kind: 'radio', options: [{ id: 'a', label: 'A' }] },
+          onCard: (info) => {
+            captured = info;
+          },
+        });
+        return { content: [{ type: 'text', text: r.action }] };
+      },
+    };
+    const dispatchPromise = dispatchProjectedTool(
+      tool,
+      'test:ask',
+      {},
+      MAKE_CTX({ runId: 'r-oncard' }),
+      MAKE_DEPS(),
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    const snap = getSnapshot('r-oncard');
+    const correlationId = snap!.snapshot.openCards[0].correlationId;
+    expect(captured).not.toBeNull();
+    expect(captured!.correlationId).toBe(correlationId);
+    expect(captured!.runId).toBe('r-oncard');
+    expect(captured!.workspaceId).toBe('workspace-Z');
+    resolveCardResponse({
+      correlationId,
+      action: 'submit',
+      payload: { picks: ['a'] },
+      expectedWorkspaceId: 'workspace-Z',
+    });
+    await dispatchPromise;
+  });
+
   it('askUser is NOT installed when ctx lacks runId — handler sees ctx.askUser undefined', async () => {
     const tool = makeAskTool();
     const result = await dispatchProjectedTool(

@@ -135,7 +135,7 @@ describe('toolToOpenApiFragment — security + vendor extensions', () => {
   it('emits vendor extensions for roles / timeouts / replayBuffer / modality / plugin', () => {
     const frag = toolToOpenApiFragment('t', makeTool({
       pluginName: 'fixture',
-      roles: ['architect', 'scoper'],
+      agentRoles: ['architect', 'scoper'],
       timeoutSec: 120,
       idleTimeoutSec: 30,
       replayBufferSize: 64,

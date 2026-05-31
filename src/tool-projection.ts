@@ -28,6 +28,7 @@ import type {
 import type { AgentRole, Capability, PluginSpawn } from './host-types';
 import { toJsonSchema } from './schema-adapter';
 import type { StandardSchemaV1 } from './standard-schema';
+import type { Authorizer } from './authz';
 
 /* ─── Event schema types ─────────────────────────────────────────────── */
 
@@ -290,6 +291,16 @@ export interface GateBypass {
    * the failure into the handler). Present as an explicit per-call escape hatch.
    */
   harness?: boolean;
+  /**
+   * Skip the resource-`authorize` gate (RFC tooldef-auth D-F). Default OFF and, unlike
+   * the bypasses above, it is NOT implied by them — resource ownership is a *separate*
+   * decision a host opts out of explicitly, per call (a host that maps superuser onto
+   * `{role,capability,quota}` still runs `authorize` unless it ALSO sets this). When set,
+   * the dispatcher does not run the tool's `authorize` hook — BUT it still emits an
+   * `AuthAuditEvent` recording the bypass (an *audited* break-glass, never a silent
+   * super-admin; break-glass best practice = "policy-governed + mandatorily logged").
+   */
+  policy?: boolean;
 }
 
 export interface UnifiedToolContext {
@@ -324,7 +335,7 @@ export interface UnifiedToolContext {
 
   /* ── Auth / db (typically built-in tools) ─────────────────────────── */
   /** Auth principal resolved from bearer. Null when caller is anonymous. */
-  principal?: { slug: string; workspaceId: string; capabilities: Set<string> } | null;
+  principal?: { slug: string; workspaceId: string; capabilities: Set<string>; roles?: ReadonlySet<string> } | null;
   /**
    * Transaction-bound Sql client with `app.workspace_id` GUC set. Built-in
    * tools rely on this; plugin tools may use it. Null when call wasn't
@@ -588,9 +599,35 @@ export interface ProjectedTool {
    * primarily by the MCP transport (agent calls); HTTP callers gate via
    * principal capabilities instead.
    */
-  roles?: AgentRole[];
+  agentRoles?: AgentRole[];
   /** Per-role quota windows. Roles without an entry are unlimited. */
   rolesQuota?: Partial<Record<AgentRole, RolesQuota>>;
+  /**
+   * Resource-authorization hook (RFC tooldef-auth Phase 1b). When set, the dispatcher
+   * runs it after the coarse gates and before the handler — fail-closed, audited, and
+   * bypassable only via `GateBypass.policy`. Unset = no resource gate (the legacy
+   * default; default-deny is RFC Phase 3). See `Authorizer`.
+   */
+  authorize?: Authorizer<unknown, UnifiedToolContext, UnifiedToolContext['principal']>;
+  /**
+   * RBAC role requirement (RFC tooldef-auth Phase 2). The caller's `principal.roles`
+   * must include at least ONE of these (any-of). Checked by the dispatcher's
+   * `role-requirement` gate — fail-closed (denied when there is no principal), audited,
+   * and bypassed by `GateBypass.role` (a superuser passes RBAC role gates too). Distinct
+   * from `roles` above, which is the AGENT-orchestration allowlist checked against
+   * `ctx.role`. The declarative, typed replacement for ad-hoc `requireAdminKey` /
+   * `requireStaff`-style checks.
+   */
+  requireRoles?: readonly string[];
+  /**
+   * Opt out of default-deny (RFC tooldef-auth Phase 3). When the host enables
+   * `deps.defaultDeny`, a tool that declares NO gate (no capabilities, roles,
+   * requireRoles, or authorize) is denied as `ungated` UNLESS it sets `public: true` —
+   * the explicit "this tool intentionally needs no auth" marker (the `[AllowAnonymous]`
+   * equivalent). Default-deny is NOT bypassable: an ungated tool is a declaration gap
+   * regardless of caller, so the fix is to declare a gate or mark it public.
+   */
+  public?: boolean;
   /** Per-call wall-clock timeout, default 60s. */
   timeoutSec?: number;
   /**
@@ -895,6 +932,33 @@ export function listAllProjectedTools(): readonly ProjectedTool[] {
 }
 
 /**
+ * True if a tool declares ANY auth gate — a capability, an agent-role allowlist, an RBAC
+ * role requirement, or an `authorize` hook. The single predicate behind both the
+ * default-deny dispatch gate and `listUngatedProjectedTools` (RFC tooldef-auth Phase 3),
+ * so the enforcement and the migration aid can't drift.
+ */
+export function toolDeclaresGate(
+  tool: Pick<ProjectedTool, 'capabilities' | 'agentRoles' | 'requireRoles' | 'authorize'>,
+): boolean {
+  return (
+    tool.capabilities.length > 0 ||
+    (tool.agentRoles?.length ?? 0) > 0 ||
+    (tool.requireRoles?.length ?? 0) > 0 ||
+    !!tool.authorize
+  );
+}
+
+/**
+ * Tools that would be denied once `deps.defaultDeny` is flipped on: they declare no gate
+ * and are not marked `public`. The migration aid for RFC tooldef-auth Phase 3 (§8 D1) —
+ * run it (with the full tool registry loaded) BEFORE enabling default-deny, triage each
+ * (declare a gate or mark `public`), then flip. Empty result = safe to flip.
+ */
+export function listUngatedProjectedTools(): readonly ProjectedTool[] {
+  return Array.from(REGISTRY.values()).filter((t) => !t.public && !toolDeclaresGate(t));
+}
+
+/**
  * MCP-protocol tool listings, optionally filtered by calling role.
  * Returns only tools with `expose.mcp` set; tools that are HTTP-only are
  * invisible to the agent.
@@ -968,7 +1032,7 @@ export function listMcpProjections(role?: AgentRole, profile?: 'engineer' | 'pow
   const out: McpToolListing[] = [];
   for (const tool of REGISTRY.values()) {
     if (!tool.expose.mcp) continue;
-    if (role && tool.roles && !tool.roles.includes(role)) continue;
+    if (role && tool.agentRoles && !tool.agentRoles.includes(role)) continue;
     // Profile gate: tools tagged `profile: 'engineer'` are hidden from
     // power-profile callers. Untagged tools (undefined / 'all') are visible
     // to everyone — backward-compatible for tools not yet tagged.

@@ -22,7 +22,7 @@
 
 import type { ToolResult } from './wire';
 import type { AgentRole } from './host-types';
-import type { ProjectedTool, UnifiedToolContext } from './tool-projection';
+import { toolDeclaresGate, type ProjectedTool, type UnifiedToolContext } from './tool-projection';
 import {
   openBuffer as openReplayBuffer,
   type ReplayBufferWriter,
@@ -36,6 +36,7 @@ import type { CardResponse, CardSpec } from './types';
 import { validateSync, formatIssues, type StandardSchemaV1 } from './standard-schema';
 import {
   PASS_THROUGH,
+  HarnessRequiredError,
   UnauthorizedToolError,
   defaultComputeQuotaWindow,
   type DispatchProjectedDeps,
@@ -46,10 +47,13 @@ import {
 /* ─── Step names ─────────────────────────────────────────────────────── */
 
 export type DispatchStepName =
+  | 'default-deny'
   | 'role-allowlist'
   | 'capability-check'
+  | 'role-requirement'
   | 'harness-check'
   | 'quota'
+  | 'authorize'
   | 'timeout'
   | 'idle-watchdog'
   | 'replay-buffer'
@@ -156,17 +160,46 @@ export interface DispatchStep {
 
 /* ─── Steps ──────────────────────────────────────────────────────────── */
 
+/**
+ * Default-deny gate (RFC tooldef-auth Phase 3, decision D1). Runs first.
+ *
+ * Opt-in via `deps.defaultDeny` (off = the legacy allow-by-omission posture, no behavior
+ * change). When on, a tool that declares NO gate — no capabilities, no agent `roles`, no
+ * `requireRoles`, no `authorize` — is denied as `ungated` UNLESS it sets `public: true`
+ * (the explicit `[AllowAnonymous]` equivalent). This is the fail-closed "forgot to gate ⇒
+ * deny" baseline the §8 audit (D1) committed to. NOT bypassable: an ungated tool is a
+ * declaration gap regardless of caller — the fix is to declare a gate or mark it public.
+ * `defineTool` requires `capability`, so first-party tools are never ungated; the targets
+ * are plugin / direct registrations.
+ */
+const defaultDenyStep: DispatchStep = {
+  name: 'default-deny',
+  async run(exec) {
+    const { tool, toolName, deps } = exec;
+    if (!deps.defaultDeny || tool.public) return null;
+    if (toolDeclaresGate(tool)) return null;
+    return {
+      ok: false,
+      error: {
+        code: 'ungated' as DispatchProjectedErrorCode,
+        message: `Tool "${toolName}" declares no auth gate (capability/roles/requireRoles/authorize) and is not marked public; denied under default-deny`,
+        meta: { tool: toolName },
+      },
+    };
+  },
+};
+
 const roleAllowlistStep: DispatchStep = {
   name: 'role-allowlist',
   async run(exec) {
     const { tool, ctx, toolName } = exec;
-    if (!tool.roles || !ctx.role || ctx.gateBypass?.role) return null;
-    if (tool.roles.includes(ctx.role as AgentRole)) return null;
+    if (!tool.agentRoles || !ctx.role || ctx.gateBypass?.role) return null;
+    if (tool.agentRoles.includes(ctx.role as AgentRole)) return null;
     return {
       ok: false,
       error: {
         code: 'role_not_allowed' as DispatchProjectedErrorCode,
-        message: `Role "${ctx.role}" cannot call tool "${toolName}" (allowed roles: ${tool.roles.join(', ')})`,
+        message: `Role "${ctx.role}" cannot call tool "${toolName}" (allowed roles: ${tool.agentRoles.join(', ')})`,
       },
     };
   },
@@ -190,6 +223,45 @@ const capabilityCheckStep: DispatchStep = {
       }
     }
     return null;
+  },
+};
+
+/**
+ * RBAC role-requirement gate (RFC tooldef-auth Phase 2).
+ *
+ * A tool declaring `requireRoles` is callable only by a principal whose `roles` include
+ * at least ONE of them (any-of) — the declarative, typed replacement for ad-hoc
+ * `requireAdminKey`/`requireStaff` checks. Additive (a tool with no `requireRoles` is
+ * unaffected). Fail-closed: an anonymous call (no principal) is DENIED, since a role
+ * requirement can't be satisfied without an identity. Bypassed by `GateBypass.role` (a
+ * superuser passes RBAC role gates as it passes the agent-role allowlist). Audited like
+ * the other gates (gate:'role').
+ */
+const roleRequirementStep: DispatchStep = {
+  name: 'role-requirement',
+  async run(exec) {
+    const { tool, ctx, toolName, deps } = exec;
+    const required = tool.requireRoles;
+    if (!required || required.length === 0 || ctx.gateBypass?.role) return null;
+    const have = ctx.principal?.roles;
+    if (have && required.some((r) => have.has(r))) return null;
+    deps.auditAuth?.({
+      ts: Date.now(),
+      principal: ctx.principal ? { slug: ctx.principal.slug, workspaceId: ctx.principal.workspaceId } : null,
+      tool: toolName,
+      action: toolName,
+      decision: 'deny',
+      gate: 'role',
+      reason: `requires one of role(s): ${required.join(', ')}`,
+    });
+    return {
+      ok: false,
+      error: {
+        code: 'missing_role' as DispatchProjectedErrorCode,
+        message: `Principal ${ctx.principal ? `"${ctx.principal.slug}"` : '(anonymous)'} lacks a required role for tool "${toolName}" (needs one of: ${required.join(', ')})`,
+        meta: { tool: toolName, required, principal: ctx.principal?.slug ?? null },
+      },
+    };
   },
 };
 
@@ -354,7 +426,17 @@ const ctxBindingsStep: DispatchStep = {
       askUser = async <TSchema extends StandardSchemaV1>(
         spec: CardSpec<TSchema>,
       ): Promise<CardResponse<TSchema>> => {
-        const { result } = registerCard({ workspaceId: wsId, runId, spec });
+        const { correlationId, result } = registerCard({ workspaceId: wsId, runId, spec });
+        // Surface the freshly-minted id so a caller can link an external
+        // durable record (Phase D). Skip an idempotency-cache hit (no card was
+        // registered — correlationId is the 'idempotent' sentinel).
+        if (spec.onCard && correlationId !== 'idempotent') {
+          try {
+            spec.onCard({ correlationId, runId, workspaceId: wsId });
+          } catch {
+            /* onCard must never break the card flow */
+          }
+        }
         return await new Promise<CardResponse<TSchema>>((resolve) => {
           const onAbort = () => {
             exec.abort.signal.removeEventListener('abort', onAbort);
@@ -462,11 +544,80 @@ const invokeStep: DispatchStep = {
       if (err instanceof UnauthorizedToolError) {
         return { ok: false, error: { code: 'unauthorized', message: err.message } };
       }
+      if (err instanceof HarnessRequiredError) {
+        return { ok: false, error: { code: 'harness_required', message: err.message } };
+      }
       return {
         ok: false,
         error: { code: 'handler_error', message: err instanceof Error ? err.message : String(err) },
       };
     }
+  },
+};
+
+/**
+ * Resource-`authorize` gate (RFC tooldef-auth Phase 1b, decision D-F).
+ *
+ * Runs a tool's `authorize` hook — the fine-grained "can THIS principal act on THIS
+ * resource" layer the coarse gates can't express. Additive: a tool with no `authorize`
+ * is unaffected. Fail-closed (a throw denies). Sits with the other gates (before timer
+ * arming) so denials stay cheap and so it composes with `GateBypass` like its siblings.
+ *
+ * `GateBypass.policy` (default off, and NOT implied by the role/capability/quota
+ * bypasses) skips the hook — but the skip is AUDITED, never silent: break-glass best
+ * practice is "policy-governed + mandatorily logged" (RFC §8 D2). Every allow, deny, and
+ * bypass emits an `AuthAuditEvent` via `deps.auditAuth`.
+ */
+const authorizeStep: DispatchStep = {
+  name: 'authorize',
+  async run(exec) {
+    const { tool, toolName, input, ctx, deps } = exec;
+    const authorize = tool.authorize;
+    if (!authorize) return null; // no resource gate on this tool
+
+    const audit = (decision: 'allow' | 'deny', reason?: string) => {
+      deps.auditAuth?.({
+        ts: Date.now(),
+        principal: ctx.principal
+          ? { slug: ctx.principal.slug, workspaceId: ctx.principal.workspaceId }
+          : null,
+        tool: toolName,
+        action: toolName,
+        decision,
+        gate: 'authorize',
+        reason,
+      });
+    };
+
+    const deny = (reason: string | undefined): DispatchProjectedResult => ({
+      ok: false,
+      error: {
+        code: 'authorization_denied' as DispatchProjectedErrorCode,
+        message: reason ?? `Not authorized to call tool "${toolName}"`,
+        meta: { tool: toolName, principal: ctx.principal?.slug ?? null },
+      },
+    });
+
+    // Audited break-glass: skip the hook, but record the bypass.
+    if (ctx.gateBypass?.policy) {
+      audit('allow', 'gateBypass.policy');
+      return null;
+    }
+
+    let decision;
+    try {
+      decision = await authorize({ principal: ctx.principal, input, ctx });
+    } catch (err) {
+      const reason = `authorize threw: ${err instanceof Error ? err.message : String(err)}`;
+      audit('deny', reason);
+      return deny(reason);
+    }
+    if (!decision.allow) {
+      audit('deny', decision.reason);
+      return deny(decision.reason);
+    }
+    audit('allow', decision.reason);
+    return null;
   },
 };
 
@@ -477,8 +628,10 @@ const invokeStep: DispatchStep = {
  * the first one to return a `DispatchProjectedResult` short-circuits.
  *
  * Ordering invariants:
- *   - All gates (role / capability / quota) come first so denials are
- *     cheap (no timer arming, no buffer allocation, no ctx wrappers).
+ *   - All gates (role / capability / harness / quota / authorize) come first
+ *     so denials are cheap (no timer arming, no buffer allocation, no ctx
+ *     wrappers). `authorize` runs last among the gates — it is the
+ *     finest-grained and may touch the resource — but still before `timeout`.
  *   - `timeout` arms the AbortController; every subsequent step that
  *     races against it depends on this having run.
  *   - `idle-watchdog` runs after `timeout` so it composes with the same
@@ -490,10 +643,13 @@ const invokeStep: DispatchStep = {
  *   - `invoke` is always terminal.
  */
 export const DEFAULT_DISPATCH_STACK: ReadonlyArray<DispatchStep> = Object.freeze([
+  defaultDenyStep,
   roleAllowlistStep,
   capabilityCheckStep,
+  roleRequirementStep,
   harnessCheckStep,
   quotaStep,
+  authorizeStep,
   timeoutStep,
   idleWatchdogStep,
   replayBufferStep,

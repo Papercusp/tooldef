@@ -48,10 +48,13 @@ afterEach(() => _resetProjectionRegistryForTests());
 describe('DEFAULT_DISPATCH_STACK — enumeration', () => {
   it('runs steps in this exact order: gates → timeout → idle → buffer → bindings → invoke', () => {
     const expected: DispatchStepName[] = [
+      'default-deny',
       'role-allowlist',
       'capability-check',
+      'role-requirement',
       'harness-check',
       'quota',
+      'authorize',
       'timeout',
       'idle-watchdog',
       'replay-buffer',

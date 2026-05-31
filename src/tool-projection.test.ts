@@ -149,10 +149,10 @@ describe('listMcpProjections', () => {
 
   it('filters by role allowlist when provided', () => {
     registerProjectedTool(baseTool({
-      expose: { mcp: { name: 'a.worker' } }, roles: ['worker'],
+      expose: { mcp: { name: 'a.worker' } }, agentRoles: ['worker'],
     }));
     registerProjectedTool(baseTool({
-      expose: { mcp: { name: 'b.architect' } }, roles: ['architect'],
+      expose: { mcp: { name: 'b.architect' } }, agentRoles: ['architect'],
     }));
     registerProjectedTool(baseTool({
       expose: { mcp: { name: 'c.any' } }, // no roles -> visible to everyone
