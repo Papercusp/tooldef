@@ -19,8 +19,8 @@
  * Spec ref: openapi-design-spike-2026-05-20.md.
  */
 
-import { z } from 'zod';
 import type { ProjectedTool } from './tool-projection';
+import { toJsonSchema } from './schema-adapter';
 
 // componentKey: sanitize tool names for OpenAPI 3.1 component-schema map keys
 // (regex ^[A-Za-z0-9._-]+$). Tool names use ":" as namespace separator (legal
@@ -291,8 +291,7 @@ function stripJsonSchemaMeta(schema: Record<string, unknown>): Record<string, un
  */
 function zodToJsonSchemaSafe(schema: unknown): Record<string, unknown> {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const raw = (z as any).toJSONSchema(schema) as Record<string, unknown>;
+    const raw = toJsonSchema(schema);
     return stripJsonSchemaMeta(raw);
   } catch {
     return { description: 'Schema not representable in JSON Schema.' };

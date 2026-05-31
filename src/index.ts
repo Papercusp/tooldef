@@ -90,6 +90,14 @@ export {
   type CapabilityTierResolver,
 } from './capability-tiers';
 
+/* ─── Schema → JSON-Schema adapter (pluggable; default Zod) ───────────── */
+export {
+  toJsonSchema,
+  setJsonSchemaAdapter,
+  zodJsonSchemaAdapter,
+  type JsonSchemaAdapter,
+} from './schema-adapter';
+
 /* ─── Projected-tool registry (the function-as-truth core) ───────────── */
 export {
   registerProjectedTool,

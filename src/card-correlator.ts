@@ -17,11 +17,12 @@
  * to the state channel. No double-bookkeeping (H2).
  */
 
-import { z, type ZodTypeAny } from 'zod';
+import { type ZodTypeAny } from 'zod';
 
 import type { CardResponse, CardSpec, OpenCardSnapshot } from './types';
 import { setOpenCards } from './state-channel';
 import { onWorkspaceSwitch } from './workspace-lifecycle';
+import { toJsonSchema } from './schema-adapter';
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -75,11 +76,9 @@ function registry() {
 }
 
 function zodToJsonSchema(schema: ZodTypeAny): Record<string, unknown> {
-  // Zod 4 has built-in toJSONSchema. zod-to-json-schema@3 produces an
-  // empty result for Zod 4 schemas (see define-tool.ts:267 for the
-  // matching dance). Use the runtime method.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const raw = (z as any).toJSONSchema(schema) as Record<string, unknown>;
+  // Pluggable schema→JSON-Schema (P-021); default adapter is Zod 4's
+  // toJSONSchema (zod-to-json-schema@3 produced empty results for Zod 4).
+  const raw = toJsonSchema(schema);
   delete raw.$schema;
   return raw;
 }

@@ -15,8 +15,9 @@
  * dropping a file; no manual list to maintain.
  */
 
-import { z, type ZodTypeAny } from 'zod';
+import { type ZodTypeAny } from 'zod';
 import { tierFor } from './capability-tiers';
+import { toJsonSchema } from './schema-adapter';
 import { register } from './registry';
 import { registerProjectedTool, type ToolFn } from './tool-projection';
 import { UnauthorizedToolError } from './dispatch-projected';
@@ -335,10 +336,10 @@ function flattenForOpenAi(schema: Record<string, unknown>): Record<string, unkno
 function registerLegacyAsProjected<TArgs extends ZodTypeAny>(def: ToolDefinition<TArgs>): void {
   // tasks:list → /api/agent-tools/tasks/list
   const httpPath = `/api/agent-tools/${def.name.replaceAll(':', '/')}`;
-  // Zod 4: use built-in z.toJSONSchema. zod-to-json-schema@3 returns just
-  // `{ $schema }` for zod 4 schemas — produces empty input schemas.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const rawSchema = (z as any).toJSONSchema(def.args) as Record<string, unknown>;
+  // Pluggable schema→JSON-Schema (P-021); default adapter is Zod 4's
+  // toJSONSchema. zod-to-json-schema@3 returned just `{ $schema }` for zod 4
+  // schemas (empty input schemas) — the built-in path fixed that.
+  const rawSchema = toJsonSchema(def.args);
   delete (rawSchema as Record<string, unknown>).$schema;
   const inputSchema = flattenForOpenAi(rawSchema);
 
@@ -398,8 +399,7 @@ function registerRoleGatedAsProjected<TArgs extends ZodTypeAny>(
   def: RoleToolDefinition<TArgs>,
 ): void {
   const httpPath = `/api/agent-tools/${def.name.replaceAll(':', '/')}`;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const rawSchema = (z as any).toJSONSchema(def.args) as Record<string, unknown>;
+  const rawSchema = toJsonSchema(def.args);
   delete (rawSchema as Record<string, unknown>).$schema;
   const inputSchema = flattenForOpenAi(rawSchema);
 

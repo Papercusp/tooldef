@@ -18,7 +18,7 @@
  * Spec: apps/operator/docs/plugin-mcp-host-design.md.
  */
 
-import { z, type ZodTypeAny } from 'zod';
+import { type ZodTypeAny } from 'zod';
 import type {
   EmitCallback,
   ProgressCallback,
@@ -26,6 +26,7 @@ import type {
   ToolResult,
 } from './wire';
 import type { AgentRole, Capability, PluginSpawn } from './host-types';
+import { toJsonSchema } from './schema-adapter';
 
 /* ─── Event schema types ─────────────────────────────────────────────── */
 
@@ -145,9 +146,8 @@ export function classifyEventWire(schema: ZodTypeAny): EventWireKind {
   }
 
   try {
-    // Zod 4: built-in toJSONSchema — same path as inputSchema serialization.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const json = (z as any).toJSONSchema(schema) as { type?: string };
+    // Pluggable schema→JSON-Schema (P-021); same path as inputSchema serialization.
+    const json = toJsonSchema(schema) as { type?: string };
     return json.type === 'string' ? 'string' : 'json';
   } catch {
     // Schema rejected json conversion; default to JSON on the wire so
@@ -918,10 +918,9 @@ function serializeEventsSchema(events: EventsSchema): Record<string, Record<stri
       continue;
     }
     try {
-      // Zod 4: use built-in z.toJSONSchema (zod-to-json-schema@3 returns
-      // empty schemas on zod 4 — same reason define-tool uses this path).
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const json = (z as any).toJSONSchema(schema) as Record<string, unknown>;
+      // Pluggable schema→JSON-Schema (P-021); default adapter is Zod 4's
+      // toJSONSchema (zod-to-json-schema@3 returned empty schemas on zod 4).
+      const json = toJsonSchema(schema);
       // Drop $schema — MCP clients don't need it and it's noise in tools/list.
       delete json.$schema;
       out[name] = json;
