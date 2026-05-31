@@ -5,6 +5,7 @@
 import type { RolesQuota, ToolResult } from './wire';
 import type { AgentRole } from './host-types';
 import type { z, ZodTypeAny } from 'zod';
+import type { StandardSchemaV1 } from './standard-schema';
 import type { EventsSchema, UnifiedToolContext, UserEvents } from './tool-projection';
 import type { OpenCardSnapshot as WireOpenCardSnapshot } from '@papercusp/chat-protocol';
 
@@ -316,7 +317,7 @@ export function resolveGuidance(
 }
 
 /** Tool definition produced by `defineTool`. */
-export interface ToolDefinition<TArgs extends ZodTypeAny = ZodTypeAny> {
+export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV1> {
   /** Tool name, e.g. `"tasks:list"`. Defaults to file-path-derived. */
   name: string;
   /** TSDoc-derived description for MCP `tools/list`. */
@@ -325,10 +326,10 @@ export interface ToolDefinition<TArgs extends ZodTypeAny = ZodTypeAny> {
   capability: string;
   /** Tier looked up from the capability per §10.6.1's table. */
   tier: CapabilityTier;
-  /** Argument schema. Doubles as runtime validation and JSON-schema source. */
+  /** Argument schema (any Standard Schema validator). Runtime validation + JSON-schema source. */
   args: TArgs;
   /** Implementation. Tools may return any data shape inside ToolResponse. */
-  handler: (args: z.infer<TArgs>, ctx: ToolContext) => Promise<ToolResponse>;
+  handler: (args: StandardSchemaV1.InferOutput<TArgs>, ctx: ToolContext) => Promise<ToolResponse>;
   /**
    * Optional per-tool guidance for the role's system prompt.
    * Projected into the prompt assembly by `assembleRolePrompt`.
@@ -342,14 +343,14 @@ export interface ToolDefinition<TArgs extends ZodTypeAny = ZodTypeAny> {
 }
 
 /** Input shape for `defineTool` — same as ToolDefinition minus derived fields. */
-export interface ToolDefinitionInput<TArgs extends ZodTypeAny = ZodTypeAny> {
+export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSchemaV1> {
   /** Optional explicit name; defaults to file-path-derived. */
   name?: string;
   /** Optional explicit description; defaults to caller's TSDoc. */
   description?: string;
   capability: string;
   args: TArgs;
-  handler: (args: z.infer<TArgs>, ctx: ToolContext) => Promise<ToolResponse>;
+  handler: (args: StandardSchemaV1.InferOutput<TArgs>, ctx: ToolContext) => Promise<ToolResponse>;
   /** See `ToolGuidance`. */
   guidance?: ToolGuidance;
   /* ─── Unified-primitive forward-compat fields (Phase E1, no behavior change) ─────
@@ -416,7 +417,7 @@ export interface ToolDefinitionInput<TArgs extends ZodTypeAny = ZodTypeAny> {
  * code in the catalog forever).
  */
 export interface RoleToolDefinition<
-  TArgs extends ZodTypeAny = ZodTypeAny,
+  TArgs extends StandardSchemaV1 = StandardSchemaV1,
   TEvents extends EventsSchema = EventsSchema,
 > {
   name: string;
@@ -474,14 +475,14 @@ export interface RoleToolDefinition<
    *
    * See ProjectedTool.state.
    */
-  state?: ZodTypeAny;
+  state?: StandardSchemaV1;
   /**
    * Handler receives the unified context (no principal). May return either
    * a raw `ToolResult` (MCP shape) or a `ToolResponse` envelope; the
    * wrapper adapts both.
    */
   handler: (
-    args: z.infer<TArgs>,
+    args: StandardSchemaV1.InferOutput<TArgs>,
     ctx: UnifiedToolContext,
   ) => Promise<ToolResult | ToolResponse>;
   /** See `ToolGuidance`. */
@@ -490,7 +491,7 @@ export interface RoleToolDefinition<
 
 /** Input shape for role-gated `defineTool` — same as RoleToolDefinition minus derived fields. */
 export interface RoleToolDefinitionInput<
-  TArgs extends ZodTypeAny = ZodTypeAny,
+  TArgs extends StandardSchemaV1 = StandardSchemaV1,
   TEvents extends EventsSchema = EventsSchema,
 > {
   name?: string;
@@ -511,7 +512,7 @@ export interface RoleToolDefinitionInput<
   /** See RoleToolDefinition.modality. */
   modality?: ReadonlyArray<'text' | 'voice'>;
   /** See RoleToolDefinition.state. */
-  state?: ZodTypeAny;
+  state?: StandardSchemaV1;
   args: TArgs;
   /**
    * Typed event channel — Zod schemas keyed by event name. The
@@ -520,7 +521,7 @@ export interface RoleToolDefinitionInput<
    */
   events?: UserEvents<TEvents>;
   handler: (
-    args: z.infer<TArgs>,
+    args: StandardSchemaV1.InferOutput<TArgs>,
     ctx: UnifiedToolContext,
   ) => Promise<ToolResult | ToolResponse>;
   /** See `ToolGuidance`. */
@@ -681,10 +682,10 @@ export interface CardOption {
 }
 
 /** Card specification passed to `ctx.askUser`. */
-export interface CardSpec<TSchema extends ZodTypeAny = ZodTypeAny> {
+export interface CardSpec<TSchema extends StandardSchemaV1 = StandardSchemaV1> {
   /** Human-readable prompt. Voice surfaces read this verbatim. */
   prompt: string;
-  /** Zod schema for the response payload. Validated server-side before resolving. */
+  /** Standard Schema validator for the response payload. Validated server-side before resolving. */
   dataSchema: TSchema;
   /** Optional visual presentation hint. Voice surfaces ignore. */
   presentation?: CardPresentation;
@@ -704,8 +705,8 @@ export interface CardSpec<TSchema extends ZodTypeAny = ZodTypeAny> {
  *   decline — user explicitly skipped this card (allowDecline must be ≠ false).
  *   cancel  — run was cancelled OR user dismissed OR timeoutMs fired.
  */
-export type CardResponse<TSchema extends ZodTypeAny = ZodTypeAny> =
-  | { action: 'submit'; payload: z.infer<TSchema> }
+export type CardResponse<TSchema extends StandardSchemaV1 = StandardSchemaV1> =
+  | { action: 'submit'; payload: StandardSchemaV1.InferOutput<TSchema> }
   | { action: 'decline'; reason?: string }
   | { action: 'cancel' };
 

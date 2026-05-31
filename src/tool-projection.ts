@@ -27,6 +27,7 @@ import type {
 } from './wire';
 import type { AgentRole, Capability, PluginSpawn } from './host-types';
 import { toJsonSchema } from './schema-adapter';
+import type { StandardSchemaV1 } from './standard-schema';
 
 /* ─── Event schema types ─────────────────────────────────────────────── */
 
@@ -507,7 +508,7 @@ export type PublishStateCallback = (snapshot: unknown) => void;
  * `ctx.askUser(spec)` — mid-run interactive prompt. Returns a `CardResponse`
  * shaped per the discriminated union in `./types`.
  */
-export type AskUserCallback = <TSchema extends ZodTypeAny>(
+export type AskUserCallback = <TSchema extends StandardSchemaV1>(
   spec: import('./types').CardSpec<TSchema>,
 ) => Promise<import('./types').CardResponse<TSchema>>;
 
@@ -675,8 +676,11 @@ export interface ProjectedTool {
    *
    * v1 ships SNAPSHOT-ONLY publishState. JSON Patch deltas are
    * deferred to v1.1 once we measure snapshot-only perf on real tools.
+   *
+   * Any Standard Schema validator (P-020); the snapshot is validated via
+   * `~standard.validate` at `ctx.publishState` time.
    */
-  state?: ZodTypeAny;
+  state?: StandardSchemaV1;
   /**
    * Typed event channel — Zod schemas keyed by event name. Surfaced
    * via tools/list as JSON-Schema for client discovery. No runtime

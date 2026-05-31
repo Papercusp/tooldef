@@ -17,12 +17,11 @@
  * to the state channel. No double-bookkeeping (H2).
  */
 
-import { type ZodTypeAny } from 'zod';
-
 import type { CardResponse, CardSpec, OpenCardSnapshot } from './types';
 import { setOpenCards } from './state-channel';
 import { onWorkspaceSwitch } from './workspace-lifecycle';
 import { toJsonSchema } from './schema-adapter';
+import { validateSync, type StandardSchemaV1 } from './standard-schema';
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -37,7 +36,7 @@ function makeDeferred<T>(): Deferred<T> {
   return { promise, resolve };
 }
 
-interface PendingCard<TSchema extends ZodTypeAny = ZodTypeAny> {
+interface PendingCard<TSchema extends StandardSchemaV1 = StandardSchemaV1> {
   correlationId: string;
   runId: string;
   workspaceId: string;
@@ -75,7 +74,7 @@ function registry() {
   return r;
 }
 
-function zodToJsonSchema(schema: ZodTypeAny): Record<string, unknown> {
+function zodToJsonSchema(schema: StandardSchemaV1): Record<string, unknown> {
   // Pluggable schema→JSON-Schema (P-021); default adapter is Zod 4's
   // toJSONSchema (zod-to-json-schema@3 produced empty results for Zod 4).
   const raw = toJsonSchema(schema);
@@ -155,7 +154,7 @@ function drop(correlationId: string): void {
  * response for the same (runId, idempotencyKey), return the cached
  * response immediately without registering or emitting.
  */
-export function registerCard<TSchema extends ZodTypeAny>(opts: {
+export function registerCard<TSchema extends StandardSchemaV1>(opts: {
   workspaceId: string;
   runId: string;
   spec: CardSpec<TSchema>;
@@ -185,7 +184,7 @@ export function registerCard<TSchema extends ZodTypeAny>(opts: {
     createdAt: Date.now(),
   };
 
-  r.pending.set(correlationId, card as PendingCard);
+  r.pending.set(correlationId, card as unknown as PendingCard);
   let set = r.byRun.get(opts.runId);
   if (!set) {
     set = new Set();
@@ -243,16 +242,16 @@ export function resolveCardResponse(opts: {
   // validation may fail, in which case we leave the card pending.
   let response: CardResponse;
   if (opts.action === 'submit') {
-    const parsed = card.spec.dataSchema.safeParse(opts.payload);
-    if (!parsed.success) {
+    const parsed = validateSync(card.spec.dataSchema, opts.payload);
+    if (!parsed.ok) {
       return {
         ok: false,
         status: 400,
         error: 'payload does not match dataSchema',
-        details: parsed.error.issues,
+        details: parsed.issues,
       };
     }
-    response = { action: 'submit', payload: parsed.data };
+    response = { action: 'submit', payload: parsed.value };
   } else if (opts.action === 'decline') {
     if (card.spec.allowDecline === false) {
       return { ok: false, status: 400, error: 'this card does not allow decline' };

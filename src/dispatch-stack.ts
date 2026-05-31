@@ -33,7 +33,7 @@ import {
 } from './card-correlator';
 import { openRun, closeRun, setToolState } from './state-channel';
 import type { CardResponse, CardSpec } from './types';
-import type { ZodTypeAny } from 'zod';
+import { validateSync, formatIssues, type StandardSchemaV1 } from './standard-schema';
 import {
   PASS_THROUGH,
   UnauthorizedToolError,
@@ -351,7 +351,7 @@ const ctxBindingsStep: DispatchStep = {
       const wsId = ctx.workspaceId;
       const runId = ctx.runId;
       openRun({ workspaceId: wsId, runId });
-      askUser = async <TSchema extends ZodTypeAny>(
+      askUser = async <TSchema extends StandardSchemaV1>(
         spec: CardSpec<TSchema>,
       ): Promise<CardResponse<TSchema>> => {
         const { result } = registerCard({ workspaceId: wsId, runId, spec });
@@ -382,15 +382,15 @@ const ctxBindingsStep: DispatchStep = {
             'ctx.publishState v1 is snapshot-only; pass a full state object, not a JSON-Patch array',
           );
         }
-        const parsed = stateSchema.safeParse(snapshot);
-        if (!parsed.success) {
+        // Validate synchronously — publishState is fire-and-forget (tools call
+        // it without await), so an async validator can't be supported here.
+        const parsed = validateSync(stateSchema, snapshot);
+        if (!parsed.ok) {
           throw new Error(
-            `ctx.publishState: snapshot does not match tool.state schema: ${parsed.error.issues
-              .map((i) => `${i.path.join('.')}: ${i.message}`)
-              .join('; ')}`,
+            `ctx.publishState: snapshot does not match tool.state schema: ${formatIssues(parsed.issues)}`,
           );
         }
-        setToolState(runIdLocal, parsed.data);
+        setToolState(runIdLocal, parsed.value);
       };
     }
 

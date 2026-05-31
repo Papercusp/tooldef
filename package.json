@@ -13,7 +13,8 @@
     }
   },
   "dependencies": {
-    "@papercusp/chat-protocol": "*"
+    "@papercusp/chat-protocol": "*",
+    "@standard-schema/spec": "^1.0.0"
   },
   "scripts": {
     "test": "vitest",

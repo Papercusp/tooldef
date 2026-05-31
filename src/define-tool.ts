@@ -18,6 +18,7 @@
 import { type ZodTypeAny } from 'zod';
 import { tierFor } from './capability-tiers';
 import { toJsonSchema } from './schema-adapter';
+import { standardValidate, formatIssues, type StandardSchemaV1 } from './standard-schema';
 import { register } from './registry';
 import { registerProjectedTool, type ToolFn } from './tool-projection';
 import { UnauthorizedToolError } from './dispatch-projected';
@@ -107,10 +108,10 @@ function describeFromGuidance(guidance: ToolGuidance | undefined): string | null
  * One primitive, three projections — the route/tool duplication the
  * endpoint-unification plan set out to remove.
  */
-export function defineTool<TArgs extends ZodTypeAny>(
+export function defineTool<TArgs extends StandardSchemaV1>(
   input: RoleToolDefinitionInput<TArgs>,
 ): RoleToolDefinition<TArgs>;
-export function defineTool<TArgs extends ZodTypeAny>(
+export function defineTool<TArgs extends StandardSchemaV1>(
   input: ToolDefinitionInput<TArgs>,
 ): ToolDefinition<TArgs>;
 // Route overload LAST: a tool-shaped call must resolve against the tool
@@ -130,18 +131,18 @@ export function defineTool<TInputSchema extends ZodTypeAny | undefined = undefin
 ): RouteDefinition<TInputSchema>;
 export function defineTool(
   input:
-    | ToolDefinitionInput<ZodTypeAny>
-    | RoleToolDefinitionInput<ZodTypeAny>
+    | ToolDefinitionInput<StandardSchemaV1>
+    | RoleToolDefinitionInput<StandardSchemaV1>
     | RouteDefinition<ZodTypeAny | undefined>,
-): ToolDefinition<ZodTypeAny> | RoleToolDefinition<ZodTypeAny> | RouteDefinition<ZodTypeAny | undefined> {
+): ToolDefinition<StandardSchemaV1> | RoleToolDefinition<StandardSchemaV1> | RouteDefinition<ZodTypeAny | undefined> {
   // Route-shaped — discriminated by `method` (tool inputs never carry it).
   if ('method' in input && 'path' in input) {
     return defineRouteShaped(input as RouteDefinition<ZodTypeAny | undefined>);
   }
-  if ((input as RoleToolDefinitionInput<ZodTypeAny>).requirePrincipal === false) {
-    return defineRoleGatedTool(input as RoleToolDefinitionInput<ZodTypeAny>);
+  if ((input as RoleToolDefinitionInput<StandardSchemaV1>).requirePrincipal === false) {
+    return defineRoleGatedTool(input as RoleToolDefinitionInput<StandardSchemaV1>);
   }
-  return definePrincipalGatedTool(input as ToolDefinitionInput<ZodTypeAny>);
+  return definePrincipalGatedTool(input as ToolDefinitionInput<StandardSchemaV1>);
 }
 
 /**
@@ -159,7 +160,7 @@ function defineRouteShaped<TInputSchema extends ZodTypeAny | undefined>(
   return def;
 }
 
-function definePrincipalGatedTool<TArgs extends ZodTypeAny>(
+function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
   input: ToolDefinitionInput<TArgs>,
 ): ToolDefinition<TArgs> {
   const name = input.name ?? deriveNameFromCallSite();
@@ -187,7 +188,10 @@ function definePrincipalGatedTool<TArgs extends ZodTypeAny>(
     harness: input.harness,
   };
 
-  register(def);
+  // The catalog stores defs with their schema type erased (handlers run on
+  // post-validation values); a specific TArgs isn't assignable to the
+  // unknown-output base under Standard Schema's variance, so widen explicitly.
+  register(def as unknown as ToolDefinition);
   registerLegacyAsProjected(def);
   return def;
 }
@@ -203,7 +207,7 @@ function definePrincipalGatedTool<TArgs extends ZodTypeAny>(
  * If the tool needs PG, open its own connection from the workspace-
  * resolved pool; do not assume `tx` is set.
  */
-function defineRoleGatedTool<TArgs extends ZodTypeAny>(
+function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
   input: RoleToolDefinitionInput<TArgs>,
 ): RoleToolDefinition<TArgs> {
   const name = input.name ?? deriveNameFromCallSite();
@@ -335,7 +339,7 @@ function flattenForOpenAi(schema: Record<string, unknown>): Record<string, unkno
   };
 }
 
-function registerLegacyAsProjected<TArgs extends ZodTypeAny>(def: ToolDefinition<TArgs>): void {
+function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(def: ToolDefinition<TArgs>): void {
   // tasks:list → /api/agent-tools/tasks/list
   const httpPath = `/api/agent-tools/${def.name.replaceAll(':', '/')}`;
   // Pluggable schema→JSON-Schema (P-021); default adapter is Zod 4's
@@ -356,11 +360,11 @@ function registerLegacyAsProjected<TArgs extends ZodTypeAny>(def: ToolDefinition
       tx: ctx.tx,
       log: (level, msg, meta) => ctx.log(`[${level}] ${msg}${meta ? ` ${JSON.stringify(meta)}` : ''}`),
     };
-    const parsed = def.args.safeParse(input);
-    if (!parsed.success) {
-      throw new Error(`invalid_args: ${parsed.error.message}`);
+    const parsed = await standardValidate(def.args, input);
+    if (!parsed.ok) {
+      throw new Error(`invalid_args: ${formatIssues(parsed.issues)}`);
     }
-    const response: ToolResponse = await def.handler(parsed.data, legacyCtx);
+    const response: ToolResponse = await def.handler(parsed.value, legacyCtx);
     const content: Array<Record<string, unknown>> = [
       { type: 'text', text: JSON.stringify(response.data ?? response) },
     ];
@@ -398,7 +402,7 @@ function registerLegacyAsProjected<TArgs extends ZodTypeAny>(def: ToolDefinition
  * `ToolResponse` envelope; this wrapper normalises to `ToolResult` so
  * both transports see the same content[] array.
  */
-function registerRoleGatedAsProjected<TArgs extends ZodTypeAny>(
+function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
   def: RoleToolDefinition<TArgs>,
 ): void {
   const httpPath = `/api/agent-tools/${def.name.replaceAll(':', '/')}`;
@@ -407,11 +411,11 @@ function registerRoleGatedAsProjected<TArgs extends ZodTypeAny>(
   const inputSchema = flattenForOpenAi(rawSchema);
 
   const projectedFn: ToolFn = async (input, ctx) => {
-    const parsed = def.args.safeParse(input);
-    if (!parsed.success) {
-      throw new Error(`invalid_args: ${parsed.error.message}`);
+    const parsed = await standardValidate(def.args, input);
+    if (!parsed.ok) {
+      throw new Error(`invalid_args: ${formatIssues(parsed.issues)}`);
     }
-    const out = await def.handler(parsed.data, ctx);
+    const out = await def.handler(parsed.value, ctx);
 
     // Already a ToolResult? Pass through.
     if (out && typeof out === 'object' && Array.isArray((out as ToolResult).content)) {

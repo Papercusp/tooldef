@@ -98,6 +98,15 @@ export {
   type JsonSchemaAdapter,
 } from './schema-adapter';
 
+/* ─── Standard Schema validation (validator-agnostic) ────────────────── */
+export {
+  standardValidate,
+  validateSync,
+  formatIssues,
+  type StandardSchemaV1,
+  type ValidationResult,
+} from './standard-schema';
+
 /* ─── Projected-tool registry (the function-as-truth core) ───────────── */
 export {
   registerProjectedTool,
