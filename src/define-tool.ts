@@ -20,7 +20,7 @@ import { tierFor } from './capability-tiers';
 import { toJsonSchema } from './schema-adapter';
 import { standardValidate, formatIssues, type StandardSchemaV1 } from './standard-schema';
 import { register } from './registry';
-import { registerProjectedTool, type ToolFn } from './tool-projection';
+import { registerProjectedTool, type ToolFn, type ToolExposure } from './tool-projection';
 import { UnauthorizedToolError } from './dispatch-projected';
 import type {
   RoleToolDefinition,
@@ -195,7 +195,7 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
   // post-validation values); a specific TArgs isn't assignable to the
   // unknown-output base under Standard Schema's variance, so widen explicitly.
   register(def as unknown as ToolDefinition);
-  registerLegacyAsProjected(def);
+  registerLegacyAsProjected(def, input.expose);
   return def;
 }
 
@@ -250,7 +250,7 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
     harness: input.harness,
   };
 
-  registerRoleGatedAsProjected(def);
+  registerRoleGatedAsProjected(def, input.expose);
   return def;
 }
 
@@ -345,7 +345,10 @@ function flattenForOpenAi(schema: Record<string, unknown>): Record<string, unkno
   };
 }
 
-function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(def: ToolDefinition<TArgs>): void {
+function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
+  def: ToolDefinition<TArgs>,
+  expose?: ToolExposure,
+): void {
   // tasks:list → /api/agent-tools/tasks/list
   const httpPath = `/api/agent-tools/${def.name.replaceAll(':', '/')}`;
   // Pluggable schema→JSON-Schema (P-021); default adapter is Zod 4's
@@ -395,6 +398,10 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(def: ToolDefi
     expose: {
       mcp: { name: def.name },
       http: { path: httpPath, methods: ['POST'] },
+      // IPC-eligibility (the typed endpoint_invoke / sys:http allowlist) is
+      // opt-in per tool via `expose: { ipc: true }` in defineTool — read off
+      // the projected registry by the host's IPC server (Phase E8).
+      ...(expose?.ipc ? { ipc: true as const } : {}),
     },
     fn: projectedFn,
     guidance: def.guidance as never,
@@ -413,6 +420,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(def: ToolDefi
  */
 function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
   def: RoleToolDefinition<TArgs>,
+  expose?: ToolExposure,
 ): void {
   const httpPath = `/api/agent-tools/${def.name.replaceAll(':', '/')}`;
   const rawSchema = toJsonSchema(def.args);
@@ -465,6 +473,10 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     expose: {
       mcp: { name: def.name },
       http: { path: httpPath, methods: ['POST'] },
+      // IPC-eligibility (the typed endpoint_invoke / sys:http allowlist) is
+      // opt-in per tool via `expose: { ipc: true }` in defineTool — read off
+      // the projected registry by the host's IPC server (Phase E8).
+      ...(expose?.ipc ? { ipc: true as const } : {}),
     },
     fn: projectedFn,
     guidance: def.guidance as never,
