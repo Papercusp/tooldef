@@ -461,6 +461,17 @@ export interface RoleToolDefinition<
    */
   replayBufferSize?: number;
   /**
+   * Cross-workspace opt-out (P-062 Phase 4). When the HTTP host runs tools
+   * inside a workspace-scoped (RLS-subject) transaction by default, a tool
+   * that genuinely spans workspaces sets `crossWorkspace: true` so the host
+   * gives it the admin (rolbypassrls) handle instead. Absent/false ⇒ the
+   * tool is workspace-isolated. Set this ONLY for tools that legitimately
+   * read/write outside the caller's own workspace (e.g. listing every
+   * workspace, cross-workspace aggregation) — it disables RLS isolation for
+   * that tool. Read by the host's `runScoped` seam off `ProjectedTool`.
+   */
+  crossWorkspace?: boolean;
+  /**
    * Surfaces this tool is meaningful from. Phase 4 T3.1. The prompt-
    * assembly catalog renderer filters by the caller's modality so voice
    * surfaces only see voice-capable tools. Default — when absent — is
@@ -522,6 +533,8 @@ export interface RoleToolDefinitionInput<
   idleTimeoutSec?: number;
   /** See RoleToolDefinition.replayBufferSize. */
   replayBufferSize?: number;
+  /** See RoleToolDefinition.crossWorkspace. */
+  crossWorkspace?: boolean;
   /** See RoleToolDefinition.modality. */
   modality?: ReadonlyArray<'text' | 'voice'>;
   /** See RoleToolDefinition.state. */

@@ -652,6 +652,14 @@ export interface ProjectedTool {
    */
   replayBufferSize?: number;
   /**
+   * Cross-workspace opt-out (P-062 Phase 4). Read by the HTTP host's
+   * `runScoped` scoping seam: when true the tool runs on the admin
+   * (rolbypassrls) handle rather than a workspace-scoped RLS transaction,
+   * so it can read/write across workspaces. Absent/false ⇒ workspace-
+   * isolated (the default). See RoleToolDefinition.crossWorkspace.
+   */
+  crossWorkspace?: boolean;
+  /**
    * Surfaces this tool is meaningful from. Phase 4 T3.1. The prompt-
    * assembly catalog renderer filters by the caller's modality so
    * voice surfaces only see voice-capable tools. Absent → callers
