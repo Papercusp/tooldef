@@ -279,7 +279,7 @@ const roleRequirementStep: DispatchStep = {
  *
  * Fails closed even for privileged callers: a missing harness is a FUNCTIONAL
  * gap (the tool can't run), not a permission one, so superuser/power don't
- * bypass it. `gateBypass.harness` is an explicit per-call escape hatch only.
+ * bypass it. `gateBypass.papercusp` is an explicit per-call escape hatch only.
  */
 const harnessCheckStep: DispatchStep = {
   name: 'harness-check',

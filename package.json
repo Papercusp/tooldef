@@ -1,5 +1,6 @@
 {
   "name": "@papercusp/tooldef",
+  "type": "module",
   "version": "0.1.0",
   "private": true,
   "description": "Function-as-truth tool framework: write one typed (input, ctx) => result function and project it onto HTTP, MCP, IPC, and in-process transports with uniform auth/role/quota/telemetry/streaming. Schema-agnostic (Standard Schema), host-agnostic (all I/O injected).",

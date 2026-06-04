@@ -701,7 +701,7 @@ export interface ProjectedTool {
    * - `'none'` — the tool is harness-agnostic. Informational; no gate.
    *
    * The gate fails closed even for superuser/power callers (it's a functional
-   * requirement, not a permission) — see `GateBypass.harness`.
+   * requirement, not a permission) — see `GateBypass.papercusp`.
    */
   harness?: 'required' | 'optional' | 'none';
   /**
