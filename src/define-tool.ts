@@ -20,6 +20,7 @@ import { tierFor } from './capability-tiers';
 import { toJsonSchema } from './schema-adapter';
 import { standardValidate, formatIssues, type StandardSchemaV1 } from './standard-schema';
 import { register } from './registry';
+import { collectToolEmits } from './emits-registry';
 import { registerProjectedTool, type ToolFn, type ToolExposure } from './tool-projection';
 import { UnauthorizedToolError } from './dispatch-projected';
 import type {
@@ -189,6 +190,7 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
     authorize: input.authorize,
     requireRoles: input.requireRoles,
     public: input.public,
+    emits: input.emits,
   };
 
   // The catalog stores defs with their schema type erased (handlers run on
@@ -196,6 +198,9 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
   // unknown-output base under Standard Schema's variance, so widen explicitly.
   register(def as unknown as ToolDefinition);
   registerLegacyAsProjected(def, input.expose);
+  // Co-located intrinsic emissions → the generic collector; the operator-core
+  // desugar registers them as event-reaction rules at load (D-002).
+  collectToolEmits(name, input.emits);
   return def;
 }
 
@@ -249,9 +254,13 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
     guidance: input.guidance,
     profile: input.profile,
     harness: input.harness,
+    emits: input.emits,
   };
 
   registerRoleGatedAsProjected(def, input.expose);
+  // Co-located intrinsic emissions → the generic collector; the operator-core
+  // desugar registers them as event-reaction rules at load (D-002).
+  collectToolEmits(name, input.emits);
   return def;
 }
 

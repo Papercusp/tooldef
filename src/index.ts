@@ -37,6 +37,12 @@ export { definePrompt } from './define-prompt';
 /* ─── Registries ─────────────────────────────────────────────────────── */
 export { getCatalog, lookup, _resetCatalogForTests } from './registry';
 export {
+  collectToolEmits,
+  getCollectedToolEmits,
+  _resetCollectedToolEmitsForTests,
+  type CollectedToolEmits,
+} from './emits-registry';
+export {
   getResourceCatalog,
   lookupResource,
   matchResource,
@@ -146,6 +152,7 @@ export {
   type DispatchProjectedResult,
   type DispatchProjectedErrorCode,
   type DispatchStreamEvent,
+  type PostInvokeEvent,
   type ToolDispatchOverrideFn,
 } from './dispatch-projected';
 
@@ -174,6 +181,8 @@ export type {
   ToolContext,
   ToolDefinition,
   ToolDefinitionInput,
+  ToolEmitSpec,
+  ToolEventLike,
   ToolResponse,
   UIResourceContent,
   ResourceContext,

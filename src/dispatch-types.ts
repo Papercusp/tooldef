@@ -117,6 +117,22 @@ export type ToolDispatchOverrideFn = (
   | { content: Array<{ text?: string; [k: string]: unknown }>; isError?: boolean }
   | typeof PASS_THROUGH;
 
+/**
+ * The event handed to `DispatchProjectedDeps.postInvoke` after a tool settles.
+ * This is the event-reaction system's observation point (event-reaction-system
+ * D-001): the host matches `{ toolName, args, result, ctx }` against its rule
+ * registry and fires reactions. `args` are the validated (post-zod) arguments;
+ * `result` is the dispatcher's settled result (ok + ToolResult, or an error).
+ */
+export interface PostInvokeEvent {
+  toolName: string;
+  pluginName: string;
+  args: unknown;
+  result: DispatchProjectedResult;
+  ctx: UnifiedToolContext;
+  durationMs: number;
+}
+
 export interface DispatchProjectedDeps {
   /**
    * Resolve the quota window (telemetry grouping + quota scope) and ceiling
@@ -176,6 +192,17 @@ export interface DispatchProjectedDeps {
    * unset = decisions are not persisted (the host opted out of the audit trail).
    */
   auditAuth?(event: AuthAuditEvent): void;
+  /**
+   * Post-invocation hook — fires AFTER every tool settles (success, error, gate
+   * denial), once telemetry is recorded, on the same `finally` path. The single
+   * observation point of the event-reaction system (event-reaction-system
+   * D-001): the host matches the event against its rule registry and fires
+   * reactions. **Best-effort and MUST NOT block or fail the trigger** — the
+   * dispatcher calls it WITHOUT awaiting and swallows throws; the host schedules
+   * reaction *execution* itself (a durable queue / fire-and-forget), never
+   * inline on the hot path. Unset ⇒ no reactions.
+   */
+  postInvoke?(event: PostInvokeEvent): void;
   /**
    * Default-deny posture (RFC tooldef-auth Phase 3). When true, the dispatcher denies any
    * tool that declares NO gate (no capabilities/roles/requireRoles/authorize) and is not

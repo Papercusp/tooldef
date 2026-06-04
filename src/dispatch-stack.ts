@@ -809,10 +809,30 @@ export async function runDispatchStack(
     }
     return result;
   } finally {
-    await recordTelemetry(exec, result ?? {
+    const settled = result ?? {
       ok: false,
-      error: { code: 'handler_error', message: 'no result' },
-    });
+      error: { code: 'handler_error' as const, message: 'no result' },
+    };
+    await recordTelemetry(exec, settled);
+    // Event-reaction observation point (D-001). Fired AFTER telemetry, on every
+    // path. Best-effort + non-blocking: the host's postInvoke matches rules and
+    // SCHEDULES reactions (durable queue / fire-and-forget), it must not run a
+    // reaction inline here. We deliberately do NOT await it, and swallow throws,
+    // so a reaction can never delay or break its trigger.
+    if (deps.postInvoke) {
+      try {
+        deps.postInvoke({
+          toolName,
+          pluginName: tool.pluginName,
+          args: input,
+          result: settled,
+          ctx,
+          durationMs: Date.now() - exec.startedAt,
+        });
+      } catch {
+        // a reaction must never break its trigger
+      }
+    }
     if (exec.timeoutTimer) clearTimeout(exec.timeoutTimer);
     if (exec.idleTimer) clearInterval(exec.idleTimer);
     if (ctx.runId) {

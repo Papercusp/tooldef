@@ -420,6 +420,26 @@ export interface UnifiedToolContext {
   parentSpawnId?: string | null;
 
   /**
+   * Set by the event-reaction system on a ctx it builds for a REACTION call
+   * (a tool fired automatically by a rule). Absent on ordinary
+   * agent/user-originated calls. Carries the cause-chain so the loop guard
+   * (event-reaction-system D-005) can cap depth + detect cycles on the NEXT
+   * post-invocation, and so telemetry can audit "why did this fire?"
+   * (D-010). The dispatcher itself never reads this — it is host metadata
+   * the host's `postInvoke` interprets.
+   */
+  reactionCause?: {
+    /** Depth in the reaction cascade. An agent call is 0; its direct reactions are 1. */
+    depth: number;
+    /** Rule ids fired so far in this chain (cycle detection). */
+    chain: string[];
+    /** The rule that fired THIS call. */
+    ruleId: string;
+    /** The runId of the original (agent) trigger that rooted the chain. */
+    rootRunId?: string | null;
+  };
+
+  /**
    * When the agent was spawned from a browser tab (chat surfaces), the
    * tab's UI client_id is passed through here so `ui:*` tools default
    * to it. Null/undefined for headless spawns and CLI callers.

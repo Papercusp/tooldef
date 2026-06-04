@@ -305,6 +305,81 @@ export interface ToolGuidance {
   byRole?: Partial<Record<AgentRole, Partial<Omit<ToolGuidance, 'byRole'>>>>;
 }
 
+/**
+ * Structural tool-invocation event — the value an `emits` rule's `when` /
+ * `render` reads (coord-lifecycle-automation-2026-06-04 D-002). Defined here,
+ * minimal + domain-free, so the generic `tooldef` lib never depends on the
+ * operator-core event-reaction engine. It is structurally assignable to the
+ * engine's richer `ToolInvocationEvent` (event-reaction-system-2026-06-04), so
+ * the desugar layer passes it through without a cast.
+ */
+export interface ToolEventLike {
+  /** The trigger tool's MCP name (e.g. `'work_items:complete'`). */
+  tool: string;
+  /** The (already-validated) args the trigger was invoked with. */
+  args: Record<string, unknown>;
+  /** The trigger's result envelope. */
+  result: { ok: boolean; data?: unknown; error?: unknown };
+  /** Invocation context — the fields a `when`/`render` commonly reads. Structural/open. */
+  ctx: {
+    uiClientId?: string | null;
+    harnessSlug?: string | null;
+    workspaceId?: string | null;
+    role?: string | null;
+    runId?: string | null;
+    spawnId?: string | null;
+    [key: string]: unknown;
+  };
+  /** Cause-chain for loop protection — set by the engine, not the author. */
+  cause?: { depth: number; chain: string[]; ruleId?: string };
+}
+
+/**
+ * One INTRINSIC emission a tool always performs as part of its contract
+ * (coord-lifecycle-automation-2026-06-04 D-002). `emits: [ToolEmitSpec, …]` on
+ * a `defineTool` is co-location SUGAR that the operator-core desugar
+ * (`emitsEntryToRule`) registers as an event-reaction rule — one engine, two
+ * authoring forms (the rules file for contextual reactions; `emits:` for
+ * intrinsic lifecycle emissions). It is NEVER a parallel dispatch path: the
+ * field carries no execution, only the `(on=this tool, when, fire, args)`
+ * descriptor the engine runs.
+ *
+ * (D-002 names the field's target the "surface"; it desugars to the reaction
+ * rule's `fire` — the tool the emission invokes, e.g. `coord:emit`.)
+ */
+export interface ToolEmitSpec {
+  /**
+   * The reaction tool to fire — its MCP name, e.g. `'coord:emit'`. Desugars to
+   * `ReactionRule.fire`. The reaction runs through the NORMAL dispatcher
+   * (auth-gated, quota'd, audited), exactly like any other tool call.
+   */
+  fire: string;
+  /**
+   * Condition over the invocation event. Omitted ⇒ fires whenever the trigger
+   * matches (subject to `onlyOnSuccess`). Desugars to `ReactionRule.when`.
+   */
+  when?: (event: ToolEventLike) => boolean;
+  /**
+   * Derive the fired tool's args from the event. Desugars to
+   * `ReactionRule.args`. Keep it PURE — no I/O; the engine owns dispatch.
+   */
+  render: (event: ToolEventLike) => Record<string, unknown>;
+  /** Only fire when the trigger SUCCEEDED. Default true. */
+  onlyOnSuccess?: boolean;
+  /**
+   * Reaction execution mode — `'durable'` (DBOS-queued, off the hot path,
+   * default) or `'sync'` (in-process await; only when the trigger needs the
+   * value). Desugars to `ReactionRule.mode`.
+   */
+  mode?: 'durable' | 'sync';
+  /**
+   * Optional explicit id suffix for the generated rule. Defaults to the
+   * entry's index in the `emits` array; the full rule id is
+   * `emits:<toolName>#<id>`.
+   */
+  id?: string;
+}
+
 /** Tool definition produced by `defineTool`. */
 export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV1> {
   /** Tool name, e.g. `"tasks:list"`. Defaults to file-path-derived. */
@@ -335,6 +410,8 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
   profile?: 'engineer' | 'all';
   /** See `ToolDefinitionInput.papercusp`. */
   harness?: 'required' | 'optional' | 'none';
+  /** Intrinsic lifecycle emissions — see `ToolEmitSpec`. Desugared to event rules at load. */
+  emits?: readonly ToolEmitSpec[];
 }
 
 /** Input shape for `defineTool` — same as ToolDefinition minus derived fields. */
@@ -401,6 +478,13 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
    * See `ProjectedTool.papercusp` (su-prompt-audit-fixes P-020 / D-007).
    */
   harness?: 'required' | 'optional' | 'none';
+  /**
+   * Intrinsic lifecycle emissions (coord-lifecycle-automation D-002). Each
+   * entry desugars to an event-reaction rule registered at load — co-location
+   * sugar for "this tool always emits X", never a parallel dispatch path.
+   * See `ToolEmitSpec`.
+   */
+  emits?: readonly ToolEmitSpec[];
 }
 
 /**
@@ -505,6 +589,8 @@ export interface RoleToolDefinition<
   ) => Promise<ToolResult | ToolResponse>;
   /** See `ToolGuidance`. */
   guidance?: ToolGuidance;
+  /** Intrinsic lifecycle emissions — see `ToolEmitSpec`. Desugared to event rules at load. */
+  emits?: readonly ToolEmitSpec[];
 }
 
 /** Input shape for role-gated `defineTool` — same as RoleToolDefinition minus derived fields. */
@@ -561,6 +647,12 @@ export interface RoleToolDefinitionInput<
   sampleRate?: number;
   /** Explicit exposure override. See `ToolDefinitionInput.expose`. */
   expose?: import('./tool-projection').ToolExposure;
+  /**
+   * Intrinsic lifecycle emissions (coord-lifecycle-automation D-002). Each
+   * entry desugars to an event-reaction rule registered at load. See
+   * `ToolEmitSpec`.
+   */
+  emits?: readonly ToolEmitSpec[];
 }
 
 // ──────────────────────────────────────────────────────────────────────
