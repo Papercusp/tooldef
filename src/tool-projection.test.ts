@@ -129,6 +129,45 @@ describe('registerProjectedTool', () => {
       expose: { mcp: { name: 'b.x' }, http: { path: '/api/dup' } },
     }))).toThrow(/HTTP path "\/api\/dup" claimed by plugins "a" and "b"/);
   });
+
+  // EI-14: two STRUCTURALLY-DIFFERENT tools sharing an MCP name WITHIN one
+  // plugin namespace (every built-in shares pluginName 'agent-mcp') used to
+  // slip past the cross-plugin guard — the later import silently replaced the
+  // earlier tool with no signal. This is how the bare `coord:ask` shadowed the
+  // knowledge-first `coord:ask` in prod. It must now fail loud.
+  it('rejects same-name different-tool collisions within one plugin (EI-14)', () => {
+    registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'coord:ask' } },
+      description: 'Knowledge-first: search existing knowledge, then open a question.',
+    }));
+    expect(() => registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'coord:ask' } },
+      description: 'Ask the human owner directly and wait a bounded time.',
+    }))).toThrow(/silently shadows the first/);
+  });
+
+  it('allows a structurally-identical re-registration (HMR / double-import)', () => {
+    const def = (): ProjectedTool => baseTool({
+      expose: { mcp: { name: 'fix.reimport' } },
+      description: 'same tool, re-evaluated',
+      inputSchema: { type: 'object', properties: { a: { type: 'string' } } },
+    });
+    registerProjectedTool(def());
+    // A fresh-but-identical object (what a module re-eval produces) replaces silently.
+    expect(() => registerProjectedTool(def())).not.toThrow();
+    expect(lookupByMcpName('fix.reimport')).toBeDefined();
+  });
+
+  it('rejects same-path different-tool collisions within one plugin (EI-14)', () => {
+    registerProjectedTool(baseTool({
+      expose: { http: { path: '/api/agent-tools/coord/ask' } },
+      description: 'knowledge-first',
+    }));
+    expect(() => registerProjectedTool(baseTool({
+      expose: { http: { path: '/api/agent-tools/coord/ask' } },
+      description: 'ask-owner',
+    }))).toThrow(/silently shadows the first/);
+  });
 });
 
 describe('listAllProjectedTools', () => {

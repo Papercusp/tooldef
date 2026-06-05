@@ -842,6 +842,55 @@ export class ToolRegistrationError extends Error {
 }
 
 /**
+ * Structural fingerprint of a projected tool — stable across a re-import of
+ * the SAME source (HMR / double-import re-eval produces a fresh object that
+ * is structurally identical), but distinct for two genuinely different
+ * tools. Used to tell a benign re-registration from a silent name-collision
+ * between different tools.
+ *
+ * Why this exists (EI-14): the same-name guards below only fired when the
+ * `pluginName` differed. Every built-in `defineTool` tool registers under
+ * one synthetic plugin (`agent-mcp`), so two STRUCTURALLY-DIFFERENT built-ins
+ * that shared an MCP name slipped past the cross-plugin check and the later
+ * import silently replaced the earlier one (`BY_MCP_NAME.set`) with no error.
+ * That dropped a real tool on the floor with zero signal: it's how
+ * coordination-ops' bare `coord:ask` shadowed coordination-conversations'
+ * knowledge-first `coord:ask` in prod while every role prompt still described
+ * the knowledge-first one. Comparing this signature lets a same-namespace
+ * duplicate-name bug fail loud instead of silently dropping a tool.
+ */
+function projectedToolSignature(tool: ProjectedTool): string {
+  return JSON.stringify({
+    description: tool.description ?? '',
+    capabilities: [...(tool.capabilities ?? [])].sort(),
+    inputSchema: tool.inputSchema ?? null,
+  });
+}
+
+/**
+ * Fail loud when `prior` and `tool` claim the same name/path within ONE
+ * plugin namespace but are structurally different tools (EI-14). A
+ * structurally-identical re-registration (HMR / double-import) is the
+ * benign case and returns silently so the caller replaces as before.
+ */
+function assertNotShadowingCollision(
+  kind: 'MCP tool name' | 'HTTP path',
+  key: string,
+  prior: ProjectedTool,
+  tool: ProjectedTool,
+): void {
+  if (prior === tool) return;
+  if (projectedToolSignature(prior) === projectedToolSignature(tool)) return;
+  throw new ToolRegistrationError(
+    `${kind} "${key}" registered twice within plugin "${tool.pluginName}" by two DIFFERENT tools — ` +
+      `the second silently shadows the first (last import wins), so a real tool would vanish with no error. ` +
+      `Rename one: two distinct tools cannot share a name. ` +
+      `prior description: ${JSON.stringify((prior.description ?? '').slice(0, 100))}; ` +
+      `new description: ${JSON.stringify((tool.description ?? '').slice(0, 100))}.`,
+  );
+}
+
+/**
  * Register a projected tool. Validates the manifest:
  *   - At least one of `expose.http` / `expose.mcp` must be set.
  *   - `expose.mcp.name` must use dotted naming and be unique across the
@@ -906,6 +955,7 @@ export function registerProjectedTool(tool: ProjectedTool): void {
         `MCP tool name "${name}" claimed by plugins "${prior.pluginName}" and "${tool.pluginName}"`,
       );
     }
+    if (prior) assertNotShadowingCollision('MCP tool name', name, prior, tool);
     BY_MCP_NAME.set(name, tool);
   }
   if (tool.expose.http) {
@@ -919,6 +969,7 @@ export function registerProjectedTool(tool: ProjectedTool): void {
         `HTTP path "${p}" claimed by plugins "${prior.pluginName}" and "${tool.pluginName}"`,
       );
     }
+    if (prior) assertNotShadowingCollision('HTTP path', p, prior, tool);
     BY_HTTP_PATH.set(p, tool);
   }
   REGISTRY.set(entryKey(tool), tool);
