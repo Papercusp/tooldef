@@ -8,6 +8,7 @@ import type { z, ZodTypeAny } from 'zod';
 import type { StandardSchemaV1 } from './standard-schema';
 import type { EventsSchema, UnifiedToolContext, UserEvents } from './tool-projection';
 import type { Authorizer } from './authz';
+import type { ToolRequireSpec } from './requires';
 import type { OpenCardSnapshot as WireOpenCardSnapshot } from '@papercusp/chat-protocol';
 
 /** A Papercusp capability tier per spec/capabilities §10.6.1. */
@@ -412,6 +413,8 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
   harness?: 'required' | 'optional' | 'none';
   /** Intrinsic lifecycle emissions — see `ToolEmitSpec`. Desugared to event rules at load. */
   emits?: readonly ToolEmitSpec[];
+  /** Declarative preconditions — see `ToolRequireSpec`. Evaluated by the dispatcher's `preconditions` step. */
+  requires?: readonly ToolRequireSpec[];
 }
 
 /** Input shape for `defineTool` — same as ToolDefinition minus derived fields. */
@@ -485,6 +488,15 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
    * See `ToolEmitSpec`.
    */
   emits?: readonly ToolEmitSpec[];
+  /**
+   * Declarative preconditions (autoloop-pot-operator-rebuild D-006) — the
+   * preInvoke mirror of `emits:`. Each entry must HOLD (a MatchMap over
+   * `{ tool, args, ctx, state }`) for the call to proceed; on failure it
+   * rejects (`{ error }`) or auto-corrects (`{ fire, then: 'retry' }`).
+   * Evaluated by the dispatcher's `preconditions` step (after `authorize`).
+   * NEVER use for safety invariants (D-007) — see `ToolRequireSpec`.
+   */
+  requires?: readonly ToolRequireSpec[];
 }
 
 /**
@@ -591,6 +603,8 @@ export interface RoleToolDefinition<
   guidance?: ToolGuidance;
   /** Intrinsic lifecycle emissions — see `ToolEmitSpec`. Desugared to event rules at load. */
   emits?: readonly ToolEmitSpec[];
+  /** Declarative preconditions — see `ToolRequireSpec`. Evaluated by the dispatcher's `preconditions` step. */
+  requires?: readonly ToolRequireSpec[];
 }
 
 /** Input shape for role-gated `defineTool` — same as RoleToolDefinition minus derived fields. */
@@ -653,6 +667,12 @@ export interface RoleToolDefinitionInput<
    * `ToolEmitSpec`.
    */
   emits?: readonly ToolEmitSpec[];
+  /**
+   * Declarative preconditions (autoloop-pot-operator-rebuild D-006) — the
+   * preInvoke mirror of `emits:`. See `ToolRequireSpec` and
+   * `ToolDefinitionInput.requires`.
+   */
+  requires?: readonly ToolRequireSpec[];
 }
 
 // ──────────────────────────────────────────────────────────────────────

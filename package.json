@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@papercusp/chat-protocol": "*",
+    "@papercusp/rules": "*",
     "@standard-schema/spec": "^1.0.0"
   },
   "scripts": {

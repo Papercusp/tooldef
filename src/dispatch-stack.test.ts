@@ -55,6 +55,7 @@ describe('DEFAULT_DISPATCH_STACK — enumeration', () => {
       'harness-check',
       'quota',
       'authorize',
+      'preconditions',
       'timeout',
       'idle-watchdog',
       'replay-buffer',

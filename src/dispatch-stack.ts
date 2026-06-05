@@ -43,6 +43,8 @@ import {
   type DispatchProjectedErrorCode,
   type DispatchProjectedResult,
 } from './dispatch-types';
+import { evaluateDataCondition } from '@papercusp/rules';
+import type { ToolPreInvokeEvent, ToolRequireSpec } from './requires';
 
 /* ─── Step names ─────────────────────────────────────────────────────── */
 
@@ -54,6 +56,7 @@ export type DispatchStepName =
   | 'harness-check'
   | 'quota'
   | 'authorize'
+  | 'preconditions'
   | 'timeout'
   | 'idle-watchdog'
   | 'replay-buffer'
@@ -621,6 +624,131 @@ const authorizeStep: DispatchStep = {
   },
 };
 
+/**
+ * Declarative-preconditions gate (autoloop-pot-operator-rebuild D-006) — the
+ * preInvoke mirror of `emits:`. Evaluates each `requires:` spec's declarative
+ * condition (a `@papercusp/rules` DataCondition over `{ tool, args, ctx,
+ * state }`) and, on failure, either REJECTS (`precondition_failed`) or
+ * AUTO-CORRECTS: fires the spec's corrective tool through the host's
+ * injectable `deps.firePrecondition` port, re-resolves state, re-evaluates
+ * ONCE, and rejects if it still fails. Auto-corrections + denials are audited
+ * (gate:'precondition') — visible, never silent. Fail-closed throughout: a
+ * throwing state resolver / evaluator / fire port denies the call.
+ *
+ * Runs AFTER `authorize` (cheap declarative checks shouldn't preempt the
+ * audited auth chain, and a corrective fire must only happen for an
+ * authorized caller) and BEFORE `timeout` (it's a gate — no timers/buffers
+ * exist yet on the deny path).
+ *
+ * Safety invariants stay imperative code (D-007) — `requires:` is for
+ * functional preconditions only. See `ToolRequireSpec`.
+ */
+const preconditionsStep: DispatchStep = {
+  name: 'preconditions',
+  async run(exec) {
+    const { tool, toolName, input, ctx, deps } = exec;
+    const requires = tool.requires;
+    if (!requires || requires.length === 0) return null;
+
+    const args = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
+    const eventCtx = ctx as unknown as ToolPreInvokeEvent['ctx'];
+
+    const audit = (decision: 'allow' | 'deny', requireId: string, reason: string) => {
+      deps.auditAuth?.({
+        ts: Date.now(),
+        principal: ctx.principal
+          ? { slug: ctx.principal.slug, workspaceId: ctx.principal.workspaceId }
+          : null,
+        tool: toolName,
+        action: toolName,
+        decision,
+        gate: 'precondition',
+        reason: `[require:${requireId}] ${reason}`,
+      });
+    };
+
+    const deny = (requireId: string, message: string, meta?: Record<string, unknown>): DispatchProjectedResult => ({
+      ok: false,
+      error: {
+        code: 'precondition_failed' as DispatchProjectedErrorCode,
+        message,
+        meta: { tool: toolName, require: requireId, ...meta },
+      },
+    });
+
+    for (let i = 0; i < requires.length; i++) {
+      const spec: ToolRequireSpec = requires[i];
+      const requireId = spec.id ?? String(i);
+      const failMessage =
+        spec.error ?? `Tool "${toolName}" precondition "${requireId}" not met`;
+
+      // Evaluate once: resolve state (fail-closed on a throw), then run the
+      // declarative condition over the pre-invoke event.
+      const evaluate = async (): Promise<{ holds: boolean; event: ToolPreInvokeEvent }> => {
+        let state: Record<string, unknown> = {};
+        if (spec.state) state = await spec.state(args, eventCtx);
+        const event: ToolPreInvokeEvent = { tool: toolName, args, ctx: eventCtx, state };
+        return { holds: evaluateDataCondition(spec.when, event), event };
+      };
+
+      let first;
+      try {
+        first = await evaluate();
+      } catch (err) {
+        const reason = `precondition evaluation threw: ${err instanceof Error ? err.message : String(err)}`;
+        audit('deny', requireId, reason);
+        return deny(requireId, `${failMessage} (${reason})`);
+      }
+      if (first.holds) continue;
+
+      // Failed. Auto-correct path: fire the corrective tool, retry once.
+      if (spec.fire) {
+        if (!deps.firePrecondition) {
+          const reason = `auto-correct fire "${spec.fire}" declared but host wired no firePrecondition port`;
+          audit('deny', requireId, reason);
+          return deny(requireId, `${failMessage} (${reason})`, { fire: spec.fire });
+        }
+        try {
+          const fireArgs = spec.render ? spec.render(first.event) : {};
+          await deps.firePrecondition({
+            fire: spec.fire,
+            args: fireArgs,
+            trigger: toolName,
+            requireId,
+            ctx: eventCtx,
+          });
+        } catch (err) {
+          const reason = `auto-correct fire "${spec.fire}" failed: ${err instanceof Error ? err.message : String(err)}`;
+          audit('deny', requireId, reason);
+          return deny(requireId, `${failMessage} (${reason})`, { fire: spec.fire });
+        }
+        // then: 'retry' — re-resolve state, re-evaluate once.
+        let retry;
+        try {
+          retry = await evaluate();
+        } catch (err) {
+          const reason = `retry evaluation threw after auto-correct "${spec.fire}": ${err instanceof Error ? err.message : String(err)}`;
+          audit('deny', requireId, reason);
+          return deny(requireId, `${failMessage} (${reason})`, { fire: spec.fire });
+        }
+        if (retry.holds) {
+          // Visible success: the call proceeds, but the correction is audited.
+          audit('allow', requireId, `auto-corrected via "${spec.fire}" + retry`);
+          continue;
+        }
+        const reason = `still failing after auto-correct "${spec.fire}"`;
+        audit('deny', requireId, reason);
+        return deny(requireId, `${failMessage} (${reason})`, { fire: spec.fire });
+      }
+
+      // Plain reject.
+      audit('deny', requireId, 'condition not met');
+      return deny(requireId, failMessage);
+    }
+    return null;
+  },
+};
+
 /* ─── Default stack ──────────────────────────────────────────────────── */
 
 /**
@@ -628,10 +756,14 @@ const authorizeStep: DispatchStep = {
  * the first one to return a `DispatchProjectedResult` short-circuits.
  *
  * Ordering invariants:
- *   - All gates (role / capability / harness / quota / authorize) come first
- *     so denials are cheap (no timer arming, no buffer allocation, no ctx
- *     wrappers). `authorize` runs last among the gates — it is the
- *     finest-grained and may touch the resource — but still before `timeout`.
+ *   - All gates (role / capability / harness / quota / authorize /
+ *     preconditions) come first so denials are cheap (no timer arming, no
+ *     buffer allocation, no ctx wrappers). `authorize` runs last among the
+ *     AUTH gates — it is the finest-grained and may touch the resource.
+ *   - `preconditions` (declarative `requires:` — D-006) runs after
+ *     `authorize` and before `timeout`: a corrective auto-fire must only
+ *     happen for an authorized caller, and a functional precondition should
+ *     not mask an auth denial.
  *   - `timeout` arms the AbortController; every subsequent step that
  *     races against it depends on this having run.
  *   - `idle-watchdog` runs after `timeout` so it composes with the same
@@ -650,6 +782,7 @@ export const DEFAULT_DISPATCH_STACK: ReadonlyArray<DispatchStep> = Object.freeze
   harnessCheckStep,
   quotaStep,
   authorizeStep,
+  preconditionsStep,
   timeoutStep,
   idleWatchdogStep,
   replayBufferStep,

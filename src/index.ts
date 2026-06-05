@@ -200,6 +200,13 @@ export type {
   OpenCardSnapshot,
 } from './types';
 
+/* ─── Declarative preconditions (`requires:` — D-006) ────────────────── */
+export type {
+  ToolRequireSpec,
+  ToolPreInvokeEvent,
+  PreconditionFireRequest,
+} from './requires';
+
 /* ─── Replay buffer ──────────────────────────────────────────────────── */
 export {
   readBuffer as readReplayBuffer,

@@ -14,6 +14,7 @@
 import type { RolesQuota, ToolResult } from './wire';
 import type { UnifiedToolContext } from './tool-projection';
 import type { AuthAuditEvent } from './authz';
+import type { PreconditionFireRequest } from './requires';
 
 /* ─── Quota windowing ────────────────────────────────────────────────── */
 
@@ -65,6 +66,7 @@ export type DispatchProjectedErrorCode =
   | 'invalid_input'
   | 'handler_error'
   | 'authorization_denied'
+  | 'precondition_failed'
   | 'ungated'
   | 'timeout';
 
@@ -203,6 +205,17 @@ export interface DispatchProjectedDeps {
    * inline on the hot path. Unset ⇒ no reactions.
    */
   postInvoke?(event: PostInvokeEvent): void;
+  /**
+   * The PRECONDITION FIRE PORT (autoloop-pot-operator-rebuild D-006). When a
+   * `requires:` spec with `{ fire, then: 'retry' }` fails, the dispatcher's
+   * `preconditions` step calls this to run the corrective tool, then
+   * re-evaluates once. The host wires it to its own dispatcher (the same
+   * place reactions fire) so the corrective call is auth-gated + audited
+   * like any other invocation. AWAITED (unlike `postInvoke`) — the trigger
+   * blocks on its own correction. Unset ⇒ auto-correct specs FAIL CLOSED
+   * (the precondition rejects with a message naming the missing port).
+   */
+  firePrecondition?(req: PreconditionFireRequest): Promise<void>;
   /**
    * Default-deny posture (RFC tooldef-auth Phase 3). When true, the dispatcher denies any
    * tool that declares NO gate (no capabilities/roles/requireRoles/authorize) and is not

@@ -648,6 +648,16 @@ export interface ProjectedTool {
    * regardless of caller, so the fix is to declare a gate or mark it public.
    */
   public?: boolean;
+  /**
+   * Declarative preconditions (autoloop-pot-operator-rebuild D-006) — the
+   * preInvoke mirror of `emits:`. Evaluated by the dispatcher's
+   * `preconditions` step (after `authorize`, before `timeout`): each spec's
+   * condition must hold over `{ tool, args, ctx, state }` or the call rejects
+   * (`precondition_failed`) / auto-corrects (`{ fire, then: 'retry' }` via
+   * `deps.firePrecondition`). Functional preconditions ONLY — safety
+   * invariants stay imperative code (D-007). See `ToolRequireSpec`.
+   */
+  requires?: readonly import('./requires').ToolRequireSpec[];
   /** Per-call wall-clock timeout, default 60s. */
   timeoutSec?: number;
   /**
