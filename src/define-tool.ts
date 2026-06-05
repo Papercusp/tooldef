@@ -372,8 +372,14 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
 
   const projectedFn: ToolFn = async (input, ctx) => {
     if (!ctx.principal || !ctx.tx) {
+      // Almost always this is a workspace-SCOPING gap, not an auth failure:
+      // the caller is bearer-authenticated but the session carries no
+      // concrete workspace, so the host synthesized no workspace
+      // transaction. Say so — "requires authenticated request" sent
+      // authenticated callers down the wrong debugging path (EI-30).
       throw new UnauthorizedToolError(
-        `built-in tool "${def.name}" requires authenticated request (bearer + workspace tx)`,
+        `built-in tool "${def.name}" requires a workspace-scoped call — this session has no workspace transaction. ` +
+          `Scope the session to a workspace, or pass a per-call workspace where the host/tool supports one.`,
       );
     }
     const legacyCtx: ToolContext = {
