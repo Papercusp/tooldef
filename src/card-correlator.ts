@@ -90,6 +90,7 @@ function pendingToOpenCard(card: PendingCard): OpenCardSnapshot {
     presentation: card.spec.presentation,
     fallbackText: card.spec.fallbackText,
     allowDecline: card.spec.allowDecline,
+    report: card.spec.report,
     createdAt: card.createdAt,
   };
 }

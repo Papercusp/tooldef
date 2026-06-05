@@ -9,7 +9,10 @@ import type { StandardSchemaV1 } from './standard-schema';
 import type { EventsSchema, UnifiedToolContext, UserEvents } from './tool-projection';
 import type { Authorizer } from './authz';
 import type { ToolRequireSpec } from './requires';
-import type { OpenCardSnapshot as WireOpenCardSnapshot } from '@papercusp/chat-protocol';
+import type {
+  OpenCardSnapshot as WireOpenCardSnapshot,
+  ReportBlock,
+} from '@papercusp/chat-protocol';
 
 /** A Papercusp capability tier per spec/capabilities §10.6.1. */
 export type CapabilityTier = 'low' | 'medium' | 'high';
@@ -844,6 +847,14 @@ export interface CardSpec<TSchema extends StandardSchemaV1 = StandardSchemaV1> {
    * NOT called on an idempotency-cache hit (no card is registered).
    */
   onCard?: (info: { correlationId: string; runId: string; workspaceId: string }) => void;
+  /**
+   * Optional structured body block (the shared `ReportBlock` two-tier
+   * plan→item shape from `@papercusp/chat-protocol`) rendered between the
+   * prompt and the options — the card-system rendering of a `<report>`
+   * payload. Copied verbatim onto the wire snapshot.
+   * Plan: report-cards-inbox-reconciliation-2026-06-05 (D-001).
+   */
+  report?: ReportBlock;
 }
 
 /**
