@@ -34,6 +34,14 @@ export { defineTool } from './define-tool';
 export { defineResource } from './define-resource';
 export { definePrompt } from './define-prompt';
 
+/* ─── Result serialization (token-efficient formats) ─────────────────── */
+export {
+  serializeToolResponse,
+  formatOptsFromCtx,
+  type SerializeFormatOpts,
+  type SerializedToolResult,
+} from './serialize-result';
+
 /* ─── Registries ─────────────────────────────────────────────────────── */
 export { getCatalog, lookup, _resetCatalogForTests } from './registry';
 export {

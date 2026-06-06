@@ -25,7 +25,6 @@ import { registerProjectedTool, type ToolFn, type ToolExposure, type UnifiedTool
 import { UnauthorizedToolError } from './dispatch-projected';
 import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
 import { analyzeSchema, type EligibilityResult } from '@papercusp/result-encoding';
-import type { ToolResult as ToolResultType } from './wire';
 import type {
   RoleToolDefinition,
   RoleToolDefinitionInput,
@@ -95,6 +94,62 @@ function describeFromGuidance(guidance: ToolGuidance | undefined): string | null
   if (guidance.notWhen) parts.push(`When NOT to use: ${guidance.notWhen}`);
   if (guidance.chaining) parts.push(`Chaining: ${guidance.chaining}`);
   return parts.length > 0 ? parts.join('\n\n') : null;
+}
+
+/**
+ * Compute the output-schema JSON projection + format eligibility once at
+ * register time (token-efficient-tool-result-formats P-001/P-002). Returns
+ * empties when the tool declared no output schema or the projection fails —
+ * such tools fall back to the TOON runtime auto-encoder at serialize time.
+ */
+function computeOutputEligibility(
+  resultSchema: StandardSchemaV1 | undefined,
+): { jsonSchema?: Record<string, unknown>; eligibility?: EligibilityResult } {
+  if (!resultSchema) return {};
+  try {
+    const js = toJsonSchema(resultSchema);
+    delete (js as Record<string, unknown>).$schema;
+    return { jsonSchema: js, eligibility: analyzeSchema(js) };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Build the MCP `ToolResult` from a handler's `ToolResponse` using format-aware
+ * serialization (P-005/P-006). The chosen format follows the request context
+ * (explicit negotiation, else MCP→compact / others→JSON) intersected with the
+ * tool's precomputed eligibility; the pagination/degraded envelope rides in
+ * `_meta`. When `PAPERCUSP_VALIDATE_TOOL_OUTPUT=1` and an output schema is
+ * declared, the returned `data` is validated against it and a mismatch is
+ * logged (best-effort, never throws — D-003 payoff #3).
+ */
+async function serializeProjectedResult(
+  response: ToolResponse,
+  ctx: UnifiedToolContext,
+  eligibility: EligibilityResult | undefined,
+  def: { name: string; result?: StandardSchemaV1 },
+): Promise<ToolResult> {
+  if (
+    def.result &&
+    process.env.PAPERCUSP_VALIDATE_TOOL_OUTPUT === '1' &&
+    response &&
+    typeof response === 'object' &&
+    response.data !== undefined
+  ) {
+    try {
+      const v = await standardValidate(def.result, response.data);
+      if (!v.ok) {
+        ctx.log(`[output-schema] ${def.name} returned data not matching its declared result schema: ${formatIssues(v.issues)}`);
+      }
+    } catch {
+      /* validation is best-effort; never fail the call on it */
+    }
+  }
+  const serialized = serializeToolResponse(response, formatOptsFromCtx(ctx, eligibility));
+  const result: ToolResult = { content: serialized.content as never };
+  if (Object.keys(serialized._meta).length > 0) result._meta = serialized._meta;
+  return result;
 }
 
 /**
@@ -186,6 +241,7 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
     capability: input.capability,
     tier,
     args: input.args,
+    result: input.result ?? input.output,
     handler: input.handler,
     guidance: input.guidance,
     profile: input.profile,
@@ -252,6 +308,7 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
     crossWorkspace: input.crossWorkspace,
     modality: input.modality,
     args: input.args,
+    result: input.result ?? input.output,
     events: input.events,
     state: input.state,
     handler: input.handler,
@@ -372,6 +429,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
   const rawSchema = toJsonSchema(def.args);
   delete (rawSchema as Record<string, unknown>).$schema;
   const inputSchema = flattenForOpenAi(rawSchema);
+  const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
 
   const projectedFn: ToolFn = async (input, ctx) => {
     if (!ctx.principal || !ctx.tx) {
@@ -395,15 +453,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       throw new Error(`invalid_args: ${formatIssues(parsed.issues)}`);
     }
     const response: ToolResponse = await def.handler(parsed.value, legacyCtx);
-    const content: Array<Record<string, unknown>> = [
-      { type: 'text', text: JSON.stringify(response.data ?? response) },
-    ];
-    if (Array.isArray(response.uiResources)) {
-      for (const ui of response.uiResources) {
-        content.push(ui as unknown as Record<string, unknown>);
-      }
-    }
-    return { content: content as never };
+    return serializeProjectedResult(response, ctx, eligibility, def);
   };
 
   registerProjectedTool({
@@ -417,6 +467,9 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     requireRoles: def.requireRoles,
     public: def.public,
     requires: def.requires,
+    outputSchema: def.result,
+    outputJsonSchema,
+    resultEligibility: eligibility,
     expose: {
       mcp: { name: def.name },
       http: { path: httpPath, methods: ['POST'] },
@@ -448,6 +501,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
   const rawSchema = toJsonSchema(def.args);
   delete (rawSchema as Record<string, unknown>).$schema;
   const inputSchema = flattenForOpenAi(rawSchema);
+  const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
 
   const projectedFn: ToolFn = async (input, ctx) => {
     const parsed = await standardValidate(def.args, input);
@@ -456,22 +510,15 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     }
     const out = await def.handler(parsed.value, ctx);
 
-    // Already a ToolResult? Pass through.
+    // Already a ToolResult? The handler self-serialized its content — pass it
+    // through untouched (format-aware serialization only applies to handlers
+    // that return a ToolResponse envelope with structured `data`).
     if (out && typeof out === 'object' && Array.isArray((out as ToolResult).content)) {
       return out as ToolResult;
     }
 
-    // Otherwise treat as ToolResponse envelope and adapt to MCP content[].
-    const response = out as ToolResponse;
-    const content: Array<Record<string, unknown>> = [
-      { type: 'text', text: JSON.stringify(response.data ?? response) },
-    ];
-    if (Array.isArray(response.uiResources)) {
-      for (const ui of response.uiResources) {
-        content.push(ui as unknown as Record<string, unknown>);
-      }
-    }
-    return { content: content as never };
+    // ToolResponse envelope → format-aware MCP content[] + _meta.
+    return serializeProjectedResult(out as ToolResponse, ctx, eligibility, def);
   };
 
   registerProjectedTool({
@@ -481,6 +528,9 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     capabilities: [def.capability as never],
     profile: def.profile,
     harness: def.harness,
+    outputSchema: def.result,
+    outputJsonSchema,
+    resultEligibility: eligibility,
     agentRoles: def.agentRoles,
     rolesQuota: def.rolesQuota,
     authorize: def.authorize,

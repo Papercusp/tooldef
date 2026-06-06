@@ -87,20 +87,26 @@ function chooseFormat(
   const req: FormatRequest = opts.requested ?? (opts.defaultCompact ? 'compact' : 'json');
   const autoBest: ResultFormat = Array.isArray(data) ? 'toon' : 'json';
 
+  // `want` = the format the request IDEALLY maps to (what a successful serve
+  // looks like); `candidates` = the ordered try-list (excludes formats the
+  // capability set disallows). `fallback` is then "we served something other
+  // than `want`" — which correctly flags both an unsupported explicit request
+  // and a compact request whose ideal format couldn't represent the data.
+  let want: ResultFormat;
   let candidates: ResultFormat[];
   if (req === 'json') {
+    want = 'json';
     candidates = ['json'];
   } else if (req === 'compact') {
-    const best = opts.eligibility ? opts.eligibility.bestFormat : autoBest;
-    candidates = [best, 'json'];
+    want = opts.eligibility ? opts.eligibility.bestFormat : autoBest;
+    candidates = [want, 'json'];
   } else {
-    // Explicit compact format. Intersect with the capability set when known.
+    want = req; // the client explicitly named this format
     const allowed = opts.eligibility ? opts.eligibility.capabilities.has(req) : true;
     const fb = opts.eligibility ? opts.eligibility.bestFormat : autoBest;
     candidates = allowed ? [req, fb, 'json'] : [fb, 'json'];
   }
 
-  const want = candidates[0];
   for (const f of candidates) {
     const r = tryEncode(f, data);
     if (r) return { ...r, fallback: r.format !== want };
