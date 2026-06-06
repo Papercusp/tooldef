@@ -21,8 +21,11 @@ import { toJsonSchema } from './schema-adapter';
 import { standardValidate, formatIssues, type StandardSchemaV1 } from './standard-schema';
 import { register } from './registry';
 import { collectToolEmits } from './emits-registry';
-import { registerProjectedTool, type ToolFn, type ToolExposure } from './tool-projection';
+import { registerProjectedTool, type ToolFn, type ToolExposure, type UnifiedToolContext } from './tool-projection';
 import { UnauthorizedToolError } from './dispatch-projected';
+import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
+import { analyzeSchema, type EligibilityResult } from '@papercusp/result-encoding';
+import type { ToolResult as ToolResultType } from './wire';
 import type {
   RoleToolDefinition,
   RoleToolDefinitionInput,

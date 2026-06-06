@@ -29,6 +29,7 @@ import type { AgentRole, Capability, PluginSpawn } from './host-types';
 import { toJsonSchema } from './schema-adapter';
 import type { StandardSchemaV1 } from './standard-schema';
 import type { Authorizer } from './authz';
+import type { EligibilityResult } from '@papercusp/result-encoding';
 
 /* ─── Event schema types ─────────────────────────────────────────────── */
 
@@ -407,6 +408,17 @@ export interface UnifiedToolContext {
    */
   transport?: 'http' | 'mcp' | 'ipc' | 'in_process';
 
+  /**
+   * Client-negotiated result format (token-efficient-tool-result-formats D-005).
+   * The RAW request token from the transport — `?format=`/`Accept` on HTTP,
+   * `_meta.format` or `?format=` on MCP — parsed by the result serializer via
+   * `parseFormatRequest` (`json|toon|csv|tsv|md|compact` + MIME types). The
+   * format is set by the CLIENT PROCESS, never authored by the model. Absent ⇒
+   * the serializer uses the transport default (MCP → compact, else JSON). On an
+   * unsupported request the serializer falls back gracefully and labels it.
+   */
+  requestedFormat?: string;
+
   /* ── Spawn context (typically agent-driven calls) ─────────────────── */
   workspaceId?: string;
   harnessSlug?: string;
@@ -756,6 +768,26 @@ export interface ProjectedTool {
    * `~standard.validate` at `ctx.publishState` time.
    */
   state?: StandardSchemaV1;
+  /**
+   * Output-`data` schema (token-efficient-tool-result-formats D-003). The raw
+   * Standard-Schema validator a tool declared for its `ToolResponse.data`.
+   * Source for runtime output validation + `structuredContent`. Absent when the
+   * tool declared none (it still gets the TOON runtime auto-encoder).
+   */
+  outputSchema?: StandardSchemaV1;
+  /**
+   * JSON-Schema projection of `outputSchema`, computed once at register time.
+   * Advertised as MCP `outputSchema` in `tools/list` (P-010); also the input to
+   * the eligibility walk below.
+   */
+  outputJsonSchema?: Record<string, unknown>;
+  /**
+   * Precomputed format eligibility for the output `data` shape (D-004): the set
+   * of formats the result can be rendered in + the best compact default. Read
+   * by the result serializer on every call and advertised in `tools/list`.
+   * Absent ⇒ no output schema ⇒ the serializer uses the runtime auto-encoder.
+   */
+  resultEligibility?: EligibilityResult;
   /**
    * Typed event channel — Zod schemas keyed by event name. Surfaced
    * via tools/list as JSON-Schema for client discovery. No runtime

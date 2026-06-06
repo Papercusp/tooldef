@@ -402,6 +402,16 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
   tier: CapabilityTier;
   /** Argument schema (any Standard Schema validator). Runtime validation + JSON-schema source. */
   args: TArgs;
+  /**
+   * Optional schema for the `ToolResponse.data` this tool returns (D-003). The
+   * mirror of `args` on the output side — a single declaration that powers
+   * three things: (1) token-efficient FORMAT ELIGIBILITY (which compact formats
+   * the result can be rendered in — see `@papercusp/result-encoding`'s
+   * `analyzeSchema`), (2) MCP `outputSchema` advertisement + `structuredContent`,
+   * and (3) runtime output validation. Resolved from `result`/`output` on the
+   * input. Optional — tools without it still get the TOON runtime auto-encoder.
+   */
+  result?: StandardSchemaV1;
   /** Implementation. Tools may return any data shape inside ToolResponse. */
   handler: (args: StandardSchemaV1.InferOutput<TArgs>, ctx: ToolContext) => Promise<ToolResponse>;
   /**
@@ -457,6 +467,17 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
    * set, `args` wins (back-compat). New callsites should use `input`.
    */
   input?: TArgs;
+  /**
+   * Optional output-`data` schema (D-003). Declaring it unlocks token-efficient
+   * format eligibility (CSV where the shape proves flat-scalar-array), MCP
+   * `outputSchema` advertisement, and runtime output validation. `output` is an
+   * accepted alias; when both are set `result` wins. Omit and the result still
+   * gets the lossless TOON runtime auto-encoder — declaring a schema only
+   * UPGRADES eligibility, it is never required.
+   */
+  result?: StandardSchemaV1;
+  /** Alias for `result`. */
+  output?: StandardSchemaV1;
   /**
    * Telemetry sample rate, 0..1. Default 1 (record every call). High-
    * frequency tools set this < 1 so `tool_invocations` doesn't flood.
@@ -594,6 +615,12 @@ export interface RoleToolDefinition<
    */
   state?: StandardSchemaV1;
   /**
+   * Optional output-`data` schema (D-003) — see `ToolDefinition.result`. Only
+   * meaningful when the handler returns a `ToolResponse` envelope (a raw
+   * `ToolResult` is already content-shaped and bypasses format selection).
+   */
+  result?: StandardSchemaV1;
+  /**
    * Handler receives the unified context (no principal). May return either
    * a raw `ToolResult` (MCP shape) or a `ToolResponse` envelope; the
    * wrapper adapts both.
@@ -664,6 +691,13 @@ export interface RoleToolDefinitionInput<
   sampleRate?: number;
   /** Explicit exposure override. See `ToolDefinitionInput.expose`. */
   expose?: import('./tool-projection').ToolExposure;
+  /**
+   * Optional output-`data` schema (D-003) — see `ToolDefinitionInput.result`.
+   * `output` is an accepted alias; when both are set `result` wins.
+   */
+  result?: StandardSchemaV1;
+  /** Alias for `result`. */
+  output?: StandardSchemaV1;
   /**
    * Intrinsic lifecycle emissions (coord-lifecycle-automation D-002). Each
    * entry desugars to an event-reaction rule registered at load. See
