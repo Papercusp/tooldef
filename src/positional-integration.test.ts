@@ -16,6 +16,11 @@ import {
   configurePrePromptRegistry,
   clearPrePromptRegistry,
   advertisedArgsSchema,
+  listPrePromptEntries,
+  projectReadColumns,
+  projectWriteColumns,
+  renderWireSchemas,
+  reconstructArgs,
 } from '@papercusp/result-encoding';
 import {
   lookupByMcpName,
@@ -146,6 +151,62 @@ describe('positional write shim — end-to-end (P-008/P-009)', () => {
     );
     expect(r.ok).toBe(true);
     expect(received).toEqual({ id: 'WI-9', body: 'fixed it, added a test, shipped' });
+  });
+});
+
+describe('anti-desync: legend columns === wire columns (P-011)', () => {
+  it('the prompt legend, the read serializer, and the write shim share one projection', async () => {
+    // A read-list tool (no required args) and a write tool, both pre-prompted.
+    defineTool({
+      name: 'wi:rlist',
+      requirePrincipal: false,
+      capability: 'test:read',
+      args: z.object({}),
+      result: z.array(z.object({ id: z.string(), state: z.enum(['todo', 'done']) })),
+      handler: async () => ({ data: [{ id: 'WI-1', state: 'todo' }] }),
+    });
+    let received: unknown;
+    defineTool({
+      name: 'wi:wstate',
+      requirePrincipal: false,
+      capability: 'test:write',
+      args: z.object({ id: z.string(), state: z.enum(['todo', 'done']) }),
+      handler: async (args) => {
+        received = args;
+        return { data: { ok: true } };
+      },
+    });
+    configurePrePromptRegistry([
+      { name: 'wi:rlist', read: 'csv' },
+      { name: 'wi:wstate', write: 'positional' },
+    ]);
+
+    const rTool = lookupByMcpName('wi:rlist')!;
+    const wTool = lookupByMcpName('wi:wstate')!;
+
+    // The legend renders columns from each tool's OWN schema — the SAME
+    // projection the wire paths use. A forked projection would diverge here.
+    const legend = renderWireSchemas(listPrePromptEntries(), (e) =>
+      e.name === 'wi:rlist'
+        ? { read: projectReadColumns(rTool.outputJsonSchema) }
+        : { write: projectWriteColumns(wTool.inputSchema as Record<string, unknown>) },
+    );
+    expect(legend).toContain('read → id:id, state:todo|done');
+    expect(legend).toContain('write ← id:id, state:todo|done');
+
+    // READ: the serializer emits VALUES in exactly the legend's column order.
+    const readCols = projectReadColumns(rTool.outputJsonSchema)!;
+    expect(readCols.map((c) => c.name)).toEqual(['id', 'state']);
+    const rr = await dispatchProjectedTool(rTool, 'wi:rlist', {}, ctx(), DEPS);
+    expect((rr.result!.content[0] as { text: string }).text).toBe('format: csv\n[1]\nWI-1,todo');
+
+    // WRITE: the shim reconstructs by the SAME column order, end-to-end.
+    const writeCols = projectWriteColumns(wTool.inputSchema as Record<string, unknown>)!;
+    expect(writeCols.map((c) => c.name)).toEqual(['id', 'state']);
+    expect(reconstructArgs('WI-9,done', writeCols)).toEqual({ ok: true, args: { id: 'WI-9', state: 'done' } });
+    const r = await dispatchProjectedTool(wTool, 'wi:wstate', { row: 'WI-9,done' }, ctx(), DEPS);
+    expect(r.ok).toBe(true);
+    expect(received).toEqual({ id: 'WI-9', state: 'done' });
   });
 });
 
