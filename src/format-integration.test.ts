@@ -9,7 +9,12 @@ import { afterEach, describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
 import { defineTool } from './define-tool';
 import { dispatchProjectedTool, type DispatchProjectedDeps } from './dispatch-projected';
-import { lookupByMcpName, _resetProjectionRegistryForTests, type UnifiedToolContext } from './tool-projection';
+import {
+  lookupByMcpName,
+  listMcpProjections,
+  _resetProjectionRegistryForTests,
+  type UnifiedToolContext,
+} from './tool-projection';
 
 const DEPS: DispatchProjectedDeps = {};
 
@@ -111,6 +116,32 @@ describe('end-to-end format selection through defineTool', () => {
     const tool = lookupByMcpName('fmt:advertise')!;
     expect(tool.outputJsonSchema).toBeTruthy();
     expect([...(tool.resultEligibility?.capabilities ?? [])].sort()).toEqual(['csv', 'json', 'md', 'toon', 'tsv']);
+  });
+
+  it('tools/list advertises resultFormats always but outputSchema ONLY for object-rooted shapes', () => {
+    // MCP `outputSchema` must be an object-typed JSON Schema (the SDK rejects a
+    // tools/list otherwise). A bare-array list tool must therefore advertise its
+    // capability via resultFormats but NOT emit an array-rooted outputSchema.
+    defineListTool('fmt:arrlist', { result: z.array(z.object({ id: z.number(), name: z.string() })) });
+    defineTool({
+      name: 'fmt:objtool',
+      requirePrincipal: false,
+      capability: 'test:read',
+      args: z.object({}),
+      result: z.object({ slug: z.string(), status: z.string() }),
+      handler: async () => ({ data: { slug: 'x', status: 'ok' } }),
+    });
+    const listings = listMcpProjections();
+    const arr = listings.find((l) => l.name === 'fmt:arrlist')!;
+    const obj = listings.find((l) => l.name === 'fmt:objtool')!;
+    // Array list tool: no outputSchema (would be array-rooted), but resultFormats present.
+    expect(arr.outputSchema).toBeUndefined();
+    expect(arr.resultFormats).toEqual(['json', 'toon', 'csv', 'tsv', 'md']);
+    // Mirrored onto _meta so it survives strict SDK validation.
+    expect(arr._meta?.['papercusp/resultFormats']).toEqual(['json', 'toon', 'csv', 'tsv', 'md']);
+    // Object tool: object-rooted outputSchema IS advertised.
+    expect(obj.outputSchema?.type).toBe('object');
+    expect(obj.resultFormats).toEqual(['json']);
   });
 
   it('opt-in structuredContent attaches lossless JSON alongside the compact text (P-010)', async () => {

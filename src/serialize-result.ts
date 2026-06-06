@@ -23,8 +23,11 @@ import {
   encode,
   encodeAuto,
   encodeToonChecked,
+  encodePositionalRows,
   isFlatObjectArray,
   parseFormatRequest,
+  readPrePromptFormat,
+  type ColumnSpec,
   type EligibilityResult,
   type FormatRequest,
   type ResultFormat,
@@ -45,6 +48,18 @@ export interface SerializeFormatOpts {
    * the full JSON; a UI/programmatic consumer opts in (`?structured=1`).
    */
   includeStructured?: boolean;
+  /**
+   * Full tool name (e.g. `coord:inbox`) — consulted against the pre-prompt
+   * registry for the Tier-3 prompt-declared-column read path
+   * (token-efficient-agent-io P-004). Undefined → the tool isn't registry-aware.
+   */
+  toolName?: string;
+  /**
+   * The tool's READ columns (projected once at registration from its output
+   * `data` schema). Present only when the schema is a flat scalar array; the
+   * SAME projection drives the prompt legend (anti-desync guarantee, P-011).
+   */
+  readColumns?: ColumnSpec[];
 }
 
 export interface SerializedToolResult {
@@ -125,6 +140,30 @@ function chooseFormat(
 }
 
 /**
+ * Tier-3 read path (token-efficient-agent-io P-004/D-001): when the tool is in
+ * the pre-prompt registry and its `data` is a flat scalar array, render it as a
+ * HEADERLESS CSV/TSV body with a `[N]` row-count guard — the columns live in the
+ * prompt's "## Wire schemas" legend, not on the wire. Returns null (fall through
+ * to the normal compact path) unless every precondition holds AND the resolved
+ * request is compact (an explicit `json`/`toon`/other ask is respected, so a UI
+ * or lossless consumer is never handed the headerless form).
+ */
+function tryTier3Read(
+  data: unknown,
+  opts: SerializeFormatOpts,
+): { format: ResultFormat; text: string } | null {
+  if (!opts.toolName || !opts.readColumns || opts.readColumns.length === 0) return null;
+  const fmt = readPrePromptFormat(opts.toolName);
+  if (fmt !== 'csv' && fmt !== 'tsv') return null; // 'toon' / 'off' → normal path
+  if (opts.includeStructured) return null; // structured consumer wants the lossless body
+  const req: FormatRequest = opts.requested ?? (opts.defaultCompact ? 'compact' : 'json');
+  if (req !== 'compact' && req !== fmt) return null; // honor an explicit different/lossless ask
+  if (!isFlatObjectArray(data)) return null; // shape must actually be flat at runtime
+  const text = encodePositionalRows(data as Array<Record<string, unknown>>, opts.readColumns, fmt === 'tsv' ? '\t' : ',');
+  return { format: fmt, text };
+}
+
+/**
  * Serialize a `ToolResponse` into MCP `content[]` + `_meta`. `uiResources` are
  * appended verbatim after the text item (parity with the legacy wrappers).
  */
@@ -141,8 +180,12 @@ export function serializeToolResponse(
   }
   const data = response.data ?? response;
 
-  const chosen = chooseFormat(data, opts);
+  // Tier-3 (prompt-declared columns) takes precedence over the generic compact
+  // path for registry tools; otherwise fall through to bestFormat/TOON-auto.
+  const tier3 = tryTier3Read(data, opts);
+  const chosen = tier3 ? { ...tier3, fallback: false } : chooseFormat(data, opts);
   _meta.format = chosen.format;
+  if (tier3) _meta.prePrompt = true;
   if (chosen.fallback) _meta.formatFallback = true;
 
   // Compact payloads self-identify with a ~3-token marker; JSON (the assumed

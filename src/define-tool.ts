@@ -24,7 +24,16 @@ import { collectToolEmits } from './emits-registry';
 import { registerProjectedTool, type ToolFn, type ToolExposure, type UnifiedToolContext } from './tool-projection';
 import { UnauthorizedToolError } from './dispatch-projected';
 import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
-import { analyzeSchema, type EligibilityResult } from '@papercusp/result-encoding';
+import {
+  analyzeSchema,
+  projectReadColumns,
+  projectWriteColumns,
+  reconstructArgs,
+  isWritePositional,
+  getPrePromptEntry,
+  type ColumnSpec,
+  type EligibilityResult,
+} from '@papercusp/result-encoding';
 import type {
   RoleToolDefinition,
   RoleToolDefinitionInput,
@@ -129,6 +138,7 @@ async function serializeProjectedResult(
   ctx: UnifiedToolContext,
   eligibility: EligibilityResult | undefined,
   def: { name: string; result?: StandardSchemaV1 },
+  readColumns?: ColumnSpec[],
 ): Promise<ToolResult> {
   if (
     def.result &&
@@ -146,11 +156,36 @@ async function serializeProjectedResult(
       /* validation is best-effort; never fail the call on it */
     }
   }
-  const serialized = serializeToolResponse(response, formatOptsFromCtx(ctx, eligibility));
+  const serialized = serializeToolResponse(response, {
+    ...formatOptsFromCtx(ctx, eligibility),
+    toolName: def.name,
+    readColumns,
+  });
   const result: ToolResult = { content: serialized.content as never };
   if (Object.keys(serialized._meta).length > 0) result._meta = serialized._meta;
   if (serialized.structuredContent !== undefined) result.structuredContent = serialized.structuredContent;
   return result;
+}
+
+/**
+ * Write-side positional shim (token-efficient-agent-io P-008/D-006/D-007). When
+ * the tool is registry write-positional and the model sent a single `row`
+ * string, reconstruct the typed args from the prompt-declared column order and
+ * run the misalignment guard BEFORE Zod validation. Returns the (possibly
+ * reconstructed) input unchanged when the tool isn't positional or the caller
+ * sent keyed args. Throws on a guard failure so a mis-emitted row fails LOUDLY
+ * rather than writing wrong-but-valid data (Zod checks shape, not alignment).
+ */
+function applyPositionalWriteShim(name: string, argsJsonSchema: Record<string, unknown>, input: unknown): unknown {
+  if (!isWritePositional(name)) return input;
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
+  const row = (input as Record<string, unknown>).row;
+  if (typeof row !== 'string') return input; // keyed args (or no row) — leave as-is
+  const cols = projectWriteColumns(argsJsonSchema, { freeTextName: getPrePromptEntry(name)?.freeTextArg });
+  if (!cols) return input; // tool doesn't actually fit the bounded positional shape
+  const rec = reconstructArgs(row, cols);
+  if (!rec.ok) throw new Error(`invalid_positional_row: ${rec.reason}`);
+  return rec.args;
 }
 
 /**
@@ -431,6 +466,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
   delete (rawSchema as Record<string, unknown>).$schema;
   const inputSchema = flattenForOpenAi(rawSchema);
   const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
+  const readColumns = projectReadColumns(outputJsonSchema);
 
   const projectedFn: ToolFn = async (input, ctx) => {
     if (!ctx.principal || !ctx.tx) {
@@ -449,12 +485,13 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       tx: ctx.tx,
       log: (level, msg, meta) => ctx.log(`[${level}] ${msg}${meta ? ` ${JSON.stringify(meta)}` : ''}`),
     };
-    const parsed = await standardValidate(def.args, input);
+    const shimmed = applyPositionalWriteShim(def.name, rawSchema, input);
+    const parsed = await standardValidate(def.args, shimmed);
     if (!parsed.ok) {
       throw new Error(`invalid_args: ${formatIssues(parsed.issues)}`);
     }
     const response: ToolResponse = await def.handler(parsed.value, legacyCtx);
-    return serializeProjectedResult(response, ctx, eligibility, def);
+    return serializeProjectedResult(response, ctx, eligibility, def, readColumns);
   };
 
   registerProjectedTool({
@@ -503,9 +540,11 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
   delete (rawSchema as Record<string, unknown>).$schema;
   const inputSchema = flattenForOpenAi(rawSchema);
   const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
+  const readColumns = projectReadColumns(outputJsonSchema);
 
   const projectedFn: ToolFn = async (input, ctx) => {
-    const parsed = await standardValidate(def.args, input);
+    const shimmed = applyPositionalWriteShim(def.name, rawSchema, input);
+    const parsed = await standardValidate(def.args, shimmed);
     if (!parsed.ok) {
       throw new Error(`invalid_args: ${formatIssues(parsed.issues)}`);
     }
@@ -519,7 +558,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     }
 
     // ToolResponse envelope → format-aware MCP content[] + _meta.
-    return serializeProjectedResult(out as ToolResponse, ctx, eligibility, def);
+    return serializeProjectedResult(out as ToolResponse, ctx, eligibility, def, readColumns);
   };
 
   registerProjectedTool({

@@ -1113,9 +1113,17 @@ export interface McpToolListing {
    * The token-efficient formats this tool's result can be rendered in
    * (token-efficient-tool-result-formats P-010 / D-005). A Papercusp extension
    * so a client knows which `_meta.format` values it may negotiate; absent ⇒
-   * `['json']` (the always-available default). Standard MCP clients ignore it.
+   * `['json']` (the always-available default). Also mirrored onto `_meta`
+   * (`papercusp/resultFormats`) because the MCP SDK strips unknown TOP-LEVEL
+   * tool fields during validation — `_meta` is the spec's passthrough slot, so
+   * that copy is the one that actually reaches a strict client.
    */
   resultFormats?: ReadonlyArray<'json' | 'toon' | 'csv' | 'tsv' | 'md'>;
+  /**
+   * MCP `_meta` passthrough — survives strict SDK validation (unlike unknown
+   * top-level fields). Carries `papercusp/resultFormats` (the capability set).
+   */
+  _meta?: Record<string, unknown>;
   /** Map of event-name → JSON-Schema. Absent when the tool declares no events. */
   events?: Record<string, Record<string, unknown>>;
   /**
@@ -1188,9 +1196,22 @@ export function listMcpProjections(role?: AgentRole, profile?: 'engineer' | 'pow
     // Advertise the output schema + negotiable formats when the tool declared
     // an output schema (P-010). Tools without one still get the runtime
     // auto-encoder; they just don't advertise a capability set.
-    if (tool.outputJsonSchema) listing.outputSchema = tool.outputJsonSchema;
+    //
+    // MCP `outputSchema` describes `structuredContent`, which the spec requires
+    // to be a JSON OBJECT — so a strict client (the MCP SDK) rejects a tools/list
+    // whose outputSchema is array/scalar-rooted. Our list tools return bare
+    // arrays, so we only emit the spec-standard `outputSchema` for object-rooted
+    // shapes; the array/list case advertises capability via the `resultFormats`
+    // extension below (which the SDK tolerates as an unknown field).
+    if (tool.outputJsonSchema && tool.outputJsonSchema.type === 'object') {
+      listing.outputSchema = tool.outputJsonSchema;
+    }
     if (tool.resultEligibility) {
-      listing.resultFormats = [...tool.resultEligibility.capabilities] as McpToolListing['resultFormats'];
+      const formats = [...tool.resultEligibility.capabilities] as McpToolListing['resultFormats'];
+      listing.resultFormats = formats;
+      // Mirror onto `_meta` — the spec passthrough slot — so it survives the
+      // strict MCP SDK tools/list validation that strips unknown top-level fields.
+      listing._meta = { ...(listing._meta ?? {}), 'papercusp/resultFormats': formats };
     }
     if (tool.events && Object.keys(tool.events).length > 0) {
       listing.events = serializeEventsSchema(tool.events);
