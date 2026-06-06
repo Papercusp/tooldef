@@ -158,7 +158,12 @@ function tryTier3Read(
   if (opts.includeStructured) return null; // structured consumer wants the lossless body
   const req: FormatRequest = opts.requested ?? (opts.defaultCompact ? 'compact' : 'json');
   if (req !== 'compact' && req !== fmt) return null; // honor an explicit different/lossless ask
-  if (!isFlatObjectArray(data)) return null; // shape must actually be flat at runtime
+  // Shape must actually be a flat array at runtime — but an EMPTY array is valid
+  // (renders as `[0]`), so a Tier-3 tool always self-presents in the declared
+  // format (the model never sees TOON for the empty case). A non-empty array with
+  // a nested cell declines Tier-3 → safe fallback to the compact/lossless path.
+  if (!Array.isArray(data)) return null;
+  if (data.length > 0 && !isFlatObjectArray(data)) return null;
   const text = encodePositionalRows(data as Array<Record<string, unknown>>, opts.readColumns, fmt === 'tsv' ? '\t' : ',');
   return { format: fmt, text };
 }

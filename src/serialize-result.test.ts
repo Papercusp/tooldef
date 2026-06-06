@@ -173,4 +173,27 @@ describe('serializeToolResponse — Tier-3 prompt-declared columns (read, P-004)
     const r = serializeToolResponse({ data: rows }, opts(ctx));
     expect(r.format).toBe('toon');
   });
+
+  it('read:tsv produces a tab-delimited headerless body', () => {
+    configurePrePromptRegistry([{ name: 'work_items:list', read: 'tsv' }]);
+    const ctx = { transport: 'mcp' } as UnifiedToolContext;
+    const r = serializeToolResponse({ data: rows }, opts(ctx));
+    expect(r.format).toBe('tsv');
+    expect((r.content[0] as { text: string }).text).toBe('format: tsv\n[2]\nWI-1\ttodo\nWI-2\tdone');
+  });
+
+  it('a structured-content request opts OUT of Tier-3 (UI/programmatic consumer keeps lossless)', () => {
+    configurePrePromptRegistry([{ name: 'work_items:list', read: 'csv' }]);
+    const ctx = { transport: 'mcp', requestedStructured: true } as UnifiedToolContext;
+    const r = serializeToolResponse({ data: rows }, opts(ctx));
+    expect(r._meta.prePrompt).toBeUndefined();
+    expect((r.content[0] as { text: string }).text).not.toContain('[2]');
+  });
+
+  it('empty array under Tier-3 → just the [0] guard (no rows, no crash)', () => {
+    configurePrePromptRegistry([{ name: 'work_items:list', read: 'csv' }]);
+    const ctx = { transport: 'mcp' } as UnifiedToolContext;
+    const r = serializeToolResponse({ data: [] }, opts(ctx));
+    expect((r.content[0] as { text: string }).text).toBe('format: csv\n[0]');
+  });
 });
