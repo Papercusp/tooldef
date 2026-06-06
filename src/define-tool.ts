@@ -149,6 +149,7 @@ async function serializeProjectedResult(
   const serialized = serializeToolResponse(response, formatOptsFromCtx(ctx, eligibility));
   const result: ToolResult = { content: serialized.content as never };
   if (Object.keys(serialized._meta).length > 0) result._meta = serialized._meta;
+  if (serialized.structuredContent !== undefined) result.structuredContent = serialized.structuredContent;
   return result;
 }
 

@@ -419,6 +419,14 @@ export interface UnifiedToolContext {
    */
   requestedFormat?: string;
 
+  /**
+   * Opt-in for MCP `structuredContent` (P-010) — set by the transport from
+   * `?structured=1` / `_meta.structured`. When true, a result with a declared
+   * output schema also carries the lossless structured `data` alongside the
+   * compact text. OFF by default so the model never pays for both at once.
+   */
+  requestedStructured?: boolean;
+
   /* ── Spawn context (typically agent-driven calls) ─────────────────── */
   workspaceId?: string;
   harnessSlug?: string;
@@ -1095,6 +1103,19 @@ export interface McpToolListing {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  /**
+   * JSON-Schema for the tool's result `data` (MCP `outputSchema`, P-010).
+   * Spec-aligned advertisement; present only when the tool declared an output
+   * schema. Clients can validate `structuredContent` against it.
+   */
+  outputSchema?: Record<string, unknown>;
+  /**
+   * The token-efficient formats this tool's result can be rendered in
+   * (token-efficient-tool-result-formats P-010 / D-005). A Papercusp extension
+   * so a client knows which `_meta.format` values it may negotiate; absent ⇒
+   * `['json']` (the always-available default). Standard MCP clients ignore it.
+   */
+  resultFormats?: ReadonlyArray<'json' | 'toon' | 'csv' | 'tsv' | 'md'>;
   /** Map of event-name → JSON-Schema. Absent when the tool declares no events. */
   events?: Record<string, Record<string, unknown>>;
   /**
@@ -1164,6 +1185,13 @@ export function listMcpProjections(role?: AgentRole, profile?: 'engineer' | 'pow
       description: tool.description,
       inputSchema: tool.inputSchema,
     };
+    // Advertise the output schema + negotiable formats when the tool declared
+    // an output schema (P-010). Tools without one still get the runtime
+    // auto-encoder; they just don't advertise a capability set.
+    if (tool.outputJsonSchema) listing.outputSchema = tool.outputJsonSchema;
+    if (tool.resultEligibility) {
+      listing.resultFormats = [...tool.resultEligibility.capabilities] as McpToolListing['resultFormats'];
+    }
     if (tool.events && Object.keys(tool.events).length > 0) {
       listing.events = serializeEventsSchema(tool.events);
     } else if (tool.eventsJsonSchema && Object.keys(tool.eventsJsonSchema).length > 0) {

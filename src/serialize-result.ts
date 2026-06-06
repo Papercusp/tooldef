@@ -39,6 +39,12 @@ export interface SerializeFormatOpts {
   eligibility?: EligibilityResult;
   /** When nothing is explicitly requested, default to compact? (MCP agent transport → true.) */
   defaultCompact: boolean;
+  /**
+   * Also attach the lossless structured `data` as `structuredContent` (P-010).
+   * OFF by default — gated so the model never pays for both the compact text AND
+   * the full JSON; a UI/programmatic consumer opts in (`?structured=1`).
+   */
+  includeStructured?: boolean;
 }
 
 export interface SerializedToolResult {
@@ -47,11 +53,13 @@ export interface SerializedToolResult {
   format: ResultFormat;
   /** True when the served format differs from the requested/ideal one (graceful downgrade). */
   fallback: boolean;
+  /** Lossless structured `data`, present only when `includeStructured` was set (P-010). */
+  structuredContent?: unknown;
 }
 
 /** Build the format options for a call from the request context + the tool's precomputed eligibility. */
 export function formatOptsFromCtx(
-  ctx: Pick<UnifiedToolContext, 'requestedFormat' | 'transport'>,
+  ctx: Pick<UnifiedToolContext, 'requestedFormat' | 'transport' | 'requestedStructured'>,
   eligibility: EligibilityResult | undefined,
 ): SerializeFormatOpts {
   return {
@@ -61,6 +69,7 @@ export function formatOptsFromCtx(
     // deliver compact by default. Every other transport (HTTP catch-all,
     // in-process, IPC) defaults to lossless JSON unless it explicitly negotiates.
     defaultCompact: ctx.transport === 'mcp',
+    includeStructured: ctx.requestedStructured === true,
   };
 }
 
@@ -144,5 +153,12 @@ export function serializeToolResponse(
   if (Array.isArray(response.uiResources)) {
     for (const ui of response.uiResources) content.push(ui as unknown as Record<string, unknown>);
   }
-  return { content, _meta, format: chosen.format, fallback: chosen.fallback };
+  const result: SerializedToolResult = { content, _meta, format: chosen.format, fallback: chosen.fallback };
+  // Opt-in lossless structured payload for UI/programmatic consumers (P-010).
+  // Only meaningful when the body itself isn't already the lossless JSON.
+  if (opts.includeStructured && hasData && chosen.format !== 'json') {
+    result.structuredContent = data;
+    _meta.structured = true;
+  }
+  return result;
 }
