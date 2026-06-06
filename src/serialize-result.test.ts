@@ -1,6 +1,11 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { z } from 'zod';
-import { analyzeSchema } from '@papercusp/result-encoding';
+import {
+  analyzeSchema,
+  configurePrePromptRegistry,
+  clearPrePromptRegistry,
+  projectReadColumns,
+} from '@papercusp/result-encoding';
 import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
 import type { ToolResponse } from './types';
 import type { UnifiedToolContext } from './tool-projection';
@@ -97,5 +102,75 @@ describe('serializeToolResponse — envelope routing', () => {
     const r = serializeToolResponse({ data: flatRows, uiResources: [ui] }, formatOptsFromCtx(ctx, undefined));
     expect(r.content).toHaveLength(2);
     expect(r.content[1]).toEqual(ui);
+  });
+});
+
+describe('serializeToolResponse — Tier-3 prompt-declared columns (read, P-004)', () => {
+  afterEach(() => clearPrePromptRegistry());
+
+  const schema = z.array(z.object({ id: z.string(), state: z.enum(['todo', 'done']) }));
+  const readColumns = projectReadColumns(
+    (() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const js = (z as any).toJSONSchema(schema) as Record<string, unknown>;
+      delete js.$schema;
+      return js;
+    })(),
+  );
+  const rows = [
+    { id: 'WI-1', state: 'todo' },
+    { id: 'WI-2', state: 'done' },
+  ];
+
+  function opts(ctx: UnifiedToolContext) {
+    return { ...formatOptsFromCtx(ctx, elig(schema)), toolName: 'work_items:list', readColumns };
+  }
+
+  it('registry tool → headerless CSV + [N] guard, no header row', () => {
+    configurePrePromptRegistry([{ name: 'work_items:list', read: 'csv' }]);
+    const ctx = { transport: 'mcp' } as UnifiedToolContext;
+    const r = serializeToolResponse({ data: rows }, opts(ctx));
+    expect(r.format).toBe('csv');
+    expect(r._meta.prePrompt).toBe(true);
+    expect((r.content[0] as { text: string }).text).toBe('format: csv\n[2]\nWI-1,todo\nWI-2,done');
+  });
+
+  it('[N] guard reflects the row count (truncation signal)', () => {
+    configurePrePromptRegistry([{ name: 'work_items:list', read: 'csv' }]);
+    const ctx = { transport: 'mcp' } as UnifiedToolContext;
+    const r = serializeToolResponse({ data: [rows[0]] }, opts(ctx));
+    expect((r.content[0] as { text: string }).text).toBe('format: csv\n[1]\nWI-1,todo');
+  });
+
+  it('envelope still rides in _meta under Tier-3', () => {
+    configurePrePromptRegistry([{ name: 'work_items:list', read: 'csv' }]);
+    const ctx = { transport: 'mcp' } as UnifiedToolContext;
+    const r = serializeToolResponse({ data: rows, nextCursor: 'CUR' }, opts(ctx));
+    expect(r._meta.nextCursor).toBe('CUR');
+    expect((r.content[0] as { text: string }).text).not.toContain('CUR');
+  });
+
+  it('explicit ?format=json opts OUT of Tier-3 (lossless honored)', () => {
+    configurePrePromptRegistry([{ name: 'work_items:list', read: 'csv' }]);
+    const ctx = { transport: 'mcp', requestedFormat: 'json' } as UnifiedToolContext;
+    const r = serializeToolResponse({ data: rows }, opts(ctx));
+    expect(r.format).toBe('json');
+    expect(r._meta.prePrompt).toBeUndefined();
+    expect((r.content[0] as { text: string }).text).toBe(JSON.stringify(rows));
+  });
+
+  it('non-registry tool is unaffected (stays TOON-auto)', () => {
+    // registry empty
+    const ctx = { transport: 'mcp' } as UnifiedToolContext;
+    const r = serializeToolResponse({ data: rows }, opts(ctx));
+    expect(r.format).toBe('toon');
+    expect(r._meta.prePrompt).toBeUndefined();
+  });
+
+  it('read:off in the registry leaves the tool on the default path', () => {
+    configurePrePromptRegistry([{ name: 'work_items:list', read: 'off' }]);
+    const ctx = { transport: 'mcp' } as UnifiedToolContext;
+    const r = serializeToolResponse({ data: rows }, opts(ctx));
+    expect(r.format).toBe('toon');
   });
 });
