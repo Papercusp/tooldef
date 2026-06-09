@@ -163,3 +163,35 @@ describe('end-to-end format selection through defineTool', () => {
     expect(text).toBe('RAW');
   });
 });
+
+describe('principal-gated ToolResult pass-through (memory-taxonomy-and-debt-followups P-006)', () => {
+  it('a handler-returned ToolResult passes through untouched — no re-encode, no double wrap', async () => {
+    // The memory:* family returns the MCP content shape directly and the TUI
+    // Memory tab parses content[0].text as the handler's own JSON. The
+    // projected wrapper must hand it through exactly (parity with the
+    // role-gated wrapper), not serialize it as opaque data.
+    const payload = JSON.stringify({ ok: true, results: [{ id: 'm1', memory: 'fact' }] });
+    defineTool({
+      name: 'fmt:toolresult-passthrough',
+      capability: 'test:read',
+      args: z.object({}),
+      handler: async () => ({ content: [{ type: 'text', text: payload }] }),
+    });
+    const tool = lookupByMcpName('fmt:toolresult-passthrough')!;
+    const r = await dispatchProjectedTool(
+      tool,
+      'fmt:toolresult-passthrough',
+      {},
+      ctx({
+        transport: 'mcp',
+        principal: { slug: 'u', workspaceId: 'w', capabilities: new Set(['test:read']) },
+        tx: {},
+      } as unknown as Partial<UnifiedToolContext>),
+      DEPS,
+    );
+    expect(r.ok).toBe(true);
+    const text = (r.result!.content[0] as { text: string }).text;
+    // The text IS the handler's JSON — not a serialized {content:[...]} wrapper.
+    expect(JSON.parse(text)).toEqual({ ok: true, results: [{ id: 'm1', memory: 'fact' }] });
+  });
+});

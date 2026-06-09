@@ -496,10 +496,15 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       throw new Error(`invalid_args: ${formatIssues(parsed.issues)}`);
     }
     const response = await def.handler(parsed.value, legacyCtx);
-    // NOTE: a raw ToolResult return is deliberately NOT special-cased here —
-    // it rides the generic encoder as opaque data (today's live behavior for
-    // the memory:* family). Changing that is a wire-contract decision
-    // (memory-taxonomy-and-debt-followups P-006), not a type fix.
+    // A raw ToolResult (MCP content shape) passes through untouched — parity
+    // with the role-gated wrapper below. The memory:* family returns it and
+    // its consumers (the TUI Memory tab) parse content[0].text as the
+    // handler's own JSON; re-encoding it as opaque data double-wrapped the
+    // envelope and broke that contract
+    // (memory-taxonomy-and-debt-followups P-006).
+    if (response && typeof response === 'object' && Array.isArray((response as ToolResult).content)) {
+      return response as ToolResult;
+    }
     return serializeProjectedResult(response as ToolResponse, ctx, eligibility, def, readColumns);
   };
 

@@ -415,10 +415,9 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
   /**
    * Implementation. PREFER returning a `ToolResponse` envelope (`{ data }`)
    * — it gets format-aware serialization. A raw `ToolResult` (MCP content
-   * shape) is also accepted to match runtime reality (the legacy memory:*
-   * family returns it), but note the projected serializer treats it as
-   * opaque data — it is re-encoded, NOT passed through (see
-   * memory-taxonomy-and-debt-followups P-006 before adding new ones).
+   * shape) is also accepted and passes through untouched (parity with the
+   * role-gated wrapper; the memory:* family + the TUI Memory tab depend on
+   * it — memory-taxonomy-and-debt-followups P-006).
    */
   handler: (args: StandardSchemaV1.InferOutput<TArgs>, ctx: ToolContext) => Promise<ToolResponse | ToolResult>;
   /**
@@ -463,7 +462,7 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
   description?: string;
   capability: string;
   args: TArgs;
-  /** See `ToolDefinition.handler` — ToolResponse preferred; raw ToolResult accepted (re-encoded, not passed through). */
+  /** See `ToolDefinition.handler` — ToolResponse preferred; a raw ToolResult passes through untouched. */
   handler: (args: StandardSchemaV1.InferOutput<TArgs>, ctx: ToolContext) => Promise<ToolResponse | ToolResult>;
   /** See `ToolGuidance`. */
   guidance?: ToolGuidance;
