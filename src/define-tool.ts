@@ -495,8 +495,12 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     if (!parsed.ok) {
       throw new Error(`invalid_args: ${formatIssues(parsed.issues)}`);
     }
-    const response: ToolResponse = await def.handler(parsed.value, legacyCtx);
-    return serializeProjectedResult(response, ctx, eligibility, def, readColumns);
+    const response = await def.handler(parsed.value, legacyCtx);
+    // NOTE: a raw ToolResult return is deliberately NOT special-cased here —
+    // it rides the generic encoder as opaque data (today's live behavior for
+    // the memory:* family). Changing that is a wire-contract decision
+    // (memory-taxonomy-and-debt-followups P-006), not a type fix.
+    return serializeProjectedResult(response as ToolResponse, ctx, eligibility, def, readColumns);
   };
 
   registerProjectedTool({

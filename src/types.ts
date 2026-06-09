@@ -412,8 +412,15 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
    * input. Optional — tools without it still get the TOON runtime auto-encoder.
    */
   result?: StandardSchemaV1;
-  /** Implementation. Tools may return any data shape inside ToolResponse. */
-  handler: (args: StandardSchemaV1.InferOutput<TArgs>, ctx: ToolContext) => Promise<ToolResponse>;
+  /**
+   * Implementation. PREFER returning a `ToolResponse` envelope (`{ data }`)
+   * — it gets format-aware serialization. A raw `ToolResult` (MCP content
+   * shape) is also accepted to match runtime reality (the legacy memory:*
+   * family returns it), but note the projected serializer treats it as
+   * opaque data — it is re-encoded, NOT passed through (see
+   * memory-taxonomy-and-debt-followups P-006 before adding new ones).
+   */
+  handler: (args: StandardSchemaV1.InferOutput<TArgs>, ctx: ToolContext) => Promise<ToolResponse | ToolResult>;
   /**
    * Optional per-tool guidance for the role's system prompt.
    * Projected into the prompt assembly by `assembleRolePrompt`.
@@ -456,7 +463,8 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
   description?: string;
   capability: string;
   args: TArgs;
-  handler: (args: StandardSchemaV1.InferOutput<TArgs>, ctx: ToolContext) => Promise<ToolResponse>;
+  /** See `ToolDefinition.handler` — ToolResponse preferred; raw ToolResult accepted (re-encoded, not passed through). */
+  handler: (args: StandardSchemaV1.InferOutput<TArgs>, ctx: ToolContext) => Promise<ToolResponse | ToolResult>;
   /** See `ToolGuidance`. */
   guidance?: ToolGuidance;
   /* ─── Unified-primitive forward-compat fields (Phase E1, no behavior change) ─────
