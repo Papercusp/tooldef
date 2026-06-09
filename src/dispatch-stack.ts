@@ -885,6 +885,10 @@ async function recordTelemetry(
         windowKey: windowKey ?? '',
         durationMs: Date.now() - startedAt,
         status,
+        // Persist the dispatcher error CLASS (computed above, then historically
+        // discarded) so the watchdog can tell a deterministic config bug from a
+        // transient crash without LIKE-matching errorMessage (P-007 / D-009).
+        errorCode: code ?? null,
         errorMessage: result.error?.message ?? '',
         args: input,
         eventCount,

@@ -346,6 +346,38 @@ describe('dispatchProjectedTool', () => {
     expect(recorded[0].transport).toBe('ipc');
   });
 
+  it('errorCode (the dispatcher error CLASS) is plumbed through to recordInvocation (P-007)', async () => {
+    // watchdog-robustness P-007 / D-009: the dispatcher computes a rich error
+    // `code` then persists it on tool_invocations.error_code so the watchdog can
+    // tell a deterministic config bug from a transient crash WITHOUT parsing
+    // errorMessage. A throwing handler surfaces as code 'handler_error' — verify
+    // the class reaches the record call, not just the coarse status='error'.
+    const tool = makeTool({
+      fn: async () => { throw new Error('boom'); },
+    });
+    const recorded: Array<{ status?: string; errorCode?: string | null }> = [];
+    const deps: DispatchProjectedDeps = {
+      recordInvocation: async (input) => {
+        recorded.push({ status: input.status, errorCode: input.errorCode });
+      },
+    };
+    await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), deps);
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0].status).toBe('error');            // coarse status (unchanged)
+    expect(recorded[0].errorCode).toBe('handler_error'); // NEW: the class is preserved
+  });
+
+  it('errorCode is null on a successful call (P-007)', async () => {
+    const tool = makeTool({ fn: async () => ({ content: [{ type: 'text', text: 'ok' }] }) });
+    let captured: { status?: string; errorCode?: string | null } = {};
+    const deps: DispatchProjectedDeps = {
+      recordInvocation: async (input) => { captured = { status: input.status, errorCode: input.errorCode }; },
+    };
+    await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), deps);
+    expect(captured.status).toBe('ok');
+    expect(captured.errorCode ?? null).toBeNull();
+  });
+
   it('ok-on-abort: handler returns ok despite signal aborted → surfaces as timeout error', async () => {
     // Round-7 follow-up: the watchdog used to fire but if the handler
     // returned normally without observing ctx.signal.aborted, the

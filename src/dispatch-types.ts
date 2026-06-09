@@ -170,6 +170,14 @@ export interface DispatchProjectedDeps {
     outputSize?: number | null;
     errorMessage?: string | null;
     /**
+     * The dispatcher's error CLASS code (e.g. 'unauthorized', 'handler_error',
+     * 'timeout', 'role_not_allowed', 'harness_required', 'invalid_args') —
+     * persisted so consumers (the improvement-watchdog) can classify
+     * structural-vs-transient failures on a first-class column instead of
+     * parsing errorMessage. NULL on success. (watchdog-robustness P-007 / D-009.)
+     */
+    errorCode?: string | null;
+    /**
      * The validated arguments the tool was called with (post-zod parse).
      * Used by the /dev Sessions drilldown to enable exact-replay reruns.
      */
