@@ -428,6 +428,18 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
   emits?: readonly ToolEmitSpec[];
   /** Declarative preconditions — see `ToolRequireSpec`. Evaluated by the dispatcher's `preconditions` step. */
   requires?: readonly ToolRequireSpec[];
+  /**
+   * Cross-workspace opt-out for PRINCIPAL-gated tools — see
+   * `RoleToolDefinition.crossWorkspace` for the full rationale. A
+   * principal-gated tool whose data genuinely spans workspaces (e.g. the
+   * memory store, which lives in shared tables scoped by user-id / harness-slug,
+   * not by workspace) sets `crossWorkspace: true` so an UNSCOPED superuser
+   * session (`workspaceId '*'`) is handed the admin (rolbypassrls) handle + a
+   * synthesized principal instead of failing `workspace_required`. Absent/false
+   * ⇒ workspace-isolated (the default). Threaded onto `ProjectedTool` by
+   * `registerLegacyAsProjected` and read by the host dispatch's crossWorkspace branch.
+   */
+  crossWorkspace?: boolean;
 }
 
 /** Input shape for `defineTool` — same as ToolDefinition minus derived fields. */
@@ -521,6 +533,10 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
    * NEVER use for safety invariants (D-007) — see `ToolRequireSpec`.
    */
   requires?: readonly ToolRequireSpec[];
+  /** See `ToolDefinition.crossWorkspace`. Set on a principal-gated tool that
+   * legitimately spans workspaces (e.g. the user-/harness-scoped memory store)
+   * so it runs from an unscoped superuser session instead of `workspace_required`. */
+  crossWorkspace?: boolean;
 }
 
 /**

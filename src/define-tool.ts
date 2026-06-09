@@ -287,6 +287,11 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
     public: input.public,
     emits: input.emits,
     requires: input.requires,
+    // P-062: cross-workspace opt-out, threaded so PRINCIPAL-gated tools (e.g.
+    // memory:*) can run from an unscoped superuser session. The role-gated path
+    // already threads this; the principal-gated path previously dropped it, so a
+    // principal-gated cross-workspace tool failed `workspace_required`. See the field doc.
+    crossWorkspace: input.crossWorkspace,
   };
 
   // The catalog stores defs with their schema type erased (handlers run on
