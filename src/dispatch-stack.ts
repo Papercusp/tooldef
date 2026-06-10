@@ -45,7 +45,6 @@ import {
 } from './dispatch-types';
 import { evaluateDataCondition } from '@papercusp/rules';
 import type { ToolPreInvokeEvent, ToolRequireSpec } from './requires';
-const __DBG_STACK_TAG = Math.random().toString(36).slice(2, 8);
 
 /* ─── Step names ─────────────────────────────────────────────────────── */
 
@@ -545,13 +544,17 @@ const invokeStep: DispatchStep = {
           error: { code: 'timeout', message: `tool "${toolName}" exceeded timeout of ${exec.timeoutSec}s` },
         };
       }
-      // eslint-disable-next-line no-console
-      console.error('[DBG dispatch-stack catch] catchInstance=', __DBG_STACK_TAG, 'toolInstance=', (tool as unknown as Record<string, unknown>).__dbgInstance, 'errName=', (err as Error)?.name, 'iof=', err instanceof UnauthorizedToolError);
-      if (err instanceof UnauthorizedToolError) {
-        return { ok: false, error: { code: 'unauthorized', message: err.message } };
+      // Match by stable `name` as well as instanceof: when the host loads a
+      // second copy of this module (tsx/vite dual-instance), a handler's
+      // UnauthorizedToolError is a DIFFERENT class object and instanceof is
+      // false — without the name check the clean 401/precondition codes
+      // degrade to a generic handler_error 500.
+      const errName = (err as Error | null)?.name;
+      if (err instanceof UnauthorizedToolError || errName === 'UnauthorizedToolError') {
+        return { ok: false, error: { code: 'unauthorized', message: (err as Error).message } };
       }
-      if (err instanceof HarnessRequiredError) {
-        return { ok: false, error: { code: 'harness_required', message: err.message } };
+      if (err instanceof HarnessRequiredError || errName === 'HarnessRequiredError') {
+        return { ok: false, error: { code: 'harness_required', message: (err as Error).message } };
       }
       return {
         ok: false,
