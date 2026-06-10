@@ -185,8 +185,13 @@ export interface RouteDefinition<TInputSchema extends ZodTypeAny | undefined = u
    * file-serving, SSE).
    */
   input?: TInputSchema;
-  /** Wall-clock timeout. Default 30s. A wedged handler aborts. */
-  timeoutSec?: number;
+  /**
+   * Wall-clock timeout. Default 30s. A wedged handler aborts.
+   * `null` disables the watchdog entirely — for long-lived routes
+   * (SSE / streaming transports) whose handler legitimately outlives any
+   * fixed budget; a 30s default there kills healthy streams (EI-110).
+   */
+  timeoutSec?: number | null;
   /**
    * Telemetry sample rate, 0..1. Default 1 (record every call). High-
    * frequency polled routes set this < 1; 0 = never record.
