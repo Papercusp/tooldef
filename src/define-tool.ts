@@ -23,6 +23,7 @@ import { register } from './registry';
 import { collectToolEmits } from './emits-registry';
 import { registerProjectedTool, type ToolFn, type ToolExposure, type UnifiedToolContext } from './tool-projection';
 import { UnauthorizedToolError } from './dispatch-projected';
+const __DBG_INSTANCE_TAG = Math.random().toString(36).slice(2, 8);
 import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
 import {
   analyzeSchema,
@@ -462,6 +463,8 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
   def: ToolDefinition<TArgs>,
   expose?: ToolExposure,
 ): void {
+  // eslint-disable-next-line no-console
+  if (def.name === 'tasks:list') console.error('[DBG register tasks:list] instance=', __DBG_INSTANCE_TAG, 'url=', import.meta.url, '\n', new Error('stack').stack);
   // tasks:list → /api/agent-tools/tasks/list
   const httpPath = `/api/agent-tools/${def.name.replaceAll(':', '/')}`;
   // Pluggable schema→JSON-Schema (P-021); default adapter is Zod 4's

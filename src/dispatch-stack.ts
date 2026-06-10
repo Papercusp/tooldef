@@ -544,6 +544,8 @@ const invokeStep: DispatchStep = {
           error: { code: 'timeout', message: `tool "${toolName}" exceeded timeout of ${exec.timeoutSec}s` },
         };
       }
+      // eslint-disable-next-line no-console
+      console.error('[DBG dispatch-stack catch]', import.meta.url, 'errName=', (err as Error)?.name, 'iof=', err instanceof UnauthorizedToolError);
       if (err instanceof UnauthorizedToolError) {
         return { ok: false, error: { code: 'unauthorized', message: err.message } };
       }
