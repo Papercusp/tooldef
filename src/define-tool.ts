@@ -464,7 +464,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
   expose?: ToolExposure,
 ): void {
   // eslint-disable-next-line no-console
-  if (def.name === 'tasks:list') console.error('[DBG register tasks:list] instance=', __DBG_INSTANCE_TAG, 'url=', import.meta.url, '\n', new Error('stack').stack);
+  if (def.name === 'tasks:list') console.error('[DBG register tasks:list] t=', Date.now(), 'instance=', __DBG_INSTANCE_TAG);
   // tasks:list → /api/agent-tools/tasks/list
   const httpPath = `/api/agent-tools/${def.name.replaceAll(':', '/')}`;
   // Pluggable schema→JSON-Schema (P-021); default adapter is Zod 4's
@@ -512,6 +512,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
   };
 
   registerProjectedTool({
+    ...({ __dbgInstance: __DBG_INSTANCE_TAG } as object),
     pluginName: 'agent-mcp',
     description: def.description,
     inputSchema,

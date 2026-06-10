@@ -45,6 +45,7 @@ import {
 } from './dispatch-types';
 import { evaluateDataCondition } from '@papercusp/rules';
 import type { ToolPreInvokeEvent, ToolRequireSpec } from './requires';
+const __DBG_STACK_TAG = Math.random().toString(36).slice(2, 8);
 
 /* ─── Step names ─────────────────────────────────────────────────────── */
 
@@ -545,7 +546,7 @@ const invokeStep: DispatchStep = {
         };
       }
       // eslint-disable-next-line no-console
-      console.error('[DBG dispatch-stack catch]', import.meta.url, 'errName=', (err as Error)?.name, 'iof=', err instanceof UnauthorizedToolError);
+      console.error('[DBG dispatch-stack catch] catchInstance=', __DBG_STACK_TAG, 'toolInstance=', (tool as unknown as Record<string, unknown>).__dbgInstance, 'errName=', (err as Error)?.name, 'iof=', err instanceof UnauthorizedToolError);
       if (err instanceof UnauthorizedToolError) {
         return { ok: false, error: { code: 'unauthorized', message: err.message } };
       }
