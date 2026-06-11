@@ -123,10 +123,13 @@ export interface PrincipalRequirements {
 
 /**
  * Endpoint auth stance. `'public'` opts out of `requirePrincipal()`
- * (used for webhooks, OAuth callbacks, pair endpoints). Otherwise a
- * `PrincipalRequirements` object gates the call.
+ * (used for webhooks, OAuth callbacks, pair endpoints). `'loopback'`
+ * also takes no principal but declares the route local-only — the host's
+ * dispatch chokepoint rejects requests whose Host is not a loopback
+ * address (enforcement lives host-side; this type is the contract).
+ * Otherwise a `PrincipalRequirements` object gates the call.
  */
-export type RouteAuth = 'public' | PrincipalRequirements;
+export type RouteAuth = 'public' | 'loopback' | PrincipalRequirements;
 
 /* ─── Route projection (Phase E6, endpoint-unification-2026-05-21) ─────
  *
