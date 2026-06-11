@@ -438,6 +438,14 @@ export interface UnifiedToolContext {
   runId?: string;
   spawnId?: string;
   parentSpawnId?: string | null;
+  /**
+   * True when the transport VERIFIED a signed per-spawn URL's signature for
+   * this context (never set for unsigned / soft-allowed spawn URLs). Hosts
+   * may key identity attribution on it for spawn callers that carry no
+   * explicit client/owner id — e.g. attribute to the stable harness rather
+   * than the per-call spawn id.
+   */
+  sigVerifiedSpawn?: boolean;
 
   /**
    * Set by the event-reaction system on a ctx it builds for a REACTION call
