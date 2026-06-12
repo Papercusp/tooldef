@@ -32,6 +32,7 @@ export {
   PASS_THROUGH,
   UnauthorizedToolError,
   HarnessRequiredError,
+  InvalidInputError,
   type QuotaWindow,
   type DispatchProjectedDeps,
   type DispatchProjectedErrorCode,

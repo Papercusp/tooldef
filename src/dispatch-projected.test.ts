@@ -7,6 +7,7 @@ import {
   dispatchProjectedTool,
   dispatchProjectedToolStream,
   defaultComputeQuotaWindow,
+  InvalidInputError,
   type DispatchProjectedDeps,
   type DispatchStreamEvent,
 } from './dispatch-projected';
@@ -262,6 +263,32 @@ describe('dispatchProjectedTool', () => {
     expect(r.ok).toBe(false);
     expect(r.error?.code).toBe('handler_error');
     expect(recorded).toEqual(['error']);
+  });
+
+  it('codes InvalidInputError as invalid_input, not handler_error (EI-334 false-structural leg)', async () => {
+    // defineTool's projected fn throws InvalidInputError on a zod-parse
+    // failure. handler_error is the STRUCTURAL telemetry class (a tool bug);
+    // a caller's bad args must surface as invalid_input (status invalid-input,
+    // HTTP 400) so the repeated-tool-error watchdog files it as caller-class.
+    const tool = makeTool({ fn: async () => { throw new InvalidInputError('invalid_args: brief: Too big'); } });
+    const recorded: Array<{ status: string; errorCode?: string | null }> = [];
+    const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
+      recordInvocation: vi.fn(async (i) => { recorded.push({ status: i.status, errorCode: i.errorCode }); }),
+    }));
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe('invalid_input');
+    expect(r.error?.message).toContain('invalid_args: brief: Too big');
+    expect(recorded).toEqual([{ status: 'invalid-input', errorCode: 'invalid_input' }]);
+  });
+
+  it('codes a foreign-instance InvalidInputError by name (dual-module-instance hosts)', async () => {
+    // Same name-based match the Unauthorized/HarnessRequired classes carry:
+    // when the host loads a second copy of this module, instanceof is false.
+    const foreign = new Error('invalid_args: nope');
+    Object.defineProperty(foreign, 'name', { value: 'InvalidInputError' });
+    const tool = makeTool({ fn: async () => { throw foreign; } });
+    const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS());
+    expect(r.error?.code).toBe('invalid_input');
   });
 
   it('returns timeout when fn exceeds timeoutSec', async () => {

@@ -166,6 +166,7 @@ export {
   defaultComputeQuotaWindow,
   UnauthorizedToolError,
   HarnessRequiredError,
+  InvalidInputError,
   PASS_THROUGH,
   type QuotaWindow,
   type DispatchProjectedDeps,

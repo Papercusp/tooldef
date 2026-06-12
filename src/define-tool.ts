@@ -22,7 +22,7 @@ import { standardValidate, formatIssues, type StandardSchemaV1 } from './standar
 import { register } from './registry';
 import { collectToolEmits } from './emits-registry';
 import { registerProjectedTool, type ToolFn, type ToolExposure, type UnifiedToolContext } from './tool-projection';
-import { UnauthorizedToolError } from './dispatch-projected';
+import { UnauthorizedToolError, InvalidInputError } from './dispatch-projected';
 import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
 import {
   analyzeSchema,
@@ -493,7 +493,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     const shimmed = applyPositionalWriteShim(def.name, rawSchema, input);
     const parsed = await standardValidate(def.args, shimmed);
     if (!parsed.ok) {
-      throw new Error(`invalid_args: ${formatIssues(parsed.issues)}`);
+      throw new InvalidInputError(`invalid_args: ${formatIssues(parsed.issues)}`);
     }
     const response = await def.handler(parsed.value, legacyCtx);
     // A raw ToolResult (MCP content shape) passes through untouched — parity
@@ -563,7 +563,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     const shimmed = applyPositionalWriteShim(def.name, rawSchema, input);
     const parsed = await standardValidate(def.args, shimmed);
     if (!parsed.ok) {
-      throw new Error(`invalid_args: ${formatIssues(parsed.issues)}`);
+      throw new InvalidInputError(`invalid_args: ${formatIssues(parsed.issues)}`);
     }
     const out = await def.handler(parsed.value, ctx);
 

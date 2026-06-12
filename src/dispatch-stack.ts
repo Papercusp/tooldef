@@ -37,6 +37,7 @@ import { validateSync, formatIssues, type StandardSchemaV1 } from './standard-sc
 import {
   PASS_THROUGH,
   HarnessRequiredError,
+  InvalidInputError,
   UnauthorizedToolError,
   defaultComputeQuotaWindow,
   type DispatchProjectedDeps,
@@ -555,6 +556,13 @@ const invokeStep: DispatchStep = {
       }
       if (err instanceof HarnessRequiredError || errName === 'HarnessRequiredError') {
         return { ok: false, error: { code: 'harness_required', message: (err as Error).message } };
+      }
+      // Schema-validation failure thrown by defineTool's projected fn (or any
+      // handler-level input check). Coding it `invalid_input` (400) instead of
+      // `handler_error` (500) keeps caller mistakes out of the structural
+      // tool-error telemetry class (EI-334's false-fire leg).
+      if (err instanceof InvalidInputError || errName === 'InvalidInputError') {
+        return { ok: false, error: { code: 'invalid_input', message: (err as Error).message } };
       }
       return {
         ok: false,
