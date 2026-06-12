@@ -612,6 +612,31 @@ export interface ToolExposureMcp {
   largeOutput?: boolean;
 }
 
+/**
+ * Slash-exposure overrides (slash-exposure-tool-catalog-2026-06-12). The
+ * slash surface projects an MCP-exposed tool onto the MCP **prompts**
+ * primitive so agent clients (Claude Code, …) surface it as a slash
+ * command. Unlike `http`/`mcp` this is NOT a dispatch transport — the
+ * rendered prompt instructs the agent, and the agent's tool call rides the
+ * session's existing MCP transport (D-001 on the plan).
+ */
+export interface ToolExposureSlash {
+  /**
+   * Override the prompt's name SUFFIX. The full prompt name is always
+   * `tool:<name>`; default `<name>` = the tool's `expose.mcp.name`.
+   */
+  name?: string;
+  /** Override the slash listing's description. Default: `guidance.when` ?? `description`. */
+  description?: string;
+  /**
+   * Restrict which top-level input fields surface as MCP prompt arguments.
+   * Default: every top-level scalar (string/number/integer/boolean/enum)
+   * property of the input schema. Non-scalar fields never become prompt
+   * arguments — the rendered instruction has the agent elicit them (D-004).
+   */
+  args?: readonly string[];
+}
+
 /** Per-tool exposure config — at least one of `http`/`mcp`/`ipc` must be set. */
 export interface ToolExposure {
   http?: ToolExposureHttp;
@@ -622,6 +647,13 @@ export interface ToolExposure {
    * Default false — IPC opt-in mirrors HTTP/MCP opt-in. Phase E8.
    */
   ipc?: true;
+  /**
+   * Slash-command exposure via MCP prompts. DEFAULT ON for every
+   * MCP-exposed tool (owner-ratified D-003, slash-exposure-tool-catalog-
+   * 2026-06-12): absent/`true` ⇒ projected; `false` ⇒ hidden from the
+   * slash surface; an object ⇒ projected with overrides.
+   */
+  slash?: boolean | ToolExposureSlash;
 }
 
 /**

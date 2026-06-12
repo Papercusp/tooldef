@@ -61,6 +61,17 @@ export {
   lookupPrompt,
   _resetPromptCatalogForTests,
 } from './prompt-registry';
+export {
+  SLASH_PROMPT_PREFIX,
+  resolveSlashExposure,
+  slashPromptNameFor,
+  isSlashPromptName,
+  slashPromptToolName,
+  deriveSlashPromptArguments,
+  slashPromptListingFor,
+  renderSlashPrompt,
+} from './slash-projection';
+export type { SlashPromptListing } from './slash-projection';
 
 /* ─── Run / workspace lifecycle ──────────────────────────────────────── */
 export {
@@ -140,6 +151,7 @@ export {
   type ToolExposure,
   type ToolExposureHttp,
   type ToolExposureMcp,
+  type ToolExposureSlash,
   type UnifiedToolContext,
   type GateBypass,
   type MinimalEventSink,

@@ -529,6 +529,9 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       // opt-in per tool via `expose: { ipc: true }` in defineTool — read off
       // the projected registry by the host's IPC server (Phase E8).
       ...(expose?.ipc ? { ipc: true as const } : {}),
+      // Slash exposure (MCP-prompts slash commands) defaults ON when absent;
+      // thread the declared value so `false`/overrides survive projection.
+      ...(expose?.slash !== undefined ? { slash: expose.slash } : {}),
     },
     fn: projectedFn,
     guidance: def.guidance as never,
@@ -605,6 +608,9 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
       // opt-in per tool via `expose: { ipc: true }` in defineTool — read off
       // the projected registry by the host's IPC server (Phase E8).
       ...(expose?.ipc ? { ipc: true as const } : {}),
+      // Slash exposure (MCP-prompts slash commands) defaults ON when absent;
+      // thread the declared value so `false`/overrides survive projection.
+      ...(expose?.slash !== undefined ? { slash: expose.slash } : {}),
     },
     fn: projectedFn,
     guidance: def.guidance as never,
