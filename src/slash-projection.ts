@@ -162,6 +162,14 @@ export function renderSlashPrompt(
   tool: ProjectedTool,
   args: Record<string, string>,
   advertisedInputSchema?: Record<string, unknown>,
+  opts?: {
+    /**
+     * Replace the supplied-arguments block verbatim — used by FILE emitters
+     * whose client substitutes its own placeholder at invocation time (the
+     * Codex `$ARGUMENTS` path, plan P-009). When set, `args` is ignored.
+     */
+    suppliedArgsText?: string;
+  },
 ): PromptResult {
   const mcpName = tool.expose.mcp!.name;
   const schema = advertisedInputSchema ?? tool.inputSchema;
@@ -170,9 +178,10 @@ export function renderSlashPrompt(
 
   const supplied = Object.entries(args).filter(([, v]) => v !== undefined && v !== '');
   const suppliedBlock =
-    supplied.length > 0
+    opts?.suppliedArgsText ??
+    (supplied.length > 0
       ? supplied.map(([k, v]) => `- ${k}: ${v}`).join('\n')
-      : '(none)';
+      : '(none)');
 
   const guidanceBits = [
     tool.guidance?.when ? `When to use: ${tool.guidance.when}` : null,
