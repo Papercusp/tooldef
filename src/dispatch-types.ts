@@ -93,6 +93,18 @@ export class HarnessRequiredError extends Error {
   override readonly name = 'HarnessRequiredError';
 }
 
+/**
+ * Throw to signal the CALLER's input failed schema validation. The dispatcher
+ * surfaces this as `invalid_input` (HTTP 400) instead of `handler_error`
+ * (500) — the distinction matters downstream: error-class telemetry treats
+ * `handler_error` as a structural tool bug, so a zod failure coded
+ * `handler_error` files false "tool is broken" signals (EI-334's cluster:
+ * an oversized fleet:spawn `brief` fired the structural watchdog key).
+ */
+export class InvalidInputError extends Error {
+  override readonly name = 'InvalidInputError';
+}
+
 export interface DispatchProjectedResult {
   ok: boolean;
   result?: ToolResult;
