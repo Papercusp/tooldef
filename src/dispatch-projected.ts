@@ -38,6 +38,7 @@ export {
   type DispatchProjectedErrorCode,
   type DispatchProjectedResult,
   type PostInvokeEvent,
+  type CapabilityEnvelopeVerdict,
   type ToolDispatchOverrideFn,
 } from './dispatch-types';
 

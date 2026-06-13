@@ -60,6 +60,7 @@ export type DispatchProjectedErrorCode =
   | 'unauthorized'
   | 'role_not_allowed'
   | 'missing_capability'
+  | 'capability_denied'
   | 'missing_role'
   | 'harness_required'
   | 'quota_exceeded'
@@ -132,6 +133,29 @@ export type ToolDispatchOverrideFn = (
   | typeof PASS_THROUGH;
 
 /**
+ * The capability-envelope verdict for one call (agent-capability-confinement-2026-06-13
+ * B-06 / P-012). Produced by the host's `checkCapabilityEnvelope` port, consumed by the
+ * `capability-envelope` dispatch step (a `deny` short-circuits) AND threaded onto
+ * `PostInvokeEvent.envelopeVerdict` so the host's decision-ledger emit can record the
+ * row's posture.
+ */
+export interface CapabilityEnvelopeVerdict {
+  /**
+   * 'allow'   — within the envelope (or the envelope did not apply): proceed.
+   * 'observe' — beyond the envelope but enforcement is OFF (shadow): proceed, but the
+   *             ledger records the would-deny ('gated' posture).
+   * 'deny'    — beyond the envelope and enforcement is ON: short-circuit (capability_denied).
+   */
+  decision: 'allow' | 'observe' | 'deny';
+  /** Ledger posture: 'auto' (allowed) · 'gated' (observed would-deny) · 'rejected' (denied). */
+  posture: 'auto' | 'gated' | 'rejected';
+  /** false ⇒ the caller was EXEMPT (SU / power-user / non-fleet / roleless): envelope did not apply. */
+  applied: boolean;
+  /** Why, when beyond-envelope — feeds the deny message + the ledger `why`. */
+  reason?: string;
+}
+
+/**
  * The event handed to `DispatchProjectedDeps.postInvoke` after a tool settles.
  * This is the event-reaction system's observation point (event-reaction-system
  * D-001): the host matches `{ toolName, args, result, ctx }` against its rule
@@ -145,6 +169,20 @@ export interface PostInvokeEvent {
   result: DispatchProjectedResult;
   ctx: UnifiedToolContext;
   durationMs: number;
+  /**
+   * The tool's declared capabilities (agent-capability-confinement B-06). Additive intrinsic
+   * call metadata: the decision-ledger emit derives the action's tier (governed = non-low)
+   * + coarse category from these without a registry lookup. The event-reaction matcher
+   * ignores it. Undefined for hosts that don't populate it.
+   */
+  capabilities?: readonly string[];
+  /**
+   * The capability-envelope verdict (agent-capability-confinement B-06 / P-012), threaded
+   * from the `capability-envelope` step. Present only when the host wired
+   * `checkCapabilityEnvelope` AND it returned a verdict; null/undefined otherwise (the
+   * ledger then records posture 'auto').
+   */
+  envelopeVerdict?: CapabilityEnvelopeVerdict | null;
 }
 
 export interface DispatchProjectedDeps {
@@ -225,6 +263,27 @@ export interface DispatchProjectedDeps {
    * inline on the hot path. Unset ⇒ no reactions.
    */
   postInvoke?(event: PostInvokeEvent): void;
+  /**
+   * The CAPABILITY-ENVELOPE port (agent-capability-confinement-2026-06-13 B-06 / P-012).
+   * The `capability-envelope` dispatch step calls this to evaluate the cheap, static,
+   * per-role "may this caller do X at all" envelope. The host owns ALL policy here — the
+   * per-role allowlist, the protected set, the SU/non-fleet EXEMPTIONS (D-002), and the
+   * enforce-vs-observe flag — and returns a `CapabilityEnvelopeVerdict`; the engine merely
+   * acts on `decision` (a `deny` short-circuits as `capability_denied`; `allow`/`observe`
+   * proceed) and threads the verdict onto `PostInvokeEvent.envelopeVerdict`.
+   *
+   * Return `null` ⇒ not applicable (treated as allow, no verdict stashed). AWAITED, but the
+   * host impl must be cheap (static matching + a cached flag read; no PG). Unset ⇒ the step
+   * is a NO-OP (behavior-neutral — every existing host/test is unaffected). FAIL-OPEN: the
+   * step swallows a thrown evaluator error (the OS sandbox is the containment backstop,
+   * D-006 — an evaluator bug must never wedge the whole fleet).
+   */
+  checkCapabilityEnvelope?(input: {
+    toolName: string;
+    capabilities: readonly string[];
+    ctx: UnifiedToolContext;
+    args: unknown;
+  }): Promise<CapabilityEnvelopeVerdict | null> | (CapabilityEnvelopeVerdict | null);
   /**
    * The PRECONDITION FIRE PORT (autoloop-pot-operator-rebuild D-006). When a
    * `requires:` spec with `{ fire, then: 'retry' }` fails, the dispatcher's

@@ -174,6 +174,7 @@ export {
   type DispatchProjectedErrorCode,
   type DispatchStreamEvent,
   type PostInvokeEvent,
+  type CapabilityEnvelopeVerdict,
   type ToolDispatchOverrideFn,
 } from './dispatch-projected';
 

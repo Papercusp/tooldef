@@ -51,6 +51,7 @@ describe('DEFAULT_DISPATCH_STACK — enumeration', () => {
       'default-deny',
       'role-allowlist',
       'capability-check',
+      'capability-envelope',
       'role-requirement',
       'harness-check',
       'quota',

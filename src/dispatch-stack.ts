@@ -40,6 +40,7 @@ import {
   InvalidInputError,
   UnauthorizedToolError,
   defaultComputeQuotaWindow,
+  type CapabilityEnvelopeVerdict,
   type DispatchProjectedDeps,
   type DispatchProjectedErrorCode,
   type DispatchProjectedResult,
@@ -53,6 +54,7 @@ export type DispatchStepName =
   | 'default-deny'
   | 'role-allowlist'
   | 'capability-check'
+  | 'capability-envelope'
   | 'role-requirement'
   | 'harness-check'
   | 'quota'
@@ -107,6 +109,10 @@ export interface DispatchExecution {
   /** ctx with emit/progress/askUser/publishState/metadata wrappers applied. */
   handlerCtx: UnifiedToolContext;
 
+  // ─── written by 'capability-envelope' step ──────────────────────────
+  /** The capability-envelope verdict (B-06), threaded into the postInvoke event. Null until set. */
+  envelopeVerdict: CapabilityEnvelopeVerdict | null;
+
   // ─── written by 'invoke' step ───────────────────────────────────────
   handlerResult: ToolResult | null;
 }
@@ -145,6 +151,7 @@ function initExecution(
     metadataJson: null,
     handlerCtx: ctx,
     handlerResult: null,
+    envelopeVerdict: null,
   };
 }
 
@@ -227,6 +234,57 @@ const capabilityCheckStep: DispatchStep = {
       }
     }
     return null;
+  },
+};
+
+/**
+ * Capability-envelope gate (agent-capability-confinement-2026-06-13 B-06 / P-012). The
+ * cheap, static, per-role "may this caller do X at all" gate for the autonomous fleet —
+ * the *capability gate* of the two-gate split (D-003), distinct from the Queen's rich
+ * autonomy/decision gate. Pure mechanism: ALL policy (per-role allowlist, protected set,
+ * SU/non-fleet exemptions, enforce-vs-observe) lives behind the host's
+ * `deps.checkCapabilityEnvelope` port; this step only acts on the returned verdict.
+ *
+ * No-op when the port is unwired (behavior-neutral). FAIL-OPEN on an evaluator throw (the
+ * OS sandbox is the containment backstop, D-006 — a bug here must not wedge the fleet).
+ * The verdict is stashed on `exec.envelopeVerdict` and threaded into the postInvoke event
+ * so the decision-ledger emit (P-011) records the action's posture. Runs right after
+ * `capability-check` (both are cheap capability gates) and before the costlier
+ * authorize/precondition gates.
+ */
+const capabilityEnvelopeStep: DispatchStep = {
+  name: 'capability-envelope',
+  async run(exec) {
+    const { tool, toolName, input, ctx, deps } = exec;
+    const port = deps.checkCapabilityEnvelope;
+    if (!port) return null; // no policy wired ⇒ no-op (behavior-neutral)
+    let verdict: CapabilityEnvelopeVerdict | null;
+    try {
+      verdict = await port({ toolName, capabilities: tool.capabilities, ctx, args: input });
+    } catch (err) {
+      // FAIL-OPEN (D-006): an evaluator bug must never wedge the fleet; the OS sandbox is the
+      // containment backstop. Matches the quota gate's fail-open-on-error posture.
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[capability-envelope] evaluator threw for "${toolName}" (failing open): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+    if (!verdict) return null;
+    exec.envelopeVerdict = verdict; // threaded into PostInvokeEvent for the decision-ledger emit
+    if (verdict.decision === 'deny') {
+      return {
+        ok: false,
+        error: {
+          code: 'capability_denied' as DispatchProjectedErrorCode,
+          message:
+            verdict.reason ??
+            `Tool "${toolName}" is outside role "${ctx.role ?? '(none)'}" capability envelope`,
+          meta: { tool: toolName, role: ctx.role ?? null },
+        },
+      };
+    }
+    return null; // 'allow' | 'observe' ⇒ continue
   },
 };
 
@@ -792,6 +850,7 @@ export const DEFAULT_DISPATCH_STACK: ReadonlyArray<DispatchStep> = Object.freeze
   defaultDenyStep,
   roleAllowlistStep,
   capabilityCheckStep,
+  capabilityEnvelopeStep,
   roleRequirementStep,
   harnessCheckStep,
   quotaStep,
@@ -857,7 +916,7 @@ async function recordTelemetry(
   const status =
     result.ok
       ? 'ok'
-      : code === 'role_not_allowed' || code === 'missing_capability'
+      : code === 'role_not_allowed' || code === 'missing_capability' || code === 'capability_denied'
         ? 'role-not-allowed'
         : code === 'quota_exceeded'
           ? 'quota-exceeded'
@@ -870,6 +929,7 @@ async function recordTelemetry(
     !result.ok &&
     (code === 'role_not_allowed' ||
       code === 'missing_capability' ||
+      code === 'capability_denied' ||
       code === 'quota_exceeded');
   if (!isGateDenial && !windowKey) return;
 
@@ -979,6 +1039,8 @@ export async function runDispatchStack(
           result: settled,
           ctx,
           durationMs: Date.now() - exec.startedAt,
+          capabilities: tool.capabilities,
+          envelopeVerdict: exec.envelopeVerdict,
         });
       } catch {
         // a reaction must never break its trigger
