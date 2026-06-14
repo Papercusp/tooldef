@@ -413,7 +413,7 @@ describe('dispatchProjectedTool', () => {
     // bogus `done` instead of `error: timeout`). The fix treats
     // abort.signal.aborted as authoritative — for a MUTATION (tier != 'low').
     const tool = makeTool({
-      tier: 'medium', // a write — the abort stays authoritative
+      capabilities: [], // no low-read capability the dispatcher can classify → abort stays authoritative
       timeoutSec: 60,
       idleTimeoutSec: 1,
       fn: async (_input, ctx) => {
@@ -439,7 +439,9 @@ describe('dispatchProjectedTool', () => {
     // false "tool errored" signals. For a 'low' tier (idempotent read / low-stakes,
     // no governed mutation) the completed result is safe to surface.
     const tool = makeTool({
-      tier: 'low', // a read — a completed result is authoritative over the deadline
+      // A read: every declared capability resolves to tier 'low' (the generic
+      // default resolver maps all → 'low'), so a completed result surfaces past the deadline.
+      capabilities: ['plans:read'],
       timeoutSec: 60,
       idleTimeoutSec: 1,
       fn: async () => {

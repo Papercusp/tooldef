@@ -34,6 +34,7 @@ import {
 import { openRun, closeRun, setToolState } from './state-channel';
 import type { CardResponse, CardSpec } from './types';
 import { validateSync, formatIssues, type StandardSchemaV1 } from './standard-schema';
+import { tierFor } from './capability-tiers';
 import {
   PASS_THROUGH,
   HarnessRequiredError,
@@ -589,7 +590,14 @@ const invokeStep: DispatchStep = {
       //     low-stakes call, never a governed mutation — so a completed one is safe
       //     to surface even past the deadline.
       if (exec.abort.signal.aborted) {
-        if (exec.tool.tier !== 'low') {
+        // Effective tier from the tool's capabilities (host-registered resolver via
+        // tierFor; defaults to 'low'). Low-tier READ ⟺ ≥1 declared capability AND
+        // every one resolves to 'low' (the effective tier is the max). No declared
+        // capability ⇒ treat as non-low (don't assume an ungated utility is a safe
+        // read). `ProjectedTool` carries `capabilities`, not a precomputed `tier`.
+        const caps = exec.tool.capabilities;
+        const isLowTierRead = caps.length > 0 && caps.every((c) => tierFor(c) === 'low');
+        if (!isLowTierRead) {
           return {
             ok: false,
             error: {
