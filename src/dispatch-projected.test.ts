@@ -405,14 +405,15 @@ describe('dispatchProjectedTool', () => {
     expect(captured.errorCode ?? null).toBeNull();
   });
 
-  it('ok-on-abort: handler returns ok despite signal aborted → surfaces as timeout error', async () => {
+  it('ok-on-abort (MUTATION, non-low tier): handler returns ok despite signal aborted → surfaces as timeout error', async () => {
     // Round-7 follow-up: the watchdog used to fire but if the handler
     // returned normally without observing ctx.signal.aborted, the
     // dispatcher would emit `ok: true` + the partial result. That hid
     // wedged-but-non-throwing handlers from the consumer (they saw a
     // bogus `done` instead of `error: timeout`). The fix treats
-    // abort.signal.aborted as authoritative.
+    // abort.signal.aborted as authoritative — for a MUTATION (tier != 'low').
     const tool = makeTool({
+      tier: 'medium', // a write — the abort stays authoritative
       timeoutSec: 60,
       idleTimeoutSec: 1,
       fn: async (_input, ctx) => {
@@ -428,6 +429,27 @@ describe('dispatchProjectedTool', () => {
     const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS());
     expect(r.ok).toBe(false);
     expect(r.error?.code).toBe('timeout');
+  }, 10_000);
+
+  it('ok-on-abort (idempotent READ, tier low): a completed result SURFACES despite the abort (no false timeout)', async () => {
+    // The repeated-tool-error cluster (EI-98/99/105/174/175): under load the
+    // wall-clock exceeds the timeout even for a cheap read, the idle/timeout
+    // watchdog fires, the handler still returns a valid result — and discarding it
+    // as a timeout both wasted the read and flooded the improvement-watchdog with
+    // false "tool errored" signals. For a 'low' tier (idempotent read / low-stakes,
+    // no governed mutation) the completed result is safe to surface.
+    const tool = makeTool({
+      tier: 'low', // a read — a completed result is authoritative over the deadline
+      timeoutSec: 60,
+      idleTimeoutSec: 1,
+      fn: async () => {
+        await new Promise((r) => setTimeout(r, 3000)); // outlast the idle cap → abort fires
+        return { content: [{ type: 'text', text: 'fresh-read' }] };
+      },
+    });
+    const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS());
+    expect(r.ok).toBe(true);
+    expect(r.result?.content?.[0]?.text).toBe('fresh-read');
   }, 10_000);
 
   it('ctx.progress refreshes idleTimeoutSec deadline (alias parity)', async () => {

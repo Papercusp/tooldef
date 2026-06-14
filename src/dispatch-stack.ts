@@ -573,17 +573,37 @@ const invokeStep: DispatchStep = {
       } else {
         result = await tool.fn(input, handlerCtx);
       }
-      // ok-on-abort race: if the watchdog fired mid-handler but the
-      // handler returned normally without observing ctx.signal.aborted,
-      // treat the abort as authoritative.
+      // ok-on-abort race: the timeout/idle watchdog (or the caller's signal) fired
+      // mid-handler, but the handler returned normally without observing
+      // ctx.signal.aborted.
+      //   - MUTATION (tier != 'low'): the abort stays AUTHORITATIVE — never report
+      //     success for a possibly-cancelled write (the caller may have given up or
+      //     re-dispatched). Surfaces as a timeout error.
+      //   - IDEMPOTENT READ (tier 'low'): the completed result is valid +
+      //     side-effect-free, so RETURN it. Discarding it wastes the read AND —
+      //     under load, when wall-clock exceeds the timeout even for a CHEAP handler
+      //     — floods the improvement-watchdog with false "tool errored" timeouts
+      //     (the repeated-tool-error cluster: plans:list / plans:search /
+      //     coord:inbox / activity:recent — EI-98/99/105/174/175). The 'low' tier IS
+      //     the safety line: per the capability table it's an idempotent read /
+      //     low-stakes call, never a governed mutation — so a completed one is safe
+      //     to surface even past the deadline.
       if (exec.abort.signal.aborted) {
-        return {
-          ok: false,
-          error: {
-            code: 'timeout',
-            message: `tool "${toolName}" exceeded timeout of ${exec.timeoutSec}s (handler returned but signal had aborted)`,
-          },
-        };
+        if (exec.tool.tier !== 'low') {
+          return {
+            ok: false,
+            error: {
+              code: 'timeout',
+              message: `tool "${toolName}" exceeded timeout of ${exec.timeoutSec}s (handler returned but signal had aborted)`,
+            },
+          };
+        }
+        // Completed read despite the abort: return it directly. Skip the outputRef
+        // chunk-emit below — the stream is already aborted so the client can't
+        // receive it (and emitting could re-throw into the catch); the result still
+        // carries outputRef for a later fetch.
+        exec.handlerResult = result;
+        return { ok: true, result };
       }
       // outputRef auto-emit — the framework injects a `chunk` event
       // when the handler declared outputRef on its result.
