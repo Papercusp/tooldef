@@ -66,4 +66,48 @@ describe('runOrchestrationScript (B-CX-1A)', () => {
     expect(r.ok).toBe(true);
     expect(r.result).toBe('undefined,undefined');
   });
+
+  // B-CX-SANDBOX: the reason the executor moved to a worker thread — a SYNCHRONOUS infinite loop
+  // must be killable. The old in-host vm executor's wall-clock race only bounded async-yielding
+  // work, so `while (true) {}` froze the whole process. Now the worker is terminated at the bound.
+  it('kills a SYNCHRONOUS infinite loop at the timeout (the host stays alive)', async () => {
+    const start = Date.now();
+    const r = await runOrchestrationScript(`while (true) {}`, facade({}), { timeoutMs: 300 });
+    const elapsed = Date.now() - start;
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/script_timeout/);
+    // Terminated near the bound — proves the host wasn't blocked by the sync loop.
+    expect(elapsed).toBeLessThan(2000);
+  });
+
+  it('keeps the host responsive while a sync loop runs (concurrent work completes)', async () => {
+    // If the sync loop blocked the host event loop, this Promise.all would never settle the timer.
+    const hung = runOrchestrationScript(`for (;;) {}`, facade({}), { timeoutMs: 400 });
+    const hostTick = new Promise<string>((res) => setTimeout(() => res('host-alive'), 50));
+    const [tick] = await Promise.all([hostTick, hung]);
+    expect(tick).toBe('host-alive');
+  });
+
+  it('isolates state between runs (no shared sandbox globals leak across calls)', async () => {
+    const a = await runOrchestrationScript(`globalThis.__leak = 'from-a'; return 'a';`, facade({}));
+    const b = await runOrchestrationScript(`return typeof globalThis.__leak;`, facade({}));
+    expect(a.ok).toBe(true);
+    expect(b.ok).toBe(true);
+    expect(b.result).toBe('undefined'); // a fresh worker per run — no cross-run global leak
+  });
+
+  it('surfaces a thrown error from inside a tool call as ok=false', async () => {
+    const boom = vi.fn(async () => {
+      throw new Error('tool exploded');
+    });
+    const r = await runOrchestrationScript(`return await tools.svc.go();`, facade({ svc: { go: boom } }));
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/tool exploded/);
+  });
+
+  it('rejects a call to a tool absent from the facade (whitelist boundary)', async () => {
+    const r = await runOrchestrationScript(`return await tools.secret.exfiltrate();`, facade({}));
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/not available/);
+  });
 });

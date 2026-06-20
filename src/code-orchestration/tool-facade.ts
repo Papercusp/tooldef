@@ -40,8 +40,12 @@ export interface ToolFacade {
   [ns: string]: any;
 }
 
-/** `wake-queue` / `set_status` → `wakeQueue` / `setStatus` (a valid JS identifier). */
-function camelVerb(verb: string): string {
+/**
+ * `wake-queue` / `set_status` → `wakeQueue` / `setStatus` (a valid JS identifier).
+ * Exported so the COMPILE-TIME signature generator (facade-types.ts, B-CX-API) names verbs
+ * identically to this RUNTIME facade — the two must never disagree.
+ */
+export function camelVerb(verb: string): string {
   return verb.replace(/[-_]+([a-z0-9])/gi, (_m, c: string) => c.toUpperCase());
 }
 

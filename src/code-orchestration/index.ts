@@ -25,3 +25,12 @@ export {
   type OrchestrateResult,
   type PlannedMutation,
 } from './orchestrate';
+// B-CX-API: compile-time typed signatures for the facade + the on-demand namespace index.
+export {
+  generateToolFacadeTypes,
+  listFacadeNamespaces,
+  toolArgsType,
+  type GenerateFacadeTypesOptions,
+  type FacadeNamespaceIndexEntry,
+  type ToolArgsType,
+} from './facade-types';
