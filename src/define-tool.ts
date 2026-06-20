@@ -263,10 +263,18 @@ function defineRouteShaped<TInputSchema extends ZodTypeAny | undefined>(
  */
 const WRITE_CAPABILITY_SUFFIXES = [':write', ':admin', ':delete', ':manage', ':execute'] as const;
 /**
- * Known-mutating capabilities whose names don't end in a write-suffix — chiefly the
- * `capability:*` host-capability family (bash/fs-write/edit/write/git/computer) + a few
- * control verbs (processes:kill). Centralized here instead of backfilling each tool def;
- * a tool can still override via an explicit `effect`.
+ * Known-mutating capabilities whose names don't end in a write-suffix — the
+ * `capability:*` host-capability family (bash/fs-write/edit/write/git/computer/net) plus
+ * dedicated control / side-effect capabilities (processes:kill, turn:interrupt,
+ * ui:dispatch, tui:dispatch, operator:converse, operator:delegate, activity:report).
+ * Each is used ONLY by a mutating tool — where a read sibling exists it is a DISTINCT
+ * `*:read` capability (ui:read, activity:read, operator:read) — so flipping the capability
+ * is safe and self-documenting. Centralized here instead of backfilling each tool def.
+ *
+ * A tool can still override via an explicit `effect`; and a mutator that SHARES a `*:read`
+ * capability with genuine readers (e.g. learning_packs:export, plans:export — both write
+ * files under a `*:read` cap) sets `effect: 'write'` on its own def instead of polluting
+ * this set (which would wrongly flip its read siblings). B-CX-EFFECT audit (2026-06-20).
  */
 const WRITE_CAPABILITIES = new Set<string>([
   'capability:bash',
@@ -275,7 +283,14 @@ const WRITE_CAPABILITIES = new Set<string>([
   'capability:write',
   'capability:git',
   'capability:computer',
+  'capability:net', // outbound HTTP (capability:fetch) — can POST/PUT/DELETE → external mutation
   'processes:kill',
+  'turn:interrupt', // ends a peer agent's current turn
+  'ui:dispatch', // performs a UI intent (click/navigate/submit) in a browser tab
+  'tui:dispatch', // performs a control intent against a running pui workbench
+  'operator:converse', // brain turn: spawns agents, records spend, mem0.add, dispatches <spawn>
+  'operator:delegate', // spawns a delegate agent (+ records a work_item)
+  'activity:report', // inserts an agent-activity row
 ]);
 function inferEffect(capability: string, explicit?: 'read' | 'write'): 'read' | 'write' {
   if (explicit) return explicit;
