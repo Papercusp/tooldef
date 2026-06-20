@@ -44,6 +44,9 @@ export {
 
 /* ─── Registries ─────────────────────────────────────────────────────── */
 export { getCatalog, lookup, _resetCatalogForTests } from './registry';
+
+/* ─── Code-execution tool-orchestration runtime (B-CX-1A / B-CX-2A) ────── */
+export * from './code-orchestration';
 export {
   collectToolEmits,
   getCollectedToolEmits,
