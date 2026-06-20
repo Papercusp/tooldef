@@ -16,6 +16,9 @@ import type { ToolResult } from '../wire';
 import { dispatchProjectedTool } from '../dispatch-projected';
 import type { FacadeDispatch } from './tool-facade';
 
+/** The `text` variant of a ToolResult content item, narrowed from the content union. */
+type TextContent = Extract<NonNullable<ToolResult['content']>[number], { type: 'text' }>;
+
 /**
  * Unwrap a settled `ToolResult` into the plain value the script should receive:
  * `structuredContent` if present, else the JSON-parsed text payload, else the raw text.
@@ -23,9 +26,10 @@ import type { FacadeDispatch } from './tool-facade';
 export function unwrapToolResult(result: ToolResult | undefined): unknown {
   if (!result) return undefined;
   if (result.structuredContent !== undefined) return result.structuredContent;
-  const textItem = result.content?.find(
-    (c): c is { text: string } => typeof (c as { text?: unknown }).text === 'string',
-  );
+  // Narrow on the `type` discriminant — the prior `c is { text: string }` predicate was not a
+  // subtype of the content union (TS2677) so it failed to narrow, leaving `.text` unreadable on
+  // the image/resource variants (TS2339). Extracting the 'text' member fixes both.
+  const textItem = result.content?.find((c): c is TextContent => c.type === 'text');
   if (!textItem) return result;
   try {
     return JSON.parse(textItem.text);

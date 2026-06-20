@@ -49,4 +49,21 @@ describe('defineTool effect inference (B-CX-PRE)', () => {
     const def = defineTool({ name: 'test:eff_admin', capability: 'system:admin', ...base });
     expect(def.effect).toBe('write');
   });
+
+  // B-CX-EFFECT: dedicated mutator capabilities whose names DON'T end in a write-suffix —
+  // each added to the central WRITE_CAPABILITIES set (none shares its exact capability
+  // string with a reader). Guards the set so a refactor can't silently drop one and
+  // re-mis-infer these as 'read' (the dry-run gate would then EXECUTE them on a preview).
+  it.each([
+    'turn:interrupt',
+    'ui:dispatch',
+    'tui:dispatch',
+    'operator:converse',
+    'operator:delegate',
+    'activity:report',
+    'capability:net',
+  ])("treats dedicated mutator capability '%s' as 'write'", (capability) => {
+    const def = defineTool({ name: `test:eff_${capability.replace(/:/g, '_')}`, capability, ...base });
+    expect(def.effect).toBe('write');
+  });
 });
