@@ -255,6 +255,35 @@ function defineRouteShaped<TInputSchema extends ZodTypeAny | undefined>(
   return def;
 }
 
+/**
+ * Infer a tool's read/write effect (code-execution-tool-orchestration B-CX-PRE) from its
+ * capability when not set explicitly: write-ish suffixes (`:write`/`:admin`/`:delete`/
+ * `:manage`/`:execute`) ⇒ 'write'; everything else ⇒ 'read'. An explicit `effect` always
+ * wins. Consumed by the code-execution sandbox's dry-run/confirm gate (read-only ⇒ no gate).
+ */
+const WRITE_CAPABILITY_SUFFIXES = [':write', ':admin', ':delete', ':manage', ':execute'] as const;
+/**
+ * Known-mutating capabilities whose names don't end in a write-suffix — chiefly the
+ * `capability:*` host-capability family (bash/fs-write/edit/write/git/computer) + a few
+ * control verbs (processes:kill). Centralized here instead of backfilling each tool def;
+ * a tool can still override via an explicit `effect`.
+ */
+const WRITE_CAPABILITIES = new Set<string>([
+  'capability:bash',
+  'capability:fs-write',
+  'capability:edit',
+  'capability:write',
+  'capability:git',
+  'capability:computer',
+  'processes:kill',
+]);
+function inferEffect(capability: string, explicit?: 'read' | 'write'): 'read' | 'write' {
+  if (explicit) return explicit;
+  const cap = capability.toLowerCase();
+  if (WRITE_CAPABILITIES.has(cap)) return 'write';
+  return WRITE_CAPABILITY_SUFFIXES.some((s) => cap.endsWith(s)) ? 'write' : 'read';
+}
+
 function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
   input: ToolDefinitionInput<TArgs>,
 ): ToolDefinition<TArgs> {
@@ -276,6 +305,7 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
     description,
     capability: input.capability,
     tier,
+    effect: inferEffect(input.capability, input.effect),
     args: input.args,
     result: input.result ?? input.output,
     handler: input.handler,
@@ -337,6 +367,7 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
     description,
     capability: input.capability,
     tier,
+    effect: inferEffect(input.capability, input.effect),
     requirePrincipal: false,
     authorize: input.authorize,
     requireRoles: input.requireRoles,
@@ -513,6 +544,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     description: def.description,
     inputSchema,
     capabilities: [def.capability as never],
+    effect: def.effect,
     profile: def.profile,
     harness: def.harness,
     authorize: def.authorize,
@@ -583,6 +615,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     description: def.description,
     inputSchema,
     capabilities: [def.capability as never],
+    effect: def.effect,
     profile: def.profile,
     harness: def.harness,
     outputSchema: def.result,

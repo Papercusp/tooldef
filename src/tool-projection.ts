@@ -675,6 +675,14 @@ export interface ProjectedTool {
    */
   capabilities: Capability[];
   /**
+   * Read/write effect (code-execution-tool-orchestration B-CX-PRE). 'write' = the tool
+   * mutates state; 'read' = side-effect-free. Inferred from the capability suffix at
+   * `defineTool` time (overridable per tool). Read by the code-execution sandbox to decide
+   * whether a tool call needs a dry-run/confirm gate (read-only ⇒ no gate). Optional for
+   * back-compat; absent ⇒ unknown (the gate may default-deny a mutating call).
+   */
+  effect?: 'read' | 'write';
+  /**
    * Allowed agent roles. Empty/undefined means any role can call. Used
    * primarily by the MCP transport (agent calls); HTTP callers gate via
    * principal capabilities instead.

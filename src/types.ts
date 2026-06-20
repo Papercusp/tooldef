@@ -406,6 +406,14 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
   description: string;
   /** Capability gate (e.g. `"tasks:read"`). One per tool. */
   capability: string;
+  /**
+   * Read/write effect (code-execution-tool-orchestration B-CX-PRE). 'write' = the tool
+   * MUTATES state; 'read' = side-effect-free. When omitted, `defineTool` infers it from the
+   * capability suffix (`:write`/`:admin`/`:delete`/`:manage` ⇒ 'write', else 'read'); set
+   * explicitly to override. Threaded onto `ProjectedTool`; consumed by the code-execution
+   * sandbox's dry-run/confirm gate (a read-only tool needs no gate).
+   */
+  effect?: 'read' | 'write';
   /** Tier looked up from the capability per §10.6.1's table. */
   tier: CapabilityTier;
   /** Argument schema (any Standard Schema validator). Runtime validation + JSON-schema source. */
@@ -469,6 +477,8 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
   /** Optional explicit description; defaults to caller's TSDoc. */
   description?: string;
   capability: string;
+  /** Read/write effect (B-CX-PRE); inferred from the capability suffix when omitted. See ToolDefinition.effect. */
+  effect?: 'read' | 'write';
   args: TArgs;
   /** See `ToolDefinition.handler` — ToolResponse preferred; a raw ToolResult passes through untouched. */
   handler: (args: StandardSchemaV1.InferOutput<TArgs>, ctx: ToolContext) => Promise<ToolResponse | ToolResult>;
@@ -582,6 +592,8 @@ export interface RoleToolDefinition<
   description: string;
   /** Capability string for tier classification + descriptive listings. Not enforced. */
   capability: string;
+  /** Read/write effect (B-CX-PRE); inferred from the capability suffix when omitted. See ToolDefinition.effect. */
+  effect?: 'read' | 'write';
   tier: CapabilityTier;
   /**
    * Visibility profile gate. 'engineer' = engineer-only surfaces (hidden +
@@ -682,6 +694,8 @@ export interface RoleToolDefinitionInput<
   public?: boolean;
   description?: string;
   capability: string;
+  /** Read/write effect (B-CX-PRE); inferred from the capability suffix when omitted. See ToolDefinition.effect. */
+  effect?: 'read' | 'write';
   /** Visibility profile gate — see RoleToolDefinition.profile. */
   profile?: 'engineer' | 'all';
   /** Harness-scope requirement — see `ToolDefinitionInput.papercusp`. */
