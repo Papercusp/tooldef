@@ -683,6 +683,16 @@ export interface ProjectedTool {
    */
   effect?: 'read' | 'write';
   /**
+   * Canonical tool names this COMPOSITE tool bundles (tool-call-batching-wrappers
+   * P-010). Empty/undefined ⇒ a primitive. Read by agent_tools:list (the queryable
+   * composition tag) and prompt-assembly's renderToolsCatalog (the bounded
+   * back-pointer that points each bundled primitive at this composite).
+   */
+  replaces?: readonly string[];
+  /** Composition tag derived from `replaces` at defineTool time: 'composite' when
+   *  `replaces` is non-empty, else 'primitive'. Queryable via agent_tools:list. */
+  composition?: 'primitive' | 'composite';
+  /**
    * Allowed agent roles. Empty/undefined means any role can call. Used
    * primarily by the MCP transport (agent calls); HTTP callers gate via
    * principal capabilities instead.

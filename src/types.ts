@@ -414,6 +414,16 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
    * sandbox's dry-run/confirm gate (a read-only tool needs no gate).
    */
   effect?: 'read' | 'write';
+  /**
+   * Canonical tool names this COMPOSITE tool bundles (tool-call-batching-wrappers
+   * P-010). A composite collapses a hot fixed multi-step flow into one call (e.g.
+   * coord:orient replaces fleet:assignments + work_items:list + coord:inbox + …).
+   * Omitted for primitives. Drives `composition` + the agent_tools:list / prompt-
+   * catalog back-pointer that points each bundled primitive at this composite.
+   */
+  replaces?: readonly string[];
+  /** Derived at defineTool time: 'composite' when `replaces` is non-empty, else 'primitive'. */
+  composition?: 'primitive' | 'composite';
   /** Tier looked up from the capability per §10.6.1's table. */
   tier: CapabilityTier;
   /** Argument schema (any Standard Schema validator). Runtime validation + JSON-schema source. */
@@ -479,6 +489,8 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
   capability: string;
   /** Read/write effect (B-CX-PRE); inferred from the capability suffix when omitted. See ToolDefinition.effect. */
   effect?: 'read' | 'write';
+  /** Canonical tool names this composite tool bundles (e.g. coord:orient replaces fleet:assignments + work_items:list + coord:inbox). Omitted for primitives. See ToolDefinition.replaces. */
+  replaces?: readonly string[];
   args: TArgs;
   /** See `ToolDefinition.handler` — ToolResponse preferred; a raw ToolResult passes through untouched. */
   handler: (args: StandardSchemaV1.InferOutput<TArgs>, ctx: ToolContext) => Promise<ToolResponse | ToolResult>;
@@ -594,6 +606,10 @@ export interface RoleToolDefinition<
   capability: string;
   /** Read/write effect (B-CX-PRE); inferred from the capability suffix when omitted. See ToolDefinition.effect. */
   effect?: 'read' | 'write';
+  /** Canonical tool names this composite tool bundles. Omitted for primitives. See ToolDefinition.replaces. */
+  replaces?: readonly string[];
+  /** Derived at defineTool time: 'composite' when `replaces` is non-empty, else 'primitive'. */
+  composition?: 'primitive' | 'composite';
   tier: CapabilityTier;
   /**
    * Visibility profile gate. 'engineer' = engineer-only surfaces (hidden +
@@ -696,6 +712,8 @@ export interface RoleToolDefinitionInput<
   capability: string;
   /** Read/write effect (B-CX-PRE); inferred from the capability suffix when omitted. See ToolDefinition.effect. */
   effect?: 'read' | 'write';
+  /** Canonical tool names this composite tool bundles. Omitted for primitives. See ToolDefinition.replaces. */
+  replaces?: readonly string[];
   /** Visibility profile gate — see RoleToolDefinition.profile. */
   profile?: 'engineer' | 'all';
   /** Harness-scope requirement — see `ToolDefinitionInput.papercusp`. */

@@ -67,3 +67,26 @@ describe('defineTool effect inference (B-CX-PRE)', () => {
     expect(def.effect).toBe('write');
   });
 });
+
+describe('defineTool composition / replaces (tool-call-batching-wrappers P-010)', () => {
+  it("derives composition 'composite' from `replaces` + threads replaces to the projected tool", () => {
+    const def = defineTool({
+      name: 'test:comp_c',
+      capability: 'coord:read',
+      replaces: ['fleet:assignments', 'work_items:list', 'coord:inbox'],
+      ...base,
+    });
+    expect(def.composition).toBe('composite');
+    expect(def.replaces).toEqual(['fleet:assignments', 'work_items:list', 'coord:inbox']);
+    const p = projected('test:comp_c');
+    expect(p?.composition).toBe('composite');
+    expect(p?.replaces).toEqual(['fleet:assignments', 'work_items:list', 'coord:inbox']);
+  });
+
+  it("defaults composition to 'primitive' when `replaces` is omitted", () => {
+    const def = defineTool({ name: 'test:comp_p', capability: 'coord:read', ...base });
+    expect(def.composition).toBe('primitive');
+    expect(def.replaces).toBeUndefined();
+    expect(projected('test:comp_p')?.composition).toBe('primitive');
+  });
+});
