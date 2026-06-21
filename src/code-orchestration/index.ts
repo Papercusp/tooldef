@@ -9,6 +9,7 @@
 export {
   buildToolFacade,
   facadeToolNames,
+  roleScopedToolNames,
   type ToolFacade,
   type FacadeDispatch,
 } from './tool-facade';

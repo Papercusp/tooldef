@@ -102,3 +102,32 @@ export function facadeToolNames(
   }
   return out.sort();
 }
+
+/**
+ * The role-scoped allowed set BOTH code-mode meta-tools (`code:run`, `code:tools`) build before
+ * handing the facade/signatures to a script: the MCP names of every tool whose `agentRoles` admit
+ * `role`, minus an `exclude` set (the meta-tools exclude THEMSELVES so a script can't recursively
+ * nest code-mode). A tool with no `agentRoles` (or an empty list) is role-open — included for any
+ * role. This MIRRORS the dispatcher's role-allowlist gate (`dispatch-stack.ts` / `listMcpProjections`)
+ * so the facade a script can reference is exactly the set the dispatcher would let it call — the
+ * envelope IS the security boundary, so the two must never disagree.
+ *
+ * Extracted from the identical loop that lived inline in both `code/run.ts` and `code/tools.ts`
+ * (code-execution-tool-orchestration) so the scoping has ONE definition + a hermetic unit test.
+ */
+export function roleScopedToolNames(
+  tools: readonly ProjectedTool[],
+  role: string | null | undefined,
+  exclude?: ReadonlySet<string>,
+): Set<string> {
+  const allowed = new Set<string>();
+  for (const tool of tools) {
+    const name = tool.expose?.mcp?.name;
+    if (!name) continue;
+    if (exclude?.has(name)) continue;
+    const roles = tool.agentRoles;
+    const roleOk = !roles || roles.length === 0 || (role != null && roles.includes(role));
+    if (roleOk) allowed.add(name);
+  }
+  return allowed;
+}

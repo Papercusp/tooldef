@@ -1,8 +1,12 @@
 import { describe, it, expect, vi } from 'vitest';
-import { buildToolFacade, facadeToolNames } from './tool-facade';
+import { buildToolFacade, facadeToolNames, roleScopedToolNames } from './tool-facade';
 
 // Minimal ProjectedTool stand-in — the facade only reads expose.mcp.name.
 const mkTool = (name: string) => ({ expose: { mcp: { name } } }) as never;
+
+// Stand-in carrying agentRoles, for the role-scoping helper.
+const mkRoleTool = (name: string, agentRoles?: string[]) =>
+  ({ expose: { mcp: { name } }, ...(agentRoles ? { agentRoles } : {}) }) as never;
 
 describe('buildToolFacade (B-CX-1A)', () => {
   it('exposes tools.<ns>.<camelVerb>() routed through the injected dispatch', async () => {
@@ -42,5 +46,47 @@ describe('buildToolFacade (B-CX-1A)', () => {
     const tools = [mkTool('plans:list'), mkTool('work_items:list'), mkTool('malformed-no-colon')];
     expect(facadeToolNames(tools)).toEqual(['plans:list', 'work_items:list']);
     expect(facadeToolNames(tools, new Set(['plans:list']))).toEqual(['plans:list']);
+  });
+});
+
+describe('roleScopedToolNames (code:run / code:tools facade scoping)', () => {
+  const TOOLS = [
+    mkRoleTool('plans:list', ['worker', 'operator']),
+    mkRoleTool('work_items:get', ['worker', 'operator']),
+    mkRoleTool('operator:rate_limit_config', ['operator']), // operator-only
+    mkRoleTool('docs:get'), // role-open (no agentRoles)
+    mkRoleTool('code:run', ['worker', 'operator']),
+    mkRoleTool('code:tools', ['worker', 'operator']),
+  ];
+
+  it("includes only tools the role may call, plus role-open tools", () => {
+    const allowed = roleScopedToolNames(TOOLS, 'worker');
+    expect(allowed.has('plans:list')).toBe(true);
+    expect(allowed.has('work_items:get')).toBe(true);
+    expect(allowed.has('docs:get')).toBe(true); // role-open: included for any role
+    expect(allowed.has('operator:rate_limit_config')).toBe(false); // operator-only: excluded for worker
+  });
+
+  it('excludes the code-mode meta-tools so a script cannot recursively nest code-mode', () => {
+    // code:run excludes only itself (a script calling code:tools, a read, is harmless);
+    // code:tools excludes BOTH so the rendered catalog never surfaces the meta-tools.
+    const runScoped = roleScopedToolNames(TOOLS, 'worker', new Set(['code:run']));
+    expect(runScoped.has('code:run')).toBe(false);
+    expect(runScoped.has('code:tools')).toBe(true);
+
+    const toolsScoped = roleScopedToolNames(TOOLS, 'worker', new Set(['code:run', 'code:tools']));
+    expect(toolsScoped.has('code:run')).toBe(false);
+    expect(toolsScoped.has('code:tools')).toBe(false);
+  });
+
+  it('a role that may call an operator-only tool gets it', () => {
+    const allowed = roleScopedToolNames(TOOLS, 'operator', new Set(['code:run']));
+    expect(allowed.has('operator:rate_limit_config')).toBe(true);
+  });
+
+  it('a null/unknown role still gets role-open tools but no role-gated ones', () => {
+    const allowed = roleScopedToolNames(TOOLS, null);
+    expect(allowed.has('docs:get')).toBe(true); // role-open
+    expect(allowed.has('plans:list')).toBe(false); // role-gated, no role to match
   });
 });
