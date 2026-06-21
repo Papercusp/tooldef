@@ -82,7 +82,7 @@ export const RESERVED_EVENT_NAMES: readonly ReservedEventNames[] = [
   // schema for it so the wire kind is inferred (dev:ipc_echo does this).
   // 'error' is dispatcher auto-emit on uncaught handler throws AND tools
   // actively emit it mid-stream for non-fatal errors (architect:chat,
-  // brainstorm:chat, operator:scan, operator:delegate all declare it).
+  // brainstorm:chat and historical streaming tools declare it).
   // Reserving either would break production tools at register time.
 ] as const;
 
@@ -169,7 +169,7 @@ export function classifyEventWire(schema: ZodTypeAny): EventWireKind {
  *   - Route shims that bypass the HTTP transport and call
  *     `dispatchProjectedToolStream` themselves (architect/brainstorm
  *     in `apps/operator/app/api/_hono/harness.ts`, operator-scan /
- *     operator-converse / delegate-chat).
+ *     operator-converse).
  *
  * Centralizing here prevents the wire-format-drift class of bug:
  *   - z.string() events going through JSON.stringify (round-2 silent
