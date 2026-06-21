@@ -355,3 +355,44 @@ describe('Tier-3 read — end-to-end (P-004/P-005)', () => {
     expect(r.result!._meta?.prePrompt).toBe(true);
   });
 });
+
+describe('crossWorkspace projection parity (EI-2378)', () => {
+  // The host dispatch + the scoped-superuser clamp read `crossWorkspace` off the
+  // PROJECTED def (lookupByMcpName), NOT the source def. Before EI-2378 the
+  // PRINCIPAL-gated projection (registerLegacyAsProjected) dropped it while the
+  // role-gated path kept it — so a principal-gated crossWorkspace tool (memory:*)
+  // ran on a workspace-scoped tx and failed `workspace_required` from an unscoped
+  // ('*') psu. This pins parity so the asymmetry can't silently return.
+  it('a PRINCIPAL-gated defineTool propagates crossWorkspace into the projected def', () => {
+    defineTool({
+      name: 'wi:xws_principal',
+      crossWorkspace: true,
+      capability: 'test:write',
+      args: z.object({}),
+      handler: async () => ({ data: { ok: true } }),
+    });
+    expect(lookupByMcpName('wi:xws_principal')?.crossWorkspace).toBe(true);
+  });
+
+  it('a ROLE-gated defineTool also propagates crossWorkspace (the path that always worked)', () => {
+    defineTool({
+      name: 'wi:xws_role',
+      requirePrincipal: false,
+      crossWorkspace: true,
+      capability: 'test:write',
+      args: z.object({}),
+      handler: async () => ({ data: { ok: true } }),
+    });
+    expect(lookupByMcpName('wi:xws_role')?.crossWorkspace).toBe(true);
+  });
+
+  it('a defineTool WITHOUT crossWorkspace projects it falsy (workspace-isolated default)', () => {
+    defineTool({
+      name: 'wi:xws_default',
+      capability: 'test:write',
+      args: z.object({}),
+      handler: async () => ({ data: { ok: true } }),
+    });
+    expect(lookupByMcpName('wi:xws_default')?.crossWorkspace).toBeFalsy();
+  });
+});

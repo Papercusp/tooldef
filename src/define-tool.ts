@@ -572,6 +572,15 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     requireRoles: def.requireRoles,
     public: def.public,
     requires: def.requires,
+    // P-062 / EI-2378: thread crossWorkspace into the PROJECTED def. The `def`
+    // already carries it (definePrincipalGatedTool L341), but this projection —
+    // what the host dispatch + the scoped-superuser clamp read via lookupByMcpName —
+    // previously dropped it, so a principal-gated crossWorkspace tool (memory:* etc.)
+    // ran on a workspace-scoped tx and failed `workspace_required` from an unscoped
+    // ('*') psu session. The role-gated projection already threads it; this restores
+    // parity. crossWorkspace tools self-derive workspaceId (never rely on the tx's
+    // RLS), so the admin-handle path is behavior-preserving for concrete callers.
+    crossWorkspace: def.crossWorkspace,
     outputSchema: def.result,
     outputJsonSchema,
     resultEligibility: eligibility,
