@@ -59,7 +59,6 @@ describe('defineTool effect inference (B-CX-PRE)', () => {
     'ui:dispatch',
     'tui:dispatch',
     'operator:converse',
-    'operator:delegate',
     'activity:report',
     'capability:net',
   ])("treats dedicated mutator capability '%s' as 'write'", (capability) => {

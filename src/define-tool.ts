@@ -266,7 +266,7 @@ const WRITE_CAPABILITY_SUFFIXES = [':write', ':admin', ':delete', ':manage', ':e
  * Known-mutating capabilities whose names don't end in a write-suffix — the
  * `capability:*` host-capability family (bash/fs-write/edit/write/git/computer/net) plus
  * dedicated control / side-effect capabilities (processes:kill, turn:interrupt,
- * ui:dispatch, tui:dispatch, operator:converse, operator:delegate, activity:report).
+ * ui:dispatch, tui:dispatch, operator:converse, activity:report).
  * Each is used ONLY by a mutating tool — where a read sibling exists it is a DISTINCT
  * `*:read` capability (ui:read, activity:read, operator:read) — so flipping the capability
  * is safe and self-documenting. Centralized here instead of backfilling each tool def.
@@ -289,7 +289,6 @@ const WRITE_CAPABILITIES = new Set<string>([
   'ui:dispatch', // performs a UI intent (click/navigate/submit) in a browser tab
   'tui:dispatch', // performs a control intent against a running pui workbench
   'operator:converse', // brain turn: spawns agents, records spend, mem0.add, dispatches <spawn>
-  'operator:delegate', // spawns a delegate agent (+ records a work_item)
   'activity:report', // inserts an agent-activity row
 ]);
 function inferEffect(capability: string, explicit?: 'read' | 'write'): 'read' | 'write' {
