@@ -241,6 +241,17 @@ export function computeViewFingerprint(input: {
   return fnv1a64(material);
 }
 
+/**
+ * A content hash of an arbitrary value (key-sorted, so structurally-equal values
+ * hash identically) — the auto-derived view revision for a `delta` capability
+ * that declares no `revision` and isn't row-shaped. `not_modified` then means
+ * "the whole rendered output is byte-identical to last time" (safe for any shape,
+ * incl. a grouped aggregate like `plans:attention`).
+ */
+export function contentRevision(value: unknown): string {
+  return fnv1a64(canonicalStringify(value));
+}
+
 /* ──────────────────────────────────────────────────────────────────────────
  * Endpoint opt-in declaration (D-002 — minimal for Lane B)
  * ────────────────────────────────────────────────────────────────────────── */
@@ -265,13 +276,19 @@ export interface DeltaCapability<Args = unknown, Ctx = unknown> {
    * The view's current revision/checksum — the freshness signal. Coerced to a
    * string; equal strings ⇒ "unchanged". May be async (e.g. a `SELECT max(seq)`).
    *
+   * OPTIONAL: when omitted the framework derives the revision automatically — the
+   * view CHECKSUM for a semantic tool (`itemKey` + extractable rows), else a
+   * content hash of the whole response data. So the simplest opt-in is `delta:{}`
+   * (whole-output content-hash `not_modified`); declare `revision` only for a
+   * cheaper/more-precise signal (a `max(seq)` that needn't hash the body).
+   *
    * Method-shorthand (not an arrow property) on purpose: it makes the parameter
    * types bivariant, so a `DeltaCapability<SpecificArgs, Ctx>` declared on a
    * `defineTool` is assignable to the framework's `DeltaCapability<unknown,…>`
    * call site. Authors may still write `revision: (args, ctx) => …` (an arrow
    * property satisfies a method signature).
    */
-  revision(args: Args, ctx: Ctx): string | number | Promise<string | number>;
+  revision?(args: Args, ctx: Ctx): string | number | Promise<string | number>;
   /**
    * Auth/scope discriminator folded into the fingerprint (e.g.
    * `workspace:harness:role`). Two callers with different scope get different
@@ -289,6 +306,14 @@ export interface DeltaCapability<Args = unknown, Ctx = unknown> {
    * `not_modified`-only to true `added/updated/removed` delta bodies. All optional;
    * a tool with only `revision`/`scope`/`schemaVersion` stays Lane-B (full | not_modified). */
 
+  /**
+   * Extract the diffable ROW ARRAY from the response `data` when `data` is not
+   * itself the array (e.g. `plans:attention` returns `{ groups, tierCounts }` —
+   * `rows: (d) => d.groups.flatMap(g => g.items)`). Return null/undefined to opt a
+   * particular response out of semantic diffing (→ `not_modified`/`full` only).
+   * Defaults to "the data IS the array" when omitted.
+   */
+  rows?(data: unknown): unknown[] | null | undefined;
   /**
    * Stable per-row identity. REQUIRED to emit semantic deltas — it is the `id` in
    * each `DeltaChange` and the key the harness merges on. Must be stable across
