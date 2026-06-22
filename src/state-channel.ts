@@ -46,6 +46,14 @@ export interface StateSnapshot {
 
 export interface VersionedSnapshot {
   runId: string;
+  /**
+   * The workspace this run is scoped to. Carried on the wire so a stateful
+   * surface can answer a card (`/card-response` `expectedWorkspaceId`) without
+   * out-of-band knowledge of its window's workspace — the desktop chat reads it
+   * from a React prop, but headless consumers (the TUI card renderer) have no
+   * such source. Optional for back-compat with any older serialized snapshot.
+   */
+  workspaceId?: string;
   version: number;
   snapshot: StateSnapshot;
 }
@@ -119,6 +127,7 @@ function emit(entry: RunEntry): void {
   // mutate; deep-cloning arbitrary toolState shapes is too expensive).
   const vs: VersionedSnapshot = {
     runId: entry.runId,
+    workspaceId: entry.workspaceId,
     version: entry.version,
     snapshot: {
       openCards: [...entry.snapshot.openCards],
@@ -211,6 +220,7 @@ export function getSnapshot(runId: string): VersionedSnapshot | null {
   if (!entry) return null;
   return {
     runId: entry.runId,
+    workspaceId: entry.workspaceId,
     version: entry.version,
     snapshot: entry.snapshot,
   };
@@ -232,7 +242,12 @@ export function subscribe(runId: string, cb: Subscriber): () => void {
   // Emit current state immediately so new connections get the snapshot.
   // Isolate throw — see emit() — so a buggy subscriber can't kill the caller.
   try {
-    cb({ runId: entry.runId, version: entry.version, snapshot: entry.snapshot });
+    cb({
+      runId: entry.runId,
+      workspaceId: entry.workspaceId,
+      version: entry.version,
+      snapshot: entry.snapshot,
+    });
   } catch (e) {
     console.warn('[state-channel] subscriber threw on initial emit', { runId: entry.runId, error: e });
   }
@@ -290,6 +305,7 @@ export function snapshotWorkspace(workspaceId: string): VersionedSnapshot[] {
     if (entry.workspaceId === workspaceId) {
       out.push({
         runId: entry.runId,
+        workspaceId: entry.workspaceId,
         version: entry.version,
         snapshot: entry.snapshot,
       });
