@@ -118,26 +118,39 @@ function chooseFormat(
   // (definetool-token-optimization-adoption P-001.)
   const autoBest: ResultFormat = Array.isArray(data) || isObjectWithArrayField(data) ? 'toon' : 'json';
 
-  // `want` = the format the request IDEALLY maps to (what a successful serve
-  // looks like); `candidates` = the ordered try-list (excludes formats the
-  // capability set disallows). `fallback` is then "we served something other
-  // than `want`" — which correctly flags both an unsupported explicit request
-  // and a compact request whose ideal format couldn't represent the data.
-  let want: ResultFormat;
-  let candidates: ResultFormat[];
+  // `json` request → lossless JSON, unconditionally.
   if (req === 'json') {
-    want = 'json';
-    candidates = ['json'];
-  } else if (req === 'compact') {
-    want = opts.eligibility ? opts.eligibility.bestFormat : autoBest;
-    candidates = [want, 'json'];
-  } else {
-    want = req; // the client explicitly named this format
-    const allowed = opts.eligibility ? opts.eligibility.capabilities.has(req) : true;
-    const fb = opts.eligibility ? opts.eligibility.bestFormat : autoBest;
-    candidates = allowed ? [req, fb, 'json'] : [fb, 'json'];
+    return { format: 'json', text: encode(data, 'json'), fallback: false };
   }
 
+  // `compact` request (the agent default) → the auto pick (schema bestFormat,
+  // else autoBest), but SIZE-GUARDED (D-005): never serve a compact body that
+  // isn't actually SMALLER than JSON. TOON is lossless-checked yet can be LARGER
+  // than JSON for a HETEROGENEOUS object array — rows with differing key sets
+  // (e.g. a bulk envelope whose failed items carry an extra `error` field) defeat
+  // TOON's tabular form and fall back to a per-row expansion bigger than JSON;
+  // serving it would INCREASE tokens. Choosing JSON there is the honest optimum,
+  // NOT a degradation, so `fallback` stays false. (CSV/TSV are only reached here
+  // via an eligibility bestFormat over a proven-flat array, where they are
+  // reliably smaller, so the same size check is safe for them.)
+  if (req === 'compact') {
+    const jsonText = encode(data, 'json');
+    const want = opts.eligibility ? opts.eligibility.bestFormat : autoBest;
+    if (want !== 'json') {
+      const r = tryEncode(want, data);
+      if (r && r.text.length < jsonText.length) return { ...r, fallback: false };
+    }
+    return { format: 'json', text: jsonText, fallback: false };
+  }
+
+  // Explicit non-JSON format (csv/toon/tsv/md): a DELIBERATE client ask — honor it
+  // (no size guard; the client chose it), trying it first, then the
+  // eligibility/auto fallback, then JSON. `fallback` flags "served other than
+  // `want`" — an unsupported explicit request or a shape the format can't hold.
+  const want: ResultFormat = req;
+  const allowed = opts.eligibility ? opts.eligibility.capabilities.has(req) : true;
+  const fb = opts.eligibility ? opts.eligibility.bestFormat : autoBest;
+  const candidates: ResultFormat[] = allowed ? [req, fb, 'json'] : [fb, 'json'];
   for (const f of candidates) {
     const r = tryEncode(f, data);
     if (r) return { ...r, fallback: r.format !== want };

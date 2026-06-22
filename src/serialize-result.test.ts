@@ -87,6 +87,26 @@ describe('serializeToolResponse — format selection', () => {
     const r = serializeToolResponse({ data: { ok: true, slug: 'x', status: 'done' } }, formatOptsFromCtx(ctx, undefined));
     expect(r.format).toBe('json');
   });
+
+  it('size-guard: a HETEROGENEOUS bulk envelope (TOON larger than JSON) is served as JSON, not the bigger TOON', () => {
+    // The failed item carries an extra `error` key → the results array is NOT
+    // uniform, so TOON cannot use its compact tabular form and expands to MORE
+    // tokens than JSON. The compact path must NOT serve the larger TOON.
+    const ctx = { transport: 'mcp' } as UnifiedToolContext;
+    const envelope = {
+      ok: true,
+      results: [
+        { ok: true, id: 'WI-1', state: 'passed' },
+        { ok: false, id: 'WI-2', error: 'not found' },
+        { ok: true, id: 'WI-3', state: 'passed' },
+      ],
+      counts: { ok: 2, failed: 1 },
+    };
+    const r = serializeToolResponse({ data: envelope }, formatOptsFromCtx(ctx, undefined));
+    expect(r.format).toBe('json');
+    expect(r.fallback).toBe(false); // JSON is the honest optimum here, not a degradation
+    expect((r.content[0] as { text: string }).text).toBe(JSON.stringify(envelope));
+  });
 });
 
 describe('serializeToolResponse — envelope routing', () => {
