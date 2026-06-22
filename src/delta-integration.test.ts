@@ -8,10 +8,55 @@
  */
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
+import { decode, type ResultFormat } from '@papercusp/result-encoding';
 import { defineTool } from './define-tool';
 import { dispatchProjectedTool, type DispatchProjectedDeps } from './dispatch-projected';
 import { lookupByMcpName, _resetProjectionRegistryForTests, type UnifiedToolContext } from './tool-projection';
-import { decodeDeltaCursor } from './delta-protocol';
+import {
+  decodeDeltaCursor,
+  encodeDeltaCursor,
+  computeViewChecksum,
+  applySemanticDelta,
+  type DeltaChange,
+} from './delta-protocol';
+
+interface SemRow {
+  id: string;
+  name: string;
+  rev: number;
+}
+const semItemKey = (r: unknown) => (r as SemRow).id;
+const semRowRevision = (r: unknown) => (r as SemRow).rev;
+const sortById = (rs: SemRow[]) => [...rs].sort((a, b) => a.id.localeCompare(b.id));
+
+/** Parse a serialized tool body back to its value (handles the `format: <fmt>` marker). */
+function parseBody(text: string): unknown {
+  const m = /^format: (\w+)\n/.exec(text);
+  if (!m) return JSON.parse(text);
+  return decode(text.slice(m[0].length), m[1] as ResultFormat);
+}
+
+// A bounded heterogeneous-free row-set, comfortably over the bypass threshold.
+function makeSemRows(n = 10): SemRow[] {
+  return Array.from({ length: n }, (_, i) => ({ id: `r${i}`, name: `row-${i}-with-padding-text`, rev: 1 }));
+}
+
+/** Semantic-capable tool whose view revision tracks its rows (revision = view checksum). */
+function defineSemanticTool(name: string, state: { rows: SemRow[] }, opts: { maxDeltaAge?: number } = {}): void {
+  defineTool({
+    name,
+    requirePrincipal: false,
+    capability: 'test:read',
+    args: z.object({}),
+    handler: async () => ({ data: state.rows }),
+    delta: {
+      revision: () => computeViewChecksum(state.rows, semItemKey, semRowRevision),
+      itemKey: semItemKey,
+      rowRevision: semRowRevision,
+      ...(opts.maxDeltaAge !== undefined ? { maxDeltaAge: opts.maxDeltaAge } : {}),
+    },
+  });
+}
 
 const DEPS: DispatchProjectedDeps = {};
 
@@ -195,5 +240,104 @@ describe('delta negotiation end-to-end through defineTool', () => {
     expect(meta.delta.mode).toBe('full');
     expect(meta.delta.reason).toBe('revision_error');
     expect(text).toMatch(/^format: toon\n/);
+  });
+});
+
+describe('semantic deltas end-to-end (Lane E)', () => {
+  it('first call → full body + cursor carrying the row digest + checksum', async () => {
+    const state = { rows: makeSemRows() };
+    defineSemanticTool('sem:first', state);
+    const { meta } = await call('sem:first', { transport: 'mcp', requestedDelta: 'auto' });
+    expect(meta.delta.mode).toBe('full');
+    expect(meta.delta.supported).toBe(true);
+    expect(meta.delta.checksum).toBe(computeViewChecksum(state.rows, semItemKey, semRowRevision));
+    const decoded = decodeDeltaCursor(meta.delta.cursor)!;
+    expect(Object.keys(decoded.dg ?? {})).toHaveLength(10); // digest embedded
+    expect(typeof decoded.ts).toBe('number');
+  });
+
+  it('unchanged view → not_modified (revision = view checksum matched)', async () => {
+    const state = { rows: makeSemRows() };
+    defineSemanticTool('sem:unchanged', state);
+    const first = await call('sem:unchanged', { transport: 'mcp', requestedDelta: 'auto' });
+    const second = await call('sem:unchanged', { transport: 'mcp', requestedDelta: `auto~${first.meta.delta.cursor}` });
+    expect(second.meta.delta.mode).toBe('not_modified');
+  });
+
+  it('changed view → mode:delta carrying ONLY the changed rows + counts + checksum; merge reconstructs the view', async () => {
+    const state = { rows: makeSemRows() };
+    defineSemanticTool('sem:delta', state);
+    const first = await call('sem:delta', { transport: 'mcp', requestedDelta: 'auto' });
+    const baseRows = parseBody(first.text) as SemRow[];
+    expect(sortById(baseRows)).toEqual(sortById(state.rows)); // full snapshot recovered
+
+    // Mutate: update r0, remove r1, add zz.
+    state.rows = [
+      { id: 'r0', name: 'row-0-with-padding-text', rev: 99 }, // updated
+      ...state.rows.slice(2), // r1 removed
+      { id: 'zz', name: 'brand-new-row', rev: 1 }, // added
+    ];
+
+    const second = await call('sem:delta', { transport: 'mcp', requestedDelta: `auto~${first.meta.delta.cursor}` });
+    expect(second.meta.delta.mode).toBe('delta');
+    expect(second.meta.delta.counts).toEqual({ added: 1, updated: 1, removed: 1 });
+
+    const changes = parseBody(second.text) as DeltaChange<SemRow>[];
+    // body carries ONLY the 3 changed rows, not the whole snapshot
+    expect(changes).toHaveLength(3);
+    expect(changes.some((c) => c.id === 'r5' && c.change === 'added')).toBe(false); // unchanged not present
+
+    // The harness merge reconstructs the new full view exactly, and its checksum matches.
+    const merged = applySemanticDelta(baseRows, changes, (r) => r.id);
+    expect(sortById(merged)).toEqual(sortById(state.rows));
+    expect(computeViewChecksum(merged, semItemKey, semRowRevision)).toBe(second.meta.delta.checksum);
+  });
+
+  it('explicit mode:not_modified on a changed view → full, NOT delta (harness wanted ETag-only)', async () => {
+    const state = { rows: makeSemRows() };
+    defineSemanticTool('sem:etagonly', state);
+    const first = await call('sem:etagonly', { transport: 'mcp', requestedDelta: 'auto' });
+    state.rows = [...state.rows, { id: 'zz', name: 'added-row-padding', rev: 1 }];
+    const second = await call('sem:etagonly', {
+      transport: 'mcp',
+      requestedDelta: `not_modified~${first.meta.delta.cursor}`,
+    });
+    expect(second.meta.delta.mode).toBe('full');
+    expect(second.meta.delta.reason).toBe('changed');
+  });
+
+  it('a prior cursor with no digest → full + reason:no_digest (cannot diff)', async () => {
+    const state = { rows: makeSemRows() };
+    defineSemanticTool('sem:nodigest', state);
+    const first = await call('sem:nodigest', { transport: 'mcp', requestedDelta: 'auto' });
+    const d = decodeDeltaCursor(first.meta.delta.cursor)!;
+    const noDigestCursor = encodeDeltaCursor({ v: 1, fp: d.fp, rev: d.rev }); // strip dg + ts
+    state.rows = [...state.rows, { id: 'zz', name: 'added-row-padding', rev: 1 }];
+    const second = await call('sem:nodigest', { transport: 'mcp', requestedDelta: `auto~${noDigestCursor}` });
+    expect(second.meta.delta.mode).toBe('full');
+    expect(second.meta.delta.reason).toBe('no_digest');
+  });
+
+  it('cursor older than maxDeltaAge → full + reason:max_age (periodic forced-full)', async () => {
+    const state = { rows: makeSemRows() };
+    defineSemanticTool('sem:maxage', state, { maxDeltaAge: 1000 });
+    const first = await call('sem:maxage', { transport: 'mcp', requestedDelta: 'auto' });
+    const d = decodeDeltaCursor(first.meta.delta.cursor)!;
+    const staleCursor = encodeDeltaCursor({ ...d, ts: 1 }); // ancient issued-at
+    state.rows = [...state.rows, { id: 'zz', name: 'added-row-padding', rev: 1 }];
+    const second = await call('sem:maxage', { transport: 'mcp', requestedDelta: `auto~${staleCursor}` });
+    expect(second.meta.delta.mode).toBe('full');
+    expect(second.meta.delta.reason).toBe('max_age');
+  });
+
+  it('delta-too-large guard: when every row changed, the delta is not smaller than full → full', async () => {
+    const state = { rows: makeSemRows() };
+    defineSemanticTool('sem:toolarge', state);
+    const first = await call('sem:toolarge', { transport: 'mcp', requestedDelta: 'auto' });
+    // bump EVERY row's rev → diff = all rows as 'updated' (each carrying full data) ≥ full
+    state.rows = state.rows.map((r) => ({ ...r, rev: r.rev + 1 }));
+    const second = await call('sem:toolarge', { transport: 'mcp', requestedDelta: `auto~${first.meta.delta.cursor}` });
+    expect(second.meta.delta.mode).toBe('full');
+    expect(second.meta.delta.reason).toBe('delta_too_large');
   });
 });

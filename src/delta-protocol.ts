@@ -105,6 +105,17 @@ export interface DeltaCursorPayload {
   rev: string;
   /** Endpoint schema version (a cursor-wide invalidation knob). Optional. */
   sv?: string;
+  /**
+   * Semantic-delta row digest — `{ itemKey → per-row revision }` of the view at
+   * issue time (Lane E). Present only for tools that declared the semantic surface
+   * (`itemKey`); lets the NEXT call compute added/updated/removed STATELESSLY from
+   * (this digest) + (the current rows) — no server-stored snapshot. Omitted when
+   * the view is too large to embed (`DELTA_MAX_DIGEST_ENTRIES`), in which case the
+   * tool degrades to `not_modified`/`full` only.
+   */
+  dg?: Record<string, string>;
+  /** Issued-at epoch ms — drives the `maxDeltaAge` periodic-forced-full (Lane E). */
+  ts?: number;
 }
 
 function toBase64Url(s: string): string {
@@ -154,7 +165,25 @@ export function decodeDeltaCursor(token: string | null | undefined): DeltaCursor
   const p = parsed as Record<string, unknown>;
   if (p.v !== 1 || typeof p.fp !== 'string' || typeof p.rev !== 'string') return null;
   if (p.sv !== undefined && typeof p.sv !== 'string') return null;
-  return { v: 1, fp: p.fp, rev: p.rev, ...(typeof p.sv === 'string' ? { sv: p.sv } : {}) };
+  const dg = isStringRecord(p.dg) ? (p.dg as Record<string, string>) : undefined;
+  const ts = typeof p.ts === 'number' && Number.isFinite(p.ts) ? p.ts : undefined;
+  return {
+    v: 1,
+    fp: p.fp,
+    rev: p.rev,
+    ...(typeof p.sv === 'string' ? { sv: p.sv } : {}),
+    ...(dg ? { dg } : {}),
+    ...(ts !== undefined ? { ts } : {}),
+  };
+}
+
+/** True for a flat `{ [string]: string }` object — the shape of a cursor digest. */
+function isStringRecord(v: unknown): v is Record<string, string> {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
+  for (const val of Object.values(v as Record<string, unknown>)) {
+    if (typeof val !== 'string') return false;
+  }
+  return true;
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -255,13 +284,56 @@ export interface DeltaCapability<Args = unknown, Ctx = unknown> {
    * to `full`.
    */
   schemaVersion?: string;
+
+  /* ── Semantic surface (Lane E) — declaring `itemKey` graduates the tool from
+   * `not_modified`-only to true `added/updated/removed` delta bodies. All optional;
+   * a tool with only `revision`/`scope`/`schemaVersion` stays Lane-B (full | not_modified). */
+
+  /**
+   * Stable per-row identity. REQUIRED to emit semantic deltas — it is the `id` in
+   * each `DeltaChange` and the key the harness merges on. Must be stable across
+   * calls for the "same" logical row.
+   */
+  itemKey?(row: unknown): string;
+  /**
+   * Per-row revision/version — the signal that a row was UPDATED (vs unchanged).
+   * Defaults to a content hash of the row when omitted, so `updated` is still
+   * detected; declare it when you have a cheaper/more-precise version (e.g. a row
+   * `updatedAt` or `version`).
+   */
+  rowRevision?(row: unknown): string | number;
+  /**
+   * Optional row type tag, surfaced as `DeltaChange.type` (for heterogeneous
+   * views like `plans:attention` whose rows are escalations / plan-items / …).
+   */
+  rowType?(row: unknown): string;
+  /**
+   * Optional sort-field name the row data carries — informational for the harness
+   * (it re-sorts its merged set by this field; full row data is carried per change
+   * so order is reconstructable). The framework's checksum stays set-based.
+   */
+  orderKey?: string;
+  /**
+   * Optional endpoint-supplied stateless change source: given the decoded cursor
+   * (its `rev`/`ts`/`dg`), return the changes since it. Use for views too large to
+   * embed a digest in the cursor (query "rows changed since `rev`" from a watermark
+   * source + a tombstone for removals). When omitted, the framework computes the
+   * diff generically from the cursor's embedded `dg` + the current rows.
+   */
+  changesSince?(args: Args, cursor: DeltaCursorPayload, ctx: Ctx): DeltaChange[] | Promise<DeltaChange[]>;
+  /**
+   * Max cursor age (ms). A cursor older than this forces a full reconciliation
+   * (`reason:'max_age'`) — the periodic forced-full that bounds drift accumulation.
+   * Omitted ⇒ no age limit.
+   */
+  maxDeltaAge?: number;
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
  * Negotiation (pure)
  * ────────────────────────────────────────────────────────────────────────── */
 
-export type NegotiatedDeltaMode = 'full' | 'not_modified';
+export type NegotiatedDeltaMode = 'full' | 'not_modified' | 'delta';
 
 /**
  * Small-response bypass threshold (bytes of the full JSON body). Below this a
@@ -282,17 +354,33 @@ export type DeltaFullReason =
   | 'changed' // same view, but the revision advanced — here is the new state
   | 'revision_error' // the endpoint's revision() threw — degrade to full
   | 'not_capable' // endpoint declared no delta capability
-  | 'bypass'; // small-response bypass
+  | 'bypass' // small-response bypass
+  | 'no_digest' // semantic delta wanted but the prior cursor carried no row digest
+  | 'max_age' // cursor older than maxDeltaAge — periodic forced-full
+  | 'delta_too_large' // the computed delta wasn't smaller than a full resend
+  | 'changesSince_error'; // the endpoint's changesSince() threw — degrade to full
 
 export interface DeltaNegotiation {
-  /** What to actually serve. Lane B: only `full` or `not_modified` — never a partial body. */
+  /** What to actually serve. `full` (complete body) | `not_modified` (no body) | `delta` (changed rows only). */
   mode: NegotiatedDeltaMode;
   /** Did the endpoint declare a `DeltaCapability`? Harness uses this to stop re-sending `_delta`. */
   supported: boolean;
   /** Fresh cursor to attach (only for delta-capable, non-bypass responses). */
   cursor?: string;
-  /** Present when `mode === 'full'` despite the client wanting otherwise. */
+  /** Present when `mode === 'full'`/`'delta'` despite the client wanting otherwise. */
   reason?: DeltaFullReason;
+  /** `mode==='delta'` only: the added/updated/removed rows (full data per changed row). */
+  changes?: DeltaChange[];
+  /**
+   * Set-based checksum of the FULL current view (Lane E). On a `full` or `delta`
+   * response the harness stores it; after applying a delta it recomputes the
+   * checksum over its merged set and force-fulls on mismatch — the safety net that
+   * makes an un-tombstoned removal or any mis-merge degrade to a re-fetch, never a
+   * wrong action (D-007).
+   */
+  checksum?: string;
+  /** `mode==='delta'` only: `{ added, updated, removed }` counts for the harness/telemetry. */
+  counts?: { added: number; updated: number; removed: number };
 }
 
 /**
@@ -322,8 +410,14 @@ export function negotiateDelta(input: {
   schemaVersion?: string;
   /** Small-response bypass: skip negotiation entirely, serve full, no cursor. */
   bypass?: boolean;
+  /**
+   * Extra fields folded into the freshly-minted cursor — the semantic-delta row
+   * digest (`dg`) + issued-at (`ts`) for a Lane-E tool, so the NEXT call can diff
+   * from this cursor. Omitted for a Lane-B (`revision`-only) tool.
+   */
+  cursorExtra?: Pick<DeltaCursorPayload, 'dg' | 'ts'>;
 }): DeltaNegotiation {
-  const { request, capabilityDeclared, currentRevision, currentFingerprint, schemaVersion, bypass } = input;
+  const { request, capabilityDeclared, currentRevision, currentFingerprint, schemaVersion, bypass, cursorExtra } = input;
 
   if (!capabilityDeclared) {
     return { mode: 'full', supported: false, reason: 'not_capable' };
@@ -338,6 +432,8 @@ export function negotiateDelta(input: {
     fp: currentFingerprint ?? '',
     rev: currentRevision ?? '',
     ...(schemaVersion ? { sv: schemaVersion } : {}),
+    ...(cursorExtra?.dg ? { dg: cursorExtra.dg } : {}),
+    ...(cursorExtra?.ts !== undefined ? { ts: cursorExtra.ts } : {}),
   });
 
   if (!request || request.mode === 'full') {
@@ -361,4 +457,132 @@ export function negotiateDelta(input: {
     return { mode: 'not_modified', supported: true, cursor: freshCursor };
   }
   return { mode: 'full', supported: true, cursor: freshCursor, reason: 'changed' };
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * Semantic deltas (Lane E) — pure row diffing, checksum, and reference merge
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Max rows whose digest is embedded in a cursor. Above this the digest is omitted
+ * (the cursor stays small) and the tool degrades to `not_modified`/`full` only —
+ * a bounded view (e.g. `plans:attention`, tens of rows) gets full semantic deltas;
+ * an unbounded one should supply `changesSince` (watermark-backed) instead.
+ */
+export const DELTA_MAX_DIGEST_ENTRIES = 500;
+
+/**
+ * A single semantic change in a `mode:'delta'` response (D-003 LLM-facing shape;
+ * NOT JSON Patch). `added`/`updated` carry the FULL row `data` — a changed row
+ * never depends on the model's base, only completeness + removals do. `removed`
+ * carries just the `id`.
+ */
+export interface DeltaChange<T = unknown> {
+  change: 'added' | 'updated' | 'removed';
+  /** `itemKey` of the row. */
+  id: string;
+  /** Optional row type tag (heterogeneous views). */
+  type?: string;
+  /** Full row data for `added`/`updated`; omitted for `removed`. */
+  data?: T;
+  /** Optional per-row note (e.g. why it changed). */
+  reason?: string;
+}
+
+/** Per-row revision: the endpoint's `rowRevision`, else a stable content hash. */
+function rowRev(row: unknown, rowRevision?: (row: unknown) => string | number): string {
+  return rowRevision ? String(rowRevision(row)) : fnv1a64(canonicalStringify(row));
+}
+
+/**
+ * `{ itemKey → rowRevision }` for the current rows — the digest embedded in a
+ * cursor so the next call can diff statelessly. Returns null when the view
+ * exceeds `DELTA_MAX_DIGEST_ENTRIES` (caller omits the digest → no semantic delta).
+ */
+export function computeRowDigest(
+  rows: readonly unknown[],
+  itemKey: (row: unknown) => string,
+  rowRevision?: (row: unknown) => string | number,
+): Record<string, string> | null {
+  if (rows.length > DELTA_MAX_DIGEST_ENTRIES) return null;
+  const out: Record<string, string> = {};
+  for (const row of rows) out[itemKey(row)] = rowRev(row, rowRevision);
+  return out;
+}
+
+/**
+ * A set-based checksum of the full view — a stable hash over the sorted
+ * `id=rev` pairs. The harness recomputes the SAME over its merged set and
+ * force-fulls on mismatch (D-007). Order-insensitive: the harness re-sorts by the
+ * declared `orderKey` field carried in each row's data, so a pure reorder doesn't
+ * need to bust the checksum.
+ */
+export function computeViewChecksum(
+  rows: readonly unknown[],
+  itemKey: (row: unknown) => string,
+  rowRevision?: (row: unknown) => string | number,
+): string {
+  const pairs: string[] = [];
+  for (const row of rows) pairs.push(`${itemKey(row)}=${rowRev(row, rowRevision)}`);
+  pairs.sort();
+  return fnv1a64(pairs.join(';'));
+}
+
+/**
+ * Compute added/updated/removed from a prior cursor digest + the current rows —
+ * the generic stateless differ used when the endpoint declares no `changesSince`.
+ * Complete (incl. removals) because the prior state IS the digest. `added` =
+ * id absent from the digest; `updated` = id present but the rowRevision differs;
+ * `removed` = a digest id absent from the current rows.
+ */
+export function diffFromDigest(
+  priorDigest: Record<string, string>,
+  rows: readonly unknown[],
+  itemKey: (row: unknown) => string,
+  opts: { rowRevision?: (row: unknown) => string | number; rowType?: (row: unknown) => string } = {},
+): DeltaChange[] {
+  const { rowRevision, rowType } = opts;
+  const changes: DeltaChange[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const id = itemKey(row);
+    seen.add(id);
+    const rev = rowRev(row, rowRevision);
+    const type = rowType?.(row);
+    if (!(id in priorDigest)) changes.push({ change: 'added', id, ...(type ? { type } : {}), data: row });
+    else if (priorDigest[id] !== rev) changes.push({ change: 'updated', id, ...(type ? { type } : {}), data: row });
+    // unchanged → omitted
+  }
+  for (const id of Object.keys(priorDigest)) {
+    if (!seen.has(id)) changes.push({ change: 'removed', id });
+  }
+  return changes;
+}
+
+/**
+ * Reference merge — apply a delta to a base row-set, keyed by `itemKey`. This is
+ * exactly what the agent harness must do to reconstruct the full view from its
+ * retained base + a `mode:'delta'` response; exported so the harness (and the
+ * tests that prove merge-correctness) share ONE implementation. Returns the
+ * merged rows in insertion order (the caller re-sorts by `orderKey`).
+ */
+export function applySemanticDelta<T>(
+  base: readonly T[],
+  changes: readonly DeltaChange<T>[],
+  itemKey: (row: T) => string,
+): T[] {
+  const map = new Map<string, T>();
+  for (const row of base) map.set(itemKey(row), row);
+  for (const c of changes) {
+    if (c.change === 'removed') map.delete(c.id);
+    else if (c.data !== undefined) map.set(c.id, c.data);
+  }
+  return [...map.values()];
+}
+
+/** `{ added, updated, removed }` counts over a change set (for the envelope + telemetry). */
+export function deltaCounts(changes: readonly DeltaChange[]): { added: number; updated: number; removed: number } {
+  const counts = { added: 0, updated: 0, removed: 0 };
+  for (const c of changes) counts[c.change]++;
+  return counts;
 }

@@ -28,6 +28,11 @@ import {
   parseDeltaRequest,
   computeViewFingerprint,
   negotiateDelta,
+  decodeDeltaCursor,
+  computeRowDigest,
+  computeViewChecksum,
+  diffFromDigest,
+  deltaCounts,
   DELTA_SMALL_RESPONSE_BYTES,
   type DeltaCapability,
   type DeltaNegotiation,
@@ -142,6 +147,103 @@ function computeOutputEligibility(
  * declared, the returned `data` is validated against it and a mismatch is
  * logged (best-effort, never throws — D-003 payoff #3).
  */
+/**
+ * Resolve the freshness negotiation for one projected tool call (agent-tool-delta-
+ * protocol-2026-06-22). Layers the Lane-E semantic upgrade on top of the Lane-B
+ * view-level decision (`negotiateDelta`):
+ *
+ *   - no `_delta` request AND no `delta` capability → undefined (today's path).
+ *   - `_delta` request, non-capable tool → full, `supported:false`.
+ *   - capable tool: small-response bypass → full; else compute the view revision +
+ *     (for a semantic tool) the row digest + checksum, run the Lane-B decision, and
+ *     UPGRADE a `changed` outcome to `mode:'delta'` when the request wants it, the
+ *     prior cursor carried a digest, the cursor is within `maxDeltaAge`, and the
+ *     computed delta is actually smaller than a full resend.
+ *
+ * Never throws: a thrown `revision()`/`changesSince()` degrades to a full body.
+ */
+async function negotiateToolDelta(
+  def: { name: string; delta?: DeltaCapability },
+  ctx: UnifiedToolContext,
+  args: unknown,
+  response: ToolResponse,
+): Promise<DeltaNegotiation | undefined> {
+  const request = parseDeltaRequest(ctx.requestedDelta);
+  if (!request && !def.delta) return undefined;
+  if (!def.delta) return negotiateDelta({ request, capabilityDeclared: false });
+
+  const cap = def.delta;
+  const scope = cap.scope?.(args, ctx);
+  const fingerprint = computeViewFingerprint({ toolName: def.name, args: args ?? null, scope, format: ctx.requestedFormat });
+  const body = response && typeof response === 'object' ? (response as ToolResponse).data : undefined;
+  const fullJsonLen = JSON.stringify(body ?? null).length;
+  if (fullJsonLen < DELTA_SMALL_RESPONSE_BYTES) {
+    return negotiateDelta({ request, capabilityDeclared: true, currentFingerprint: fingerprint, bypass: true });
+  }
+
+  let currentRevision: string;
+  try {
+    currentRevision = String(await cap.revision(args, ctx));
+  } catch (err) {
+    ctx.log(`[delta] ${def.name} revision() threw; serving full: ${err instanceof Error ? err.message : String(err)}`);
+    return { mode: 'full', supported: true, reason: 'revision_error' };
+  }
+
+  // Semantic surface active only when the tool declared `itemKey` AND the body is
+  // an array of rows. Otherwise it's a Lane-B (full | not_modified) tool.
+  const rows = cap.itemKey && Array.isArray(body) ? (body as unknown[]) : null;
+  const itemKey = cap.itemKey;
+  let digest: Record<string, string> | null = null;
+  let checksum: string | undefined;
+  if (rows && itemKey) {
+    digest = computeRowDigest(rows, itemKey, cap.rowRevision);
+    checksum = computeViewChecksum(rows, itemKey, cap.rowRevision);
+  }
+  const nowMs = Date.now();
+  const cursorExtra = digest ? { dg: digest, ts: nowMs } : undefined;
+
+  const base = negotiateDelta({
+    request,
+    capabilityDeclared: true,
+    currentRevision,
+    currentFingerprint: fingerprint,
+    schemaVersion: cap.schemaVersion,
+    cursorExtra,
+  });
+  // A semantic full/not_modified response carries the view checksum so the harness
+  // can verify a later merge (and store it with the base).
+  if (checksum && base.mode !== 'delta') base.checksum = checksum;
+
+  // Upgrade `changed` → `delta` only when the harness wants a delta body (mode
+  // `auto`; an explicit `not_modified`/`full` is honored as-is) and it's safe.
+  const wantsDelta = !!request && request.mode !== 'full' && request.mode !== 'not_modified';
+  if (rows && itemKey && base.mode === 'full' && base.reason === 'changed' && wantsDelta) {
+    // reason 'changed' ⇒ the request cursor decoded and its fp+sv matched.
+    const decoded = decodeDeltaCursor(request!.cursor);
+    if (!decoded?.dg) {
+      base.reason = 'no_digest';
+    } else if (cap.maxDeltaAge !== undefined && decoded.ts !== undefined && nowMs - decoded.ts > cap.maxDeltaAge) {
+      base.reason = 'max_age';
+    } else {
+      try {
+        const changes = cap.changesSince
+          ? await cap.changesSince(args, decoded, ctx)
+          : diffFromDigest(decoded.dg, rows, itemKey, { rowRevision: cap.rowRevision, rowType: cap.rowType });
+        // The delta must actually be smaller than a full resend, else just send full.
+        if (JSON.stringify(changes).length >= fullJsonLen) {
+          base.reason = 'delta_too_large';
+        } else {
+          return { mode: 'delta', supported: true, cursor: base.cursor, changes, checksum, counts: deltaCounts(changes) };
+        }
+      } catch (err) {
+        ctx.log(`[delta] ${def.name} changesSince() threw; serving full: ${err instanceof Error ? err.message : String(err)}`);
+        base.reason = 'changesSince_error';
+      }
+    }
+  }
+  return base;
+}
+
 async function serializeProjectedResult(
   response: ToolResponse,
   ctx: UnifiedToolContext,
@@ -167,47 +269,11 @@ async function serializeProjectedResult(
     }
   }
 
-  // Framework freshness negotiation (agent-tool-delta-protocol-2026-06-22, P-005).
-  // Compute ONLY when the call carries a `_delta` request OR the endpoint declared
-  // a `delta` capability — otherwise this adds nothing (today's path, no cost).
-  // It NEVER fails a call: a thrown revision() degrades to a full body.
-  let delta: DeltaNegotiation | undefined;
-  const deltaRequest = parseDeltaRequest(ctx.requestedDelta);
-  if (deltaRequest || def.delta) {
-    if (def.delta) {
-      const scope = def.delta.scope?.(args, ctx);
-      const fingerprint = computeViewFingerprint({
-        toolName: def.name,
-        args: args ?? null,
-        scope,
-        format: ctx.requestedFormat,
-      });
-      const body = response && typeof response === 'object' ? (response as ToolResponse).data : undefined;
-      const fullJsonLen = JSON.stringify(body ?? null).length;
-      const bypass = fullJsonLen < DELTA_SMALL_RESPONSE_BYTES;
-      if (bypass) {
-        delta = negotiateDelta({ request: deltaRequest, capabilityDeclared: true, currentFingerprint: fingerprint, bypass: true });
-      } else {
-        try {
-          const currentRevision = String(await def.delta.revision(args, ctx));
-          delta = negotiateDelta({
-            request: deltaRequest,
-            capabilityDeclared: true,
-            currentRevision,
-            currentFingerprint: fingerprint,
-            schemaVersion: def.delta.schemaVersion,
-          });
-        } catch (err) {
-          ctx.log(`[delta] ${def.name} revision() threw; serving full: ${err instanceof Error ? err.message : String(err)}`);
-          delta = { mode: 'full', supported: true, reason: 'revision_error' };
-        }
-      }
-    } else {
-      // A `_delta` request against a non-capable endpoint → full, supported:false
-      // (tells the harness to stop sending `_delta` for this tool).
-      delta = negotiateDelta({ request: deltaRequest, capabilityDeclared: false });
-    }
-  }
+  // Framework freshness negotiation (agent-tool-delta-protocol-2026-06-22, P-005 +
+  // P-011/P-012 semantic deltas). No-op unless the call carries a `_delta` request
+  // or the endpoint declared a `delta` capability; never fails a call (a thrown
+  // revision()/changesSince() degrades to full).
+  const delta = await negotiateToolDelta(def, ctx, args, response);
 
   const serialized = serializeToolResponse(response, {
     ...formatOptsFromCtx(ctx, eligibility),

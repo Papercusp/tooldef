@@ -6,8 +6,23 @@ import {
   decodeDeltaCursor,
   computeViewFingerprint,
   negotiateDelta,
+  computeRowDigest,
+  computeViewChecksum,
+  diffFromDigest,
+  applySemanticDelta,
+  deltaCounts,
+  DELTA_MAX_DIGEST_ENTRIES,
   type DeltaCursorPayload,
+  type DeltaChange,
 } from './delta-protocol';
+
+interface Row {
+  id: string;
+  name: string;
+  rev: number;
+}
+const itemKey = (r: unknown) => (r as Row).id;
+const rowRevision = (r: unknown) => (r as Row).rev;
 
 describe('parseDeltaRequest', () => {
   it('returns undefined for absent / empty tokens', () => {
@@ -234,5 +249,128 @@ describe('negotiateDelta', () => {
       schemaVersion: 'v2',
     });
     expect(second.mode).toBe('not_modified');
+  });
+
+  it('embeds a cursor digest + ts via cursorExtra and round-trips it', () => {
+    const dg = { a: '1', b: '2' };
+    const n = negotiateDelta({
+      request: undefined,
+      capabilityDeclared: true,
+      currentRevision: '7',
+      currentFingerprint: fp,
+      cursorExtra: { dg, ts: 1000 },
+    });
+    const decoded = decodeDeltaCursor(n.cursor!);
+    expect(decoded?.dg).toEqual(dg);
+    expect(decoded?.ts).toBe(1000);
+  });
+});
+
+describe('computeRowDigest', () => {
+  const rows: Row[] = [
+    { id: 'a', name: 'A', rev: 1 },
+    { id: 'b', name: 'B', rev: 1 },
+  ];
+
+  it('maps itemKey → rowRevision', () => {
+    expect(computeRowDigest(rows, itemKey, rowRevision)).toEqual({ a: '1', b: '1' });
+  });
+
+  it('falls back to a content hash when no rowRevision is given (still detects updates)', () => {
+    const d1 = computeRowDigest(rows, itemKey)!;
+    const d2 = computeRowDigest([{ id: 'a', name: 'A', rev: 1 }, { id: 'b', name: 'B-changed', rev: 1 }], itemKey)!;
+    expect(d1.a).toBe(d2.a); // unchanged row → same hash
+    expect(d1.b).not.toBe(d2.b); // changed content → different hash even though rev is equal
+  });
+
+  it('returns null above DELTA_MAX_DIGEST_ENTRIES (caller omits the digest)', () => {
+    const big = Array.from({ length: DELTA_MAX_DIGEST_ENTRIES + 1 }, (_, i) => ({ id: `r${i}`, name: 'x', rev: 1 }));
+    expect(computeRowDigest(big, itemKey, rowRevision)).toBeNull();
+  });
+});
+
+describe('computeViewChecksum', () => {
+  const rows: Row[] = [
+    { id: 'a', name: 'A', rev: 1 },
+    { id: 'b', name: 'B', rev: 2 },
+  ];
+
+  it('is deterministic and order-insensitive', () => {
+    expect(computeViewChecksum(rows, itemKey, rowRevision)).toBe(
+      computeViewChecksum([...rows].reverse(), itemKey, rowRevision),
+    );
+  });
+
+  it('changes when a row revision changes / a row is added / a row is removed', () => {
+    const base = computeViewChecksum(rows, itemKey, rowRevision);
+    expect(computeViewChecksum([{ id: 'a', name: 'A', rev: 9 }, rows[1]], itemKey, rowRevision)).not.toBe(base);
+    expect(computeViewChecksum([...rows, { id: 'c', name: 'C', rev: 1 }], itemKey, rowRevision)).not.toBe(base);
+    expect(computeViewChecksum([rows[0]], itemKey, rowRevision)).not.toBe(base);
+  });
+});
+
+describe('diffFromDigest', () => {
+  const prior: Row[] = [
+    { id: 'a', name: 'A', rev: 1 },
+    { id: 'b', name: 'B', rev: 1 },
+    { id: 'c', name: 'C', rev: 1 },
+  ];
+  const priorDigest = computeRowDigest(prior, itemKey, rowRevision)!;
+
+  it('detects added / updated / removed (and omits unchanged)', () => {
+    const next: Row[] = [
+      { id: 'a', name: 'A', rev: 1 }, // unchanged
+      { id: 'b', name: 'B2', rev: 2 }, // updated (rev bumped)
+      { id: 'd', name: 'D', rev: 1 }, // added
+      // c removed
+    ];
+    const changes = diffFromDigest(priorDigest, next, itemKey, { rowRevision });
+    expect(deltaCounts(changes)).toEqual({ added: 1, updated: 1, removed: 1 });
+    const byId = Object.fromEntries(changes.map((c) => [c.id, c]));
+    expect(byId.d.change).toBe('added');
+    expect(byId.d.data).toEqual({ id: 'd', name: 'D', rev: 1 });
+    expect(byId.b.change).toBe('updated');
+    expect(byId.c.change).toBe('removed');
+    expect(byId.c.data).toBeUndefined(); // removed carries id only
+    expect(byId.a).toBeUndefined(); // unchanged omitted
+  });
+
+  it('tags rows with rowType when provided', () => {
+    const changes = diffFromDigest(priorDigest, [{ id: 'e', name: 'E', rev: 1 }], itemKey, {
+      rowRevision,
+      rowType: () => 'plan-item',
+    });
+    expect(changes.find((c) => c.id === 'e')?.type).toBe('plan-item');
+  });
+});
+
+describe('applySemanticDelta — merge-correctness (the D-008 de-risk property)', () => {
+  it('applying diff(base→next) to base reconstructs next exactly (set-wise)', () => {
+    const base: Row[] = [
+      { id: 'a', name: 'A', rev: 1 },
+      { id: 'b', name: 'B', rev: 1 },
+      { id: 'c', name: 'C', rev: 1 },
+    ];
+    const next: Row[] = [
+      { id: 'a', name: 'A', rev: 1 }, // unchanged
+      { id: 'b', name: 'B2', rev: 2 }, // updated
+      { id: 'd', name: 'D', rev: 1 }, // added
+      // c removed
+    ];
+    const digest = computeRowDigest(base, itemKey, rowRevision)!;
+    const changes = diffFromDigest(digest, next, itemKey, { rowRevision }) as DeltaChange<Row>[];
+    const merged = applySemanticDelta(base, changes, (r) => r.id);
+    // set-wise equality + the post-merge checksum matches the fresh full view
+    const sortById = (rs: Row[]) => [...rs].sort((x, y) => x.id.localeCompare(y.id));
+    expect(sortById(merged)).toEqual(sortById(next));
+    expect(computeViewChecksum(merged, itemKey, rowRevision)).toBe(computeViewChecksum(next, itemKey, rowRevision));
+  });
+
+  it('a no-op delta (no changes) leaves the base identical', () => {
+    const base: Row[] = [{ id: 'a', name: 'A', rev: 1 }];
+    const digest = computeRowDigest(base, itemKey, rowRevision)!;
+    const changes = diffFromDigest(digest, base, itemKey, { rowRevision });
+    expect(changes).toEqual([]);
+    expect(applySemanticDelta(base, changes as DeltaChange<Row>[], (r) => r.id)).toEqual(base);
   });
 });

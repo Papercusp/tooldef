@@ -81,6 +81,8 @@ function deltaMeta(delta: DeltaNegotiation): Record<string, unknown> {
     supported: delta.supported,
     ...(delta.cursor ? { cursor: delta.cursor } : {}),
     ...(delta.reason ? { reason: delta.reason } : {}),
+    ...(delta.checksum ? { checksum: delta.checksum } : {}),
+    ...(delta.counts ? { counts: delta.counts } : {}),
   };
 }
 
@@ -248,6 +250,24 @@ export function serializeToolResponse(
     // `format: 'json'` is the internal label only — `_meta.format` is deliberately
     // left unset (there is no compact body to tag; telemetry reads delta.mode).
     return { content, _meta, format: 'json', fallback: false };
+  }
+
+  // Semantic delta (Lane E): the BODY is the changed rows (added/updated/removed),
+  // not the full snapshot — a compact array the harness merges onto its retained
+  // base, then verifies against `_meta.delta.checksum`. Same format machinery as a
+  // full body (TOON/compact-eligible), so the changes ride the token-efficient path.
+  if (opts.delta && opts.delta.mode === 'delta') {
+    _meta.delta = deltaMeta(opts.delta);
+    const changes = opts.delta.changes ?? [];
+    const chosen = chooseFormat(changes, opts);
+    _meta.format = chosen.format;
+    if (chosen.fallback) _meta.formatFallback = true;
+    const text = chosen.format === 'json' ? chosen.text : `format: ${chosen.format}\n${chosen.text}`;
+    const content: Array<Record<string, unknown>> = [{ type: 'text', text }];
+    if (Array.isArray(response.uiResources)) {
+      for (const ui of response.uiResources) content.push(ui as unknown as Record<string, unknown>);
+    }
+    return { content, _meta, format: chosen.format, fallback: chosen.fallback };
   }
 
   // Tier-3 (prompt-declared columns) takes precedence over the generic compact
