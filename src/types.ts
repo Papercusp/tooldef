@@ -9,6 +9,7 @@ import type { StandardSchemaV1 } from './standard-schema';
 import type { EventsSchema, UnifiedToolContext, UserEvents } from './tool-projection';
 import type { Authorizer } from './authz';
 import type { ToolRequireSpec } from './requires';
+import type { DeltaCapability } from './delta-protocol';
 import type {
   OpenCardSnapshot as WireOpenCardSnapshot,
   ReportBlock,
@@ -439,6 +440,15 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
    */
   result?: StandardSchemaV1;
   /**
+   * Opt into framework freshness negotiation (agent-tool-delta-protocol-2026-06-22,
+   * D-001/D-002). Declare a `revision` source and the framework answers an
+   * `_meta.delta` request with `not_modified` when the view is unchanged (else
+   * `full`), via a stateless opaque cursor — no per-tool `args` schema change
+   * (control rides the MCP `_meta` ENVELOPE). Semantic added/updated/removed
+   * deltas are a separate endpoint layer (Lane E) NOT enabled by this field.
+   */
+  delta?: DeltaCapability<StandardSchemaV1.InferOutput<TArgs>, UnifiedToolContext>;
+  /**
    * Implementation. PREFER returning a `ToolResponse` envelope (`{ data }`)
    * — it gets format-aware serialization. A raw `ToolResult` (MCP content
    * shape) is also accepted and passes through untouched (parity with the
@@ -527,6 +537,12 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
   result?: StandardSchemaV1;
   /** Alias for `result`. */
   output?: StandardSchemaV1;
+  /**
+   * Opt into framework freshness negotiation — see `ToolDefinition.delta`
+   * (agent-tool-delta-protocol-2026-06-22, D-001/D-002). Endpoints declare a
+   * `revision` source; the framework handles cursor + `not_modified` plumbing.
+   */
+  delta?: DeltaCapability<StandardSchemaV1.InferOutput<TArgs>, UnifiedToolContext>;
   /**
    * Telemetry sample rate, 0..1. Default 1 (record every call). High-
    * frequency tools set this < 1 so `tool_invocations` doesn't flood.
@@ -680,6 +696,11 @@ export interface RoleToolDefinition<
    */
   result?: StandardSchemaV1;
   /**
+   * Opt into framework freshness negotiation — see `ToolDefinition.delta`
+   * (agent-tool-delta-protocol-2026-06-22, D-001/D-002).
+   */
+  delta?: DeltaCapability<StandardSchemaV1.InferOutput<TArgs>, UnifiedToolContext>;
+  /**
    * Handler receives the unified context (no principal). May return either
    * a raw `ToolResult` (MCP shape) or a `ToolResponse` envelope; the
    * wrapper adapts both.
@@ -761,6 +782,12 @@ export interface RoleToolDefinitionInput<
   result?: StandardSchemaV1;
   /** Alias for `result`. */
   output?: StandardSchemaV1;
+  /**
+   * Opt into framework freshness negotiation — see `ToolDefinition.delta`
+   * (agent-tool-delta-protocol-2026-06-22, D-001/D-002). Endpoints declare a
+   * `revision` source; the framework handles cursor + `not_modified` plumbing.
+   */
+  delta?: DeltaCapability<StandardSchemaV1.InferOutput<TArgs>, UnifiedToolContext>;
   /**
    * Intrinsic lifecycle emissions (coord-lifecycle-automation D-002). Each
    * entry desugars to an event-reaction rule registered at load. See

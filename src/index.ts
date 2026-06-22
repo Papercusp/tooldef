@@ -42,6 +42,24 @@ export {
   type SerializedToolResult,
 } from './serialize-result';
 
+/* ─── Delta protocol — agent tool result freshness negotiation ───────── */
+export {
+  parseDeltaRequest,
+  formatDeltaRequest,
+  encodeDeltaCursor,
+  decodeDeltaCursor,
+  computeViewFingerprint,
+  negotiateDelta,
+  DELTA_SMALL_RESPONSE_BYTES,
+  type DeltaMode,
+  type DeltaRequest,
+  type DeltaCursorPayload,
+  type DeltaCapability,
+  type DeltaNegotiation,
+  type NegotiatedDeltaMode,
+  type DeltaFullReason,
+} from './delta-protocol';
+
 /* ─── Registries ─────────────────────────────────────────────────────── */
 export { getCatalog, lookup, _resetCatalogForTests } from './registry';
 

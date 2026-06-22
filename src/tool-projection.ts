@@ -427,6 +427,18 @@ export interface UnifiedToolContext {
    */
   requestedStructured?: boolean;
 
+  /**
+   * Client-negotiated freshness request (agent-tool-delta-protocol-2026-06-22,
+   * D-001). The RAW token from the transport — `_meta.delta` or `?delta=` on MCP
+   * (`"<mode>"` / `"<mode>~<cursor>"`, parsed by `parseDeltaRequest`). Like
+   * `requestedFormat`, it is set by the CLIENT/HARNESS process, never the model:
+   * the harness owns cursor storage + base-presence tracking and only asks for
+   * `not_modified` when it can prove the matching base is still in context.
+   * Absent ⇒ no negotiation (serve full, as today). Consumed by the result
+   * serializer when the tool declared a `delta` capability.
+   */
+  requestedDelta?: string;
+
   /* ── Spawn context (typically agent-driven calls) ─────────────────── */
   workspaceId?: string;
   harnessSlug?: string;

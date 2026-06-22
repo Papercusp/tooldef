@@ -25,6 +25,14 @@ import { registerProjectedTool, type ToolFn, type ToolExposure, type UnifiedTool
 import { UnauthorizedToolError, InvalidInputError } from './dispatch-projected';
 import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
 import {
+  parseDeltaRequest,
+  computeViewFingerprint,
+  negotiateDelta,
+  DELTA_SMALL_RESPONSE_BYTES,
+  type DeltaCapability,
+  type DeltaNegotiation,
+} from './delta-protocol';
+import {
   analyzeSchema,
   projectReadColumns,
   projectWriteColumns,
@@ -138,8 +146,9 @@ async function serializeProjectedResult(
   response: ToolResponse,
   ctx: UnifiedToolContext,
   eligibility: EligibilityResult | undefined,
-  def: { name: string; result?: StandardSchemaV1 },
+  def: { name: string; result?: StandardSchemaV1; delta?: DeltaCapability },
   readColumns?: ColumnSpec[],
+  args?: unknown,
 ): Promise<ToolResult> {
   if (
     def.result &&
@@ -157,10 +166,54 @@ async function serializeProjectedResult(
       /* validation is best-effort; never fail the call on it */
     }
   }
+
+  // Framework freshness negotiation (agent-tool-delta-protocol-2026-06-22, P-005).
+  // Compute ONLY when the call carries a `_delta` request OR the endpoint declared
+  // a `delta` capability — otherwise this adds nothing (today's path, no cost).
+  // It NEVER fails a call: a thrown revision() degrades to a full body.
+  let delta: DeltaNegotiation | undefined;
+  const deltaRequest = parseDeltaRequest(ctx.requestedDelta);
+  if (deltaRequest || def.delta) {
+    if (def.delta) {
+      const scope = def.delta.scope?.(args, ctx);
+      const fingerprint = computeViewFingerprint({
+        toolName: def.name,
+        args: args ?? null,
+        scope,
+        format: ctx.requestedFormat,
+      });
+      const body = response && typeof response === 'object' ? (response as ToolResponse).data : undefined;
+      const fullJsonLen = JSON.stringify(body ?? null).length;
+      const bypass = fullJsonLen < DELTA_SMALL_RESPONSE_BYTES;
+      if (bypass) {
+        delta = negotiateDelta({ request: deltaRequest, capabilityDeclared: true, currentFingerprint: fingerprint, bypass: true });
+      } else {
+        try {
+          const currentRevision = String(await def.delta.revision(args, ctx));
+          delta = negotiateDelta({
+            request: deltaRequest,
+            capabilityDeclared: true,
+            currentRevision,
+            currentFingerprint: fingerprint,
+            schemaVersion: def.delta.schemaVersion,
+          });
+        } catch (err) {
+          ctx.log(`[delta] ${def.name} revision() threw; serving full: ${err instanceof Error ? err.message : String(err)}`);
+          delta = { mode: 'full', supported: true, reason: 'revision_error' };
+        }
+      }
+    } else {
+      // A `_delta` request against a non-capable endpoint → full, supported:false
+      // (tells the harness to stop sending `_delta` for this tool).
+      delta = negotiateDelta({ request: deltaRequest, capabilityDeclared: false });
+    }
+  }
+
   const serialized = serializeToolResponse(response, {
     ...formatOptsFromCtx(ctx, eligibility),
     toolName: def.name,
     readColumns,
+    ...(delta ? { delta } : {}),
   });
   const result: ToolResult = { content: serialized.content as never };
   if (Object.keys(serialized._meta).length > 0) result._meta = serialized._meta;
@@ -369,6 +422,7 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
     composition: (input.replaces?.length ?? 0) > 0 ? 'composite' : 'primitive',
     args: input.args,
     result: input.result ?? input.output,
+    delta: input.delta,
     handler: input.handler,
     guidance: input.guidance,
     profile: input.profile,
@@ -444,6 +498,7 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
     modality: input.modality,
     args: input.args,
     result: input.result ?? input.output,
+    delta: input.delta,
     events: input.events,
     state: input.state,
     handler: input.handler,
@@ -602,11 +657,11 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     if (response && typeof response === 'object' && Array.isArray((response as ToolResult).content)) {
       const reencodable = reencodableJsonPayload(response as ToolResult, ctx);
       if (reencodable !== undefined) {
-        return serializeProjectedResult({ data: reencodable } as ToolResponse, ctx, eligibility, def, readColumns);
+        return serializeProjectedResult({ data: reencodable } as ToolResponse, ctx, eligibility, def, readColumns, parsed.value);
       }
       return response as ToolResult;
     }
-    return serializeProjectedResult(response as ToolResponse, ctx, eligibility, def, readColumns);
+    return serializeProjectedResult(response as ToolResponse, ctx, eligibility, def, readColumns, parsed.value);
   };
 
   registerProjectedTool({
@@ -689,13 +744,13 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     if (out && typeof out === 'object' && Array.isArray((out as ToolResult).content)) {
       const reencodable = reencodableJsonPayload(out as ToolResult, ctx);
       if (reencodable !== undefined) {
-        return serializeProjectedResult({ data: reencodable } as ToolResponse, ctx, eligibility, def, readColumns);
+        return serializeProjectedResult({ data: reencodable } as ToolResponse, ctx, eligibility, def, readColumns, parsed.value);
       }
       return out as ToolResult;
     }
 
     // ToolResponse envelope → format-aware MCP content[] + _meta.
-    return serializeProjectedResult(out as ToolResponse, ctx, eligibility, def, readColumns);
+    return serializeProjectedResult(out as ToolResponse, ctx, eligibility, def, readColumns, parsed.value);
   };
 
   registerProjectedTool({

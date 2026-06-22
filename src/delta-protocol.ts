@@ -235,14 +235,20 @@ export interface DeltaCapability<Args = unknown, Ctx = unknown> {
   /**
    * The view's current revision/checksum — the freshness signal. Coerced to a
    * string; equal strings ⇒ "unchanged". May be async (e.g. a `SELECT max(seq)`).
+   *
+   * Method-shorthand (not an arrow property) on purpose: it makes the parameter
+   * types bivariant, so a `DeltaCapability<SpecificArgs, Ctx>` declared on a
+   * `defineTool` is assignable to the framework's `DeltaCapability<unknown,…>`
+   * call site. Authors may still write `revision: (args, ctx) => …` (an arrow
+   * property satisfies a method signature).
    */
-  revision: (args: Args, ctx: Ctx) => string | number | Promise<string | number>;
+  revision(args: Args, ctx: Ctx): string | number | Promise<string | number>;
   /**
    * Auth/scope discriminator folded into the fingerprint (e.g.
    * `workspace:harness:role`). Two callers with different scope get different
    * fingerprints, so a cursor never crosses a scope boundary. Defaults to ''.
    */
-  scope?: (args: Args, ctx: Ctx) => string;
+  scope?(args: Args, ctx: Ctx): string;
   /**
    * Bump this to invalidate EVERY outstanding cursor for the endpoint at once
    * (e.g. after a result-shape change). A cursor whose `sv` differs falls back
@@ -257,6 +263,14 @@ export interface DeltaCapability<Args = unknown, Ctx = unknown> {
 
 export type NegotiatedDeltaMode = 'full' | 'not_modified';
 
+/**
+ * Small-response bypass threshold (bytes of the full JSON body). Below this a
+ * `not_modified` round-trip barely saves anything once the cursor + envelope
+ * (~120 bytes) is counted, so the framework skips delta machinery and serves
+ * full with no cursor. (agent-tool-delta-protocol-2026-06-22, P-004.)
+ */
+export const DELTA_SMALL_RESPONSE_BYTES = 256;
+
 /** Why `full` was served despite a `not_modified`/`auto` request (telemetry + harness signal). */
 export type DeltaFullReason =
   | 'no_request' // no _delta on the call
@@ -266,6 +280,7 @@ export type DeltaFullReason =
   | 'schema_changed'
   | 'view_changed' // fingerprint mismatch (different tool/args/scope/format)
   | 'changed' // same view, but the revision advanced — here is the new state
+  | 'revision_error' // the endpoint's revision() threw — degrade to full
   | 'not_capable' // endpoint declared no delta capability
   | 'bypass'; // small-response bypass
 

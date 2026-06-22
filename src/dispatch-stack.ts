@@ -973,10 +973,20 @@ async function recordTelemetry(
       // It rides metadata_json (jsonb) — no DDL. Absent _meta.format ⇒ not recorded
       // (the consumer reads absent as the unmarked JSON default).
       const servedFormat = (r._meta as { format?: unknown } | undefined)?.format;
-      const metaWithFormat =
-        typeof servedFormat === 'string'
-          ? { ...(metadataJson ?? {}), format: servedFormat }
-          : metadataJson;
+      // The negotiated freshness mode (full | not_modified), when the call went
+      // through delta negotiation (agent-tool-delta-protocol-2026-06-22, P-005).
+      // Captured into metadata_json so `metadata_json->>'deltaMode'` GROUP BY gives
+      // the not_modified hit-rate per tool over time — the success metric for the
+      // delta rollout (mirrors the `format` capture; rides jsonb, no DDL). Absent
+      // _meta.delta ⇒ not recorded (the tool wasn't delta-negotiated).
+      const servedDeltaMode = (r._meta as { delta?: { mode?: unknown } } | undefined)?.delta?.mode;
+      let metaWithFormat = metadataJson;
+      if (typeof servedFormat === 'string') {
+        metaWithFormat = { ...(metaWithFormat ?? {}), format: servedFormat };
+      }
+      if (typeof servedDeltaMode === 'string') {
+        metaWithFormat = { ...(metaWithFormat ?? {}), deltaMode: servedDeltaMode };
+      }
       await deps.recordInvocation({
         toolName,
         pluginName: tool.pluginName,

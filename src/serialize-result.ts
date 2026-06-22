@@ -35,6 +35,7 @@ import {
 } from '@papercusp/result-encoding';
 import type { ToolResponse } from './types';
 import type { UnifiedToolContext } from './tool-projection';
+import type { DeltaNegotiation } from './delta-protocol';
 
 export interface SerializeFormatOpts {
   /** Explicit client-requested format (negotiation), already parsed. Undefined → transport default. */
@@ -61,6 +62,26 @@ export interface SerializeFormatOpts {
    * SAME projection drives the prompt legend (anti-desync guarantee, P-011).
    */
   readColumns?: ColumnSpec[];
+  /**
+   * Negotiated freshness outcome (agent-tool-delta-protocol-2026-06-22, P-005),
+   * computed upstream from the tool's `delta` capability + `ctx.requestedDelta`.
+   * When `mode === 'not_modified'` the data body is SUPPRESSED (the harness holds
+   * the matching base) and only the marker + cursor are sent; otherwise the
+   * fresh cursor rides `_meta.delta` alongside the normal full body. Absent ⇒ no
+   * negotiation (today's behavior). The `delta` field never appears for a tool
+   * that didn't declare a `delta` capability AND didn't get a `_delta` request.
+   */
+  delta?: DeltaNegotiation;
+}
+
+/** Shape the negotiation into the compact `_meta.delta` envelope (omit absent fields). */
+function deltaMeta(delta: DeltaNegotiation): Record<string, unknown> {
+  return {
+    mode: delta.mode,
+    supported: delta.supported,
+    ...(delta.cursor ? { cursor: delta.cursor } : {}),
+    ...(delta.reason ? { reason: delta.reason } : {}),
+  };
 }
 
 export interface SerializedToolResult {
@@ -205,6 +226,30 @@ export function serializeToolResponse(
   }
   const data = response.data ?? response;
 
+  // Freshness negotiation (agent-tool-delta-protocol-2026-06-22, P-005). A
+  // `not_modified` outcome SUPPRESSES the body entirely — the harness already
+  // holds the matching base in context, so we send only a tiny marker + the
+  // fresh cursor. This is the whole point of the protocol: don't replay an
+  // unchanged snapshot into the model's context. (No data → nothing to merge →
+  // base-presence-safe, D-004/D-006.) The `full` branch below attaches the
+  // fresh cursor so the NEXT call can ask `not_modified`.
+  if (opts.delta && opts.delta.mode === 'not_modified') {
+    _meta.delta = deltaMeta(opts.delta);
+    const count = Array.isArray(data)
+      ? data.length
+      : isObjectWithArrayField(data)
+        ? undefined
+        : undefined;
+    const text = count !== undefined ? `mode: not_modified\ncount: ${count}` : 'mode: not_modified';
+    const content: Array<Record<string, unknown>> = [{ type: 'text', text }];
+    if (Array.isArray(response.uiResources)) {
+      for (const ui of response.uiResources) content.push(ui as unknown as Record<string, unknown>);
+    }
+    // `format: 'json'` is the internal label only — `_meta.format` is deliberately
+    // left unset (there is no compact body to tag; telemetry reads delta.mode).
+    return { content, _meta, format: 'json', fallback: false };
+  }
+
   // Tier-3 (prompt-declared columns) takes precedence over the generic compact
   // path for registry tools; otherwise fall through to bestFormat/TOON-auto.
   const tier3 = tryTier3Read(data, opts);
@@ -221,6 +266,10 @@ export function serializeToolResponse(
   if (Array.isArray(response.uiResources)) {
     for (const ui of response.uiResources) content.push(ui as unknown as Record<string, unknown>);
   }
+  // Full-body path: attach the negotiated freshness envelope (fresh cursor, so
+  // the next call can request `not_modified`; `supported:false` tells a harness
+  // this endpoint isn't delta-capable so it stops sending `_delta`).
+  if (opts.delta) _meta.delta = deltaMeta(opts.delta);
   const result: SerializedToolResult = { content, _meta, format: chosen.format, fallback: chosen.fallback };
   // Opt-in lossless structured payload for UI/programmatic consumers (P-010).
   // Only meaningful when the body itself isn't already the lossless JSON.
