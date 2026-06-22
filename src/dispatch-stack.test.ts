@@ -186,4 +186,30 @@ describe('runDispatchStack — custom stack', () => {
     );
     expect(recorded).toEqual(['role-not-allowed']);
   });
+
+  it('captures the served result _meta.format into recorded metadata_json (usage-insights P-002)', async () => {
+    let capturedMeta: Record<string, unknown> | null | undefined;
+    const tool = makeTool({
+      fn: async () => ({ content: [{ type: 'text', text: 'format: toon\n[1]{a}:\n1' }], _meta: { format: 'toon' } }),
+    });
+    await runDispatchStack(tool, 'fix.tool', {}, MAKE_CTX(), {
+      computeQuotaWindow: () => ({ key: 'w', limit: 0 }),
+      recordInvocation: vi.fn(async (i) => {
+        capturedMeta = i.metadataJson;
+      }),
+    });
+    expect(capturedMeta?.format).toBe('toon');
+  });
+
+  it('records NO format key when the result carries no _meta.format', async () => {
+    let captured: Record<string, unknown> | null | undefined = { sentinel: 1 };
+    const tool = makeTool({ fn: async () => ({ content: [{ type: 'text', text: 'x' }] }) });
+    await runDispatchStack(tool, 'fix.tool', {}, MAKE_CTX(), {
+      computeQuotaWindow: () => ({ key: 'w', limit: 0 }),
+      recordInvocation: vi.fn(async (i) => {
+        captured = i.metadataJson;
+      }),
+    });
+    expect((captured ?? {}).format).toBeUndefined();
+  });
 });

@@ -966,6 +966,17 @@ async function recordTelemetry(
   try {
     if (result.ok && result.result) {
       const r = result.result;
+      // Capture the SERVED result format (json/toon/csv/tsv/md) into metadata_json so
+      // compact-encoding ADOPTION is a measurable signal — `metadata_json->>'format'`
+      // GROUP BY gives the toon-vs-json share per tool over time, the success metric
+      // for the token-optimization rollout (definetool-usage-insights-tab P-002 / D-002).
+      // It rides metadata_json (jsonb) — no DDL. Absent _meta.format ⇒ not recorded
+      // (the consumer reads absent as the unmarked JSON default).
+      const servedFormat = (r._meta as { format?: unknown } | undefined)?.format;
+      const metaWithFormat =
+        typeof servedFormat === 'string'
+          ? { ...(metadataJson ?? {}), format: servedFormat }
+          : metadataJson;
       await deps.recordInvocation({
         toolName,
         pluginName: tool.pluginName,
@@ -977,7 +988,7 @@ async function recordTelemetry(
         ...(r.outputRef ? { outputRef: r.outputRef } : {}),
         args: input,
         eventCount,
-        metadataJson,
+        metadataJson: metaWithFormat,
       });
     } else {
       await deps.recordInvocation({
