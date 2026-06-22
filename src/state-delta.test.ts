@@ -7,7 +7,7 @@
  * null (→ the caller refetches the full snapshot).
  */
 import { describe, it, expect } from 'vitest';
-import { diffSnapshot, applySnapshotDelta } from './state-delta';
+import { diffSnapshot, applySnapshotDelta, chooseSnapshotEmission } from './state-delta';
 import type { OpenCardSnapshot } from './types';
 import type { VersionedSnapshot } from './state-channel';
 
@@ -70,5 +70,32 @@ describe('diffSnapshot / applySnapshotDelta', () => {
     const prev = snap(1, [card('a', { x: 1, y: 2 })]);
     const next = snap(2, [card('a', { y: 2, x: 1 })]);
     expect(diffSnapshot(prev, next)!.cards).toEqual([]);
+  });
+});
+
+describe('chooseSnapshotEmission (stream full-vs-delta policy)', () => {
+  it('emits a full snapshot as the baseline (no prev)', () => {
+    const next = snap(1, [card('a')]);
+    expect(chooseSnapshotEmission(undefined, next, true)).toEqual({ event: 'snapshot', data: next });
+  });
+
+  it('emits full snapshots to a non-delta consumer even with a prev', () => {
+    const prev = snap(1, [card('a')]);
+    const next = snap(2, [card('a'), card('b')]);
+    expect(chooseSnapshotEmission(prev, next, false)).toEqual({ event: 'snapshot', data: next });
+  });
+
+  it('emits a delta to a delta-aware consumer once a base exists', () => {
+    const prev = snap(1, [card('a')]);
+    const next = snap(2, [card('a'), card('b')]);
+    const out = chooseSnapshotEmission(prev, next, true);
+    expect(out.event).toBe('delta');
+    expect(applySnapshotDelta(prev, out.data as never)).toEqual(next); // the delta reconstructs next
+  });
+
+  it('re-emits a full snapshot when the version is unchanged (no diff to send)', () => {
+    const prev = snap(2, [card('a')]);
+    const next = snap(2, [card('a')]);
+    expect(chooseSnapshotEmission(prev, next, true)).toEqual({ event: 'snapshot', data: next });
   });
 });

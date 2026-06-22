@@ -84,3 +84,26 @@ export function applySnapshotDelta(base: VersionedSnapshot, delta: SnapshotDelta
 function toolStateChanged(a: unknown, b: unknown): boolean {
   return computeViewChecksum([a], () => 't') !== computeViewChecksum([b], () => 't');
 }
+
+export type SnapshotEmission =
+  | { event: 'snapshot'; data: VersionedSnapshot }
+  | { event: 'delta'; data: SnapshotDelta };
+
+/**
+ * Choose how to emit `next` on a per-run snapshot stream: a `delta` against `prev`
+ * for a delta-aware consumer when one can be computed, else the full `snapshot`
+ * (the baseline on first emit, a non-delta consumer, an unchanged version, or an
+ * undeltable view). Pure — the caller tracks `prev` per run and updates it to
+ * `next` after emitting.
+ */
+export function chooseSnapshotEmission(
+  prev: VersionedSnapshot | undefined,
+  next: VersionedSnapshot,
+  wantsDelta: boolean,
+): SnapshotEmission {
+  if (wantsDelta && prev && prev.version !== next.version) {
+    const d = diffSnapshot(prev, next);
+    if (d) return { event: 'delta', data: d };
+  }
+  return { event: 'snapshot', data: next };
+}

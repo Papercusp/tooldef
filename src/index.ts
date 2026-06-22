@@ -128,8 +128,8 @@ export type {
 } from './state-channel';
 
 /* ─── State-channel deltas (agent-tool-delta-protocol P-009) ─────────────── */
-export { diffSnapshot, applySnapshotDelta } from './state-delta';
-export type { SnapshotDelta } from './state-delta';
+export { diffSnapshot, applySnapshotDelta, chooseSnapshotEmission } from './state-delta';
+export type { SnapshotDelta, SnapshotEmission } from './state-delta';
 
 /* ─── Card correlator (ctx.askUser) ──────────────────────────────────── */
 export {
