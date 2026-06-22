@@ -32,6 +32,15 @@ export interface ToolResult {
     /** Structured metadata returned alongside content (not shown to the model). */
     _meta?: Record<string, unknown>;
     /**
+     * Lossless structured JSON of the result, mirroring the tool's MCP
+     * `outputSchema` (token-efficient-tool-result-formats P-010). When present,
+     * the MCP transport forwards it as `tools/call` `structuredContent` for
+     * UI/programmatic consumers. Gated by negotiation so the model never pays for
+     * both the compact `content` text AND this JSON — absent on the default
+     * compact path.
+     */
+    structuredContent?: unknown;
+    /**
      * Path to a scratch-dir artifact this tool produced. The dispatcher records
      * it on the telemetry row (`outputRef`); a host that surfaces large outputs
      * can deep-link to the file rather than re-rendering megabytes inline.

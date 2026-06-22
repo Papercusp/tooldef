@@ -55,7 +55,7 @@ exports.RESERVED_EVENT_NAMES = [
     // schema for it so the wire kind is inferred (dev:ipc_echo does this).
     // 'error' is dispatcher auto-emit on uncaught handler throws AND tools
     // actively emit it mid-stream for non-fatal errors (architect:chat,
-    // brainstorm:chat, operator:scan, operator:delegate all declare it).
+    // brainstorm:chat and historical streaming tools declare it).
     // Reserving either would break production tools at register time.
 ];
 /**
@@ -154,6 +154,48 @@ class ToolRegistrationError extends Error {
 }
 exports.ToolRegistrationError = ToolRegistrationError;
 /**
+ * Structural fingerprint of a projected tool — stable across a re-import of
+ * the SAME source (HMR / double-import re-eval produces a fresh object that
+ * is structurally identical), but distinct for two genuinely different
+ * tools. Used to tell a benign re-registration from a silent name-collision
+ * between different tools.
+ *
+ * Why this exists (EI-14): the same-name guards below only fired when the
+ * `pluginName` differed. Every built-in `defineTool` tool registers under
+ * one synthetic plugin (`agent-mcp`), so two STRUCTURALLY-DIFFERENT built-ins
+ * that shared an MCP name slipped past the cross-plugin check and the later
+ * import silently replaced the earlier one (`BY_MCP_NAME.set`) with no error.
+ * That dropped a real tool on the floor with zero signal: it's how
+ * coordination-ops' bare `coord:ask` shadowed coordination-conversations'
+ * knowledge-first `coord:ask` in prod while every role prompt still described
+ * the knowledge-first one. Comparing this signature lets a same-namespace
+ * duplicate-name bug fail loud instead of silently dropping a tool.
+ */
+function projectedToolSignature(tool) {
+    return JSON.stringify({
+        description: tool.description ?? '',
+        capabilities: [...(tool.capabilities ?? [])].sort(),
+        inputSchema: tool.inputSchema ?? null,
+    });
+}
+/**
+ * Fail loud when `prior` and `tool` claim the same name/path within ONE
+ * plugin namespace but are structurally different tools (EI-14). A
+ * structurally-identical re-registration (HMR / double-import) is the
+ * benign case and returns silently so the caller replaces as before.
+ */
+function assertNotShadowingCollision(kind, key, prior, tool) {
+    if (prior === tool)
+        return;
+    if (projectedToolSignature(prior) === projectedToolSignature(tool))
+        return;
+    throw new ToolRegistrationError(`${kind} "${key}" registered twice within plugin "${tool.pluginName}" by two DIFFERENT tools — ` +
+        `the second silently shadows the first (last import wins), so a real tool would vanish with no error. ` +
+        `Rename one: two distinct tools cannot share a name. ` +
+        `prior description: ${JSON.stringify((prior.description ?? '').slice(0, 100))}; ` +
+        `new description: ${JSON.stringify((tool.description ?? '').slice(0, 100))}.`);
+}
+/**
  * Register a projected tool. Validates the manifest:
  *   - At least one of `expose.http` / `expose.mcp` must be set.
  *   - `expose.mcp.name` must use dotted naming and be unique across the
@@ -208,6 +250,8 @@ function registerProjectedTool(tool) {
         if (prior && prior.pluginName !== tool.pluginName) {
             throw new ToolRegistrationError(`MCP tool name "${name}" claimed by plugins "${prior.pluginName}" and "${tool.pluginName}"`);
         }
+        if (prior)
+            assertNotShadowingCollision('MCP tool name', name, prior, tool);
         BY_MCP_NAME.set(name, tool);
     }
     if (tool.expose.http) {
@@ -219,6 +263,8 @@ function registerProjectedTool(tool) {
         if (prior && prior.pluginName !== tool.pluginName) {
             throw new ToolRegistrationError(`HTTP path "${p}" claimed by plugins "${prior.pluginName}" and "${tool.pluginName}"`);
         }
+        if (prior)
+            assertNotShadowingCollision('HTTP path', p, prior, tool);
         BY_HTTP_PATH.set(p, tool);
     }
     REGISTRY.set(entryKey(tool), tool);
@@ -341,6 +387,26 @@ function listMcpProjections(role, profile) {
             description: tool.description,
             inputSchema: tool.inputSchema,
         };
+        // Advertise the output schema + negotiable formats when the tool declared
+        // an output schema (P-010). Tools without one still get the runtime
+        // auto-encoder; they just don't advertise a capability set.
+        //
+        // MCP `outputSchema` describes `structuredContent`, which the spec requires
+        // to be a JSON OBJECT — so a strict client (the MCP SDK) rejects a tools/list
+        // whose outputSchema is array/scalar-rooted. Our list tools return bare
+        // arrays, so we only emit the spec-standard `outputSchema` for object-rooted
+        // shapes; the array/list case advertises capability via the `resultFormats`
+        // extension below (which the SDK tolerates as an unknown field).
+        if (tool.outputJsonSchema && tool.outputJsonSchema.type === 'object') {
+            listing.outputSchema = tool.outputJsonSchema;
+        }
+        if (tool.resultEligibility) {
+            const formats = [...tool.resultEligibility.capabilities];
+            listing.resultFormats = formats;
+            // Mirror onto `_meta` — the spec passthrough slot — so it survives the
+            // strict MCP SDK tools/list validation that strips unknown top-level fields.
+            listing._meta = { ...(listing._meta ?? {}), 'papercusp/resultFormats': formats };
+        }
         if (tool.events && Object.keys(tool.events).length > 0) {
             listing.events = serializeEventsSchema(tool.events);
         }

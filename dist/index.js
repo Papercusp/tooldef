@@ -13,9 +13,23 @@
  * Papercusp host adapter (`@papercusp/agent-mcp`) re-exports this surface and
  * supplies the deps (PG tx, telemetry, role config, HMAC signing, …).
  */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __exportStar = (this && this.__exportStar) || function(m, exports) {
+    for (var p in m) if (p !== "default" && !Object.prototype.hasOwnProperty.call(exports, p)) __createBinding(exports, m, p);
+};
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.isPapercuspBinaryEnvelope = exports.emitToSseSink = exports.ToolRegistrationError = exports.listMcpProjections = exports.listAllProjectedTools = exports.lookupByHttpPath = exports.lookupByMcpName = exports.listUngatedProjectedTools = exports.toolDeclaresGate = exports.unregisterProjectedToolsForPlugin = exports.registerProjectedTool = exports.formatIssues = exports.validateSync = exports.standardValidate = exports.zodJsonSchemaAdapter = exports.setJsonSchemaAdapter = exports.toJsonSchema = exports.defaultTierResolver = exports.setCapabilityTierResolver = exports.tierFor = exports._resetCardCorrelatorForTests = exports.cancelPendingCardsForWorkspaceSwitch = exports.cancelPendingCardsForRun = exports.resolveCardResponse = exports.registerCard = exports._resetStateChannelForTests = exports.dropStateSnapshotsForWorkspaceSwitch = exports.snapshotWorkspace = exports.subscribeWorkspace = exports.subscribeStateChannel = exports.getSnapshot = exports.setToolState = exports.setOpenCards = exports.closeRun = exports.openRun = exports.dispatchWorkspaceSwitch = exports.onWorkspaceSwitch = exports._resetPromptCatalogForTests = exports.lookupPrompt = exports.getPromptCatalog = exports._resetResourceCatalogForTests = exports.matchResource = exports.lookupResource = exports.getResourceCatalog = exports._resetCatalogForTests = exports.lookup = exports.getCatalog = exports.definePrompt = exports.defineResource = exports.defineTool = void 0;
-exports.toolOperationName = exports.assembleOpenApiDocument = exports.standardResponseComponents = exports.componentKey = exports.toolToOpenApiFragment = exports.replayBufferStats = exports.closeReplayBuffer = exports.readReplayBuffer = exports.ownerOnly = exports.PASS_THROUGH = exports.HarnessRequiredError = exports.UnauthorizedToolError = exports.defaultComputeQuotaWindow = exports.dispatchProjectedToolStream = exports.dispatchProjectedTool = exports._resetProjectionRegistryForTests = void 0;
+exports.standardValidate = exports.zodJsonSchemaAdapter = exports.setJsonSchemaAdapter = exports.toJsonSchema = exports.defaultTierResolver = exports.setCapabilityTierResolver = exports.tierFor = exports._resetCardCorrelatorForTests = exports.cancelPendingCardsForWorkspaceSwitch = exports.cancelPendingCardsForRun = exports.resolveCardResponse = exports.registerCard = exports._resetStateChannelForTests = exports.dropStateSnapshotsForWorkspaceSwitch = exports.snapshotWorkspace = exports.subscribeWorkspace = exports.subscribeStateChannel = exports.getSnapshot = exports.setToolState = exports.setOpenCards = exports.closeRun = exports.openRun = exports.dispatchWorkspaceSwitch = exports.onWorkspaceSwitch = exports.renderSlashPrompt = exports.slashPromptListingFor = exports.deriveSlashPromptArguments = exports.slashPromptToolName = exports.isSlashPromptName = exports.slashPromptNameFor = exports.resolveSlashExposure = exports.SLASH_PROMPT_PREFIX = exports._resetPromptCatalogForTests = exports.lookupPrompt = exports.getPromptCatalog = exports._resetResourceCatalogForTests = exports.matchResource = exports.lookupResource = exports.getResourceCatalog = exports._resetCollectedToolEmitsForTests = exports.getCollectedToolEmits = exports.collectToolEmits = exports._resetCatalogForTests = exports.lookup = exports.getCatalog = exports.formatOptsFromCtx = exports.serializeToolResponse = exports.definePrompt = exports.defineResource = exports.defineTool = void 0;
+exports.toolOperationName = exports.assembleOpenApiDocument = exports.standardResponseComponents = exports.componentKey = exports.toolToOpenApiFragment = exports.replayBufferStats = exports.closeReplayBuffer = exports.readReplayBuffer = exports.ownerOnly = exports.PASS_THROUGH = exports.InvalidInputError = exports.HarnessRequiredError = exports.UnauthorizedToolError = exports.defaultComputeQuotaWindow = exports.dispatchProjectedToolStream = exports.dispatchProjectedTool = exports._resetProjectionRegistryForTests = exports.isPapercuspBinaryEnvelope = exports.emitToSseSink = exports.ToolRegistrationError = exports.listMcpProjections = exports.listAllProjectedTools = exports.lookupByHttpPath = exports.lookupByMcpName = exports.listUngatedProjectedTools = exports.toolDeclaresGate = exports.unregisterProjectedToolsForPlugin = exports.registerProjectedTool = exports.formatIssues = exports.validateSync = void 0;
 /* ─── defineTool + sibling authoring primitives ──────────────────────── */
 var define_tool_1 = require("./define-tool");
 Object.defineProperty(exports, "defineTool", { enumerable: true, get: function () { return define_tool_1.defineTool; } });
@@ -23,11 +37,21 @@ var define_resource_1 = require("./define-resource");
 Object.defineProperty(exports, "defineResource", { enumerable: true, get: function () { return define_resource_1.defineResource; } });
 var define_prompt_1 = require("./define-prompt");
 Object.defineProperty(exports, "definePrompt", { enumerable: true, get: function () { return define_prompt_1.definePrompt; } });
+/* ─── Result serialization (token-efficient formats) ─────────────────── */
+var serialize_result_1 = require("./serialize-result");
+Object.defineProperty(exports, "serializeToolResponse", { enumerable: true, get: function () { return serialize_result_1.serializeToolResponse; } });
+Object.defineProperty(exports, "formatOptsFromCtx", { enumerable: true, get: function () { return serialize_result_1.formatOptsFromCtx; } });
 /* ─── Registries ─────────────────────────────────────────────────────── */
 var registry_1 = require("./registry");
 Object.defineProperty(exports, "getCatalog", { enumerable: true, get: function () { return registry_1.getCatalog; } });
 Object.defineProperty(exports, "lookup", { enumerable: true, get: function () { return registry_1.lookup; } });
 Object.defineProperty(exports, "_resetCatalogForTests", { enumerable: true, get: function () { return registry_1._resetCatalogForTests; } });
+/* ─── Code-execution tool-orchestration runtime (B-CX-1A / B-CX-2A) ────── */
+__exportStar(require("./code-orchestration"), exports);
+var emits_registry_1 = require("./emits-registry");
+Object.defineProperty(exports, "collectToolEmits", { enumerable: true, get: function () { return emits_registry_1.collectToolEmits; } });
+Object.defineProperty(exports, "getCollectedToolEmits", { enumerable: true, get: function () { return emits_registry_1.getCollectedToolEmits; } });
+Object.defineProperty(exports, "_resetCollectedToolEmitsForTests", { enumerable: true, get: function () { return emits_registry_1._resetCollectedToolEmitsForTests; } });
 var resource_registry_1 = require("./resource-registry");
 Object.defineProperty(exports, "getResourceCatalog", { enumerable: true, get: function () { return resource_registry_1.getResourceCatalog; } });
 Object.defineProperty(exports, "lookupResource", { enumerable: true, get: function () { return resource_registry_1.lookupResource; } });
@@ -37,6 +61,15 @@ var prompt_registry_1 = require("./prompt-registry");
 Object.defineProperty(exports, "getPromptCatalog", { enumerable: true, get: function () { return prompt_registry_1.getPromptCatalog; } });
 Object.defineProperty(exports, "lookupPrompt", { enumerable: true, get: function () { return prompt_registry_1.lookupPrompt; } });
 Object.defineProperty(exports, "_resetPromptCatalogForTests", { enumerable: true, get: function () { return prompt_registry_1._resetPromptCatalogForTests; } });
+var slash_projection_1 = require("./slash-projection");
+Object.defineProperty(exports, "SLASH_PROMPT_PREFIX", { enumerable: true, get: function () { return slash_projection_1.SLASH_PROMPT_PREFIX; } });
+Object.defineProperty(exports, "resolveSlashExposure", { enumerable: true, get: function () { return slash_projection_1.resolveSlashExposure; } });
+Object.defineProperty(exports, "slashPromptNameFor", { enumerable: true, get: function () { return slash_projection_1.slashPromptNameFor; } });
+Object.defineProperty(exports, "isSlashPromptName", { enumerable: true, get: function () { return slash_projection_1.isSlashPromptName; } });
+Object.defineProperty(exports, "slashPromptToolName", { enumerable: true, get: function () { return slash_projection_1.slashPromptToolName; } });
+Object.defineProperty(exports, "deriveSlashPromptArguments", { enumerable: true, get: function () { return slash_projection_1.deriveSlashPromptArguments; } });
+Object.defineProperty(exports, "slashPromptListingFor", { enumerable: true, get: function () { return slash_projection_1.slashPromptListingFor; } });
+Object.defineProperty(exports, "renderSlashPrompt", { enumerable: true, get: function () { return slash_projection_1.renderSlashPrompt; } });
 /* ─── Run / workspace lifecycle ──────────────────────────────────────── */
 var workspace_lifecycle_1 = require("./workspace-lifecycle");
 Object.defineProperty(exports, "onWorkspaceSwitch", { enumerable: true, get: function () { return workspace_lifecycle_1.onWorkspaceSwitch; } });
@@ -96,6 +129,7 @@ Object.defineProperty(exports, "dispatchProjectedToolStream", { enumerable: true
 Object.defineProperty(exports, "defaultComputeQuotaWindow", { enumerable: true, get: function () { return dispatch_projected_1.defaultComputeQuotaWindow; } });
 Object.defineProperty(exports, "UnauthorizedToolError", { enumerable: true, get: function () { return dispatch_projected_1.UnauthorizedToolError; } });
 Object.defineProperty(exports, "HarnessRequiredError", { enumerable: true, get: function () { return dispatch_projected_1.HarnessRequiredError; } });
+Object.defineProperty(exports, "InvalidInputError", { enumerable: true, get: function () { return dispatch_projected_1.InvalidInputError; } });
 Object.defineProperty(exports, "PASS_THROUGH", { enumerable: true, get: function () { return dispatch_projected_1.PASS_THROUGH; } });
 /* ─── Resource authorization (RFC tooldef-auth-rfc Phase 1 — contract only) ─── */
 var authz_1 = require("./authz");

@@ -7,6 +7,7 @@
  */
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
+import { decode } from '@papercusp/result-encoding';
 import { defineTool } from './define-tool';
 import { dispatchProjectedTool, type DispatchProjectedDeps } from './dispatch-projected';
 import {
@@ -164,34 +165,64 @@ describe('end-to-end format selection through defineTool', () => {
   });
 });
 
-describe('principal-gated ToolResult pass-through (memory-taxonomy-and-debt-followups P-006)', () => {
-  it('a handler-returned ToolResult passes through untouched — no re-encode, no double wrap', async () => {
-    // The memory:* family returns the MCP content shape directly and the TUI
-    // Memory tab parses content[0].text as the handler's own JSON. The
-    // projected wrapper must hand it through exactly (parity with the
-    // role-gated wrapper), not serialize it as opaque data.
-    const payload = JSON.stringify({ ok: true, results: [{ id: 'm1', memory: 'fact' }] });
+describe('raw-ToolResult re-encode on the MCP transport (definetool-token-optimization-adoption P-002)', () => {
+  const ENVELOPE = { ok: true, results: [{ id: 'm1', memory: 'fact' }, { id: 'm2', memory: 'two' }], counts: { ok: 2, failed: 0 } };
+
+  function definePrincipalRaw(name: string, text: string): void {
     defineTool({
-      name: 'fmt:toolresult-passthrough',
+      name,
       capability: 'test:read',
       args: z.object({}),
-      handler: async () => ({ content: [{ type: 'text', text: payload }] }),
+      handler: async () => ({ content: [{ type: 'text', text }] }),
     });
-    const tool = lookupByMcpName('fmt:toolresult-passthrough')!;
+  }
+
+  async function callPrincipal(name: string, transport: string) {
+    const tool = lookupByMcpName(name)!;
     const r = await dispatchProjectedTool(
       tool,
-      'fmt:toolresult-passthrough',
+      name,
       {},
       ctx({
-        transport: 'mcp',
+        transport,
         principal: { slug: 'u', workspaceId: 'w', capabilities: new Set(['test:read']) },
         tx: {},
       } as unknown as Partial<UnifiedToolContext>),
       DEPS,
     );
-    expect(r.ok).toBe(true);
-    const text = (r.result!.content[0] as { text: string }).text;
-    // The text IS the handler's JSON — not a serialized {content:[...]} wrapper.
-    expect(JSON.parse(text)).toEqual({ ok: true, results: [{ id: 'm1', memory: 'fact' }] });
+    if (!r.ok) throw new Error(`dispatch failed: ${r.error?.code}`);
+    return { text: (r.result!.content[0] as { text: string }).text, meta: r.result!._meta ?? {} };
+  }
+
+  it('an object-with-array-field JSON body IS re-encoded to compact TOON on mcp (the inliner win, lossless)', async () => {
+    definePrincipalRaw('fmt:rawbulk-mcp', JSON.stringify(ENVELOPE));
+    const { text, meta } = await callPrincipal('fmt:rawbulk-mcp', 'mcp');
+    expect(meta.format).toBe('toon');
+    expect(text).toMatch(/^format: toon\n/);
+    // Lossless: decoding the TOON body recovers the exact handler payload.
+    expect(decode(text.replace(/^format: toon\n/, ''), 'toon')).toEqual(ENVELOPE);
+  });
+
+  it('the SAME raw body passes through VERBATIM on a non-mcp transport (memory:* / TUI contract, P-006)', async () => {
+    // The TUI Memory tab + every in-process compound read content[0].text as the
+    // handler's own JSON over a non-mcp transport — they must see exact bytes.
+    definePrincipalRaw('fmt:rawbulk-http', JSON.stringify(ENVELOPE));
+    const { text, meta } = await callPrincipal('fmt:rawbulk-http', 'http');
+    expect(text).toBe(JSON.stringify(ENVELOPE));
+    expect(meta.format).toBeUndefined();
+  });
+
+  it('a plain-object JSON body (no array field) is left untouched even on mcp (no TOON win)', async () => {
+    const obj = { ok: true, slug: 'x', status: 'done' };
+    definePrincipalRaw('fmt:rawobj-mcp', JSON.stringify(obj));
+    const { text, meta } = await callPrincipal('fmt:rawobj-mcp', 'mcp');
+    expect(text).toBe(JSON.stringify(obj));
+    expect(meta.format).toBeUndefined();
+  });
+
+  it('a non-JSON text body passes through untouched on mcp', async () => {
+    definePrincipalRaw('fmt:rawtext-mcp', 'just a human message');
+    const { text } = await callPrincipal('fmt:rawtext-mcp', 'mcp');
+    expect(text).toBe('just a human message');
   });
 });

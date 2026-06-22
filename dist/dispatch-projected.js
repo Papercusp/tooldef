@@ -18,7 +18,7 @@
  * Spec: apps/operator/docs/plugin-mcp-host-design.md.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.withReplacedStep = exports.DEFAULT_DISPATCH_STACK = exports.HarnessRequiredError = exports.UnauthorizedToolError = exports.PASS_THROUGH = exports.defaultComputeQuotaWindow = void 0;
+exports.withReplacedStep = exports.DEFAULT_DISPATCH_STACK = exports.InvalidInputError = exports.HarnessRequiredError = exports.UnauthorizedToolError = exports.PASS_THROUGH = exports.defaultComputeQuotaWindow = void 0;
 exports.dispatchProjectedTool = dispatchProjectedTool;
 exports.dispatchProjectedToolStream = dispatchProjectedToolStream;
 const dispatch_stack_1 = require("./dispatch-stack");
@@ -27,6 +27,7 @@ Object.defineProperty(exports, "defaultComputeQuotaWindow", { enumerable: true, 
 Object.defineProperty(exports, "PASS_THROUGH", { enumerable: true, get: function () { return dispatch_types_1.PASS_THROUGH; } });
 Object.defineProperty(exports, "UnauthorizedToolError", { enumerable: true, get: function () { return dispatch_types_1.UnauthorizedToolError; } });
 Object.defineProperty(exports, "HarnessRequiredError", { enumerable: true, get: function () { return dispatch_types_1.HarnessRequiredError; } });
+Object.defineProperty(exports, "InvalidInputError", { enumerable: true, get: function () { return dispatch_types_1.InvalidInputError; } });
 var dispatch_stack_2 = require("./dispatch-stack");
 Object.defineProperty(exports, "DEFAULT_DISPATCH_STACK", { enumerable: true, get: function () { return dispatch_stack_2.DEFAULT_DISPATCH_STACK; } });
 Object.defineProperty(exports, "withReplacedStep", { enumerable: true, get: function () { return dispatch_stack_2.withReplacedStep; } });

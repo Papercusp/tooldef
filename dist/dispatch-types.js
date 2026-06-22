@@ -12,7 +12,7 @@
  * threaded in through `DispatchProjectedDeps` by the host.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.PASS_THROUGH = exports.HarnessRequiredError = exports.UnauthorizedToolError = void 0;
+exports.PASS_THROUGH = exports.InvalidInputError = exports.HarnessRequiredError = exports.UnauthorizedToolError = void 0;
 exports.defaultComputeQuotaWindow = defaultComputeQuotaWindow;
 /**
  * The framework's default quota windowing: run-scoped, `perRun` ceiling.
@@ -48,6 +48,18 @@ class HarnessRequiredError extends Error {
     name = 'HarnessRequiredError';
 }
 exports.HarnessRequiredError = HarnessRequiredError;
+/**
+ * Throw to signal the CALLER's input failed schema validation. The dispatcher
+ * surfaces this as `invalid_input` (HTTP 400) instead of `handler_error`
+ * (500) — the distinction matters downstream: error-class telemetry treats
+ * `handler_error` as a structural tool bug, so a zod failure coded
+ * `handler_error` files false "tool is broken" signals (EI-334's cluster:
+ * an oversized fleet:spawn `brief` fired the structural watchdog key).
+ */
+class InvalidInputError extends Error {
+    name = 'InvalidInputError';
+}
+exports.InvalidInputError = InvalidInputError;
 /* ─── Dispatch deps (DI surface) ─────────────────────────────────────── */
 /** Sentinel — return this from overrideTool to let the real handler run. */
 exports.PASS_THROUGH = Symbol('PASS_THROUGH');

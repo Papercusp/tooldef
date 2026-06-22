@@ -68,6 +68,7 @@ function pendingToOpenCard(card) {
         presentation: card.spec.presentation,
         fallbackText: card.spec.fallbackText,
         allowDecline: card.spec.allowDecline,
+        report: card.spec.report,
         createdAt: card.createdAt,
     };
 }

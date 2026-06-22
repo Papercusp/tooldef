@@ -20,7 +20,7 @@ import type { ToolResult } from './wire';
 import type { ProjectedTool, UnifiedToolContext } from './tool-projection';
 import { type DispatchStep } from './dispatch-stack';
 import type { DispatchProjectedDeps, DispatchProjectedResult } from './dispatch-types';
-export { defaultComputeQuotaWindow, PASS_THROUGH, UnauthorizedToolError, HarnessRequiredError, type QuotaWindow, type DispatchProjectedDeps, type DispatchProjectedErrorCode, type DispatchProjectedResult, type ToolDispatchOverrideFn, } from './dispatch-types';
+export { defaultComputeQuotaWindow, PASS_THROUGH, UnauthorizedToolError, HarnessRequiredError, InvalidInputError, type QuotaWindow, type DispatchProjectedDeps, type DispatchProjectedErrorCode, type DispatchProjectedResult, type PostInvokeEvent, type CapabilityEnvelopeVerdict, type ToolDispatchOverrideFn, } from './dispatch-types';
 export { DEFAULT_DISPATCH_STACK, withReplacedStep, type DispatchExecution, type DispatchStep, type DispatchStepName, } from './dispatch-stack';
 /**
  * Dispatch a projected tool. Drives the default dispatch stack (gates,

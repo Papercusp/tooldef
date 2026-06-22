@@ -71,6 +71,22 @@ describe('serializeToolResponse — format selection', () => {
     expect(r.format).toBe('json');
     expect(r.fallback).toBe(false);
   });
+
+  it('compact auto-picks TOON for an object-with-an-array-field, no schema (bulk envelope, P-001)', () => {
+    // A bulk envelope { ok, results:[…], counts } is object-rooted, not a bare
+    // array — but TOON's nested-list encoding still shrinks it ~38%, lossless.
+    const ctx = { transport: 'mcp' } as UnifiedToolContext;
+    const envelope = { ok: true, results: [{ id: 'a', v: 1 }, { id: 'b', v: 2 }], counts: { ok: 2, failed: 0 } };
+    const r = serializeToolResponse({ data: envelope }, formatOptsFromCtx(ctx, undefined));
+    expect(r.format).toBe('toon');
+    expect((r.content[0] as { text: string }).text).toMatch(/^format: toon\n/);
+  });
+
+  it('a plain object (no array field) still yields JSON on the auto path', () => {
+    const ctx = { transport: 'mcp' } as UnifiedToolContext;
+    const r = serializeToolResponse({ data: { ok: true, slug: 'x', status: 'done' } }, formatOptsFromCtx(ctx, undefined));
+    expect(r.format).toBe('json');
+  });
 });
 
 describe('serializeToolResponse — envelope routing', () => {

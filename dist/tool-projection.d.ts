@@ -22,6 +22,7 @@ import type { EmitCallback, ProgressCallback, RolesQuota, ToolResult } from './w
 import type { AgentRole, Capability, PluginSpawn } from './host-types';
 import type { StandardSchemaV1 } from './standard-schema';
 import type { Authorizer } from './authz';
+import type { EligibilityResult } from '@papercusp/result-encoding';
 /** Schema for a tool's typed event channel. Keys are wire-level event names. */
 export type EventsSchema = Record<string, ZodTypeAny>;
 /**
@@ -108,7 +109,7 @@ export declare function classifyEventWire(schema: ZodTypeAny): EventWireKind;
  *   - Route shims that bypass the HTTP transport and call
  *     `dispatchProjectedToolStream` themselves (architect/brainstorm
  *     in `apps/operator/app/api/_hono/harness.ts`, operator-scan /
- *     operator-converse / delegate-chat).
+ *     operator-converse).
  *
  * Centralizing here prevents the wire-format-drift class of bug:
  *   - z.string() events going through JSON.stringify (round-2 silent
@@ -304,6 +305,23 @@ export interface UnifiedToolContext {
      * through an adapter — `recordInvocation` writes null in that case.
      */
     transport?: 'http' | 'mcp' | 'ipc' | 'in_process';
+    /**
+     * Client-negotiated result format (token-efficient-tool-result-formats D-005).
+     * The RAW request token from the transport — `?format=`/`Accept` on HTTP,
+     * `_meta.format` or `?format=` on MCP — parsed by the result serializer via
+     * `parseFormatRequest` (`json|toon|csv|tsv|md|compact` + MIME types). The
+     * format is set by the CLIENT PROCESS, never authored by the model. Absent ⇒
+     * the serializer uses the transport default (MCP → compact, else JSON). On an
+     * unsupported request the serializer falls back gracefully and labels it.
+     */
+    requestedFormat?: string;
+    /**
+     * Opt-in for MCP `structuredContent` (P-010) — set by the transport from
+     * `?structured=1` / `_meta.structured`. When true, a result with a declared
+     * output schema also carries the lossless structured `data` alongside the
+     * compact text. OFF by default so the model never pays for both at once.
+     */
+    requestedStructured?: boolean;
     workspaceId?: string;
     harnessSlug?: string;
     projectDir?: string;
@@ -314,6 +332,33 @@ export interface UnifiedToolContext {
     runId?: string;
     spawnId?: string;
     parentSpawnId?: string | null;
+    /**
+     * True when the transport VERIFIED a signed per-spawn URL's signature for
+     * this context (never set for unsigned / soft-allowed spawn URLs). Hosts
+     * may key identity attribution on it for spawn callers that carry no
+     * explicit client/owner id — e.g. attribute to the stable harness rather
+     * than the per-call spawn id.
+     */
+    sigVerifiedSpawn?: boolean;
+    /**
+     * Set by the event-reaction system on a ctx it builds for a REACTION call
+     * (a tool fired automatically by a rule). Absent on ordinary
+     * agent/user-originated calls. Carries the cause-chain so the loop guard
+     * (event-reaction-system D-005) can cap depth + detect cycles on the NEXT
+     * post-invocation, and so telemetry can audit "why did this fire?"
+     * (D-010). The dispatcher itself never reads this — it is host metadata
+     * the host's `postInvoke` interprets.
+     */
+    reactionCause?: {
+        /** Depth in the reaction cascade. An agent call is 0; its direct reactions are 1. */
+        depth: number;
+        /** Rule ids fired so far in this chain (cycle detection). */
+        chain: string[];
+        /** The rule that fired THIS call. */
+        ruleId: string;
+        /** The runId of the original (agent) trigger that rooted the chain. */
+        rootRunId?: string | null;
+    };
     /**
      * When the agent was spawned from a browser tab (chat surfaces), the
      * tab's UI client_id is passed through here so `ui:*` tools default
@@ -440,6 +485,30 @@ export interface ToolExposureMcp {
      */
     largeOutput?: boolean;
 }
+/**
+ * Slash-exposure overrides (slash-exposure-tool-catalog-2026-06-12). The
+ * slash surface projects an MCP-exposed tool onto the MCP **prompts**
+ * primitive so agent clients (Claude Code, …) surface it as a slash
+ * command. Unlike `http`/`mcp` this is NOT a dispatch transport — the
+ * rendered prompt instructs the agent, and the agent's tool call rides the
+ * session's existing MCP transport (D-001 on the plan).
+ */
+export interface ToolExposureSlash {
+    /**
+     * Override the prompt's name SUFFIX. The full prompt name is always
+     * `tool:<name>`; default `<name>` = the tool's `expose.mcp.name`.
+     */
+    name?: string;
+    /** Override the slash listing's description. Default: `guidance.when` ?? `description`. */
+    description?: string;
+    /**
+     * Restrict which top-level input fields surface as MCP prompt arguments.
+     * Default: every top-level scalar (string/number/integer/boolean/enum)
+     * property of the input schema. Non-scalar fields never become prompt
+     * arguments — the rendered instruction has the agent elicit them (D-004).
+     */
+    args?: readonly string[];
+}
 /** Per-tool exposure config — at least one of `http`/`mcp`/`ipc` must be set. */
 export interface ToolExposure {
     http?: ToolExposureHttp;
@@ -450,6 +519,13 @@ export interface ToolExposure {
      * Default false — IPC opt-in mirrors HTTP/MCP opt-in. Phase E8.
      */
     ipc?: true;
+    /**
+     * Slash-command exposure via MCP prompts. DEFAULT ON for every
+     * MCP-exposed tool (owner-ratified D-003, slash-exposure-tool-catalog-
+     * 2026-06-12): absent/`true` ⇒ projected; `false` ⇒ hidden from the
+     * slash surface; an object ⇒ projected with overrides.
+     */
+    slash?: boolean | ToolExposureSlash;
 }
 /**
  * One entry in the projection registry. Combines the function (truth)
@@ -469,6 +545,24 @@ export interface ProjectedTool {
      * means no capability gate.
      */
     capabilities: Capability[];
+    /**
+     * Read/write effect (code-execution-tool-orchestration B-CX-PRE). 'write' = the tool
+     * mutates state; 'read' = side-effect-free. Inferred from the capability suffix at
+     * `defineTool` time (overridable per tool). Read by the code-execution sandbox to decide
+     * whether a tool call needs a dry-run/confirm gate (read-only ⇒ no gate). Optional for
+     * back-compat; absent ⇒ unknown (the gate may default-deny a mutating call).
+     */
+    effect?: 'read' | 'write';
+    /**
+     * Canonical tool names this COMPOSITE tool bundles (tool-call-batching-wrappers
+     * P-010). Empty/undefined ⇒ a primitive. Read by agent_tools:list (the queryable
+     * composition tag) and prompt-assembly's renderToolsCatalog (the bounded
+     * back-pointer that points each bundled primitive at this composite).
+     */
+    replaces?: readonly string[];
+    /** Composition tag derived from `replaces` at defineTool time: 'composite' when
+     *  `replaces` is non-empty, else 'primitive'. Queryable via agent_tools:list. */
+    composition?: 'primitive' | 'composite';
     /**
      * Allowed agent roles. Empty/undefined means any role can call. Used
      * primarily by the MCP transport (agent calls); HTTP callers gate via
@@ -503,6 +597,16 @@ export interface ProjectedTool {
      * regardless of caller, so the fix is to declare a gate or mark it public.
      */
     public?: boolean;
+    /**
+     * Declarative preconditions (autoloop-pot-operator-rebuild D-006) — the
+     * preInvoke mirror of `emits:`. Evaluated by the dispatcher's
+     * `preconditions` step (after `authorize`, before `timeout`): each spec's
+     * condition must hold over `{ tool, args, ctx, state }` or the call rejects
+     * (`precondition_failed`) / auto-corrects (`{ fire, then: 'retry' }` via
+     * `deps.firePrecondition`). Functional preconditions ONLY — safety
+     * invariants stay imperative code (D-007). See `ToolRequireSpec`.
+     */
+    requires?: readonly import('./requires').ToolRequireSpec[];
     /** Per-call wall-clock timeout, default 60s. */
     timeoutSec?: number;
     /**
@@ -576,7 +680,7 @@ export interface ProjectedTool {
      * - `'none'` — the tool is harness-agnostic. Informational; no gate.
      *
      * The gate fails closed even for superuser/power callers (it's a functional
-     * requirement, not a permission) — see `GateBypass.harness`.
+     * requirement, not a permission) — see `GateBypass.papercusp`.
      */
     harness?: 'required' | 'optional' | 'none';
     /**
@@ -601,6 +705,26 @@ export interface ProjectedTool {
      * `~standard.validate` at `ctx.publishState` time.
      */
     state?: StandardSchemaV1;
+    /**
+     * Output-`data` schema (token-efficient-tool-result-formats D-003). The raw
+     * Standard-Schema validator a tool declared for its `ToolResponse.data`.
+     * Source for runtime output validation + `structuredContent`. Absent when the
+     * tool declared none (it still gets the TOON runtime auto-encoder).
+     */
+    outputSchema?: StandardSchemaV1;
+    /**
+     * JSON-Schema projection of `outputSchema`, computed once at register time.
+     * Advertised as MCP `outputSchema` in `tools/list` (P-010); also the input to
+     * the eligibility walk below.
+     */
+    outputJsonSchema?: Record<string, unknown>;
+    /**
+     * Precomputed format eligibility for the output `data` shape (D-004): the set
+     * of formats the result can be rendered in + the best compact default. Read
+     * by the result serializer on every call and advertised in `tools/list`.
+     * Absent ⇒ no output schema ⇒ the serializer uses the runtime auto-encoder.
+     */
+    resultEligibility?: EligibilityResult;
     /**
      * Typed event channel — Zod schemas keyed by event name. Surfaced
      * via tools/list as JSON-Schema for client discovery. No runtime
@@ -709,6 +833,27 @@ export interface McpToolListing {
     name: string;
     description: string;
     inputSchema: Record<string, unknown>;
+    /**
+     * JSON-Schema for the tool's result `data` (MCP `outputSchema`, P-010).
+     * Spec-aligned advertisement; present only when the tool declared an output
+     * schema. Clients can validate `structuredContent` against it.
+     */
+    outputSchema?: Record<string, unknown>;
+    /**
+     * The token-efficient formats this tool's result can be rendered in
+     * (token-efficient-tool-result-formats P-010 / D-005). A Papercusp extension
+     * so a client knows which `_meta.format` values it may negotiate; absent ⇒
+     * `['json']` (the always-available default). Also mirrored onto `_meta`
+     * (`papercusp/resultFormats`) because the MCP SDK strips unknown TOP-LEVEL
+     * tool fields during validation — `_meta` is the spec's passthrough slot, so
+     * that copy is the one that actually reaches a strict client.
+     */
+    resultFormats?: ReadonlyArray<'json' | 'toon' | 'csv' | 'tsv' | 'md'>;
+    /**
+     * MCP `_meta` passthrough — survives strict SDK validation (unlike unknown
+     * top-level fields). Carries `papercusp/resultFormats` (the capability set).
+     */
+    _meta?: Record<string, unknown>;
     /** Map of event-name → JSON-Schema. Absent when the tool declares no events. */
     events?: Record<string, Record<string, unknown>>;
     /**

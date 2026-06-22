@@ -29,7 +29,9 @@ const replay_buffer_1 = require("./replay-buffer");
 const card_correlator_1 = require("./card-correlator");
 const state_channel_1 = require("./state-channel");
 const standard_schema_1 = require("./standard-schema");
+const capability_tiers_1 = require("./capability-tiers");
 const dispatch_types_1 = require("./dispatch-types");
+const rules_1 = require("@papercusp/rules");
 function initExecution(tool, toolName, input, ctx, deps) {
     // Resolve the quota window + ceiling once, up front: the window key feeds
     // both the quota gate and telemetry, so it must be computed for every call
@@ -56,6 +58,7 @@ function initExecution(tool, toolName, input, ctx, deps) {
         metadataJson: null,
         handlerCtx: ctx,
         handlerResult: null,
+        envelopeVerdict: null,
     };
 }
 /* ─── Steps ──────────────────────────────────────────────────────────── */
@@ -128,6 +131,56 @@ const capabilityCheckStep = {
     },
 };
 /**
+ * Capability-envelope gate (agent-capability-confinement-2026-06-13 B-06 / P-012). The
+ * cheap, static, per-role "may this caller do X at all" gate for the autonomous fleet —
+ * the *capability gate* of the two-gate split (D-003), distinct from the Queen's rich
+ * autonomy/decision gate. Pure mechanism: ALL policy (per-role allowlist, protected set,
+ * SU/non-fleet exemptions, enforce-vs-observe) lives behind the host's
+ * `deps.checkCapabilityEnvelope` port; this step only acts on the returned verdict.
+ *
+ * No-op when the port is unwired (behavior-neutral). FAIL-OPEN on an evaluator throw (the
+ * OS sandbox is the containment backstop, D-006 — a bug here must not wedge the fleet).
+ * The verdict is stashed on `exec.envelopeVerdict` and threaded into the postInvoke event
+ * so the decision-ledger emit (P-011) records the action's posture. Runs right after
+ * `capability-check` (both are cheap capability gates) and before the costlier
+ * authorize/precondition gates.
+ */
+const capabilityEnvelopeStep = {
+    name: 'capability-envelope',
+    async run(exec) {
+        const { tool, toolName, input, ctx, deps } = exec;
+        const port = deps.checkCapabilityEnvelope;
+        if (!port)
+            return null; // no policy wired ⇒ no-op (behavior-neutral)
+        let verdict;
+        try {
+            verdict = await port({ toolName, capabilities: tool.capabilities, ctx, args: input });
+        }
+        catch (err) {
+            // FAIL-OPEN (D-006): an evaluator bug must never wedge the fleet; the OS sandbox is the
+            // containment backstop. Matches the quota gate's fail-open-on-error posture.
+            // eslint-disable-next-line no-console
+            console.warn(`[capability-envelope] evaluator threw for "${toolName}" (failing open): ${err instanceof Error ? err.message : String(err)}`);
+            return null;
+        }
+        if (!verdict)
+            return null;
+        exec.envelopeVerdict = verdict; // threaded into PostInvokeEvent for the decision-ledger emit
+        if (verdict.decision === 'deny') {
+            return {
+                ok: false,
+                error: {
+                    code: 'capability_denied',
+                    message: verdict.reason ??
+                        `Tool "${toolName}" is outside role "${ctx.role ?? '(none)'}" capability envelope`,
+                    meta: { tool: toolName, role: ctx.role ?? null },
+                },
+            };
+        }
+        return null; // 'allow' | 'observe' ⇒ continue
+    },
+};
+/**
  * RBAC role-requirement gate (RFC tooldef-auth Phase 2).
  *
  * A tool declaring `requireRoles` is callable only by a principal whose `roles` include
@@ -181,7 +234,7 @@ const roleRequirementStep = {
  *
  * Fails closed even for privileged callers: a missing harness is a FUNCTIONAL
  * gap (the tool can't run), not a permission one, so superuser/power don't
- * bypass it. `gateBypass.harness` is an explicit per-call escape hatch only.
+ * bypass it. `gateBypass.papercusp` is an explicit per-call escape hatch only.
  */
 const harnessCheckStep = {
     name: 'harness-check',
@@ -405,17 +458,44 @@ const invokeStep = {
             else {
                 result = await tool.fn(input, handlerCtx);
             }
-            // ok-on-abort race: if the watchdog fired mid-handler but the
-            // handler returned normally without observing ctx.signal.aborted,
-            // treat the abort as authoritative.
+            // ok-on-abort race: the timeout/idle watchdog (or the caller's signal) fired
+            // mid-handler, but the handler returned normally without observing
+            // ctx.signal.aborted.
+            //   - MUTATION (tier != 'low'): the abort stays AUTHORITATIVE — never report
+            //     success for a possibly-cancelled write (the caller may have given up or
+            //     re-dispatched). Surfaces as a timeout error.
+            //   - IDEMPOTENT READ (tier 'low'): the completed result is valid +
+            //     side-effect-free, so RETURN it. Discarding it wastes the read AND —
+            //     under load, when wall-clock exceeds the timeout even for a CHEAP handler
+            //     — floods the improvement-watchdog with false "tool errored" timeouts
+            //     (the repeated-tool-error cluster: plans:list / plans:search /
+            //     coord:inbox / activity:recent — EI-98/99/105/174/175). The 'low' tier IS
+            //     the safety line: per the capability table it's an idempotent read /
+            //     low-stakes call, never a governed mutation — so a completed one is safe
+            //     to surface even past the deadline.
             if (exec.abort.signal.aborted) {
-                return {
-                    ok: false,
-                    error: {
-                        code: 'timeout',
-                        message: `tool "${toolName}" exceeded timeout of ${exec.timeoutSec}s (handler returned but signal had aborted)`,
-                    },
-                };
+                // Effective tier from the tool's capabilities (host-registered resolver via
+                // tierFor; defaults to 'low'). Low-tier READ ⟺ ≥1 declared capability AND
+                // every one resolves to 'low' (the effective tier is the max). No declared
+                // capability ⇒ treat as non-low (don't assume an ungated utility is a safe
+                // read). `ProjectedTool` carries `capabilities`, not a precomputed `tier`.
+                const caps = exec.tool.capabilities;
+                const isLowTierRead = caps.length > 0 && caps.every((c) => (0, capability_tiers_1.tierFor)(c) === 'low');
+                if (!isLowTierRead) {
+                    return {
+                        ok: false,
+                        error: {
+                            code: 'timeout',
+                            message: `tool "${toolName}" exceeded timeout of ${exec.timeoutSec}s (handler returned but signal had aborted)`,
+                        },
+                    };
+                }
+                // Completed read despite the abort: return it directly. Skip the outputRef
+                // chunk-emit below — the stream is already aborted so the client can't
+                // receive it (and emitting could re-throw into the catch); the result still
+                // carries outputRef for a later fetch.
+                exec.handlerResult = result;
+                return { ok: true, result };
             }
             // outputRef auto-emit — the framework injects a `chunk` event
             // when the handler declared outputRef on its result.
@@ -436,11 +516,24 @@ const invokeStep = {
                     error: { code: 'timeout', message: `tool "${toolName}" exceeded timeout of ${exec.timeoutSec}s` },
                 };
             }
-            if (err instanceof dispatch_types_1.UnauthorizedToolError) {
+            // Match by stable `name` as well as instanceof: when the host loads a
+            // second copy of this module (tsx/vite dual-instance), a handler's
+            // UnauthorizedToolError is a DIFFERENT class object and instanceof is
+            // false — without the name check the clean 401/precondition codes
+            // degrade to a generic handler_error 500.
+            const errName = err?.name;
+            if (err instanceof dispatch_types_1.UnauthorizedToolError || errName === 'UnauthorizedToolError') {
                 return { ok: false, error: { code: 'unauthorized', message: err.message } };
             }
-            if (err instanceof dispatch_types_1.HarnessRequiredError) {
+            if (err instanceof dispatch_types_1.HarnessRequiredError || errName === 'HarnessRequiredError') {
                 return { ok: false, error: { code: 'harness_required', message: err.message } };
+            }
+            // Schema-validation failure thrown by defineTool's projected fn (or any
+            // handler-level input check). Coding it `invalid_input` (400) instead of
+            // `handler_error` (500) keeps caller mistakes out of the structural
+            // tool-error telemetry class (EI-334's false-fire leg).
+            if (err instanceof dispatch_types_1.InvalidInputError || errName === 'InvalidInputError') {
+                return { ok: false, error: { code: 'invalid_input', message: err.message } };
             }
             return {
                 ok: false,
@@ -512,16 +605,141 @@ const authorizeStep = {
         return null;
     },
 };
+/**
+ * Declarative-preconditions gate (autoloop-pot-operator-rebuild D-006) — the
+ * preInvoke mirror of `emits:`. Evaluates each `requires:` spec's declarative
+ * condition (a `@papercusp/rules` DataCondition over `{ tool, args, ctx,
+ * state }`) and, on failure, either REJECTS (`precondition_failed`) or
+ * AUTO-CORRECTS: fires the spec's corrective tool through the host's
+ * injectable `deps.firePrecondition` port, re-resolves state, re-evaluates
+ * ONCE, and rejects if it still fails. Auto-corrections + denials are audited
+ * (gate:'precondition') — visible, never silent. Fail-closed throughout: a
+ * throwing state resolver / evaluator / fire port denies the call.
+ *
+ * Runs AFTER `authorize` (cheap declarative checks shouldn't preempt the
+ * audited auth chain, and a corrective fire must only happen for an
+ * authorized caller) and BEFORE `timeout` (it's a gate — no timers/buffers
+ * exist yet on the deny path).
+ *
+ * Safety invariants stay imperative code (D-007) — `requires:` is for
+ * functional preconditions only. See `ToolRequireSpec`.
+ */
+const preconditionsStep = {
+    name: 'preconditions',
+    async run(exec) {
+        const { tool, toolName, input, ctx, deps } = exec;
+        const requires = tool.requires;
+        if (!requires || requires.length === 0)
+            return null;
+        const args = (input && typeof input === 'object' ? input : {});
+        const eventCtx = ctx;
+        const audit = (decision, requireId, reason) => {
+            deps.auditAuth?.({
+                ts: Date.now(),
+                principal: ctx.principal
+                    ? { slug: ctx.principal.slug, workspaceId: ctx.principal.workspaceId }
+                    : null,
+                tool: toolName,
+                action: toolName,
+                decision,
+                gate: 'precondition',
+                reason: `[require:${requireId}] ${reason}`,
+            });
+        };
+        const deny = (requireId, message, meta) => ({
+            ok: false,
+            error: {
+                code: 'precondition_failed',
+                message,
+                meta: { tool: toolName, require: requireId, ...meta },
+            },
+        });
+        for (let i = 0; i < requires.length; i++) {
+            const spec = requires[i];
+            const requireId = spec.id ?? String(i);
+            const failMessage = spec.error ?? `Tool "${toolName}" precondition "${requireId}" not met`;
+            // Evaluate once: resolve state (fail-closed on a throw), then run the
+            // declarative condition over the pre-invoke event.
+            const evaluate = async () => {
+                let state = {};
+                if (spec.state)
+                    state = await spec.state(args, eventCtx);
+                const event = { tool: toolName, args, ctx: eventCtx, state };
+                return { holds: (0, rules_1.evaluateDataCondition)(spec.when, event), event };
+            };
+            let first;
+            try {
+                first = await evaluate();
+            }
+            catch (err) {
+                const reason = `precondition evaluation threw: ${err instanceof Error ? err.message : String(err)}`;
+                audit('deny', requireId, reason);
+                return deny(requireId, `${failMessage} (${reason})`);
+            }
+            if (first.holds)
+                continue;
+            // Failed. Auto-correct path: fire the corrective tool, retry once.
+            if (spec.fire) {
+                if (!deps.firePrecondition) {
+                    const reason = `auto-correct fire "${spec.fire}" declared but host wired no firePrecondition port`;
+                    audit('deny', requireId, reason);
+                    return deny(requireId, `${failMessage} (${reason})`, { fire: spec.fire });
+                }
+                try {
+                    const fireArgs = spec.render ? spec.render(first.event) : {};
+                    await deps.firePrecondition({
+                        fire: spec.fire,
+                        args: fireArgs,
+                        trigger: toolName,
+                        requireId,
+                        ctx: eventCtx,
+                    });
+                }
+                catch (err) {
+                    const reason = `auto-correct fire "${spec.fire}" failed: ${err instanceof Error ? err.message : String(err)}`;
+                    audit('deny', requireId, reason);
+                    return deny(requireId, `${failMessage} (${reason})`, { fire: spec.fire });
+                }
+                // then: 'retry' — re-resolve state, re-evaluate once.
+                let retry;
+                try {
+                    retry = await evaluate();
+                }
+                catch (err) {
+                    const reason = `retry evaluation threw after auto-correct "${spec.fire}": ${err instanceof Error ? err.message : String(err)}`;
+                    audit('deny', requireId, reason);
+                    return deny(requireId, `${failMessage} (${reason})`, { fire: spec.fire });
+                }
+                if (retry.holds) {
+                    // Visible success: the call proceeds, but the correction is audited.
+                    audit('allow', requireId, `auto-corrected via "${spec.fire}" + retry`);
+                    continue;
+                }
+                const reason = `still failing after auto-correct "${spec.fire}"`;
+                audit('deny', requireId, reason);
+                return deny(requireId, `${failMessage} (${reason})`, { fire: spec.fire });
+            }
+            // Plain reject.
+            audit('deny', requireId, 'condition not met');
+            return deny(requireId, failMessage);
+        }
+        return null;
+    },
+};
 /* ─── Default stack ──────────────────────────────────────────────────── */
 /**
  * Default ordered stack the dispatcher runs. Steps execute in this order;
  * the first one to return a `DispatchProjectedResult` short-circuits.
  *
  * Ordering invariants:
- *   - All gates (role / capability / harness / quota / authorize) come first
- *     so denials are cheap (no timer arming, no buffer allocation, no ctx
- *     wrappers). `authorize` runs last among the gates — it is the
- *     finest-grained and may touch the resource — but still before `timeout`.
+ *   - All gates (role / capability / harness / quota / authorize /
+ *     preconditions) come first so denials are cheap (no timer arming, no
+ *     buffer allocation, no ctx wrappers). `authorize` runs last among the
+ *     AUTH gates — it is the finest-grained and may touch the resource.
+ *   - `preconditions` (declarative `requires:` — D-006) runs after
+ *     `authorize` and before `timeout`: a corrective auto-fire must only
+ *     happen for an authorized caller, and a functional precondition should
+ *     not mask an auth denial.
  *   - `timeout` arms the AbortController; every subsequent step that
  *     races against it depends on this having run.
  *   - `idle-watchdog` runs after `timeout` so it composes with the same
@@ -536,10 +754,12 @@ exports.DEFAULT_DISPATCH_STACK = Object.freeze([
     defaultDenyStep,
     roleAllowlistStep,
     capabilityCheckStep,
+    capabilityEnvelopeStep,
     roleRequirementStep,
     harnessCheckStep,
     quotaStep,
     authorizeStep,
+    preconditionsStep,
     timeoutStep,
     idleWatchdogStep,
     replayBufferStep,
@@ -589,7 +809,7 @@ async function recordTelemetry(exec, result) {
     const code = result.ok ? null : result.error?.code;
     const status = result.ok
         ? 'ok'
-        : code === 'role_not_allowed' || code === 'missing_capability'
+        : code === 'role_not_allowed' || code === 'missing_capability' || code === 'capability_denied'
             ? 'role-not-allowed'
             : code === 'quota_exceeded'
                 ? 'quota-exceeded'
@@ -601,6 +821,7 @@ async function recordTelemetry(exec, result) {
     const isGateDenial = !result.ok &&
         (code === 'role_not_allowed' ||
             code === 'missing_capability' ||
+            code === 'capability_denied' ||
             code === 'quota_exceeded');
     if (!isGateDenial && !windowKey)
         return;
@@ -630,6 +851,10 @@ async function recordTelemetry(exec, result) {
                 windowKey: windowKey ?? '',
                 durationMs: Date.now() - startedAt,
                 status,
+                // Persist the dispatcher error CLASS (computed above, then historically
+                // discarded) so the watchdog can tell a deterministic config bug from a
+                // transient crash without LIKE-matching errorMessage (P-007 / D-009).
+                errorCode: code ?? null,
                 errorMessage: result.error?.message ?? '',
                 args: input,
                 eventCount,
@@ -680,10 +905,33 @@ async function runDispatchStack(tool, toolName, input, ctx, deps, stack = export
         return result;
     }
     finally {
-        await recordTelemetry(exec, result ?? {
+        const settled = result ?? {
             ok: false,
             error: { code: 'handler_error', message: 'no result' },
-        });
+        };
+        await recordTelemetry(exec, settled);
+        // Event-reaction observation point (D-001). Fired AFTER telemetry, on every
+        // path. Best-effort + non-blocking: the host's postInvoke matches rules and
+        // SCHEDULES reactions (durable queue / fire-and-forget), it must not run a
+        // reaction inline here. We deliberately do NOT await it, and swallow throws,
+        // so a reaction can never delay or break its trigger.
+        if (deps.postInvoke) {
+            try {
+                deps.postInvoke({
+                    toolName,
+                    pluginName: tool.pluginName,
+                    args: input,
+                    result: settled,
+                    ctx,
+                    durationMs: Date.now() - exec.startedAt,
+                    capabilities: tool.capabilities,
+                    envelopeVerdict: exec.envelopeVerdict,
+                });
+            }
+            catch {
+                // a reaction must never break its trigger
+            }
+        }
         if (exec.timeoutTimer)
             clearTimeout(exec.timeoutTimer);
         if (exec.idleTimer)

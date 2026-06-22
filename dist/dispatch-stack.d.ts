@@ -22,8 +22,8 @@
 import type { ToolResult } from './wire';
 import { type ProjectedTool, type UnifiedToolContext } from './tool-projection';
 import { type ReplayBufferWriter } from './replay-buffer';
-import { type DispatchProjectedDeps, type DispatchProjectedResult } from './dispatch-types';
-export type DispatchStepName = 'default-deny' | 'role-allowlist' | 'capability-check' | 'role-requirement' | 'harness-check' | 'quota' | 'authorize' | 'timeout' | 'idle-watchdog' | 'replay-buffer' | 'ctx-bindings' | 'invoke';
+import { type CapabilityEnvelopeVerdict, type DispatchProjectedDeps, type DispatchProjectedResult } from './dispatch-types';
+export type DispatchStepName = 'default-deny' | 'role-allowlist' | 'capability-check' | 'capability-envelope' | 'role-requirement' | 'harness-check' | 'quota' | 'authorize' | 'preconditions' | 'timeout' | 'idle-watchdog' | 'replay-buffer' | 'ctx-bindings' | 'invoke';
 /**
  * Mutable state that flows between steps. Read-only fields are set at
  * init; mutable fields are written by specific steps (named in each
@@ -55,6 +55,8 @@ export interface DispatchExecution {
     metadataJson: Record<string, unknown> | null;
     /** ctx with emit/progress/askUser/publishState/metadata wrappers applied. */
     handlerCtx: UnifiedToolContext;
+    /** The capability-envelope verdict (B-06), threaded into the postInvoke event. Null until set. */
+    envelopeVerdict: CapabilityEnvelopeVerdict | null;
     handlerResult: ToolResult | null;
 }
 /**
@@ -73,10 +75,14 @@ export interface DispatchStep {
  * the first one to return a `DispatchProjectedResult` short-circuits.
  *
  * Ordering invariants:
- *   - All gates (role / capability / harness / quota / authorize) come first
- *     so denials are cheap (no timer arming, no buffer allocation, no ctx
- *     wrappers). `authorize` runs last among the gates — it is the
- *     finest-grained and may touch the resource — but still before `timeout`.
+ *   - All gates (role / capability / harness / quota / authorize /
+ *     preconditions) come first so denials are cheap (no timer arming, no
+ *     buffer allocation, no ctx wrappers). `authorize` runs last among the
+ *     AUTH gates — it is the finest-grained and may touch the resource.
+ *   - `preconditions` (declarative `requires:` — D-006) runs after
+ *     `authorize` and before `timeout`: a corrective auto-fire must only
+ *     happen for an authorized caller, and a functional precondition should
+ *     not mask an auth denial.
  *   - `timeout` arms the AbortController; every subsequent step that
  *     races against it depends on this having run.
  *   - `idle-watchdog` runs after `timeout` so it composes with the same

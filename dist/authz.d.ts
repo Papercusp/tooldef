@@ -114,7 +114,7 @@ export interface AuthAuditEvent {
     };
     decision: 'allow' | 'deny';
     /** Which layer rendered the decision. */
-    gate: 'role' | 'capability' | 'harness' | 'quota' | 'authorize';
+    gate: 'role' | 'capability' | 'harness' | 'quota' | 'authorize' | 'precondition';
     reason?: string;
 }
 /**

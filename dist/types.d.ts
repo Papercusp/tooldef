@@ -7,7 +7,8 @@ import type { z, ZodTypeAny } from 'zod';
 import type { StandardSchemaV1 } from './standard-schema';
 import type { EventsSchema, UnifiedToolContext, UserEvents } from './tool-projection';
 import type { Authorizer } from './authz';
-import type { OpenCardSnapshot as WireOpenCardSnapshot } from '@papercusp/chat-protocol';
+import type { ToolRequireSpec } from './requires';
+import type { OpenCardSnapshot as WireOpenCardSnapshot, ReportBlock } from '@papercusp/chat-protocol';
 /** A Papercusp capability tier per spec/capabilities §10.6.1. */
 export type CapabilityTier = 'low' | 'medium' | 'high';
 /**
@@ -98,10 +99,13 @@ export interface PrincipalRequirements {
 }
 /**
  * Endpoint auth stance. `'public'` opts out of `requirePrincipal()`
- * (used for webhooks, OAuth callbacks, pair endpoints). Otherwise a
- * `PrincipalRequirements` object gates the call.
+ * (used for webhooks, OAuth callbacks, pair endpoints). `'loopback'`
+ * also takes no principal but declares the route local-only — the host's
+ * dispatch chokepoint rejects requests whose Host is not a loopback
+ * address (enforcement lives host-side; this type is the contract).
+ * Otherwise a `PrincipalRequirements` object gates the call.
  */
-export type RouteAuth = 'public' | PrincipalRequirements;
+export type RouteAuth = 'public' | 'loopback' | PrincipalRequirements;
 export type RouteMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'OPTIONS';
 /**
  * Per-call context handed to a route handler. Host-neutral: `req` and
@@ -142,8 +146,13 @@ export interface RouteDefinition<TInputSchema extends ZodTypeAny | undefined = u
      * file-serving, SSE).
      */
     input?: TInputSchema;
-    /** Wall-clock timeout. Default 30s. A wedged handler aborts. */
-    timeoutSec?: number;
+    /**
+     * Wall-clock timeout. Default 30s. A wedged handler aborts.
+     * `null` disables the watchdog entirely — for long-lived routes
+     * (SSE / streaming transports) whose handler legitimately outlives any
+     * fixed budget; a 30s default there kills healthy streams (EI-110).
+     */
+    timeoutSec?: number | null;
     /**
      * Telemetry sample rate, 0..1. Default 1 (record every call). High-
      * frequency polled routes set this < 1; 0 = never record.
@@ -259,6 +268,87 @@ export interface ToolGuidance {
      */
     byRole?: Partial<Record<AgentRole, Partial<Omit<ToolGuidance, 'byRole'>>>>;
 }
+/**
+ * Structural tool-invocation event — the value an `emits` rule's `when` /
+ * `render` reads (coord-lifecycle-automation-2026-06-04 D-002). Defined here,
+ * minimal + domain-free, so the generic `tooldef` lib never depends on the
+ * operator-core event-reaction engine. It is structurally assignable to the
+ * engine's richer `ToolInvocationEvent` (event-reaction-system-2026-06-04), so
+ * the desugar layer passes it through without a cast.
+ */
+export interface ToolEventLike {
+    /** The trigger tool's MCP name (e.g. `'work_items:complete'`). */
+    tool: string;
+    /** The (already-validated) args the trigger was invoked with. */
+    args: Record<string, unknown>;
+    /** The trigger's result envelope. */
+    result: {
+        ok: boolean;
+        data?: unknown;
+        error?: unknown;
+    };
+    /** Invocation context — the fields a `when`/`render` commonly reads. Structural/open. */
+    ctx: {
+        uiClientId?: string | null;
+        harnessSlug?: string | null;
+        workspaceId?: string | null;
+        role?: string | null;
+        runId?: string | null;
+        spawnId?: string | null;
+        [key: string]: unknown;
+    };
+    /** Cause-chain for loop protection — set by the engine, not the author. */
+    cause?: {
+        depth: number;
+        chain: string[];
+        ruleId?: string;
+    };
+}
+/**
+ * One INTRINSIC emission a tool always performs as part of its contract
+ * (coord-lifecycle-automation-2026-06-04 D-002). `emits: [ToolEmitSpec, …]` on
+ * a `defineTool` is co-location SUGAR that the operator-core desugar
+ * (`emitsEntryToRule`) registers as an event-reaction rule — one engine, two
+ * authoring forms (the rules file for contextual reactions; `emits:` for
+ * intrinsic lifecycle emissions). It is NEVER a parallel dispatch path: the
+ * field carries no execution, only the `(on=this tool, when, fire, args)`
+ * descriptor the engine runs.
+ *
+ * (D-002 names the field's target the "surface"; it desugars to the reaction
+ * rule's `fire` — the tool the emission invokes, e.g. `coord:emit`.)
+ */
+export interface ToolEmitSpec {
+    /**
+     * The reaction tool to fire — its MCP name, e.g. `'coord:emit'`. Desugars to
+     * `ReactionRule.fire`. The reaction runs through the NORMAL dispatcher
+     * (auth-gated, quota'd, audited), exactly like any other tool call.
+     */
+    fire: string;
+    /**
+     * Condition over the invocation event. Omitted ⇒ fires whenever the trigger
+     * matches (subject to `onlyOnSuccess`). Desugars to `ReactionRule.when`.
+     */
+    when?: (event: ToolEventLike) => boolean;
+    /**
+     * Derive the fired tool's args from the event. Desugars to
+     * `ReactionRule.args`. Keep it PURE — no I/O; the engine owns dispatch.
+     */
+    render: (event: ToolEventLike) => Record<string, unknown>;
+    /** Only fire when the trigger SUCCEEDED. Default true. */
+    onlyOnSuccess?: boolean;
+    /**
+     * Reaction execution mode — `'durable'` (DBOS-queued, off the hot path,
+     * default) or `'sync'` (in-process await; only when the trigger needs the
+     * value). Desugars to `ReactionRule.mode`.
+     */
+    mode?: 'durable' | 'sync';
+    /**
+     * Optional explicit id suffix for the generated rule. Defaults to the
+     * entry's index in the `emits` array; the full rule id is
+     * `emits:<toolName>#<id>`.
+     */
+    id?: string;
+}
 /** Tool definition produced by `defineTool`. */
 export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV1> {
     /** Tool name, e.g. `"tasks:list"`. Defaults to file-path-derived. */
@@ -273,12 +363,46 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
     description: string;
     /** Capability gate (e.g. `"tasks:read"`). One per tool. */
     capability: string;
+    /**
+     * Read/write effect (code-execution-tool-orchestration B-CX-PRE). 'write' = the tool
+     * MUTATES state; 'read' = side-effect-free. When omitted, `defineTool` infers it from the
+     * capability suffix (`:write`/`:admin`/`:delete`/`:manage` ⇒ 'write', else 'read'); set
+     * explicitly to override. Threaded onto `ProjectedTool`; consumed by the code-execution
+     * sandbox's dry-run/confirm gate (a read-only tool needs no gate).
+     */
+    effect?: 'read' | 'write';
+    /**
+     * Canonical tool names this COMPOSITE tool bundles (tool-call-batching-wrappers
+     * P-010). A composite collapses a hot fixed multi-step flow into one call (e.g.
+     * coord:orient replaces fleet:assignments + work_items:list + coord:inbox + …).
+     * Omitted for primitives. Drives `composition` + the agent_tools:list / prompt-
+     * catalog back-pointer that points each bundled primitive at this composite.
+     */
+    replaces?: readonly string[];
+    /** Derived at defineTool time: 'composite' when `replaces` is non-empty, else 'primitive'. */
+    composition?: 'primitive' | 'composite';
     /** Tier looked up from the capability per §10.6.1's table. */
     tier: CapabilityTier;
     /** Argument schema (any Standard Schema validator). Runtime validation + JSON-schema source. */
     args: TArgs;
-    /** Implementation. Tools may return any data shape inside ToolResponse. */
-    handler: (args: StandardSchemaV1.InferOutput<TArgs>, ctx: ToolContext) => Promise<ToolResponse>;
+    /**
+     * Optional schema for the `ToolResponse.data` this tool returns (D-003). The
+     * mirror of `args` on the output side — a single declaration that powers
+     * three things: (1) token-efficient FORMAT ELIGIBILITY (which compact formats
+     * the result can be rendered in — see `@papercusp/result-encoding`'s
+     * `analyzeSchema`), (2) MCP `outputSchema` advertisement + `structuredContent`,
+     * and (3) runtime output validation. Resolved from `result`/`output` on the
+     * input. Optional — tools without it still get the TOON runtime auto-encoder.
+     */
+    result?: StandardSchemaV1;
+    /**
+     * Implementation. PREFER returning a `ToolResponse` envelope (`{ data }`)
+     * — it gets format-aware serialization. A raw `ToolResult` (MCP content
+     * shape) is also accepted and passes through untouched (parity with the
+     * role-gated wrapper; the memory:* family + the TUI Memory tab depend on
+     * it — memory-taxonomy-and-debt-followups P-006).
+     */
+    handler: (args: StandardSchemaV1.InferOutput<TArgs>, ctx: ToolContext) => Promise<ToolResponse | ToolResult>;
     /**
      * Optional per-tool guidance for the role's system prompt.
      * Projected into the prompt assembly by `assembleRolePrompt`.
@@ -287,8 +411,24 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
     guidance?: ToolGuidance;
     /** See `ToolDefinitionInput.profile`. */
     profile?: 'engineer' | 'all';
-    /** See `ToolDefinitionInput.harness`. */
+    /** See `ToolDefinitionInput.papercusp`. */
     harness?: 'required' | 'optional' | 'none';
+    /** Intrinsic lifecycle emissions — see `ToolEmitSpec`. Desugared to event rules at load. */
+    emits?: readonly ToolEmitSpec[];
+    /** Declarative preconditions — see `ToolRequireSpec`. Evaluated by the dispatcher's `preconditions` step. */
+    requires?: readonly ToolRequireSpec[];
+    /**
+     * Cross-workspace opt-out for PRINCIPAL-gated tools — see
+     * `RoleToolDefinition.crossWorkspace` for the full rationale. A
+     * principal-gated tool whose data genuinely spans workspaces (e.g. the
+     * memory store, which lives in shared tables scoped by user-id / harness-slug,
+     * not by workspace) sets `crossWorkspace: true` so an UNSCOPED superuser
+     * session (`workspaceId '*'`) is handed the admin (rolbypassrls) handle + a
+     * synthesized principal instead of failing `workspace_required`. Absent/false
+     * ⇒ workspace-isolated (the default). Threaded onto `ProjectedTool` by
+     * `registerLegacyAsProjected` and read by the host dispatch's crossWorkspace branch.
+     */
+    crossWorkspace?: boolean;
 }
 /** Input shape for `defineTool` — same as ToolDefinition minus derived fields. */
 export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSchemaV1> {
@@ -303,8 +443,13 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
     /** Optional explicit description; defaults to caller's TSDoc. */
     description?: string;
     capability: string;
+    /** Read/write effect (B-CX-PRE); inferred from the capability suffix when omitted. See ToolDefinition.effect. */
+    effect?: 'read' | 'write';
+    /** Canonical tool names this composite tool bundles (e.g. coord:orient replaces fleet:assignments + work_items:list + coord:inbox). Omitted for primitives. See ToolDefinition.replaces. */
+    replaces?: readonly string[];
     args: TArgs;
-    handler: (args: StandardSchemaV1.InferOutput<TArgs>, ctx: ToolContext) => Promise<ToolResponse>;
+    /** See `ToolDefinition.handler` — ToolResponse preferred; a raw ToolResult passes through untouched. */
+    handler: (args: StandardSchemaV1.InferOutput<TArgs>, ctx: ToolContext) => Promise<ToolResponse | ToolResult>;
     /** See `ToolGuidance`. */
     guidance?: ToolGuidance;
     /**
@@ -320,6 +465,17 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
      * set, `args` wins (back-compat). New callsites should use `input`.
      */
     input?: TArgs;
+    /**
+     * Optional output-`data` schema (D-003). Declaring it unlocks token-efficient
+     * format eligibility (CSV where the shape proves flat-scalar-array), MCP
+     * `outputSchema` advertisement, and runtime output validation. `output` is an
+     * accepted alias; when both are set `result` wins. Omit and the result still
+     * gets the lossless TOON runtime auto-encoder — declaring a schema only
+     * UPGRADES eligibility, it is never required.
+     */
+    result?: StandardSchemaV1;
+    /** Alias for `result`. */
+    output?: StandardSchemaV1;
     /**
      * Telemetry sample rate, 0..1. Default 1 (record every call). High-
      * frequency tools set this < 1 so `tool_invocations` doesn't flood.
@@ -344,9 +500,29 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
      * uniform `harness_required` error when `ctx.harnessSlug` is absent or
      * `'*'` — for CTX-ONLY tools (no slug arg). Tools that take an explicit
      * slug self-resolve; leave them `'optional'` (default) or `'none'`.
-     * See `ProjectedTool.harness` (su-prompt-audit-fixes P-020 / D-007).
+     * See `ProjectedTool.papercusp` (su-prompt-audit-fixes P-020 / D-007).
      */
     harness?: 'required' | 'optional' | 'none';
+    /**
+     * Intrinsic lifecycle emissions (coord-lifecycle-automation D-002). Each
+     * entry desugars to an event-reaction rule registered at load — co-location
+     * sugar for "this tool always emits X", never a parallel dispatch path.
+     * See `ToolEmitSpec`.
+     */
+    emits?: readonly ToolEmitSpec[];
+    /**
+     * Declarative preconditions (autoloop-pot-operator-rebuild D-006) — the
+     * preInvoke mirror of `emits:`. Each entry must HOLD (a MatchMap over
+     * `{ tool, args, ctx, state }`) for the call to proceed; on failure it
+     * rejects (`{ error }`) or auto-corrects (`{ fire, then: 'retry' }`).
+     * Evaluated by the dispatcher's `preconditions` step (after `authorize`).
+     * NEVER use for safety invariants (D-007) — see `ToolRequireSpec`.
+     */
+    requires?: readonly ToolRequireSpec[];
+    /** See `ToolDefinition.crossWorkspace`. Set on a principal-gated tool that
+     * legitimately spans workspaces (e.g. the user-/harness-scoped memory store)
+     * so it runs from an unscoped superuser session instead of `workspace_required`. */
+    crossWorkspace?: boolean;
 }
 /**
  * Role-gated first-party tool definition.
@@ -373,6 +549,12 @@ export interface RoleToolDefinition<TArgs extends StandardSchemaV1 = StandardSch
     description: string;
     /** Capability string for tier classification + descriptive listings. Not enforced. */
     capability: string;
+    /** Read/write effect (B-CX-PRE); inferred from the capability suffix when omitted. See ToolDefinition.effect. */
+    effect?: 'read' | 'write';
+    /** Canonical tool names this composite tool bundles. Omitted for primitives. See ToolDefinition.replaces. */
+    replaces?: readonly string[];
+    /** Derived at defineTool time: 'composite' when `replaces` is non-empty, else 'primitive'. */
+    composition?: 'primitive' | 'composite';
     tier: CapabilityTier;
     /**
      * Visibility profile gate. 'engineer' = engineer-only surfaces (hidden +
@@ -380,7 +562,7 @@ export interface RoleToolDefinition<TArgs extends StandardSchemaV1 = StandardSch
      * Read by registerRoleGatedAsProjected → the projection profile filter.
      */
     profile?: 'engineer' | 'all';
-    /** See `ToolDefinitionInput.harness`. */
+    /** See `ToolDefinitionInput.papercusp`. */
     harness?: 'required' | 'optional' | 'none';
     /** Marker — read by the projection wrapper to skip the principal check. */
     requirePrincipal: false;
@@ -437,6 +619,12 @@ export interface RoleToolDefinition<TArgs extends StandardSchemaV1 = StandardSch
      */
     state?: StandardSchemaV1;
     /**
+     * Optional output-`data` schema (D-003) — see `ToolDefinition.result`. Only
+     * meaningful when the handler returns a `ToolResponse` envelope (a raw
+     * `ToolResult` is already content-shaped and bypasses format selection).
+     */
+    result?: StandardSchemaV1;
+    /**
      * Handler receives the unified context (no principal). May return either
      * a raw `ToolResult` (MCP shape) or a `ToolResponse` envelope; the
      * wrapper adapts both.
@@ -444,6 +632,10 @@ export interface RoleToolDefinition<TArgs extends StandardSchemaV1 = StandardSch
     handler: (args: StandardSchemaV1.InferOutput<TArgs>, ctx: UnifiedToolContext) => Promise<ToolResult | ToolResponse>;
     /** See `ToolGuidance`. */
     guidance?: ToolGuidance;
+    /** Intrinsic lifecycle emissions — see `ToolEmitSpec`. Desugared to event rules at load. */
+    emits?: readonly ToolEmitSpec[];
+    /** Declarative preconditions — see `ToolRequireSpec`. Evaluated by the dispatcher's `preconditions` step. */
+    requires?: readonly ToolRequireSpec[];
 }
 /** Input shape for role-gated `defineTool` — same as RoleToolDefinition minus derived fields. */
 export interface RoleToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSchemaV1, TEvents extends EventsSchema = EventsSchema> {
@@ -456,9 +648,13 @@ export interface RoleToolDefinitionInput<TArgs extends StandardSchemaV1 = Standa
     public?: boolean;
     description?: string;
     capability: string;
+    /** Read/write effect (B-CX-PRE); inferred from the capability suffix when omitted. See ToolDefinition.effect. */
+    effect?: 'read' | 'write';
+    /** Canonical tool names this composite tool bundles. Omitted for primitives. See ToolDefinition.replaces. */
+    replaces?: readonly string[];
     /** Visibility profile gate — see RoleToolDefinition.profile. */
     profile?: 'engineer' | 'all';
-    /** Harness-scope requirement — see `ToolDefinitionInput.harness`. */
+    /** Harness-scope requirement — see `ToolDefinitionInput.papercusp`. */
     harness?: 'required' | 'optional' | 'none';
     requirePrincipal: false;
     agentRoles?: AgentRole[];
@@ -492,6 +688,25 @@ export interface RoleToolDefinitionInput<TArgs extends StandardSchemaV1 = Standa
     sampleRate?: number;
     /** Explicit exposure override. See `ToolDefinitionInput.expose`. */
     expose?: import('./tool-projection').ToolExposure;
+    /**
+     * Optional output-`data` schema (D-003) — see `ToolDefinitionInput.result`.
+     * `output` is an accepted alias; when both are set `result` wins.
+     */
+    result?: StandardSchemaV1;
+    /** Alias for `result`. */
+    output?: StandardSchemaV1;
+    /**
+     * Intrinsic lifecycle emissions (coord-lifecycle-automation D-002). Each
+     * entry desugars to an event-reaction rule registered at load. See
+     * `ToolEmitSpec`.
+     */
+    emits?: readonly ToolEmitSpec[];
+    /**
+     * Declarative preconditions (autoloop-pot-operator-rebuild D-006) — the
+     * preInvoke mirror of `emits:`. See `ToolRequireSpec` and
+     * `ToolDefinitionInput.requires`.
+     */
+    requires?: readonly ToolRequireSpec[];
 }
 export interface ResourceContents {
     uri: string;
@@ -636,6 +851,14 @@ export interface CardSpec<TSchema extends StandardSchemaV1 = StandardSchemaV1> {
         runId: string;
         workspaceId: string;
     }) => void;
+    /**
+     * Optional structured body block (the shared `ReportBlock` two-tier
+     * plan→item shape from `@papercusp/chat-protocol`) rendered between the
+     * prompt and the options — the card-system rendering of a `<report>`
+     * payload. Copied verbatim onto the wire snapshot.
+     * Plan: report-cards-inbox-reconciliation-2026-06-05 (D-001).
+     */
+    report?: ReportBlock;
 }
 /**
  * Response from a card.

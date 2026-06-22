@@ -11,8 +11,17 @@ exports.registerPrompt = registerPrompt;
 exports.lookupPrompt = lookupPrompt;
 exports.getPromptCatalog = getPromptCatalog;
 exports._resetPromptCatalogForTests = _resetPromptCatalogForTests;
+const slash_projection_1 = require("./slash-projection");
 const CATALOG = new Map();
 function registerPrompt(def) {
+    // `tool:*` is reserved for the DYNAMIC slash projection of the tool
+    // catalog (slash-exposure-tool-catalog-2026-06-12 D-006). A static prompt
+    // there would collide unpredictably as tools come and go — fail loud at
+    // registration instead.
+    if (def.name.startsWith(slash_projection_1.SLASH_PROMPT_PREFIX)) {
+        throw new Error(`Prompt name "${def.name}" uses the reserved "${slash_projection_1.SLASH_PROMPT_PREFIX}" namespace ` +
+            '(dynamic slash projection of the tool catalog). Pick another group.');
+    }
     if (CATALOG.has(def.name)) {
         const existing = CATALOG.get(def.name);
         if (existing === def)

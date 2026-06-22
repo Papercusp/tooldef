@@ -31,6 +31,7 @@ import {
   reconstructArgs,
   isWritePositional,
   getPrePromptEntry,
+  isObjectWithArrayField,
   type ColumnSpec,
   type EligibilityResult,
 } from '@papercusp/result-encoding';
@@ -165,6 +166,50 @@ async function serializeProjectedResult(
   if (Object.keys(serialized._meta).length > 0) result._meta = serialized._meta;
   if (serialized.structuredContent !== undefined) result.structuredContent = serialized.structuredContent;
   return result;
+}
+
+/**
+ * P-002 (definetool-token-optimization-adoption): the ~407 first-party tools that
+ * hand-roll `return { content: [{ type:'text', text: JSON.stringify(x) }] }` bypass
+ * the compact encoder — a raw `ToolResult` passes through untouched. When such a
+ * result is, ON THE AGENT-FACING MCP TRANSPORT, a single text item that parses as
+ * JSON whose shape TOON actually shrinks (an array, or an object with an array
+ * field), this returns the parsed payload so the caller can re-route it through the
+ * SAME serializer a `{ data }` handler uses — zero per-tool churn, lossless JSON
+ * fallback. Otherwise returns `undefined` ⇒ the raw result is passed through verbatim.
+ *
+ * Deliberately narrow so it can NEVER change what a NON-agent consumer sees:
+ *   - ONLY `ctx.transport === 'mcp'`. Every other transport — in-process compounds
+ *     (`inProcessCall`'s `unwrap` → `JSON.parse`), HTTP, IPC, the desktop UI / TUI
+ *     Memory tab — keeps the EXACT raw bytes, preserving the memory:* verbatim-content
+ *     contract (memory-taxonomy-and-debt-followups P-006; those consumers read over a
+ *     non-mcp transport, and an MCP agent reads the body as text, never JSON-parses it).
+ *   - single text content only; skip `isError`, `structuredContent`, multi-content /
+ *     uiResources, and any already-`format:`-marked compact body (never double-encode).
+ *   - parse the text FIRST, then wrap `{ data: parsed }` — NOT `{ data: theWholeResult }`,
+ *     which is the double-wrap that broke the past blanket attempt (define-tool L548).
+ *   - only array / object-with-array-field payloads (a scalar / plain object round-trips
+ *     to identical JSON — no win — so leave it untouched).
+ */
+function reencodableJsonPayload(out: ToolResult, ctx: UnifiedToolContext): unknown | undefined {
+  if (ctx.transport !== 'mcp') return undefined;
+  if (out.isError) return undefined;
+  if (out.structuredContent !== undefined) return undefined;
+  const content = out.content;
+  if (!Array.isArray(content) || content.length !== 1) return undefined;
+  const item = content[0] as { type?: unknown; text?: unknown } | undefined;
+  if (!item || item.type !== 'text' || typeof item.text !== 'string') return undefined;
+  const text = item.text;
+  // Already a compact-encoded body (a `{data}` tool, or a hand-marked payload).
+  if (/^format: (?:toon|csv|tsv|md)\n/.test(text)) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return undefined; // non-JSON text (a plain string / human message) — leave as-is
+  }
+  if (!Array.isArray(parsed) && !isObjectWithArrayField(parsed)) return undefined;
+  return parsed;
 }
 
 /**
@@ -545,13 +590,20 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       throw new InvalidInputError(`invalid_args: ${formatIssues(parsed.issues)}`);
     }
     const response = await def.handler(parsed.value, legacyCtx);
-    // A raw ToolResult (MCP content shape) passes through untouched — parity
-    // with the role-gated wrapper below. The memory:* family returns it and
-    // its consumers (the TUI Memory tab) parse content[0].text as the
-    // handler's own JSON; re-encoding it as opaque data double-wrapped the
-    // envelope and broke that contract
+    // A raw ToolResult (MCP content shape) normally passes through untouched —
+    // parity with the role-gated wrapper below. EXCEPT: on the agent-facing MCP
+    // transport, a single-text-item JSON body whose shape TOON shrinks is
+    // transparently re-encoded for the token win (P-002). The narrow guards in
+    // `reencodableJsonPayload` keep this off every NON-mcp transport, so the
+    // memory:* family + the TUI Memory tab (which read content[0].text as the
+    // handler's own JSON over a non-mcp transport) are byte-for-byte unchanged
+    // — preserving the contract a past blanket re-encode broke
     // (memory-taxonomy-and-debt-followups P-006).
     if (response && typeof response === 'object' && Array.isArray((response as ToolResult).content)) {
+      const reencodable = reencodableJsonPayload(response as ToolResult, ctx);
+      if (reencodable !== undefined) {
+        return serializeProjectedResult({ data: reencodable } as ToolResponse, ctx, eligibility, def, readColumns);
+      }
       return response as ToolResult;
     }
     return serializeProjectedResult(response as ToolResponse, ctx, eligibility, def, readColumns);
@@ -630,8 +682,15 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
 
     // Already a ToolResult? The handler self-serialized its content — pass it
     // through untouched (format-aware serialization only applies to handlers
-    // that return a ToolResponse envelope with structured `data`).
+    // that return a ToolResponse envelope with structured `data`). EXCEPT: on
+    // the MCP transport, a single-text JSON body whose shape TOON shrinks is
+    // re-encoded for the token win (P-002); see `reencodableJsonPayload` — it is
+    // a no-op on every non-mcp transport, so verbatim-content consumers are safe.
     if (out && typeof out === 'object' && Array.isArray((out as ToolResult).content)) {
+      const reencodable = reencodableJsonPayload(out as ToolResult, ctx);
+      if (reencodable !== undefined) {
+        return serializeProjectedResult({ data: reencodable } as ToolResponse, ctx, eligibility, def, readColumns);
+      }
       return out as ToolResult;
     }
 

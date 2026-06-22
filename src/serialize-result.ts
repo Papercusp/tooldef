@@ -25,6 +25,7 @@ import {
   encodeToonChecked,
   encodePositionalRows,
   isFlatObjectArray,
+  isObjectWithArrayField,
   parseFormatRequest,
   readPrePromptFormat,
   type ColumnSpec,
@@ -109,7 +110,13 @@ function chooseFormat(
   opts: SerializeFormatOpts,
 ): { format: ResultFormat; text: string; fallback: boolean } {
   const req: FormatRequest = opts.requested ?? (opts.defaultCompact ? 'compact' : 'json');
-  const autoBest: ResultFormat = Array.isArray(data) ? 'toon' : 'json';
+  // Bare arrays AND object-rooted-but-array-bearing payloads (bulk envelopes
+  // `{ ok, results:[…], counts }`, list wrappers `{ items:[…], nextCursor }`)
+  // both win from TOON; a plain object / scalar stays JSON (TOON's gain there is
+  // marginal). `encodeToonChecked` is lossless-or-fallback, so attempting TOON on
+  // an object is safe — a non-lossless shape falls through to JSON below.
+  // (definetool-token-optimization-adoption P-001.)
+  const autoBest: ResultFormat = Array.isArray(data) || isObjectWithArrayField(data) ? 'toon' : 'json';
 
   // `want` = the format the request IDEALLY maps to (what a successful serve
   // looks like); `candidates` = the ordered try-list (excludes formats the
