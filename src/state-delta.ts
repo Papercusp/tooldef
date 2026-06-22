@@ -1,13 +1,13 @@
 /**
- * Per-run snapshot DELTA (agent-tool-delta-protocol-2026-06-22, Lane D / P-009).
+ * Per-run snapshot DELTA adapter (agent-tool-delta-protocol-2026-06-22, Lane D / P-009).
  *
  * The state channel re-emits a run's WHOLE {@link StateSnapshot} (every openCard +
- * toolState) on each mutation. For a run with many cards where one changes, that
- * re-ships everything. These pure functions let the transport ship only what moved:
- * cards added/updated (keyed by `correlationId`) + removed ids + the new card order
- * + a toolState replacement when it changed. `baseVersion` pins the version the
- * delta applies ON TOP OF — a consumer that isn't at `baseVersion` cannot apply it
- * and must refetch the full snapshot (the `resync` fallback, P-008).
+ * toolState) on each mutation. This ships only what moved. Rather than a parallel
+ * differ, it ADAPTS the generic keyed-row delta engine Lane B already built
+ * ({@link diffFromDigest} / {@link applySemanticDelta} / {@link computeViewChecksum}
+ * in `delta-protocol`): openCards are rows keyed by `correlationId`. The adapter adds
+ * only the snapshot-specific envelope — version pinning, exact card ORDER, and the
+ * toolState replacement — on top of that shared engine.
  *
  * Round-trip invariant (the contract the tests pin):
  *   applySnapshotDelta(prev, diffSnapshot(prev, next)) deep-equals next
@@ -15,6 +15,7 @@
  */
 import type { OpenCardSnapshot } from './types';
 import type { StateSnapshot, VersionedSnapshot } from './state-channel';
+import { computeRowDigest, diffFromDigest, applySemanticDelta, computeViewChecksum, type DeltaChange } from './delta-protocol';
 
 export interface SnapshotDelta {
   runId: string;
@@ -22,44 +23,37 @@ export interface SnapshotDelta {
   baseVersion: number;
   /** The version this delta produces (next.version). */
   version: number;
-  /** Cards added or whose content changed since baseVersion (full payloads). */
-  upsertedCards: OpenCardSnapshot[];
-  /** correlationIds of cards present at baseVersion but gone in this version. */
-  removedCardIds: string[];
+  /** Card add/update/remove — the generic delta-protocol shape, keyed by correlationId. */
+  cards: DeltaChange<OpenCardSnapshot>[];
   /**
-   * The full ordered correlationId list of openCards AFTER this delta. Lets the
-   * consumer reproduce exact order (incl. a pure reorder) without re-shipping
-   * unchanged cards. Length = the new openCards length.
+   * The full ordered correlationId list of openCards AFTER this delta. The generic
+   * engine returns merged rows in insertion order and defers ordering to the caller;
+   * carrying the order (just ids) reconstructs exact order incl. a pure reorder.
    */
   order: string[];
   /** Present only when toolState changed; carries the replacement value. */
   toolState?: { value: unknown };
 }
 
-const keyOf = (c: OpenCardSnapshot): string => c.correlationId;
+const keyOf = (c: unknown): string => (c as OpenCardSnapshot).correlationId;
 
-/** Diff two consecutive per-run snapshots into a minimal delta. */
-export function diffSnapshot(prev: VersionedSnapshot, next: VersionedSnapshot): SnapshotDelta {
-  const prevById = new Map(prev.snapshot.openCards.map((c) => [keyOf(c), c]));
-  const nextById = new Map(next.snapshot.openCards.map((c) => [keyOf(c), c]));
-
-  const upsertedCards: OpenCardSnapshot[] = [];
-  for (const [k, card] of nextById) {
-    const before = prevById.get(k);
-    if (!before || !deepEqual(before, card)) upsertedCards.push(card);
-  }
-  const removedCardIds: string[] = [];
-  for (const k of prevById.keys()) if (!nextById.has(k)) removedCardIds.push(k);
-
+/**
+ * Diff two consecutive per-run snapshots into a delta, or `null` when a delta can't
+ * be computed (the card view exceeds the digest cap) — the caller sends a full
+ * snapshot in that case.
+ */
+export function diffSnapshot(prev: VersionedSnapshot, next: VersionedSnapshot): SnapshotDelta | null {
+  const digest = computeRowDigest(prev.snapshot.openCards, keyOf);
+  if (digest === null) return null; // too many cards to digest → caller sends full
+  const cards = diffFromDigest(digest, next.snapshot.openCards, keyOf) as DeltaChange<OpenCardSnapshot>[];
   const delta: SnapshotDelta = {
     runId: next.runId,
     baseVersion: prev.version,
     version: next.version,
-    upsertedCards,
-    removedCardIds,
+    cards,
     order: next.snapshot.openCards.map(keyOf),
   };
-  if (!deepEqual(prev.snapshot.toolState, next.snapshot.toolState)) {
+  if (toolStateChanged(prev.snapshot.toolState, next.snapshot.toolState)) {
     delta.toolState = { value: next.snapshot.toolState };
   }
   return delta;
@@ -68,15 +62,12 @@ export function diffSnapshot(prev: VersionedSnapshot, next: VersionedSnapshot): 
 /**
  * Apply a delta to a base snapshot. Returns the new {@link VersionedSnapshot}, or
  * `null` when it cannot be applied (different run, or `baseVersion` !== base.version
- * — a gap; the caller must refetch the full snapshot). Reconstructs openCards in
- * `delta.order` so reorders are honoured.
+ * — a gap; the caller must refetch the full snapshot). Reorders by `delta.order`.
  */
 export function applySnapshotDelta(base: VersionedSnapshot, delta: SnapshotDelta): VersionedSnapshot | null {
   if (delta.runId !== base.runId || delta.baseVersion !== base.version) return null;
-  const byId = new Map(base.snapshot.openCards.map((c) => [keyOf(c), c]));
-  for (const id of delta.removedCardIds) byId.delete(id);
-  for (const card of delta.upsertedCards) byId.set(keyOf(card), card);
-
+  const merged = applySemanticDelta(base.snapshot.openCards, delta.cards, keyOf);
+  const byId = new Map(merged.map((c) => [keyOf(c), c]));
   const openCards: OpenCardSnapshot[] = [];
   for (const id of delta.order) {
     const card = byId.get(id);
@@ -89,15 +80,7 @@ export function applySnapshotDelta(base: VersionedSnapshot, delta: SnapshotDelta
   return { ...base, version: delta.version, snapshot };
 }
 
-/** Structural deep-equality via stable (sorted-key) stringify — order-insensitive. */
-function deepEqual(a: unknown, b: unknown): boolean {
-  return stableStringify(a) === stableStringify(b);
-}
-
-function stableStringify(v: unknown): string {
-  if (v === null || typeof v !== 'object') return JSON.stringify(v) ?? 'null';
-  if (Array.isArray(v)) return `[${v.map(stableStringify).join(',')}]`;
-  const obj = v as Record<string, unknown>;
-  const keys = Object.keys(obj).sort();
-  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`;
+/** toolState change-detect via the engine's order-insensitive content checksum. */
+function toolStateChanged(a: unknown, b: unknown): boolean {
+  return computeViewChecksum([a], () => 't') !== computeViewChecksum([b], () => 't');
 }

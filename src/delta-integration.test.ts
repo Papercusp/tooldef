@@ -341,3 +341,79 @@ describe('semantic deltas end-to-end (Lane E)', () => {
     expect(second.meta.delta.reason).toBe('delta_too_large');
   });
 });
+
+describe('grouped-view exemplar (the plans:attention pattern — rows selector flattens groups)', () => {
+  // Mirrors plans:attention: the response is a GROUPED aggregate `{ groups, tierCounts }`
+  // (untouched for the UI); the diffable unit is the FLAT item set, extracted by the
+  // `rows` selector. No explicit `revision` → derived from the item-set checksum.
+  function defineGroupedTool(name: string, state: { groups: { key: string; items: SemRow[] }[] }): void {
+    defineTool({
+      name,
+      requirePrincipal: false,
+      capability: 'test:read',
+      args: z.object({}),
+      handler: async () => ({ data: { groups: state.groups, tierCounts: { decision: state.groups.length } } }),
+      delta: {
+        rows: (data) => {
+          const g = (data as { groups?: { items?: unknown[] }[] } | null)?.groups;
+          return Array.isArray(g) ? g.flatMap((x) => (Array.isArray(x.items) ? x.items : [])) : null;
+        },
+        itemKey: (r) => (r as SemRow).id,
+        rowType: () => 'attn',
+        schemaVersion: 'g-v1',
+      },
+    });
+  }
+  const flatten = (groups: { items: SemRow[] }[]) => groups.flatMap((g) => g.items);
+
+  it('first → full grouped body + cursor digest over the flattened items + checksum', async () => {
+    const state = { groups: [
+      { key: 'plan-a', items: makeSemRows(6) },
+      { key: 'alerts', items: makeSemRows(5).map((r) => ({ ...r, id: `a-${r.id}` })) },
+    ] };
+    defineGroupedTool('grp:first', state);
+    const { text, meta } = await call('grp:first', { transport: 'mcp', requestedDelta: 'auto' });
+    // the full body is still the grouped aggregate
+    const body = parseBody(text) as { groups: { key: string }[] };
+    expect(body.groups.map((g) => g.key)).toEqual(['plan-a', 'alerts']);
+    expect(meta.delta.mode).toBe('full');
+    // The tool declares no rowRevision → content-hash (matching plans:attention).
+    expect(meta.delta.checksum).toBe(computeViewChecksum(flatten(state.groups), semItemKey));
+    expect(Object.keys(decodeDeltaCursor(meta.delta.cursor)?.dg ?? {})).toHaveLength(11);
+  });
+
+  it('unchanged → not_modified (item-set checksum matched, no explicit revision)', async () => {
+    const state = { groups: [{ key: 'plan-a', items: makeSemRows(8) }] };
+    defineGroupedTool('grp:unchanged', state);
+    const first = await call('grp:unchanged', { transport: 'mcp', requestedDelta: 'auto' });
+    const second = await call('grp:unchanged', { transport: 'mcp', requestedDelta: `auto~${first.meta.delta.cursor}` });
+    expect(second.meta.delta.mode).toBe('not_modified');
+  });
+
+  it('an item changed inside a group → delta carrying the changed items; merge over the flattened base reconstructs it', async () => {
+    const state = { groups: [
+      { key: 'plan-a', items: makeSemRows(6) },
+      { key: 'alerts', items: makeSemRows(4).map((r) => ({ ...r, id: `a-${r.id}` })) },
+    ] };
+    defineGroupedTool('grp:delta', state);
+    const first = await call('grp:delta', { transport: 'mcp', requestedDelta: 'auto' });
+    const baseItems = flatten((parseBody(first.text) as { groups: { items: SemRow[] }[] }).groups);
+
+    // Mutate within the groups: update plan-a/r0, remove alerts/a-r1, add plan-a/new.
+    state.groups = [
+      { key: 'plan-a', items: [{ id: 'r0', name: 'row-0-with-padding-text', rev: 42 }, ...state.groups[0].items.slice(1), { id: 'new', name: 'fresh-item-row', rev: 1 }] },
+      { key: 'alerts', items: state.groups[1].items.filter((r) => r.id !== 'a-r1') },
+    ];
+
+    const second = await call('grp:delta', { transport: 'mcp', requestedDelta: `auto~${first.meta.delta.cursor}` });
+    expect(second.meta.delta.mode).toBe('delta');
+    expect(second.meta.delta.counts).toEqual({ added: 1, updated: 1, removed: 1 });
+    const changes = parseBody(second.text) as DeltaChange<SemRow>[];
+    // rowType tag carried on added/updated (removed rows carry only an id).
+    expect(changes.filter((c) => c.change !== 'removed').every((c) => c.type === 'attn')).toBe(true);
+
+    const merged = applySemanticDelta(baseItems, changes, (r) => r.id);
+    expect(sortById(merged)).toEqual(sortById(flatten(state.groups)));
+    expect(computeViewChecksum(merged, semItemKey)).toBe(second.meta.delta.checksum);
+  });
+});

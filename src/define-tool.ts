@@ -27,6 +27,7 @@ import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
 import {
   parseDeltaRequest,
   computeViewFingerprint,
+  contentRevision,
   negotiateDelta,
   decodeDeltaCursor,
   computeRowDigest,
@@ -181,17 +182,10 @@ async function negotiateToolDelta(
     return negotiateDelta({ request, capabilityDeclared: true, currentFingerprint: fingerprint, bypass: true });
   }
 
-  let currentRevision: string;
-  try {
-    currentRevision = String(await cap.revision(args, ctx));
-  } catch (err) {
-    ctx.log(`[delta] ${def.name} revision() threw; serving full: ${err instanceof Error ? err.message : String(err)}`);
-    return { mode: 'full', supported: true, reason: 'revision_error' };
-  }
-
-  // Semantic surface active only when the tool declared `itemKey` AND the body is
-  // an array of rows. Otherwise it's a Lane-B (full | not_modified) tool.
-  const rows = cap.itemKey && Array.isArray(body) ? (body as unknown[]) : null;
+  // Semantic surface active when the tool can produce a diffable row array — via
+  // the `rows` selector (e.g. flatten groups) or because the body IS the array —
+  // AND declared `itemKey`. Otherwise it's a Lane-B (full | not_modified) tool.
+  const rows = cap.rows ? cap.rows(body) ?? null : Array.isArray(body) ? (body as unknown[]) : null;
   const itemKey = cap.itemKey;
   let digest: Record<string, string> | null = null;
   let checksum: string | undefined;
@@ -199,6 +193,22 @@ async function negotiateToolDelta(
     digest = computeRowDigest(rows, itemKey, cap.rowRevision);
     checksum = computeViewChecksum(rows, itemKey, cap.rowRevision);
   }
+
+  // Revision precedence: an explicit `cap.revision` (the cheapest signal) → the
+  // view checksum for a semantic tool → a content hash of the whole body. Only the
+  // explicit path can throw; the derived paths are pure over the handler's output.
+  let currentRevision: string;
+  try {
+    currentRevision = cap.revision
+      ? String(await cap.revision(args, ctx))
+      : checksum !== undefined
+        ? checksum
+        : contentRevision(body ?? null);
+  } catch (err) {
+    ctx.log(`[delta] ${def.name} revision() threw; serving full: ${err instanceof Error ? err.message : String(err)}`);
+    return { mode: 'full', supported: true, reason: 'revision_error' };
+  }
+
   const nowMs = Date.now();
   const cursorExtra = digest ? { dg: digest, ts: nowMs } : undefined;
 
