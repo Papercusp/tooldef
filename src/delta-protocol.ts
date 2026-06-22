@@ -485,6 +485,38 @@ export function negotiateDelta(input: {
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
+ * Semantic-delta flag gate (P-016, dormant-safe)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Resolver consulted before UPGRADING a `changed` view to a `mode:'delta'` body.
+ * The always-safe modes (`full`, `not_modified`) are NEVER gated — only the
+ * semantic added/updated/removed delta is, because it carries the
+ * silent-wrong-merge risk the owner BUILD decision retires by test (D-007/D-008).
+ *
+ * Defaults to ALWAYS-ON so the generic lib + its tests exercise the real path; the
+ * Papercusp host overrides it at boot to read the dark `TOOL_DELTA_PROTOCOL` flag
+ * (default OFF), so semantic deltas are dormant in production until the P-016
+ * flip-gate (recorded Lane-C scenario verdicts) clears.
+ */
+let semanticDeltaEnabledResolver: (ctx: unknown) => boolean | Promise<boolean> = () => true;
+
+/** Install the host's flag-backed resolver (Papercusp wires this at boot). */
+export function setSemanticDeltaEnabledResolver(fn: (ctx: unknown) => boolean | Promise<boolean>): void {
+  semanticDeltaEnabledResolver = fn;
+}
+
+/** Reset to the always-on default (tests). */
+export function resetSemanticDeltaEnabledResolver(): void {
+  semanticDeltaEnabledResolver = () => true;
+}
+
+/** Is the `mode:'delta'` upgrade permitted for this call? (full/not_modified are always allowed.) */
+export function isSemanticDeltaEnabled(ctx: unknown): boolean | Promise<boolean> {
+  return semanticDeltaEnabledResolver(ctx);
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
  * Semantic deltas (Lane E) — pure row diffing, checksum, and reference merge
  * ────────────────────────────────────────────────────────────────────────── */
 
