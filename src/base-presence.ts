@@ -22,6 +22,8 @@
  * array (see the P-003 scoping note in the plan).
  */
 
+import { DeltaToolClient, type DeltaDispatch, type DeltaDispatchResult } from './delta-client';
+
 /** The mode a delta-capable tool served — mirrors the client-observed `_meta.delta.mode`. */
 export type DeltaMode = 'full' | 'not_modified' | 'delta';
 
@@ -145,4 +147,51 @@ export class BasePresenceTracker {
   get isEnabled(): boolean {
     return this.enabled;
   }
+}
+
+/**
+ * One base-presence-guarded delta read — the turn-wrapper integration in a SINGLE call,
+ * composing a {@link BasePresenceTracker} (is the base still in the model's context?) with a
+ * {@link DeltaToolClient} (the rows + the checksum-guarded merge). This is the seam an OMP/psu
+ * turn-wrapper invokes per delta-capable tool read so adoption is a one-liner; the returned
+ * `mode` tells the wrapper what to put in the model's context — `full` → inject the rows;
+ * `delta` → inject only the changes (the token win); `not_modified` → inject NOTHING, the base
+ * already stands.
+ *
+ * Safety: it asks the tool for `not_modified`/`delta` ONLY when `haveBase` (so the model can
+ * never lose its base across a compaction — call {@link BasePresenceTracker.onCompaction} from
+ * the wrapper's compaction hook), and forces a clean `full` whenever the client can't safely
+ * reconstruct (evicted base / checksum mismatch). An out-of-scope wrapper (external Claude Code
+ * / Codex) constructs the tracker with `{ enabled: false }` ⇒ every read is `full`, byte-identical
+ * to today.
+ *
+ * Contract: `dispatch(requested)` must set the MCP `_meta.delta` to `requested` VERBATIM — the
+ * full wire value (`"not_modified~<cursor>"` | `"auto~<cursor>"`) — or omit `_meta.delta` when
+ * `requested === undefined` (a cold/forced full). `itemKey` is the registry-resolved row id for
+ * the view. On a `supported:false` view the wrapper should additionally call
+ * {@link BasePresenceTracker.onUnsupported} (the {@link DeltaResponse} the client observes does
+ * not convey `supported`).
+ */
+export async function dispatchWithBasePresence(
+  tracker: BasePresenceTracker,
+  client: DeltaToolClient,
+  viewKey: string,
+  itemKey: (row: unknown) => string,
+  dispatch: DeltaDispatch,
+  opts: { wantSemantic?: boolean } = {},
+): Promise<DeltaDispatchResult> {
+  // Ask for a delta ONLY when the base is provably in the model's context; else force full.
+  const wire = tracker.negotiationFor(viewKey, opts.wantSemantic ?? false);
+  const requested = wire === 'full' ? undefined : wire;
+  let res = await dispatch(requested);
+  let ingested = client.ingest(viewKey, res, itemKey);
+  if (ingested.refetchFull && requested !== undefined) {
+    // The client couldn't reconstruct (evicted base / checksum mismatch) — re-request a clean
+    // full so neither the client cache nor the model is left with a wrong/partial view.
+    res = await dispatch(undefined);
+    ingested = client.ingest(viewKey, res, itemKey);
+  }
+  // Fold the SERVED mode into base-presence (what the server actually returned, not what we asked).
+  tracker.record(viewKey, res.mode, res.cursor);
+  return { rows: ingested.rows, mode: res.mode };
 }

@@ -4,9 +4,12 @@
  * `agent-insights/tool-delta-base-presence-contract.mdx`.
  */
 import { describe, expect, it } from 'vitest';
-import { BasePresenceTracker } from './base-presence';
+import { BasePresenceTracker, dispatchWithBasePresence } from './base-presence';
+import { DeltaToolClient, type DeltaResponse } from './delta-client';
+import { computeViewChecksum } from './delta-protocol';
 
 const VK = 'plans:attention:scopeA';
+const idKey = (r: unknown): string => String((r as { id: string }).id);
 
 describe('BasePresenceTracker — cold / rule 2 (haveBase + negotiation)', () => {
   it('a cold view has no base and negotiates full', () => {
@@ -193,5 +196,116 @@ describe('forget / multi-view independence', () => {
     expect(t.haveBase('v1')).toBe(false);
     expect(t.haveBase('v2')).toBe(true);
     expect(t.size).toBe(1);
+  });
+});
+
+describe('dispatchWithBasePresence — the turn-wrapper integration seam', () => {
+  it('cold read asks for full (no _meta.delta), establishes the base', async () => {
+    const t = new BasePresenceTracker();
+    const c = new DeltaToolClient();
+    const seen: (string | undefined)[] = [];
+    const out = await dispatchWithBasePresence(t, c, VK, idKey, async (req) => {
+      seen.push(req);
+      return { mode: 'full', cursor: 'c0', rows: [{ id: 'a' }, { id: 'b' }] };
+    });
+    expect(seen).toEqual([undefined]); // cold → full
+    expect(out.mode).toBe('full');
+    expect(out.rows).toHaveLength(2);
+    expect(t.haveBase(VK)).toBe(true);
+  });
+
+  it('warm read sends not_modified~cursor and returns the cached base without replay', async () => {
+    const t = new BasePresenceTracker();
+    const c = new DeltaToolClient();
+    await dispatchWithBasePresence(t, c, VK, idKey, async () => ({
+      mode: 'full', cursor: 'c0', rows: [{ id: 'a' }, { id: 'b' }],
+    }));
+    const seen: (string | undefined)[] = [];
+    const out = await dispatchWithBasePresence(t, c, VK, idKey, async (req) => {
+      seen.push(req);
+      return { mode: 'not_modified', cursor: 'c1' };
+    });
+    expect(seen).toEqual(['not_modified~c0']);
+    expect(out.mode).toBe('not_modified');
+    expect(out.rows).toEqual([{ id: 'a' }, { id: 'b' }]); // cached base, not re-read off the wire
+    expect(t.negotiationFor(VK)).toBe('not_modified~c1'); // cursor advanced
+  });
+
+  it('wantSemantic asks for auto~cursor and merges a checksum-valid delta', async () => {
+    const t = new BasePresenceTracker();
+    const c = new DeltaToolClient();
+    await dispatchWithBasePresence(t, c, VK, idKey, async () => ({
+      mode: 'full', cursor: 'c0', rows: [{ id: 'a' }, { id: 'b' }],
+    }));
+    const merged = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+    const seen: (string | undefined)[] = [];
+    const out = await dispatchWithBasePresence(
+      t, c, VK, idKey,
+      async (req) => {
+        seen.push(req);
+        return {
+          mode: 'delta',
+          cursor: 'c1',
+          checksum: computeViewChecksum(merged, idKey),
+          changes: [{ change: 'added', id: 'c', data: { id: 'c' } }],
+        } satisfies DeltaResponse;
+      },
+      { wantSemantic: true },
+    );
+    expect(seen).toEqual(['auto~c0']);
+    expect(out.mode).toBe('delta');
+    expect(out.rows).toHaveLength(3); // merged
+    expect(t.haveBase(VK)).toBe(true);
+  });
+
+  it('after compaction the next read forces full even though the client still has the rows cached', async () => {
+    const t = new BasePresenceTracker();
+    const c = new DeltaToolClient();
+    await dispatchWithBasePresence(t, c, VK, idKey, async () => ({
+      mode: 'full', cursor: 'c0', rows: [{ id: 'a' }],
+    }));
+    t.onCompaction(); // the turn wrapper compacted — the model lost the base
+    const seen: (string | undefined)[] = [];
+    const out = await dispatchWithBasePresence(t, c, VK, idKey, async (req) => {
+      seen.push(req);
+      return { mode: 'full', cursor: 'c2', rows: [{ id: 'a' }] };
+    });
+    expect(seen).toEqual([undefined]); // forced full — NOT not_modified, despite the cached rows
+    expect(out.mode).toBe('full');
+    expect(t.haveBase(VK)).toBe(true); // re-established
+  });
+
+  it('a checksum-mismatched delta forces a second full dispatch (never a wrong view)', async () => {
+    const t = new BasePresenceTracker();
+    const c = new DeltaToolClient();
+    await dispatchWithBasePresence(t, c, VK, idKey, async () => ({
+      mode: 'full', cursor: 'c0', rows: [{ id: 'a' }, { id: 'b' }],
+    }));
+    const seen: (string | undefined)[] = [];
+    const out = await dispatchWithBasePresence(t, c, VK, idKey, async (req) => {
+      seen.push(req);
+      if (req !== undefined) {
+        return { mode: 'delta', cursor: 'c1', checksum: 'WRONG', changes: [{ change: 'added', id: 'c', data: { id: 'c' } }] };
+      }
+      return { mode: 'full', cursor: 'c2', rows: [{ id: 'a' }, { id: 'b' }, { id: 'c' }] };
+    });
+    expect(seen).toEqual(['not_modified~c0', undefined]); // delta failed → forced clean full
+    expect(out.mode).toBe('full');
+    expect(out.rows).toHaveLength(3);
+  });
+
+  it('a disabled (out-of-scope) tracker always asks for full', async () => {
+    const t = new BasePresenceTracker({ enabled: false });
+    const c = new DeltaToolClient();
+    await dispatchWithBasePresence(t, c, VK, idKey, async () => ({
+      mode: 'full', cursor: 'c0', rows: [{ id: 'a' }],
+    }));
+    const seen: (string | undefined)[] = [];
+    await dispatchWithBasePresence(t, c, VK, idKey, async (req) => {
+      seen.push(req);
+      return { mode: 'full', cursor: 'c1', rows: [{ id: 'a' }] };
+    });
+    expect(seen).toEqual([undefined]); // never asserts base-presence
+    expect(t.haveBase(VK)).toBe(false);
   });
 });

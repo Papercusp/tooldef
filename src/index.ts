@@ -138,7 +138,8 @@ export type { SnapshotDelta, SnapshotEmission } from './state-delta';
 export { DeltaToolClient, dispatchWithDelta, dispatchWithConveyedDelta } from './delta-client';
 export type { DeltaResponse, DeltaIngestResult, DeltaDispatch, DeltaDispatchResult } from './delta-client';
 // Harness-side base-presence tracker (the D-006 "harness owns the base" half — when is not_modified/delta safe) — P-003.
-export { BasePresenceTracker } from './base-presence';
+// `dispatchWithBasePresence` is the one-call turn-wrapper integration seam (tracker + client + guarded dispatch).
+export { BasePresenceTracker, dispatchWithBasePresence } from './base-presence';
 export type { BasePresenceOptions, DeltaMode } from './base-presence';
 // Server-side rows-array delta negotiation (the sync-resolver/SSE sibling of negotiateToolDelta) — P-006.
 export { negotiateRowsDelta } from './rows-delta';
