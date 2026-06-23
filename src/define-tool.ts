@@ -225,6 +225,11 @@ async function negotiateToolDelta(
   // can verify a later merge (and store it with the base).
   if (checksum && base.mode !== 'delta') base.checksum = checksum;
 
+  // Convey the itemKey FIELD NAME so an OUT-OF-PROCESS client (the MCP proxy) can merge
+  // a delta generically (`row[itemKeyField]`); in-process clients read `itemKey` from the
+  // registry and ignore it. Only meaningful for a semantic (itemKey-declared) tool.
+  if (cap.itemKeyField && itemKey && base.supported) base.itemKeyField = cap.itemKeyField;
+
   // Upgrade `changed` → `delta` only when the harness wants a delta body (mode
   // `auto`; an explicit `not_modified`/`full` is honored as-is) and it's safe.
   const wantsDelta = !!request && request.mode !== 'full' && request.mode !== 'not_modified';

@@ -83,6 +83,8 @@ function deltaMeta(delta: DeltaNegotiation): Record<string, unknown> {
     ...(delta.reason ? { reason: delta.reason } : {}),
     ...(delta.checksum ? { checksum: delta.checksum } : {}),
     ...(delta.counts ? { counts: delta.counts } : {}),
+    // itemKey FIELD NAME for out-of-process generic merge (the MCP proxy) — P-004.
+    ...(delta.itemKeyField ? { itemKeyField: delta.itemKeyField } : {}),
   };
 }
 

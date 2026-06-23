@@ -321,6 +321,14 @@ export interface DeltaCapability<Args = unknown, Ctx = unknown> {
    */
   itemKey?(row: unknown): string;
   /**
+   * Optional FIELD NAME corresponding to `itemKey` (e.g. `'id'`, `'slug'`). Conveyed
+   * in the `_meta.delta` response envelope so an OUT-OF-PROCESS client (the MCP proxy)
+   * can merge a delta generically — `row[itemKeyField]` — without the `itemKey` function
+   * (which can't cross a process boundary). In-process clients read `itemKey` from the
+   * registry and ignore this. Declare it ONLY when `itemKey` is a simple field access.
+   */
+  itemKeyField?: string;
+  /**
    * Per-row revision/version — the signal that a row was UPDATED (vs unchanged).
    * Defaults to a content hash of the row when omitted, so `updated` is still
    * detected; declare it when you have a cheaper/more-precise version (e.g. a row
@@ -391,6 +399,9 @@ export interface DeltaNegotiation {
   mode: NegotiatedDeltaMode;
   /** Did the endpoint declare a `DeltaCapability`? Harness uses this to stop re-sending `_delta`. */
   supported: boolean;
+  /** The tool's itemKey FIELD NAME (`DeltaCapability.itemKeyField`), conveyed so an
+   *  out-of-process client can merge a delta generically (`row[itemKeyField]`). */
+  itemKeyField?: string;
   /** Fresh cursor to attach (only for delta-capable, non-bypass responses). */
   cursor?: string;
   /** Present when `mode === 'full'`/`'delta'` despite the client wanting otherwise. */
