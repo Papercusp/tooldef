@@ -134,6 +134,10 @@ export type {
 export { diffSnapshot, applySnapshotDelta, chooseSnapshotEmission } from './state-delta';
 export type { SnapshotDelta, SnapshotEmission } from './state-delta';
 
+/* ─── Tool-result delta CLIENT (agent-tool-delta-protocol follow-up — the missing half) ─── */
+export { DeltaToolClient } from './delta-client';
+export type { DeltaResponse, DeltaIngestResult } from './delta-client';
+
 /* ─── Card correlator (ctx.askUser) ──────────────────────────────────── */
 export {
   registerCard,
