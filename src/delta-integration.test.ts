@@ -17,6 +17,8 @@ import {
   encodeDeltaCursor,
   computeViewChecksum,
   applySemanticDelta,
+  setSemanticDeltaEnabledResolver,
+  resetSemanticDeltaEnabledResolver,
   type DeltaChange,
 } from './delta-protocol';
 
@@ -415,5 +417,62 @@ describe('grouped-view exemplar (the plans:attention pattern — rows selector f
     const merged = applySemanticDelta(baseItems, changes, (r) => r.id);
     expect(sortById(merged)).toEqual(sortById(flatten(state.groups)));
     expect(computeViewChecksum(merged, semItemKey)).toBe(second.meta.delta.checksum);
+  });
+});
+
+describe('host flag gate (FLAGS.TOOL_DELTA_PROTOCOL via setSemanticDeltaEnabledResolver)', () => {
+  // The semantic-delta upgrade is host-gated. tooldef defaults the resolver to
+  // `() => true`; the Papercusp host (operator-core/agent-tools/delta-flag-wiring.ts)
+  // wires it to the flag so OFF reverts to the unconditionally-safe Lane-B `full`.
+  afterEach(() => resetSemanticDeltaEnabledResolver());
+
+  it('resolver OFF: a changed view that WOULD delta degrades to full + reason:flag_off', async () => {
+    setSemanticDeltaEnabledResolver(() => false);
+    const state = { rows: makeSemRows() };
+    defineSemanticTool('sem:flagoff', state);
+    const first = await call('sem:flagoff', { transport: 'mcp', requestedDelta: 'auto' });
+    state.rows = [...state.rows, { id: 'zz', name: 'added-row-padding', rev: 1 }]; // would be a 1-row delta
+    const second = await call('sem:flagoff', { transport: 'mcp', requestedDelta: `auto~${first.meta.delta.cursor}` });
+    expect(second.meta.delta.mode).toBe('full');
+    expect(second.meta.delta.reason).toBe('flag_off');
+    // full body recovers the whole new view (Lane-B correctness preserved)
+    expect(sortById(parseBody(second.text) as SemRow[])).toEqual(sortById(state.rows));
+  });
+
+  it('resolver OFF still serves not_modified on an UNCHANGED view (the ETag path is flag-independent)', async () => {
+    setSemanticDeltaEnabledResolver(() => false);
+    const state = { rows: makeSemRows() };
+    defineSemanticTool('sem:flagoff-unchanged', state);
+    const first = await call('sem:flagoff-unchanged', { transport: 'mcp', requestedDelta: 'auto' });
+    const second = await call('sem:flagoff-unchanged', {
+      transport: 'mcp',
+      requestedDelta: `auto~${first.meta.delta.cursor}`,
+    });
+    expect(second.meta.delta.mode).toBe('not_modified');
+  });
+
+  it('resolver ON (async, mirrors getFlag): the same changed view upgrades to mode:delta', async () => {
+    setSemanticDeltaEnabledResolver(async () => true);
+    const state = { rows: makeSemRows() };
+    defineSemanticTool('sem:flagon', state);
+    const first = await call('sem:flagon', { transport: 'mcp', requestedDelta: 'auto' });
+    state.rows = [...state.rows, { id: 'zz', name: 'added-row-padding', rev: 1 }];
+    const second = await call('sem:flagon', { transport: 'mcp', requestedDelta: `auto~${first.meta.delta.cursor}` });
+    expect(second.meta.delta.mode).toBe('delta');
+    expect(second.meta.delta.counts).toEqual({ added: 1, updated: 0, removed: 0 });
+  });
+
+  it('the resolver is consulted with the call ctx (can target per-workspace)', async () => {
+    const seen: unknown[] = [];
+    setSemanticDeltaEnabledResolver((c) => {
+      seen.push((c as { workspaceId?: string })?.workspaceId);
+      return false;
+    });
+    const state = { rows: makeSemRows() };
+    defineSemanticTool('sem:flagctx', state);
+    const first = await call('sem:flagctx', { transport: 'mcp', requestedDelta: 'auto' });
+    state.rows = [...state.rows, { id: 'zz', name: 'added-row-padding', rev: 1 }];
+    await call('sem:flagctx', { transport: 'mcp', requestedDelta: `auto~${first.meta.delta.cursor}`, workspaceId: 'ws-42' });
+    expect(seen).toContain('ws-42'); // resolver saw the call's workspaceId
   });
 });
