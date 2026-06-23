@@ -383,7 +383,8 @@ export type DeltaFullReason =
   | 'no_digest' // semantic delta wanted but the prior cursor carried no row digest
   | 'max_age' // cursor older than maxDeltaAge — periodic forced-full
   | 'delta_too_large' // the computed delta wasn't smaller than a full resend
-  | 'changesSince_error'; // the endpoint's changesSince() threw — degrade to full
+  | 'changesSince_error' // the endpoint's changesSince() threw — degrade to full
+  | 'flag_off'; // semantic delta gated off by the host (FLAGS.TOOL_DELTA_PROTOCOL) — Lane-B full
 
 export interface DeltaNegotiation {
   /** What to actually serve. `full` (complete body) | `not_modified` (no body) | `delta` (changed rows only). */

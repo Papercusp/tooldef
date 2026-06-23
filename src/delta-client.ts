@@ -95,3 +95,41 @@ export class DeltaToolClient {
     return this.views.size;
   }
 }
+
+/** Runs ONE tool read with a given delta cursor and returns the client's view of the response.
+ *  The wiring layer supplies this — in-process it sets `ctx.requestedDelta = cursor`, dispatches,
+ *  and adapts the structured result into a {@link DeltaResponse}. */
+export type DeltaDispatch = (requestedDelta: string | undefined) => Promise<DeltaResponse>;
+
+export interface DeltaDispatchResult {
+  /** The full reconstructed view (the harness-owned base) — the consumer's authoritative rows. */
+  rows: unknown[];
+  /** The response MODE to surface into the LLM context: `full` → the rows; `delta` → only the
+   *  changes (the token win); `not_modified` → nothing new (the base is already in context). */
+  mode: 'full' | 'delta' | 'not_modified';
+}
+
+/**
+ * One delta-negotiated read for a view. Sends the cached cursor, ingests the response, and —
+ * if the delta can't be safely applied (checksum mismatch / no base) — re-dispatches WITHOUT
+ * the cursor for a clean full, so the consumer (and the model) NEVER sees a wrong/partial view.
+ * Pure orchestration over an abstract {@link DeltaDispatch}; the wiring layer provides the
+ * concrete dispatch + the registry-resolved `itemKey`.
+ */
+export async function dispatchWithDelta(
+  client: DeltaToolClient,
+  viewKey: string,
+  itemKey: (row: unknown) => string,
+  dispatch: DeltaDispatch,
+): Promise<DeltaDispatchResult> {
+  const cursor = client.cursorFor(viewKey);
+  let res = await dispatch(cursor);
+  let ingested = client.ingest(viewKey, res, itemKey);
+  if (ingested.refetchFull && cursor !== undefined) {
+    // The server sent a delta/not_modified we can't apply (evicted base, checksum mismatch).
+    // Re-request a FULL (drop the cursor) — correctness over tokens; never a wrong merge.
+    res = await dispatch(undefined);
+    ingested = client.ingest(viewKey, res, itemKey);
+  }
+  return { rows: ingested.rows, mode: res.mode };
+}

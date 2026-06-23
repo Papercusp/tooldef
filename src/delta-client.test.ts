@@ -6,7 +6,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { computeRowDigest, diffFromDigest, computeViewChecksum, type DeltaChange } from './delta-protocol';
-import { DeltaToolClient } from './delta-client';
+import { DeltaToolClient, dispatchWithDelta } from './delta-client';
 
 const itemKey = (r: unknown) => (r as { id: string }).id;
 const row = (id: string, v = 1) => ({ id, v });
@@ -60,5 +60,62 @@ describe('DeltaToolClient', () => {
     const c = new DeltaToolClient();
     expect(c.ingest('v', { mode: 'delta', changes: [] }, itemKey).refetchFull).toBe(true);
     expect(c.ingest('w', { mode: 'not_modified' }, itemKey).refetchFull).toBe(true);
+  });
+});
+
+describe('dispatchWithDelta', () => {
+  it('cold call dispatches a full (no cursor), caches it, returns mode full', async () => {
+    const c = new DeltaToolClient();
+    const seen: (string | undefined)[] = [];
+    const out = await dispatchWithDelta(c, 'v', itemKey, async (cur) => {
+      seen.push(cur);
+      return { mode: 'full', cursor: 'c1', rows: [row('a')] };
+    });
+    expect(out).toEqual({ rows: [row('a')], mode: 'full' });
+    expect(seen).toEqual([undefined]);
+    expect(c.cursorFor('v')).toBe('c1');
+  });
+
+  it('repeat call sends the cursor and applies a delta', async () => {
+    const c = new DeltaToolClient();
+    c.ingest('v', { mode: 'full', cursor: 'c1', rows: [row('a'), row('b')] }, itemKey);
+    const checksum = computeViewChecksum([row('b'), row('c')], itemKey);
+    const out = await dispatchWithDelta(c, 'v', itemKey, async (cur) => {
+      expect(cur).toBe('c1');
+      return {
+        mode: 'delta',
+        cursor: 'c2',
+        checksum,
+        changes: [
+          { change: 'added', id: 'c', data: row('c') },
+          { change: 'removed', id: 'a' },
+        ] as DeltaChange[],
+      };
+    });
+    expect(out.mode).toBe('delta');
+    expect(new Set(out.rows.map(itemKey))).toEqual(new Set(['b', 'c']));
+  });
+
+  it('a mismatched delta re-dispatches WITHOUT a cursor (full refetch) → correct view, never a wrong merge', async () => {
+    const c = new DeltaToolClient();
+    c.ingest('v', { mode: 'full', cursor: 'c1', rows: [row('a')] }, itemKey);
+    const cursors: (string | undefined)[] = [];
+    const out = await dispatchWithDelta(c, 'v', itemKey, async (cur) => {
+      cursors.push(cur);
+      if (cur === 'c1') {
+        return { mode: 'delta', cursor: 'c2', checksum: 'BOGUS', changes: [{ change: 'added', id: 'b', data: row('b') }] as DeltaChange[] };
+      }
+      return { mode: 'full', cursor: 'c3', rows: [row('a'), row('b'), row('c')] };
+    });
+    expect(cursors).toEqual(['c1', undefined]);
+    expect(out.mode).toBe('full');
+    expect(new Set(out.rows.map(itemKey))).toEqual(new Set(['a', 'b', 'c']));
+  });
+
+  it('not_modified returns the cached base', async () => {
+    const c = new DeltaToolClient();
+    c.ingest('v', { mode: 'full', cursor: 'c1', rows: [row('a')] }, itemKey);
+    const out = await dispatchWithDelta(c, 'v', itemKey, async () => ({ mode: 'not_modified', cursor: 'c2' }));
+    expect(out).toEqual({ rows: [row('a')], mode: 'not_modified' });
   });
 });

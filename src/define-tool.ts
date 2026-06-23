@@ -34,6 +34,7 @@ import {
   computeViewChecksum,
   diffFromDigest,
   deltaCounts,
+  isSemanticDeltaEnabled,
   DELTA_SMALL_RESPONSE_BYTES,
   type DeltaCapability,
   type DeltaNegotiation,
@@ -228,6 +229,15 @@ async function negotiateToolDelta(
   // `auto`; an explicit `not_modified`/`full` is honored as-is) and it's safe.
   const wantsDelta = !!request && request.mode !== 'full' && request.mode !== 'not_modified';
   if (rows && itemKey && base.mode === 'full' && base.reason === 'changed' && wantsDelta) {
+    // The semantic-delta upgrade is host-gated (FLAGS.TOOL_DELTA_PROTOCOL). The
+    // flag read sits HERE — after the structural narrowing — so it runs only on a
+    // changed-view + delta-request call (never per-call) and degrades to the
+    // unconditionally-safe Lane-B `full` (reason `flag_off`) when off, never a
+    // semantic delta. dormant-safe: OFF is byte-identical to a delta-unaware host.
+    if (!(await isSemanticDeltaEnabled(ctx))) {
+      base.reason = 'flag_off';
+      return base;
+    }
     // reason 'changed' ⇒ the request cursor decoded and its fp+sv matched.
     const decoded = decodeDeltaCursor(request!.cursor);
     if (!decoded?.dg) {
