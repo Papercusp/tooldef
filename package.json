@@ -11,6 +11,11 @@
       "types": "./src/index.ts",
       "import": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./delta-client": {
+      "types": "./src/delta-client.ts",
+      "import": "./src/delta-client.ts",
+      "default": "./src/delta-client.ts"
     }
   },
   "dependencies": {

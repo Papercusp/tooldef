@@ -21,6 +21,9 @@
  * adopted tools use); a tool declaring a custom `rowRevision` must convey it to the client.
  */
 import { applySemanticDelta, computeViewChecksum, type DeltaChange } from './delta-protocol';
+// Re-exported for the `@papercusp/tooldef/delta-client` client subpath (P-006): a client
+// codec building a DeltaResponse from a server slot needs the DeltaChange shape.
+export type { DeltaChange } from './delta-protocol';
 
 /** A server delta response as the client observes it (parsed from `_meta.delta` + the body). */
 export type DeltaResponse =
