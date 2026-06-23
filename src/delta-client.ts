@@ -144,6 +144,18 @@ export async function dispatchWithDelta(
  * response, caches it per view in `fieldByView` (one map per proxy session), and merges via
  * `row[field]`. Same checksum→refetch-full guard — a delta it can't key (no field yet) or a
  * mismatched merge degrades to a clean full, never a wrong view.
+ *
+ * SCOPE (P-004 terminal disposition): this is the buildable, reusable half of the
+ * out-of-process delta proxy — usable only by an out-of-process consumer whose turn wrapper
+ * Papercusp STILL controls (so base-presence can be paired with a {@link BasePresenceTracker}
+ * configured `enabled:true`). It must NOT drive LLM-facing `not_modified`/`delta` for an
+ * EXTERNAL Claude Code / Codex session: the base-presence contract (D-006,
+ * `agent-insights/tool-delta-base-presence-contract.mdx` §Scope) forbids it — the proxy
+ * cannot see the external client's compaction, so it can't guarantee the base is in context.
+ * For those, the proxy reconstructs the full view (a localhost wire saving only, no model-token
+ * win) or simply serves `full`. That contract boundary — not a missing build — is why P-004
+ * stops here: the merge LOGIC ships; the Claude-Code-facing compact-delta delivery is by-design
+ * absent.
  */
 export async function dispatchWithConveyedDelta(
   client: DeltaToolClient,

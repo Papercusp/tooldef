@@ -212,4 +212,48 @@ describe('runDispatchStack — custom stack', () => {
     });
     expect((captured ?? {}).format).toBeUndefined();
   });
+
+  // The negotiated freshness mode → metadata_json.deltaMode (delta-rollout telemetry,
+  // agent-tool-delta-client-rollout P-005). The capture is mode-agnostic (any string mode),
+  // so a SEMANTIC delta (mode:'delta', the risky merge) is the same single GROUP BY signal as
+  // the Lane-B modes. These pin all three served modes + the absent-negotiation default.
+  it("captures a served _meta.delta.mode:'delta' into recorded metadata_json.deltaMode (P-005)", async () => {
+    let capturedMeta: Record<string, unknown> | null | undefined;
+    const tool = makeTool({
+      fn: async () => ({ content: [{ type: 'text', text: '[]' }], _meta: { delta: { mode: 'delta', cursor: 'c1' } } }),
+    });
+    await runDispatchStack(tool, 'fix.tool', {}, MAKE_CTX(), {
+      computeQuotaWindow: () => ({ key: 'w', limit: 0 }),
+      recordInvocation: vi.fn(async (i) => {
+        capturedMeta = i.metadataJson;
+      }),
+    });
+    expect(capturedMeta?.deltaMode).toBe('delta');
+  });
+
+  it("captures _meta.delta.mode:'not_modified' into recorded metadata_json.deltaMode", async () => {
+    let capturedMeta: Record<string, unknown> | null | undefined;
+    const tool = makeTool({
+      fn: async () => ({ content: [{ type: 'text', text: '' }], _meta: { delta: { mode: 'not_modified', cursor: 'c2' } } }),
+    });
+    await runDispatchStack(tool, 'fix.tool', {}, MAKE_CTX(), {
+      computeQuotaWindow: () => ({ key: 'w', limit: 0 }),
+      recordInvocation: vi.fn(async (i) => {
+        capturedMeta = i.metadataJson;
+      }),
+    });
+    expect(capturedMeta?.deltaMode).toBe('not_modified');
+  });
+
+  it('records NO deltaMode key when the result carries no _meta.delta (un-negotiated call)', async () => {
+    let captured: Record<string, unknown> | null | undefined = { sentinel: 1 };
+    const tool = makeTool({ fn: async () => ({ content: [{ type: 'text', text: 'x' }], _meta: { format: 'json' } }) });
+    await runDispatchStack(tool, 'fix.tool', {}, MAKE_CTX(), {
+      computeQuotaWindow: () => ({ key: 'w', limit: 0 }),
+      recordInvocation: vi.fn(async (i) => {
+        captured = i.metadataJson;
+      }),
+    });
+    expect((captured ?? {}).deltaMode).toBeUndefined();
+  });
 });
