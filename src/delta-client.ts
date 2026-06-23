@@ -24,9 +24,9 @@ import { applySemanticDelta, computeViewChecksum, type DeltaChange } from './del
 
 /** A server delta response as the client observes it (parsed from `_meta.delta` + the body). */
 export type DeltaResponse =
-  | { mode: 'full'; cursor?: string; rows: unknown[] }
+  | { mode: 'full'; cursor?: string; rows: unknown[]; itemKeyField?: string }
   | { mode: 'not_modified'; cursor?: string }
-  | { mode: 'delta'; cursor?: string; checksum?: string; changes: DeltaChange[] };
+  | { mode: 'delta'; cursor?: string; checksum?: string; changes: DeltaChange[]; itemKeyField?: string };
 
 export interface DeltaIngestResult {
   /** The full row-set to hand the consumer (reconstructed for a delta; the cached base for not_modified). */
@@ -132,4 +132,49 @@ export async function dispatchWithDelta(
     ingested = client.ingest(viewKey, res, itemKey);
   }
   return { rows: ingested.rows, mode: res.mode };
+}
+
+/**
+ * OUT-OF-PROCESS variant of {@link dispatchWithDelta} for a client (the MCP proxy) that
+ * has NO access to the tool's `itemKey` FUNCTION (it can't cross a process boundary). It
+ * LEARNS the itemKey FIELD NAME from the `itemKeyField` the server conveys on a full/delta
+ * response, caches it per view in `fieldByView` (one map per proxy session), and merges via
+ * `row[field]`. Same checksum→refetch-full guard — a delta it can't key (no field yet) or a
+ * mismatched merge degrades to a clean full, never a wrong view.
+ */
+export async function dispatchWithConveyedDelta(
+  client: DeltaToolClient,
+  fieldByView: Map<string, string>,
+  viewKey: string,
+  dispatch: DeltaDispatch,
+): Promise<DeltaDispatchResult> {
+  // Dynamic itemKey — re-reads the learned field, so a relearn after a refetch takes effect.
+  const itemKey = (row: unknown): string => {
+    const f = fieldByView.get(viewKey);
+    return f ? String((row as Record<string, unknown>)[f]) : '';
+  };
+
+  const cursor = client.cursorFor(viewKey);
+  let res = await dispatch(cursor);
+  learnConveyedField(fieldByView, viewKey, res);
+
+  // A delta with no conveyed key yet is unmergeable — refetch a full to learn the key + base.
+  if (res.mode === 'delta' && !fieldByView.has(viewKey)) {
+    res = await dispatch(undefined);
+    learnConveyedField(fieldByView, viewKey, res);
+  }
+
+  let ingested = client.ingest(viewKey, res, itemKey);
+  if (ingested.refetchFull && cursor !== undefined) {
+    res = await dispatch(undefined);
+    learnConveyedField(fieldByView, viewKey, res);
+    ingested = client.ingest(viewKey, res, itemKey);
+  }
+  return { rows: ingested.rows, mode: res.mode };
+}
+
+function learnConveyedField(fieldByView: Map<string, string>, viewKey: string, res: DeltaResponse): void {
+  if ((res.mode === 'full' || res.mode === 'delta') && res.itemKeyField) {
+    fieldByView.set(viewKey, res.itemKeyField);
+  }
 }

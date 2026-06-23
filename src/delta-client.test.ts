@@ -6,7 +6,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { computeRowDigest, diffFromDigest, computeViewChecksum, type DeltaChange } from './delta-protocol';
-import { DeltaToolClient, dispatchWithDelta } from './delta-client';
+import { DeltaToolClient, dispatchWithDelta, dispatchWithConveyedDelta } from './delta-client';
 
 const itemKey = (r: unknown) => (r as { id: string }).id;
 const row = (id: string, v = 1) => ({ id, v });
@@ -117,5 +117,54 @@ describe('dispatchWithDelta', () => {
     c.ingest('v', { mode: 'full', cursor: 'c1', rows: [row('a')] }, itemKey);
     const out = await dispatchWithDelta(c, 'v', itemKey, async () => ({ mode: 'not_modified', cursor: 'c2' }));
     expect(out).toEqual({ rows: [row('a')], mode: 'not_modified' });
+  });
+});
+
+describe('dispatchWithConveyedDelta (out-of-process / proxy)', () => {
+  const slug = (r: unknown) => (r as { slug: string }).slug;
+  const id = (r: unknown) => (r as { id: string }).id;
+
+  it('learns itemKeyField from the full response, then merges a delta with it', async () => {
+    const c = new DeltaToolClient();
+    const fields = new Map<string, string>();
+    let out = await dispatchWithConveyedDelta(c, fields, 'v', async (cur) => {
+      expect(cur).toBeUndefined();
+      return { mode: 'full', cursor: 'c1', rows: [{ slug: 'a' }, { slug: 'b' }], itemKeyField: 'slug' };
+    });
+    expect(out.mode).toBe('full');
+    expect(fields.get('v')).toBe('slug');
+
+    const checksum = computeViewChecksum([{ slug: 'b' }, { slug: 'c' }], slug);
+    out = await dispatchWithConveyedDelta(c, fields, 'v', async (cur) => {
+      expect(cur).toBe('c1');
+      return {
+        mode: 'delta',
+        cursor: 'c2',
+        checksum,
+        changes: [
+          { change: 'added', id: 'c', data: { slug: 'c' } },
+          { change: 'removed', id: 'a' },
+        ] as DeltaChange[],
+      };
+    });
+    expect(out.mode).toBe('delta');
+    expect(new Set(out.rows.map(slug))).toEqual(new Set(['b', 'c']));
+  });
+
+  it('refetches full on a checksum mismatch (no wrong merge reaches the proxy consumer)', async () => {
+    const c = new DeltaToolClient();
+    c.ingest('v', { mode: 'full', cursor: 'c1', rows: [{ id: 'a' }] }, id);
+    const fields = new Map<string, string>([['v', 'id']]);
+    const cursors: (string | undefined)[] = [];
+    const out = await dispatchWithConveyedDelta(c, fields, 'v', async (cur) => {
+      cursors.push(cur);
+      if (cur === 'c1') {
+        return { mode: 'delta', cursor: 'c2', checksum: 'BOGUS', changes: [{ change: 'added', id: 'b', data: { id: 'b' } }] as DeltaChange[] };
+      }
+      return { mode: 'full', cursor: 'c3', rows: [{ id: 'a' }, { id: 'b' }], itemKeyField: 'id' };
+    });
+    expect(cursors).toEqual(['c1', undefined]);
+    expect(out.mode).toBe('full');
+    expect(new Set(out.rows.map(id))).toEqual(new Set(['a', 'b']));
   });
 });

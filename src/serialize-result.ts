@@ -181,7 +181,9 @@ function chooseFormat(
     if (r) return { ...r, fallback: r.format !== want };
   }
   // Unreachable in practice (json always encodes), but keep the contract total.
-  return { format: 'json', text: encode(data, 'json'), fallback: want !== 'json' };
+  // `want` is typed to the non-json formats, so the comparison is dead — cast to keep
+  // the contract explicit (and tsc happy after a concurrent narrowing of the format type).
+  return { format: 'json', text: encode(data, 'json'), fallback: (want as string) !== 'json' };
 }
 
 /**
