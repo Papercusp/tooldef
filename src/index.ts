@@ -137,6 +137,9 @@ export type { SnapshotDelta, SnapshotEmission } from './state-delta';
 /* ─── Tool-result delta CLIENT (agent-tool-delta-protocol follow-up — the missing half) ─── */
 export { DeltaToolClient, dispatchWithDelta, dispatchWithConveyedDelta } from './delta-client';
 export type { DeltaResponse, DeltaIngestResult, DeltaDispatch, DeltaDispatchResult } from './delta-client';
+// Server-side rows-array delta negotiation (the sync-resolver/SSE sibling of negotiateToolDelta) — P-006.
+export { negotiateRowsDelta } from './rows-delta';
+export type { RowsDeltaResult } from './rows-delta';
 
 /* ─── Card correlator (ctx.askUser) ──────────────────────────────────── */
 export {
