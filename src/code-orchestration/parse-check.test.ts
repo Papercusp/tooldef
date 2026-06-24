@@ -1,5 +1,9 @@
-import { describe, it, expect } from 'vitest';
-import { checkScript } from './parse-check';
+import { describe, it, expect, beforeAll } from 'vitest';
+import { checkScript, ensureParseCheckReady } from './parse-check';
+
+// checkScript is sync but the TS compiler it uses is lazy-loaded (kept out of the
+// eager client bundle) — warm it once before the suite.
+beforeAll(async () => { await ensureParseCheckReady(); });
 
 const mkTool = (name: string) => ({ expose: { mcp: { name } } }) as never;
 const tools = [mkTool('work_items:list'), mkTool('work_items:get'), mkTool('coord:wake-queue'), mkTool('plans:set-status')];

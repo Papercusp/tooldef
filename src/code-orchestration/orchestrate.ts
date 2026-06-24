@@ -22,7 +22,7 @@ import type { DispatchProjectedDeps } from '../dispatch-types';
 import { buildToolFacade, type FacadeDispatch } from './tool-facade';
 import { realDispatch } from './dispatch-binding';
 import { runOrchestrationScript } from './run-script';
-import { checkScript } from './parse-check';
+import { checkScript, ensureParseCheckReady } from './parse-check';
 
 export interface OrchestrateOptions {
   ctx: UnifiedToolContext;
@@ -62,6 +62,7 @@ export async function runToolOrchestration(
   const { ctx, deps, tools, allowed, dryRun = false, timeoutMs } = opts;
   const plannedMutations: PlannedMutation[] = [];
 
+  await ensureParseCheckReady(); // lazy-load the TS compiler before the static parse-check (kept out of the eager client bundle)
   const check = checkScript(script, tools, allowed);
   if (!check.ok) {
     return {

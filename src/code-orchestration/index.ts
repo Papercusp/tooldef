@@ -18,7 +18,7 @@ export {
   type RunScriptResult,
   type RunScriptOptions,
 } from './run-script';
-export { checkScript, type ParseCheckResult } from './parse-check';
+export { checkScript, ensureParseCheckReady, type ParseCheckResult } from './parse-check';
 export { realDispatch, unwrapToolResult } from './dispatch-binding';
 export {
   runToolOrchestration,

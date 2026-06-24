@@ -21,8 +21,39 @@
  * to the runtime whitelist by design and is NOT flagged here. If parsing ever fails the walk falls
  * back to a regex scan so the aid degrades gracefully rather than failing open.
  */
-import ts from 'typescript';
+import type { SourceFile, Expression, ObjectBindingPattern, Node } from 'typescript';
 import type { ProjectedTool } from '../tool-projection';
+
+// PERF (FCP): `typescript` (the compiler) is ~3.4MB minified. This module is
+// re-exported through the `@papercusp/tooldef` + `@papercusp/agent-mcp` barrels,
+// which the operator webview imports — a STATIC `import ts from 'typescript'`
+// here put the whole compiler into the eager client boot bundle (the
+// second-largest FCP cost after js-tiktoken; E2E perf sweep 2026-06-23). The TS
+// AST walk is pure server-side (code:run parse-check). Load it via a lazy
+// dynamic import so it splits into its own chunk fetched ONLY when checkScript
+// actually runs (server). `checkScript` stays synchronous; callers must
+// `await ensureParseCheckReady()` once before the first call (the two runtime
+// entry points — runToolOrchestration + captureRecipe — already do).
+// See /internal/docs/performance.
+type TsModule = typeof import('typescript');
+let _ts: TsModule | null = null;
+
+/** Lazily load the TS compiler (kept out of the eager client bundle). Await once before checkScript(). Idempotent. */
+export async function ensureParseCheckReady(): Promise<void> {
+  if (!_ts) {
+    const m = (await import('typescript')) as unknown as { default?: TsModule } & TsModule;
+    _ts = (m.default ?? m) as TsModule;
+  }
+}
+
+function tsc(): TsModule {
+  if (!_ts) {
+    throw new Error(
+      'parse-check: ensureParseCheckReady() must be awaited before checkScript() (the TS compiler is lazy-loaded to keep it out of the eager client bundle)',
+    );
+  }
+  return _ts;
+}
 
 export interface ParseCheckResult {
   ok: boolean;
@@ -41,6 +72,7 @@ export function checkScript(
   tools: readonly ProjectedTool[],
   allowed?: ReadonlySet<string>,
 ): ParseCheckResult {
+  const ts = tsc(); // lazy-loaded TS compiler (see ensureParseCheckReady)
   const memberToName = new Map<string, string>(); // "ns.camelVerb" → full name
   const fullNames = new Set<string>();
   for (const t of tools) {
@@ -63,7 +95,7 @@ export function checkScript(
     if (!fullNames.has(name)) unknown.add(name);
   };
 
-  let source: ts.SourceFile;
+  let source: SourceFile;
   try {
     source = ts.createSourceFile('script.ts', script, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
   } catch {
@@ -85,7 +117,7 @@ export function checkScript(
     | { kind: 'member'; member: string }
     | null;
 
-  const literalKey = (node: ts.Expression): string | null =>
+  const literalKey = (node: Expression): string | null =>
     ts.isStringLiteralLike(node) ? node.text : null;
 
   /** One property step within the facade, given the resolved base. */
@@ -99,7 +131,7 @@ export function checkScript(
   };
 
   /** Resolve an expression to a facade position, or null if it isn't one / is dynamically computed. */
-  const resolve = (node: ts.Expression): Resolved => {
+  const resolve = (node: Expression): Resolved => {
     if (ts.isParenthesizedExpression(node) || ts.isNonNullExpression(node)) {
       return resolve(node.expression);
     }
@@ -125,7 +157,7 @@ export function checkScript(
     return null;
   };
 
-  const bindElements = (pattern: ts.ObjectBindingPattern, r: { kind: 'tools' } | { kind: 'ns'; ns: string }): void => {
+  const bindElements = (pattern: ObjectBindingPattern, r: { kind: 'tools' } | { kind: 'ns'; ns: string }): void => {
     for (const el of pattern.elements) {
       if (!ts.isIdentifier(el.name)) continue; // nested patterns aren't facade bindings
       const local = el.name.text;
@@ -144,7 +176,7 @@ export function checkScript(
     }
   };
 
-  const visit = (node: ts.Node): void => {
+  const visit = (node: Node): void => {
     // 1) Binding collection (source order, before this node's own references are recorded).
     if (ts.isVariableDeclaration(node) && node.initializer) {
       const r = resolve(node.initializer);
