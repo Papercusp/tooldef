@@ -46,6 +46,7 @@ export interface QuotaWindow {
 export function defaultComputeQuotaWindow(
   ctx: UnifiedToolContext,
   roleQuota: RolesQuota | undefined,
+  _toolName?: string,
 ): QuotaWindow {
   return {
     key: ctx.runId ? `run:${ctx.runId}` : null,
@@ -193,8 +194,15 @@ export interface DispatchProjectedDeps {
    * e.g. Papercusp keys workers on `chunk:<id>`/`perChunk`, power-user
    * sessions on the stable auth session, everyone else on `run:<id>`/`perRun`.
    * `roleQuota` is the tool's `rolesQuota[ctx.role]` entry (or undefined).
+   * `toolName` is the dispatched tool's name — passed so a host can resolve a
+   * per-(tool,role) runtime override (Papercusp's quota:set_tool dial) in front
+   * of the baked `roleQuota`. Optional + ignored by the default; back-compat.
    */
-  computeQuotaWindow?(ctx: UnifiedToolContext, roleQuota: RolesQuota | undefined): QuotaWindow;
+  computeQuotaWindow?(
+    ctx: UnifiedToolContext,
+    roleQuota: RolesQuota | undefined,
+    toolName?: string,
+  ): QuotaWindow;
   /** Read current quota usage. Return null to disable quota enforcement. */
   readQuotaState?(
     toolName: string,

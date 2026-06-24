@@ -131,7 +131,7 @@ function initExecution(
   const roleQuota = ctx.role ? tool.rolesQuota?.[ctx.role] : undefined;
   const { key: windowKey, limit: quotaLimit } = (
     deps.computeQuotaWindow ?? defaultComputeQuotaWindow
-  )(ctx, roleQuota);
+  )(ctx, roleQuota, toolName);
   return {
     tool,
     toolName,
