@@ -30,6 +30,7 @@ import { toJsonSchema } from './schema-adapter';
 import type { StandardSchemaV1 } from './standard-schema';
 import type { Authorizer } from './authz';
 import type { EligibilityResult } from '@papercusp/result-encoding';
+import type { DeltaCapability } from './delta-protocol';
 
 /* ─── Event schema types ─────────────────────────────────────────────── */
 
@@ -866,6 +867,13 @@ export interface ProjectedTool {
    * Absent ⇒ no output schema ⇒ the serializer uses the runtime auto-encoder.
    */
   resultEligibility?: EligibilityResult;
+  /**
+   * Tool-result freshness capability. Transport clients that own a cursor/base
+   * cache (or a safe proxy that reconstructs a full result for generic clients)
+   * read this registry metadata to decide whether they can negotiate `_meta.delta`
+   * without a brittle per-tool side table.
+   */
+  delta?: DeltaCapability;
   /**
    * Typed event channel — Zod schemas keyed by event name. Surfaced
    * via tools/list as JSON-Schema for client discovery. No runtime

@@ -781,6 +781,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     outputSchema: def.result,
     outputJsonSchema,
     resultEligibility: eligibility,
+    delta: def.delta,
     expose: {
       mcp: { name: def.name },
       http: { path: httpPath, methods: ['POST'] },
@@ -857,6 +858,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     outputSchema: def.result,
     outputJsonSchema,
     resultEligibility: eligibility,
+    delta: def.delta,
     agentRoles: def.agentRoles,
     rolesQuota: def.rolesQuota,
     authorize: def.authorize,
