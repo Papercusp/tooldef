@@ -74,6 +74,26 @@ export {
 /* ─── Registries ─────────────────────────────────────────────────────── */
 export { getCatalog, lookup, _resetCatalogForTests } from './registry';
 
+/* ─── Catalogue summaries (defineGroup + derived capability map) ──────── */
+export {
+  defineGroup,
+  registerGroup,
+  lookupGroup,
+  getGroupCatalog,
+  _resetGroupCatalogForTests,
+  type GroupDefinition,
+  type GroupDefinitionInput,
+} from './define-group';
+export {
+  groupOf,
+  describeGroupFromMembers,
+  catalogueProjection,
+  renderCapabilityMap,
+  declaredGroupSlugs,
+  type CatalogueEntry,
+  type RenderCapabilityMapOptions,
+} from './catalogue-projection';
+
 /* ─── Code-execution tool-orchestration runtime (B-CX-1A / B-CX-2A) ────── */
 export * from './code-orchestration';
 export {
