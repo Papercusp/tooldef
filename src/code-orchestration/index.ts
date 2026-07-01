@@ -25,6 +25,8 @@ export {
   type OrchestrateOptions,
   type OrchestrateResult,
   type PlannedMutation,
+  type WrapDispatch,
+  type DispatchNext,
 } from './orchestrate';
 // B-CX-API: compile-time typed signatures for the facade + the on-demand namespace index.
 export {

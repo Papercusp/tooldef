@@ -6,10 +6,10 @@
  * normal forms — `tools.<ns>.<verb>(…)` and the `tools.call('<ns>:<verb>', …)` escape hatch — and
  * also the obfuscated-but-static forms a regex misses:
  *
- *   - computed string-literal access:  `tools['sys']['admin']`, `tools['work_items'].list`
+ *   - computed string-literal access:  `tools['sys']['admin']`, `tools['workItems'].list`
  *   - `tools` aliasing:                `const t = tools; t.sys.admin()`
  *   - namespace / verb destructuring:  `const { coord } = tools; coord.wakeQueue()`
- *                                      `const { list } = tools.work_items; list()`
+ *                                      `const { list } = tools.workItems; list()`
  *
  * This turns the common typo / disallowed-tool case (incl. an obfuscation attempt) into a clean
  * upfront error listing the offenders, before any tool runs.
@@ -23,6 +23,7 @@
  */
 import type { SourceFile, Expression, ObjectBindingPattern, Node } from 'typescript';
 import type { ProjectedTool } from '../tool-projection';
+import { camelNamespace, camelVerb } from './tool-facade';
 
 // PERF (FCP): `typescript` (the compiler) is ~3.4MB minified. This module is
 // re-exported through the `@papercusp/tooldef` + `@papercusp/agent-mcp` barrels,
@@ -63,10 +64,6 @@ export interface ParseCheckResult {
   refs: string[];
 }
 
-/** `wake-queue` / `set_status` → `wakeQueue` / `setStatus` (the facade's JS-identifier keys). */
-const camelVerb = (verb: string): string =>
-  verb.replace(/[-_]+([a-z0-9])/gi, (_m, c: string) => c.toUpperCase());
-
 export function checkScript(
   script: string,
   tools: readonly ProjectedTool[],
@@ -80,7 +77,7 @@ export function checkScript(
     if (!name || name.indexOf(':') <= 0) continue;
     if (allowed && !allowed.has(name)) continue;
     const ci = name.indexOf(':');
-    memberToName.set(`${name.slice(0, ci)}.${camelVerb(name.slice(ci + 1))}`, name);
+    memberToName.set(`${camelNamespace(name.slice(0, ci))}.${camelVerb(name.slice(ci + 1))}`, name);
     fullNames.add(name);
   }
 

@@ -24,6 +24,27 @@ import { realDispatch } from './dispatch-binding';
 import { runOrchestrationScript } from './run-script';
 import { checkScript, ensureParseCheckReady } from './parse-check';
 
+/**
+ * Per-inner-call context-rebinding hook (WI-1411). By default every call the
+ * script makes reuses the SAME fixed `ctx` passed to `runToolOrchestration` —
+ * fine for an ordinary concrete-workspace caller (its ctx is already bound
+ * correctly for the whole batch) but WRONG for a caller whose effective
+ * per-call binding can differ from call to call (e.g. an unscoped superuser
+ * passing a per-call `{ workspace: 'X' }` arg — the EI-30 "hop without
+ * re-auth" convention a direct MCP dispatch honors via
+ * `effectiveDispatchWorkspace`/`withWorkspace`/ALS, but which a single fixed
+ * `ctx` can never express). `next(callCtx)` performs the actual dispatch with
+ * whatever context the wrapper decides is correct for THIS call.
+ */
+export type DispatchNext = (callCtx: UnifiedToolContext) => Promise<unknown>;
+export type WrapDispatch = (
+  tool: ProjectedTool,
+  toolName: string,
+  args: unknown,
+  ctx: UnifiedToolContext,
+  next: DispatchNext,
+) => Promise<unknown>;
+
 export interface OrchestrateOptions {
   ctx: UnifiedToolContext;
   deps: DispatchProjectedDeps;
@@ -35,6 +56,13 @@ export interface OrchestrateOptions {
   dryRun?: boolean;
   /** Wall-clock budget. Default = run-script's 30s. */
   timeoutMs?: number;
+  /**
+   * Optional per-call context-rebinding hook (WI-1411) — see `WrapDispatch`.
+   * Absent ⇒ every call in the batch dispatches under the fixed `ctx`
+   * (pre-WI-1411 behavior), which stays correct for any caller whose binding
+   * doesn't vary per call.
+   */
+  wrapDispatch?: WrapDispatch;
 }
 
 export interface PlannedMutation {
@@ -59,23 +87,21 @@ export async function runToolOrchestration(
   script: string,
   opts: OrchestrateOptions,
 ): Promise<OrchestrateResult> {
-  const { ctx, deps, tools, allowed, dryRun = false, timeoutMs } = opts;
+  const { ctx, deps, tools, allowed, dryRun = false, timeoutMs, wrapDispatch } = opts;
   const plannedMutations: PlannedMutation[] = [];
 
   await ensureParseCheckReady(); // lazy-load the TS compiler before the static parse-check (kept out of the eager client bundle)
   const check = checkScript(script, tools, allowed);
-  if (!check.ok) {
-    return {
-      ok: false,
-      logs: [],
-      error: `unknown_tools: ${check.unknownRefs.join(', ')}`,
-      unknownRefs: check.unknownRefs,
-      dryRun,
-      plannedMutations,
-    };
-  }
+  // F8 (autonomous-loop-hardening / H2): an unknown tool ref no longer NUKES the whole run before
+  // it starts (which forced a full re-run of the good calls too). We still surface `unknownRefs`
+  // (→ advisory facadeHelp so the agent fixes the name), but we RUN the script — binding each
+  // unknown ref to a stub that REJECTS only when CALLED. So the good calls execute and the author
+  // can isolate the bad one (Promise.allSettled / try-catch) instead of re-running the whole batch,
+  // and a bad ref in an unreached branch is a no-op. The `allowed` whitelist is still the security
+  // boundary — a stub grants NO reach; it only turns a cryptic "cannot read undefined" into a clear
+  // per-call error.
+  const unknownRefs = check.ok ? undefined : check.unknownRefs;
 
-  const inner = realDispatch(ctx, deps);
   const dispatch: FacadeDispatch = async (tool, name, args) => {
     if (tool.effect === 'write') {
       plannedMutations.push({ tool: name, args });
@@ -83,16 +109,18 @@ export async function runToolOrchestration(
         return { dryRun: true, wouldCall: name, args };
       }
     }
-    return inner(tool, name, args);
+    const call: DispatchNext = (callCtx) => realDispatch(callCtx, deps)(tool, name, args);
+    return wrapDispatch ? wrapDispatch(tool, name, args, ctx, call) : call(ctx);
   };
 
-  const facade = buildToolFacade(tools, dispatch, allowed);
+  const facade = buildToolFacade(tools, dispatch, allowed, unknownRefs);
   const run = await runOrchestrationScript(script, facade, timeoutMs ? { timeoutMs } : {});
   return {
     ok: run.ok,
     summary: run.result,
     logs: run.logs,
     error: run.error,
+    ...(unknownRefs && unknownRefs.length ? { unknownRefs } : {}),
     dryRun,
     plannedMutations,
   };

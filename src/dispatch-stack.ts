@@ -21,6 +21,7 @@
  */
 
 import type { ToolResult } from './wire';
+import { applySeeAlso } from './see-also';
 import type { AgentRole } from './host-types';
 import { toolDeclaresGate, type ProjectedTool, type UnifiedToolContext } from './tool-projection';
 import {
@@ -574,6 +575,11 @@ const invokeStep: DispatchStep = {
       } else {
         result = await tool.fn(input, handlerCtx);
       }
+      // guidance.seeAlso — result-aware cross-link pointers rendered uniformly
+      // into the envelope (_meta._seeAlso + a one-line "See also:" text block).
+      // Self-gates (unchanged result) when the tool declares none / emits none /
+      // errored; never fails the underlying tool call.
+      result = applySeeAlso(result, exec.tool.guidance?.seeAlso, input, handlerCtx);
       // ok-on-abort race: the timeout/idle watchdog (or the caller's signal) fired
       // mid-handler, but the handler returned normally without observing
       // ctx.signal.aborted.

@@ -4,7 +4,7 @@
  * The code-execution sandbox injects a `tools` object whose every member is one of the
  * agent's ALLOWED tools, callable as a normal async function:
  *
- *     const open = await tools.work_items.list({ status: 'open' });
+ *     const open = await tools.workItems.list({ status: 'open' });
  *     await tools.coord.wakeQueue();                 // hyphenated verbs → camelCase
  *     await tools.call('plans:set-status', { ... }); // universal escape hatch by full name
  *
@@ -35,29 +35,39 @@ export type FacadeDispatch = (
 export interface ToolFacade {
   /** Universal escape hatch — call any ALLOWED tool by its full MCP name (`ns:verb`). */
   call(toolName: string, args?: unknown): Promise<unknown>;
-  /** Namespaced access: `tools.<ns>.<camelVerb>(args)`. */
+  /** Namespaced access: `tools.<camelNamespace>.<camelVerb>(args)`. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   [ns: string]: any;
 }
 
 /**
- * `wake-queue` / `set_status` → `wakeQueue` / `setStatus` (a valid JS identifier).
+ * `work_items` / `wake-queue` / `set_status` → `workItems` / `wakeQueue` / `setStatus`
+ * (valid JS identifiers).
  * Exported so the COMPILE-TIME signature generator (facade-types.ts, B-CX-API) names verbs
  * identically to this RUNTIME facade — the two must never disagree.
  */
+export function camelNamespace(ns: string): string {
+  return ns.replace(/[-_]+([a-z0-9])/gi, (_m, c: string) => c.toUpperCase());
+}
+
 export function camelVerb(verb: string): string {
   return verb.replace(/[-_]+([a-z0-9])/gi, (_m, c: string) => c.toUpperCase());
 }
 
 /**
  * Build the `tools` facade the sandbox injects. One callable per ALLOWED tool, both
- * namespaced (`tools.ns.verb`) and flat (`tools.call('ns:verb', …)`). Tools outside `allowed`
- * are absent. Returns an empty-but-callable facade if `tools` is empty.
+ * namespaced (`tools.camelNamespace.camelVerb`) and flat (`tools.call('ns:verb', …)`).
+ * Tools outside `allowed` are absent. Returns an empty-but-callable facade if `tools` is empty.
  */
 export function buildToolFacade(
   tools: readonly ProjectedTool[],
   dispatch: FacadeDispatch,
   allowed?: ReadonlySet<string>,
+  /** Parse-check UNKNOWN refs (`ns.verb` dotted or `ns:verb` full). Each is bound to a stub that
+   *  REJECTS only when called, so an unknown `tools.ns.verb` fails PER-CALL — isolable via
+   *  Promise.allSettled / try-catch — instead of throwing a cryptic "cannot read undefined" that
+   *  aborts a whole Promise.all (autonomous-loop-hardening F8/H2). */
+  unknownRefs?: readonly string[],
 ): ToolFacade {
   const byName = new Map<string, ProjectedTool>();
   const facade: ToolFacade = {
@@ -78,11 +88,41 @@ export function buildToolFacade(
     if (allowed && !allowed.has(name)) continue;
 
     byName.set(name, tool);
-    const ns = name.slice(0, ci);
+    const rawNs = name.slice(0, ci);
+    const ns = camelNamespace(rawNs);
     const verb = camelVerb(name.slice(ci + 1));
-    if (ns === 'call') continue; // never shadow the escape hatch
+    if (rawNs === 'call' || ns === 'call') continue; // never shadow the escape hatch
     const bucket = (facade[ns] ??= {} as Record<string, unknown>);
     bucket[verb] = (args?: unknown): Promise<unknown> => dispatch(tool, name, args ?? {});
+  }
+
+  // F8 (autonomous-loop-hardening / H2): bind each parse-check UNKNOWN ref to a stub that REJECTS
+  // only when called, so an unknown `tools.ns.verb` fails PER-CALL (isolable) rather than throwing
+  // a cryptic "cannot read undefined" that aborts a sibling Promise.all. Never shadows a real verb
+  // (unknown refs aren't real by definition). The `tools.call('ns:verb')` hatch already rejects
+  // clearly via the `call` handler above, so only the dotted `tools.ns.verb` form needs a stub.
+  if (unknownRefs) {
+    for (const ref of unknownRefs) {
+      const ci = ref.indexOf(':');
+      const di = ref.indexOf('.');
+      const sep = ci >= 0 ? ci : di; // `ns:verb` (call-hatch full name) or `ns.verb` (dotted access)
+      if (sep <= 0) continue;
+      const ns = camelNamespace(ref.slice(0, sep));
+      if (ns === 'call') continue; // never shadow the escape hatch
+      const rawVerb = ref.slice(sep + 1);
+      const verb = camelVerb(rawVerb);
+      const bucket = (facade[ns] ??= {} as Record<string, unknown>);
+      if (bucket[verb] === undefined) {
+        bucket[verb] = (): Promise<never> =>
+          Promise.reject(
+            new Error(
+              `code-orchestration: tool not available in this sandbox: ${ns}:${rawVerb} — not in your ` +
+                `allowed facade (fix the tools.${ns}.${verb} name; see unknownRefs/facadeHelp). Wrap it in ` +
+                `Promise.allSettled or try/catch so sibling calls still return.`,
+            ),
+          );
+      }
+    }
   }
 
   return facade;

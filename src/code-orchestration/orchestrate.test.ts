@@ -82,15 +82,48 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     expect(r.plannedMutations).toEqual([{ tool: 'wi:set-status', args: { id: 1 } }]);
   });
 
-  it('parse-check rejects a script referencing an unavailable tool before running anything', async () => {
-    const list = mkTool('wi:list', 'read', vi.fn());
-    const r = await runToolOrchestration(`await tools.system.admin({});`, {
-      ctx: MAKE_CTX(),
-      deps: DEPS,
-      tools: [list],
-    });
+  // F8 / autonomous-loop-hardening H2 — an unknown tool ref used to fail the WHOLE run at
+  // parse-check, before any good call ran, forcing a full re-run. Now the script RUNS, the unknown
+  // ref rejects only when CALLED (isolable), and `unknownRefs` is still surfaced as an advisory.
+  it('a good call still runs when a SIBLING ref is unknown — unknown rejects per-call (F8/H2)', async () => {
+    const listFn = vi.fn(async () => json({ items: [{ id: 1 }] }));
+    const list = mkTool('wi:list', 'read', listFn);
+    const r = await runToolOrchestration(
+      `const l = await tools.wi.list({});
+       let badErr = null;
+       try { await tools.system.admin({}); } catch (e) { badErr = String((e && e.message) || e); }
+       return { items: l.items.length, badErr };`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [list] },
+    );
+    expect(r.ok).toBe(true);
+    expect(listFn).toHaveBeenCalledOnce(); // the good call executed (not nuked before running)
+    expect((r.summary as { items: number }).items).toBe(1);
+    expect((r.summary as { badErr: string }).badErr).toContain('not available in this sandbox');
+    expect(r.unknownRefs).toContain('system.admin'); // still surfaced as an advisory
+  });
+
+  it('an unknown ref in an UNREACHED branch is a no-op — the run succeeds (F8)', async () => {
+    const list = mkTool('wi:list', 'read', async () => json({ items: [] }));
+    const r = await runToolOrchestration(
+      `const l = await tools.wi.list({});
+       if (l.items.length > 0) { await tools.system.admin({}); }
+       return { n: l.items.length };`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [list] },
+    );
+    expect(r.ok).toBe(true);
+    expect((r.summary as { n: number }).n).toBe(0);
+    expect(r.unknownRefs).toContain('system.admin');
+  });
+
+  it('an UNCAUGHT unknown ref still fails the run, with the advisory to fix it (F8)', async () => {
+    const list = mkTool('wi:list', 'read', async () => json({ items: [{ id: 1 }] }));
+    const r = await runToolOrchestration(
+      `await tools.wi.list({}); await tools.system.admin({}); return 'done';`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [list] },
+    );
     expect(r.ok).toBe(false);
     expect(r.unknownRefs).toContain('system.admin');
+    expect(r.error).toContain('not available in this sandbox');
   });
 });
 
@@ -163,5 +196,50 @@ describe('runToolOrchestration (B-CX-DEPS — host deps threaded into inner call
     });
     expect(r.ok).toBe(false);
     expect(r.error).toContain('capability_denied');
+  });
+});
+
+describe('runToolOrchestration (WI-1411 — wrapDispatch, per-inner-call context rebinding)', () => {
+  it('wrapDispatch is invoked for EVERY inner call, with that call\'s own tool/name/args, and its next(callCtx) result is what the script sees', async () => {
+    const calls: Array<{ toolName: string; args: unknown; ctxWs: string | undefined }> = [];
+    const list = mkTool('wi:list', 'read', async () => json({ items: [{ id: 1 }, { id: 2 }] }));
+    const get = mkTool('wi:get', 'read', async (a) => json({ id: (a as { id: number }).id }));
+    const r = await runToolOrchestration(
+      `const l = await tools.wi.list({});
+       const got = [];
+       for (const w of l.items) got.push(await tools.wi.get({ id: w.id }));
+       return got;`,
+      {
+        ctx: MAKE_CTX({ workspaceId: 'ws-outer' }),
+        deps: DEPS,
+        tools: [list, get],
+        wrapDispatch: async (tool, toolName, args, ctx, next) => {
+          calls.push({ toolName, args, ctxWs: ctx.workspaceId });
+          // Rebind: every inner call is redirected to a DIFFERENT (fixture)
+          // workspace, proving the hook's `next(callCtx)` — not the original
+          // fixed `ctx` — is what actually reaches the dispatcher.
+          return next({ ...ctx, workspaceId: `${ctx.workspaceId}-rebound` } as typeof ctx);
+        },
+      },
+    );
+    expect(r.ok).toBe(true);
+    expect(calls.map((c) => c.toolName)).toEqual(['wi:list', 'wi:get', 'wi:get']);
+    expect(calls.every((c) => c.ctxWs === 'ws-outer')).toBe(true); // wrapDispatch always sees the ORIGINAL ctx
+    expect(r.summary).toEqual([{ id: 1 }, { id: 2 }]); // next(callCtx) result still flows through correctly
+  });
+
+  it('a write-effect call under dryRun is recorded WITHOUT reaching wrapDispatch (the dryRun gate short-circuits before dispatch)', async () => {
+    const wrapDispatch = vi.fn(async (_tool, _name, _args, ctx, next) => next(ctx));
+    const setStatus = mkTool('wi:set-status', 'write', vi.fn());
+    const r = await runToolOrchestration(`await tools.wi.setStatus({ id: 1 }); return 'ok';`, {
+      ctx: MAKE_CTX(),
+      deps: DEPS,
+      tools: [setStatus],
+      dryRun: true,
+      wrapDispatch,
+    });
+    expect(r.ok).toBe(true);
+    expect(r.plannedMutations).toEqual([{ tool: 'wi:set-status', args: { id: 1 } }]);
+    expect(wrapDispatch).not.toHaveBeenCalled(); // recorded-not-executed short-circuit precedes wrapDispatch
   });
 });

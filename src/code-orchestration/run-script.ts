@@ -7,10 +7,10 @@
  * into one `code:run` call, is the token win the plan is built around.
  *
  *   // model writes:
- *   const open = await tools.work_items.list({ status: 'open' });
+ *   const open = await tools.workItems.list({ status: 'open' });
  *   const failing = [];
  *   for (const w of open.items) {
- *     const d = await tools.work_items.get({ id: w.id });
+ *     const d = await tools.workItems.get({ id: w.id });
  *     if (d.checks?.failing) failing.push(w.id);
  *   }
  *   return { scanned: open.items.length, failing };   // ← only THIS returns to the model

@@ -10,6 +10,7 @@ import type { EventsSchema, UnifiedToolContext, UserEvents } from './tool-projec
 import type { Authorizer } from './authz';
 import type { ToolRequireSpec } from './requires';
 import type { DeltaCapability } from './delta-protocol';
+import type { SeeAlso } from './see-also';
 import type {
   OpenCardSnapshot as WireOpenCardSnapshot,
   ReportBlock,
@@ -306,6 +307,19 @@ export interface ToolGuidance {
    * me", or "Pair with `*_get` to drill down". Only when relevant.
    */
   chaining?: string;
+  /**
+   * Result-aware cross-link pointers to the adjacent lens / sibling tool /
+   * history door for THIS tool's output. Distinct from `chaining`: `chaining`
+   * is catalog-time/static (rendered into the DESCRIPTION at selection time,
+   * answers "what to call next"); `seeAlso` is result-time/dynamic — a function
+   * `(result, args, ctx) => Array<{ tool, reason?, selector? }>` computed from
+   * the ACTUAL result so it fills in real counts + the exact selector and
+   * self-gates (return `[]` to emit nothing). A static array is allowed for
+   * simple cases. The dispatch layer renders it uniformly into every transport
+   * envelope (structured `_meta._seeAlso` + a one-line "See also:" text block).
+   * See presence-coord-unification-2026-07-01 D-003.
+   */
+  seeAlso?: SeeAlso;
   /**
    * Per-role override. Set ONLY the fields that differ from the base
    * guidance; shallowly merged at projection time. Use sparingly — most

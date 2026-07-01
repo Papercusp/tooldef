@@ -13,7 +13,7 @@ describe('buildToolFacade (B-CX-1A)', () => {
     const dispatch = vi.fn(async () => ({ items: [] }));
     const f = buildToolFacade([mkTool('work_items:list'), mkTool('coord:wake-queue')], dispatch);
 
-    await f.work_items.list({ status: 'open' });
+    await f.workItems.list({ status: 'open' });
     expect(dispatch).toHaveBeenCalledWith(expect.anything(), 'work_items:list', { status: 'open' });
 
     await f.coord.wakeQueue(); // hyphenated verb → camelCase, empty args defaults to {}
@@ -33,7 +33,7 @@ describe('buildToolFacade (B-CX-1A)', () => {
       vi.fn(),
       new Set(['work_items:list']),
     );
-    expect(typeof f.work_items?.list).toBe('function');
+    expect(typeof f.workItems?.list).toBe('function');
     expect(f.system).toBeUndefined();
   });
 

@@ -85,7 +85,7 @@ describe('facade-types (B-CX-API)', () => {
   it('generates a declare const tools block with namespaced typed signatures', () => {
     const out = generateToolFacadeTypes([workItemsList]);
     expect(out).toContain('declare const tools: {');
-    expect(out).toContain('work_items: {');
+    expect(out).toContain('workItems: {');
     // required `name` has NO `?`; optionals have `?`; enum → literal union; array → Array<string>.
     expect(out).toMatch(
       /list\(args: \{ status\?: "open" \| "closed"; limit\?: number; name: string; tags\?: Array<string> \}\): Promise<unknown>;/,
@@ -124,7 +124,7 @@ describe('facade-types (B-CX-API)', () => {
 
   it('scopes to the allowed set — tools outside the envelope are omitted', () => {
     const out = generateToolFacadeTypes(all, { allowed: new Set(['work_items:list']) });
-    expect(out).toContain('work_items: {');
+    expect(out).toContain('workItems: {');
     expect(out).not.toContain('system:');
     expect(out).not.toContain('admin(');
     expect(out).not.toContain('plans: {');
@@ -142,7 +142,7 @@ describe('facade-types (B-CX-API)', () => {
 
   it('filters to requested exact tool names (union with namespaces)', () => {
     const out = generateToolFacadeTypes(all, { names: ['work_items:list'] });
-    expect(out).toContain('work_items: {');
+    expect(out).toContain('workItems: {');
     expect(out).toContain('list(');
     expect(out).not.toContain('plans: {');
   });
@@ -150,9 +150,9 @@ describe('facade-types (B-CX-API)', () => {
   it('lists the namespace index for cheap on-demand discovery', () => {
     const idx = listFacadeNamespaces(all, new Set(['work_items:list', 'plans:set-status']));
     const byNs = Object.fromEntries(idx.map((e) => [e.ns, e]));
-    expect(Object.keys(byNs).sort()).toEqual(['plans', 'work_items']);
-    expect(byNs.work_items.verbs).toEqual(['list']);
-    expect(byNs.work_items.toolNames).toEqual(['work_items:list']);
+    expect(Object.keys(byNs).sort()).toEqual(['plans', 'workItems']);
+    expect(byNs.workItems.verbs).toEqual(['list']);
+    expect(byNs.workItems.toolNames).toEqual(['work_items:list']);
     expect(byNs.plans.verbs).toEqual(['setStatus']);
   });
 

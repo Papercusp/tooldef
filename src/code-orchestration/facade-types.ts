@@ -5,7 +5,7 @@
  * surface the model writes against:
  *
  *     declare const tools: {
- *       work_items: {
+ *       workItems: {
  *         // List work-items across kinds …
  *         list(args?: { harness?: string; kind?: "feature" | "bug"; limit?: number }): Promise<unknown>;
  *       };
@@ -23,14 +23,15 @@
  * Anthropic "on-demand tool discovery" token win — the `code:tools` lookup serves signatures for
  * only the namespaces a task needs, instead of dumping every tool def into every prompt.
  *
- * Verb naming is shared with the runtime via `camelVerb` (tool-facade.ts) so the generated
- * `tools.<ns>.<verb>` names ALWAYS match what the runtime facade actually exposes.
+ * Namespace + verb naming are shared with the runtime via `camelNamespace` / `camelVerb`
+ * (tool-facade.ts) so the generated `tools.<ns>.<verb>` names ALWAYS match what the runtime
+ * facade actually exposes.
  *
  * Scoping mirrors the runtime: pass the agent's `allowed` set and tools outside it are omitted —
  * the model never sees a signature for a tool it cannot call.
  */
 import type { ProjectedTool } from '../tool-projection';
-import { camelVerb } from './tool-facade';
+import { camelNamespace, camelVerb } from './tool-facade';
 
 /** A JSON Schema node (we only read well-known keywords; everything else degrades to `unknown`). */
 type JsonSchema = Record<string, unknown>;
@@ -259,11 +260,12 @@ function facadeEntries(
     const ci = name.indexOf(':');
     if (ci <= 0) continue;
     if (opts.allowed && !opts.allowed.has(name)) continue;
-    const ns = name.slice(0, ci);
-    if (ns === 'call') continue; // never shadow the escape hatch
+    const rawNs = name.slice(0, ci);
+    const ns = camelNamespace(rawNs);
+    if (rawNs === 'call' || ns === 'call') continue; // never shadow the escape hatch
     // When a subset is requested, include a tool if its ns OR its full name matches.
     if (nsFilter || nameFilter) {
-      const hit = (nsFilter && nsFilter.has(ns)) || (nameFilter && nameFilter.has(name));
+      const hit = (nsFilter && (nsFilter.has(ns) || nsFilter.has(rawNs))) || (nameFilter && nameFilter.has(name));
       if (!hit) continue;
     }
     entries.push({

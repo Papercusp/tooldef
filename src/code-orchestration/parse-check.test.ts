@@ -11,14 +11,14 @@ const tools = [mkTool('work_items:list'), mkTool('work_items:get'), mkTool('coor
 describe('checkScript (B-CX-1A parse-check)', () => {
   it('passes a script that only references allowed tools', () => {
     const r = checkScript(
-      `const o = await tools.work_items.list({});
-       for (const w of o.items) await tools.work_items.get({ id: w.id });
+      `const o = await tools.workItems.list({});
+       for (const w of o.items) await tools.workItems.get({ id: w.id });
        await tools.coord.wakeQueue();`,
       tools,
     );
     expect(r.ok).toBe(true);
     expect(r.unknownRefs).toEqual([]);
-    expect(r.refs).toContain('work_items.list');
+    expect(r.refs).toContain('workItems.list');
     expect(r.refs).toContain('coord.wakeQueue');
   });
 
@@ -55,9 +55,9 @@ describe('checkScript (B-CX-PARSE — AST: computed / aliased / destructured)', 
 
   it('passes computed string-literal access to an allowed tool', () => {
     // Note: the computed key is the facade key (camelCased verb), same as dotted access.
-    const r = checkScript(`await tools['work_items'].list({});\nawait tools['coord']['wakeQueue']();`, tools);
+    const r = checkScript(`await tools['workItems'].list({});\nawait tools['coord']['wakeQueue']();`, tools);
     expect(r.ok).toBe(true);
-    expect(r.refs).toContain('work_items.list');
+    expect(r.refs).toContain('workItems.list');
     expect(r.refs).toContain('coord.wakeQueue');
   });
 
@@ -67,13 +67,13 @@ describe('checkScript (B-CX-PARSE — AST: computed / aliased / destructured)', 
     expect(r.unknownRefs).toContain('system.admin');
   });
 
-  it('follows a chained alias (const w = tools.work_items; const f = w.list)', () => {
+  it('follows a chained alias (const w = tools.workItems; const f = w.list)', () => {
     const r = checkScript(
-      `const w = tools.work_items;\nconst f = w.list;\nawait f({});`,
+      `const w = tools.workItems;\nconst f = w.list;\nawait f({});`,
       tools,
     );
     expect(r.ok).toBe(true);
-    expect(r.refs).toContain('work_items.list');
+    expect(r.refs).toContain('workItems.list');
   });
 
   it('resolves namespace destructuring `const { coord } = tools`', () => {
@@ -92,11 +92,11 @@ describe('checkScript (B-CX-PARSE — AST: computed / aliased / destructured)', 
     expect(r.refs).toContain('coord.wakeQueue');
   });
 
-  it('resolves verb destructuring off a namespace `const { list } = tools.work_items`', () => {
-    const ok = checkScript(`const { list, get } = tools.work_items;\nawait list({});\nawait get({ id: 'x' });`, tools);
+  it('resolves verb destructuring off a namespace `const { list } = tools.workItems`', () => {
+    const ok = checkScript(`const { list, get } = tools.workItems;\nawait list({});\nawait get({ id: 'x' });`, tools);
     expect(ok.ok).toBe(true);
-    expect(ok.refs).toContain('work_items.list');
-    expect(ok.refs).toContain('work_items.get');
+    expect(ok.refs).toContain('workItems.list');
+    expect(ok.refs).toContain('workItems.get');
 
     const bad = checkScript(`const { admin } = tools.system;\nawait admin({});`, tools);
     expect(bad.ok).toBe(false);
@@ -131,16 +131,16 @@ describe('checkScript (B-CX-PARSE — AST: computed / aliased / destructured)', 
 
   it('still flags a disallowed dotted call when mixed with a valid one', () => {
     const r = checkScript(
-      `await tools.work_items.list({});\nawait tools.secrets.read({});`,
+      `await tools.workItems.list({});\nawait tools.secrets.read({});`,
       tools,
     );
     expect(r.ok).toBe(false);
     expect(r.unknownRefs).toEqual(['secrets.read']);
-    expect(r.refs).toContain('work_items.list');
+    expect(r.refs).toContain('workItems.list');
   });
 
   it('does not throw on a syntactically broken script (degrades gracefully)', () => {
-    const r = checkScript(`await tools.work_items.list({ ;;; `, tools);
+    const r = checkScript(`await tools.workItems.list({ ;;; `, tools);
     // ts.createSourceFile is resilient (error nodes, no throw); the result is still well-formed.
     expect(Array.isArray(r.unknownRefs)).toBe(true);
     expect(Array.isArray(r.refs)).toBe(true);
