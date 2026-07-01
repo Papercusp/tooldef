@@ -79,10 +79,10 @@ describe('code:run acceptance — list-then-act-per-item loops', () => {
       return json({ id, state: n % 4 === 0 ? 'blocked' : 'open' });
     });
     const r = await run(
-      `const l = await tools.work_items.list({ status: 'open' });
+      `const l = await tools.workItems.list({ status: 'open' });
        const blocked = [];
        for (const w of l.items) {
-         const d = await tools.work_items.get({ id: w.id });
+         const d = await tools.workItems.get({ id: w.id });
          if (d.state === 'blocked') blocked.push(d.id);
        }
        return { scanned: l.items.length, blocked };`,
@@ -103,10 +103,10 @@ describe('code:run acceptance — list-then-act-per-item loops', () => {
       return json({ id, ok: true });
     });
     const r = await run(
-      `const l = await tools.work_items.list({});
+      `const l = await tools.workItems.list({});
        const ok = []; const failed = [];
        for (const w of l.items) {
-         try { const d = await tools.work_items.get({ id: w.id }); ok.push(d.id); }
+         try { const d = await tools.workItems.get({ id: w.id }); ok.push(d.id); }
          catch (e) { failed.push({ id: w.id, err: String(e.message || e) }); }
        }
        return { ok, failed };`,
@@ -233,8 +233,8 @@ describe('code:run acceptance — dry-run write gate', () => {
     const list = mkTool('work_items:list', 'read', readFn);
     const setState = mkTool('work_items:set_state', 'write', writeFn);
     const r = await run(
-      `const l = await tools.work_items.list({});
-       for (const w of l.items) await tools.work_items.setState({ id: w.id, state: 'done' });
+      `const l = await tools.workItems.list({});
+       for (const w of l.items) await tools.workItems.setState({ id: w.id, state: 'done' });
        return { wouldUpdate: l.items.length };`,
       [list, setState],
       { dryRun: true },
@@ -256,8 +256,8 @@ describe('code:run acceptance — dry-run write gate', () => {
     const list = mkTool('work_items:list', 'read', async () => json({ items }));
     const setState = mkTool('work_items:set_state', 'write', writeFn);
     const r = await run(
-      `const l = await tools.work_items.list({});
-       for (const w of l.items) await tools.work_items.setState({ id: w.id, state: 'done' });
+      `const l = await tools.workItems.list({});
+       for (const w of l.items) await tools.workItems.setState({ id: w.id, state: 'done' });
        return { updated: l.items.length };`,
       [list, setState],
       { dryRun: false },
@@ -273,13 +273,17 @@ describe('code:run acceptance — dry-run write gate', () => {
 // 6. Safety boundaries — the whitelist + parse-check (the security model).
 // ───────────────────────────────────────────────────────────────────────────
 describe('code:run acceptance — safety boundaries', () => {
-  it('parse-check rejects a disallowed tool reference before ANY tool runs', async () => {
+  it('parse-check SURFACES a disallowed tool reference (advisory; the runtime whitelist is the boundary)', async () => {
     const safeFn = vi.fn(async () => json({ ok: true }));
     const safe = mkTool('work_items:list', 'read', safeFn);
-    const r = await run(`await tools.work_items.list({}); await tools.system.admin({});`, [safe]);
+    const r = await run(`await tools.workItems.list({}); await tools.system.admin({});`, [safe]);
+    // Advisory parse-check (B-CX-PARSE): it does NOT fast-fail — it SURFACES the disallowed ref in
+    // unknownRefs and lets the script run. The security boundary is the runtime facade whitelist:
+    // `tools.system.admin` is absent from the facade, so it throws at runtime (→ r.ok=false). Mirrors
+    // the aliasing-obfuscation sibling test + "the whitelist is the runtime boundary" below.
     expect(r.ok).toBe(false);
-    expect(r.unknownRefs).toContain('system.admin');
-    expect(safeFn).not.toHaveBeenCalled(); // fast-fail: nothing executed, even the allowed call
+    expect(r.unknownRefs).toContain('system.admin'); // surfaced by the static scan
+    expect(safeFn).toHaveBeenCalled(); // the ALLOWED call runs (no fast-fail); only the disallowed one hits the runtime wall
   });
 
   it('parse-check sees through an aliasing obfuscation to a disallowed tool', async () => {

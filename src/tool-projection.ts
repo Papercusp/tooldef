@@ -335,6 +335,53 @@ export interface UnifiedToolContext {
    */
   emit: EmitCallback;
 
+  /**
+   * Expand the caller's LIVE tool surface at runtime — activate additional
+   * tools by name for THIS session. The transport adds the names to the
+   * session's mutable allowlist and, if the client negotiated
+   * `tools.listChanged`, fires `notifications/tools/list_changed` so the
+   * client re-fetches `tools/list` and can call the surfaced tools.
+   *
+   * The server-side half of the "small seed + expand on demand" model: a
+   * session launched with a trimmed listing seed (e.g. an MCP `?tools=` core
+   * set) calls this — typically via a discovery tool like `tools:find` — to
+   * surface the long tail on intent, WITHOUT paying the full-catalog token
+   * cost up front. Returns true iff the surface actually grew (something new
+   * was added), so the caller can tell whether a re-fetch will be triggered.
+   *
+   * No-op returning false on transports without a mutable per-session surface
+   * (in-process / non-MCP) or a session that was never seeded (a full-catalog
+   * session already has everything). Optional — reference as
+   * `ctx.activateTools?.(names)`.
+   */
+  activateTools?: (toolNames: readonly string[]) => boolean;
+
+  /**
+   * Dispatch ANOTHER tool by name server-side and return its result — the
+   * engine behind a `tools:invoke { name, args }` meta-tool. The target runs
+   * under THIS caller's context (same principal / tx / privilege), so it is
+   * gated EXACTLY as a direct call would be — a router, not a privilege bypass.
+   *
+   * The universal reachability escape hatch: a client that never sees the long
+   * tail in its own tool list (a small seed on a client that doesn't act on
+   * `tools/list_changed`) can still reach any tool by routing the call through
+   * the meta-tool — no client-side registry growth required. Complements the
+   * dynamic surface: `tools:find` returns the target's name+schema, then this
+   * calls it.
+   *
+   * Optional — present only on transports with a server-side dispatcher (MCP).
+   * Reference as `ctx.dispatchTool?.(name, args)`.
+   */
+  dispatchTool?: (
+    toolName: string,
+    toolArgs?: unknown,
+  ) => Promise<{
+    content: ReadonlyArray<unknown>;
+    isError?: boolean;
+    _meta?: Record<string, unknown>;
+    structuredContent?: unknown;
+  }>;
+
   /* ── Auth / db (typically built-in tools) ─────────────────────────── */
   /** Auth principal resolved from bearer. Null when caller is anonymous. */
   principal?: { slug: string; workspaceId: string; capabilities: Set<string>; roles?: ReadonlySet<string> } | null;
@@ -916,11 +963,14 @@ export interface ProjectedTool {
    *
    * Shape mirrors `ToolGuidance` but without a `byRole` type-import to
    * keep this module free of role-enum imports. Plumbed-through opaque.
+   * `seeAlso` (result-aware cross-links) is read at dispatch time — see
+   * `applySeeAlso` in `./see-also`.
    */
   guidance?: {
     when?: string;
     notWhen?: string;
     chaining?: string;
+    seeAlso?: import('./see-also').SeeAlso;
     byRole?: Record<string, { when?: string; notWhen?: string; chaining?: string }>;
   };
 }

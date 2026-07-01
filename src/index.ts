@@ -20,6 +20,13 @@ export type {
   ProgressCallback,
   EmitCallback,
 } from './wire';
+export type { SeeAlso, SeeAlsoEntry, SeeAlsoPointer } from './see-also';
+export {
+  applySeeAlso,
+  resolveSeeAlso,
+  renderSeeAlsoText,
+  readJsonResult,
+} from './see-also';
 export type {
   AgentRole,
   RoleRegistry,
@@ -160,7 +167,11 @@ export type { DeltaResponse, DeltaIngestResult, DeltaDispatch, DeltaDispatchResu
 // Harness-side base-presence tracker (the D-006 "harness owns the base" half — when is not_modified/delta safe) — P-003.
 // `dispatchWithBasePresence` is the one-call turn-wrapper integration seam (tracker + client + guarded dispatch).
 export { BasePresenceTracker, dispatchWithBasePresence } from './base-presence';
-export type { BasePresenceOptions, DeltaMode } from './base-presence';
+// base-presence's DeltaMode ('full'|'not_modified'|'delta') is a DISTINCT type from
+// delta-protocol's ('auto'|'full'|'not_modified') re-exported above — the two collided
+// under the bare name (TS2300). Disambiguate the barrel; the source module keeps its own
+// `DeltaMode` for internal consumers. (No external caller imports the bare barrel name.)
+export type { BasePresenceOptions, DeltaMode as BasePresenceDeltaMode } from './base-presence';
 // Server-side rows-array delta negotiation (the sync-resolver/SSE sibling of negotiateToolDelta) — P-006.
 export { negotiateRowsDelta } from './rows-delta';
 export type { RowsDeltaResult } from './rows-delta';
