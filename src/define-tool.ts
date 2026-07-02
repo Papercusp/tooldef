@@ -728,14 +728,19 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
           `Scope the session to a workspace, or pass a per-call workspace where the host/tool supports one.`,
       );
     }
-    const legacyCtx: ToolContext = {
-      principal: ctx.principal as unknown as ToolContext['principal'],
-      tx: ctx.tx,
-      log: (level, msg, meta) => ctx.log(`[${level}] ${msg}${meta ? ` ${JSON.stringify(meta)}` : ''}`),
-    };
     // Framework-reserved per-call tier override — stripped BEFORE validation
     // (context-trimming-tiers D-004; not part of any tool's schema).
     const { input: tierlessInput, callTier } = extractPayloadTier(input);
+    const legacyCtx: ToolContext & { contextTier?: string } = {
+      principal: ctx.principal as unknown as ToolContext['principal'],
+      tx: ctx.tx,
+      log: (level, msg, meta) => ctx.log(`[${level}] ${msg}${meta ? ` ${JSON.stringify(meta)}` : ''}`),
+      // Thread the RESOLVED payload tier so principal-gated tools that keep a
+      // hand-rolled JSON ToolResult (byte-stable contracts — memory:search)
+      // can adapt their defaults off ctx.contextTier, same as the role-gated
+      // wrapper below (context-trimming-tiers P-024).
+      ...(callTier ?? ctx.contextTier ? { contextTier: callTier ?? ctx.contextTier } : {}),
+    };
     const shimmed = applyPositionalWriteShim(def.name, rawSchema, tierlessInput);
     const parsed = await standardValidate(def.args, shimmed);
     if (!parsed.ok) {
