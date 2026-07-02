@@ -476,6 +476,14 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
    * See `ToolGuidance` for shape.
    */
   guidance?: ToolGuidance;
+  /**
+   * Optional payload-tier shapers (context-trimming-tiers D-004): per-tier
+   * projections of the response `data` for trimmed/standard sessions.
+   * Resolution falls back trimmed → standard → full, where `full` IS the
+   * unshaped response — a tool without `shape` is byte-identical to its
+   * pre-tier behavior on every tier. See `payload-tier.ts`.
+   */
+  shape?: import('./payload-tier').PayloadShapers;
   /** See `ToolDefinitionInput.profile`. */
   profile?: 'engineer' | 'all';
   /** See `ToolDefinitionInput.papercusp`. */
@@ -520,6 +528,14 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
   handler: (args: StandardSchemaV1.InferOutput<TArgs>, ctx: ToolContext) => Promise<ToolResponse | ToolResult>;
   /** See `ToolGuidance`. */
   guidance?: ToolGuidance;
+  /**
+   * Optional payload-tier shapers (context-trimming-tiers D-004): per-tier
+   * projections of the response `data` for trimmed/standard sessions.
+   * Resolution falls back trimmed → standard → full, where `full` IS the
+   * unshaped response — a tool without `shape` is byte-identical to its
+   * pre-tier behavior on every tier. See `payload-tier.ts`.
+   */
+  shape?: import('./payload-tier').PayloadShapers;
   /* ─── Unified-primitive forward-compat fields (Phase E1, no behavior change) ─────
    * These accept the future `defineTool`-collapsed shape without changing
    * runtime behavior. Phase E2 wires them into dispatch. Phase E1 just makes
@@ -725,6 +741,14 @@ export interface RoleToolDefinition<
   ) => Promise<ToolResult | ToolResponse>;
   /** See `ToolGuidance`. */
   guidance?: ToolGuidance;
+  /**
+   * Optional payload-tier shapers (context-trimming-tiers D-004): per-tier
+   * projections of the response `data` for trimmed/standard sessions.
+   * Resolution falls back trimmed → standard → full, where `full` IS the
+   * unshaped response — a tool without `shape` is byte-identical to its
+   * pre-tier behavior on every tier. See `payload-tier.ts`.
+   */
+  shape?: import('./payload-tier').PayloadShapers;
   /** Intrinsic lifecycle emissions — see `ToolEmitSpec`. Desugared to event rules at load. */
   emits?: readonly ToolEmitSpec[];
   /** Declarative preconditions — see `ToolRequireSpec`. Evaluated by the dispatcher's `preconditions` step. */
@@ -780,6 +804,14 @@ export interface RoleToolDefinitionInput<
   ) => Promise<ToolResult | ToolResponse>;
   /** See `ToolGuidance`. */
   guidance?: ToolGuidance;
+  /**
+   * Optional payload-tier shapers (context-trimming-tiers D-004): per-tier
+   * projections of the response `data` for trimmed/standard sessions.
+   * Resolution falls back trimmed → standard → full, where `full` IS the
+   * unshaped response — a tool without `shape` is byte-identical to its
+   * pre-tier behavior on every tier. See `payload-tier.ts`.
+   */
+  shape?: import('./payload-tier').PayloadShapers;
   /* ─── Unified-primitive forward-compat fields (Phase E1) — see ToolDefinitionInput. */
   /** See `ToolDefinitionInput.auth`. Phase E2 wiring. */
   auth?: RouteAuth;

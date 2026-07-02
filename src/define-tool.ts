@@ -516,6 +516,7 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
     delta: input.delta,
     handler: input.handler,
     guidance: input.guidance,
+    shape: input.shape,
     profile: input.profile,
     harness: input.harness,
     authorize: input.authorize,
@@ -594,6 +595,7 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
     state: input.state,
     handler: input.handler,
     guidance: input.guidance,
+    shape: input.shape,
     profile: input.profile,
     harness: input.harness,
     emits: input.emits,
@@ -730,7 +732,10 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       tx: ctx.tx,
       log: (level, msg, meta) => ctx.log(`[${level}] ${msg}${meta ? ` ${JSON.stringify(meta)}` : ''}`),
     };
-    const shimmed = applyPositionalWriteShim(def.name, rawSchema, input);
+    // Framework-reserved per-call tier override — stripped BEFORE validation
+    // (context-trimming-tiers D-004; not part of any tool's schema).
+    const { input: tierlessInput, callTier } = extractPayloadTier(input);
+    const shimmed = applyPositionalWriteShim(def.name, rawSchema, tierlessInput);
     const parsed = await standardValidate(def.args, shimmed);
     if (!parsed.ok) {
       throw new InvalidInputError(`invalid_args: ${formatIssues(parsed.issues)}`);
@@ -752,7 +757,18 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       }
       return response as ToolResult;
     }
-    return serializeProjectedResult(response as ToolResponse, ctx, eligibility, def, readColumns, parsed.value);
+    // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
+    // the session/call tier before format-aware serialization. Unshaped tools
+    // pass through byte-identical.
+    const shaped = applyPayloadTier({
+      toolName: def.name,
+      shape: def.shape,
+      response: response as ToolResponse,
+      tier: resolvePayloadTier(callTier, ctx.contextTier),
+      args: parsed.value,
+      log: (m) => ctx.log(m),
+    });
+    return serializeProjectedResult(shaped, ctx, eligibility, def, readColumns, parsed.value);
   };
 
   registerProjectedTool({
@@ -820,7 +836,10 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
   const readColumns = projectReadColumns(outputJsonSchema);
 
   const projectedFn: ToolFn = async (input, ctx) => {
-    const shimmed = applyPositionalWriteShim(def.name, rawSchema, input);
+    // Framework-reserved per-call tier override — stripped BEFORE validation
+    // (context-trimming-tiers D-004; not part of any tool's schema).
+    const { input: tierlessInput, callTier } = extractPayloadTier(input);
+    const shimmed = applyPositionalWriteShim(def.name, rawSchema, tierlessInput);
     const parsed = await standardValidate(def.args, shimmed);
     if (!parsed.ok) {
       throw new InvalidInputError(`invalid_args: ${formatIssues(parsed.issues)}`);
@@ -841,8 +860,19 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
       return out as ToolResult;
     }
 
+    // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
+    // the session/call tier before format-aware serialization. Unshaped tools
+    // pass through byte-identical.
+    const shaped = applyPayloadTier({
+      toolName: def.name,
+      shape: def.shape,
+      response: out as ToolResponse,
+      tier: resolvePayloadTier(callTier, ctx.contextTier),
+      args: parsed.value,
+      log: (m) => ctx.log(m),
+    });
     // ToolResponse envelope → format-aware MCP content[] + _meta.
-    return serializeProjectedResult(out as ToolResponse, ctx, eligibility, def, readColumns, parsed.value);
+    return serializeProjectedResult(shaped, ctx, eligibility, def, readColumns, parsed.value);
   };
 
   registerProjectedTool({
