@@ -845,7 +845,14 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     if (!parsed.ok) {
       throw new InvalidInputError(`invalid_args: ${formatIssues(parsed.issues)}`);
     }
-    const out = await def.handler(parsed.value, ctx);
+    // Thread the per-call tier override into the HANDLER's ctx too: tools that
+    // must keep a hand-rolled JSON ToolResult (hook-consumed — coord:inbox /
+    // coord:plan-events / coord:glance) adapt their DEFAULTS off
+    // ctx.contextTier instead of declaring `shape`, and without this overlay a
+    // per-call `payloadTier:"full"` would be stripped above and silently
+    // ignored by that pattern (context-trimming-tiers P-022).
+    const handlerCtx = callTier !== undefined ? { ...ctx, contextTier: callTier } : ctx;
+    const out = await def.handler(parsed.value, handlerCtx);
 
     // Already a ToolResult? The handler self-serialized its content — pass it
     // through untouched (format-aware serialization only applies to handlers
