@@ -24,6 +24,7 @@ import { collectToolEmits } from './emits-registry';
 import { registerProjectedTool, type ToolFn, type ToolExposure, type UnifiedToolContext } from './tool-projection';
 import { UnauthorizedToolError, InvalidInputError } from './dispatch-projected';
 import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
+import { applyPayloadTier, extractPayloadTier, resolvePayloadTier } from './payload-tier';
 import {
   parseDeltaRequest,
   computeViewFingerprint,

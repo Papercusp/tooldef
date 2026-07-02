@@ -308,6 +308,14 @@ export interface GateBypass {
 export interface UnifiedToolContext {
   /** Tool-bound logger. Always populated. */
   log: (msg: string) => void;
+  /**
+   * The session's payload tier (context-trimming-tiers D-004) — wired by the
+   * host from its transport (e.g. an MCP URL `ctx_tier=` param). Read at
+   * serialize time to pick a tool's `shape.trimmed`/`shape.standard`
+   * projection; absent ⇒ 'full' (the unshaped response). A per-call
+   * `payloadTier` arg outranks it.
+   */
+  contextTier?: import('./payload-tier').PayloadTier;
   /** Aborts on per-tool timeout, parent cancellation, or shutdown. */
   signal: AbortSignal;
   /**

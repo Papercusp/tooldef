@@ -38,6 +38,18 @@ export type {
 
 /* ─── defineTool + sibling authoring primitives ──────────────────────── */
 export { defineTool } from './define-tool';
+export {
+  applyPayloadTier,
+  extractPayloadTier,
+  parsePayloadTier,
+  resolvePayloadTier,
+  resetPayloadTierRatchet,
+  PAYLOAD_TIERS,
+  PAYLOAD_TIER_RATCHET_CHARS,
+  type PayloadTier,
+  type PayloadShapers,
+  type PayloadShaperCtx,
+} from './payload-tier';
 export { defineResource } from './define-resource';
 export { definePrompt } from './define-prompt';
 
