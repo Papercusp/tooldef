@@ -543,6 +543,22 @@ export interface UnifiedToolContext {
   uiClientId?: string | null;
 
   /**
+   * The CLI backend the CALLING agent runs under — `'omp' | 'claude' | 'codex'`. The launcher
+   * stamps it onto the session's MCP URL (`?agent=`) and the transport folds it here. It is the
+   * CURRENT process's backend (a resume/handoff is a fresh launch that re-stamps), so a tool can
+   * default a spawned agent's backend to the caller's own instead of a hardcoded guess (e.g.
+   * fleet:launch-on-plan). Undefined for callers whose launcher didn't stamp it. Provenance/
+   * defaulting hint only, never a security boundary.
+   */
+  callerAgent?: string | null;
+  /**
+   * The model the calling agent was launched on (`?model=` on the MCP URL), resolved by the
+   * launcher (explicit `--model` or the backend default). Paired with `callerAgent` so a tool can
+   * inherit the caller's model when it inherits the backend. Undefined when unstamped.
+   */
+  callerModel?: string | null;
+
+  /**
    * The plan-run conversation that this call belongs to, when the
    * caller is an agent launched from a plan (`plans:launch` —
    * plan-agent-launch-2026-05-21). It is the `runAgentChat` session id
