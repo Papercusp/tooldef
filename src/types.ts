@@ -429,6 +429,14 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
    * sandbox's dry-run/confirm gate (a read-only tool needs no gate).
    */
   effect?: 'read' | 'write';
+  /** Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): when
+   *  true, a handler that COMPLETED but whose `ctx.signal` had already aborted (the
+   *  wall-clock/idle timeout fired mid-handler under load) surfaces its completed result as
+   *  success instead of a spurious `timeout`. Safe ONLY when re-applying (or surfacing a
+   *  completed apply of) the write can never double-effect — e.g. `plans:set-status` sets a
+   *  status token to a fixed value. Default (absent/false) keeps the abort authoritative.
+   *  Threaded onto `ProjectedTool`; read ONLY by the dispatch abort-race branch. */
+  idempotent?: boolean;
   /**
    * Canonical tool names this COMPOSITE tool bundles (tool-call-batching-wrappers
    * P-010). A composite collapses a hot fixed multi-step flow into one call (e.g.
@@ -521,6 +529,14 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
   capability: string;
   /** Read/write effect (B-CX-PRE); inferred from the capability suffix when omitted. See ToolDefinition.effect. */
   effect?: 'read' | 'write';
+  /** Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): when
+   *  true, a handler that COMPLETED but whose `ctx.signal` had already aborted (the
+   *  wall-clock/idle timeout fired mid-handler under load) surfaces its completed result as
+   *  success instead of a spurious `timeout`. Safe ONLY when re-applying (or surfacing a
+   *  completed apply of) the write can never double-effect — e.g. `plans:set-status` sets a
+   *  status token to a fixed value. Default (absent/false) keeps the abort authoritative.
+   *  Threaded onto `ProjectedTool`; read ONLY by the dispatch abort-race branch. */
+  idempotent?: boolean;
   /** Canonical tool names this composite tool bundles (e.g. coord:orient replaces fleet:assignments + work_items:list + coord:inbox). Omitted for primitives. See ToolDefinition.replaces. */
   replaces?: readonly string[];
   args: TArgs;
@@ -652,6 +668,14 @@ export interface RoleToolDefinition<
   capability: string;
   /** Read/write effect (B-CX-PRE); inferred from the capability suffix when omitted. See ToolDefinition.effect. */
   effect?: 'read' | 'write';
+  /** Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): when
+   *  true, a handler that COMPLETED but whose `ctx.signal` had already aborted (the
+   *  wall-clock/idle timeout fired mid-handler under load) surfaces its completed result as
+   *  success instead of a spurious `timeout`. Safe ONLY when re-applying (or surfacing a
+   *  completed apply of) the write can never double-effect — e.g. `plans:set-status` sets a
+   *  status token to a fixed value. Default (absent/false) keeps the abort authoritative.
+   *  Threaded onto `ProjectedTool`; read ONLY by the dispatch abort-race branch. */
+  idempotent?: boolean;
   /** Canonical tool names this composite tool bundles. Omitted for primitives. See ToolDefinition.replaces. */
   replaces?: readonly string[];
   /** Derived at defineTool time: 'composite' when `replaces` is non-empty, else 'primitive'. */
@@ -771,6 +795,14 @@ export interface RoleToolDefinitionInput<
   capability: string;
   /** Read/write effect (B-CX-PRE); inferred from the capability suffix when omitted. See ToolDefinition.effect. */
   effect?: 'read' | 'write';
+  /** Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): when
+   *  true, a handler that COMPLETED but whose `ctx.signal` had already aborted (the
+   *  wall-clock/idle timeout fired mid-handler under load) surfaces its completed result as
+   *  success instead of a spurious `timeout`. Safe ONLY when re-applying (or surfacing a
+   *  completed apply of) the write can never double-effect — e.g. `plans:set-status` sets a
+   *  status token to a fixed value. Default (absent/false) keeps the abort authoritative.
+   *  Threaded onto `ProjectedTool`; read ONLY by the dispatch abort-race branch. */
+  idempotent?: boolean;
   /** Canonical tool names this composite tool bundles. Omitted for primitives. See ToolDefinition.replaces. */
   replaces?: readonly string[];
   /** Visibility profile gate — see RoleToolDefinition.profile. */

@@ -751,6 +751,21 @@ export interface ProjectedTool {
    */
   effect?: 'read' | 'write';
   /**
+   * Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6 / P-007). When
+   * `true`, a handler that RAN TO COMPLETION but whose `ctx.signal` had already aborted
+   * (the wall-clock/idle timeout fired mid-handler under load) surfaces its COMPLETED
+   * result as success instead of a spurious `timeout` error. Safe ONLY for a tool whose
+   * effect is idempotent — re-applying (or surfacing a completed apply of) the write can
+   * never double-effect or corrupt state (e.g. `plans:set-status` sets a status token to a
+   * fixed value; re-applying is a no-op). Default (absent/false) preserves the conservative
+   * behaviour: a completed non-low-tier mutation past the deadline still reports `timeout`
+   * (the abort stays authoritative). This turns the 280 `plans:set-status` false-timeouts —
+   * writes that COMMITTED but returned a `timeout` because wall-clock beat the deadline —
+   * into honest successes, so the agent never re-dispatches a write that already landed.
+   * ONLY the dispatch abort-race branch reads this; it is inert on the happy path.
+   */
+  idempotent?: boolean;
+  /**
    * Canonical tool names this COMPOSITE tool bundles (tool-call-batching-wrappers
    * P-010). Empty/undefined ⇒ a primitive. Read by agent_tools:list (the queryable
    * composition tag) and prompt-assembly's renderToolsCatalog (the bounded

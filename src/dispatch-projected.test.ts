@@ -454,6 +454,48 @@ describe('dispatchProjectedTool', () => {
     expect(r.result?.content?.[0]?.text).toBe('fresh-read');
   }, 10_000);
 
+  it('ok-on-abort (idempotent MUTATION opt-in): a completed non-low-tier write SURFACES its success despite the abort (W6/P-007 — the 280 set-status false-timeout fix)', async () => {
+    // backend-reliability-100pct-2026-07-03 W6/P-007: a mutation whose wall-clock beat the
+    // deadline under load COMMITTED (the handler returned a result) — reporting `timeout`
+    // was a LIE that made the agent re-dispatch a write that already landed. A tool that
+    // DECLARES itself idempotent (re-apply is a safe no-op, e.g. plans:set-status) surfaces
+    // the truthful success instead. `capabilities: []` ⇒ non-low tier (as in the MUTATION
+    // test above), so ONLY the `idempotent` opt-in flips the outcome from timeout to success.
+    const tool = makeTool({
+      capabilities: [], // non-low tier — a genuine mutation, not a low-read
+      idempotent: true,
+      timeoutSec: 60,
+      idleTimeoutSec: 1,
+      fn: async () => {
+        await new Promise((r) => setTimeout(r, 3000)); // outlast the idle cap → abort fires
+        return { content: [{ type: 'text', text: 'write-committed' }] };
+      },
+    });
+    const r = await dispatchProjectedTool(tool, 'plans:set-status', {}, MAKE_CTX(), MAKE_DEPS());
+    expect(r.ok).toBe(true);
+    expect(r.result?.content?.[0]?.text).toBe('write-committed');
+  }, 10_000);
+
+  it('ok-on-abort (idempotent opt-in REQUIRED / defaults OFF): the SAME non-low mutation with idempotent:false STILL surfaces timeout', async () => {
+    // The opt-in is load-bearing + defaults OFF: identical to the test above except
+    // idempotent:false — a write that has NOT declared itself idempotent keeps the
+    // conservative abort-authoritative behaviour (never report success for a possibly-
+    // cancelled non-idempotent write). Pins that only the explicit opt-in changes anything.
+    const tool = makeTool({
+      capabilities: [],
+      idempotent: false,
+      timeoutSec: 60,
+      idleTimeoutSec: 1,
+      fn: async () => {
+        await new Promise((r) => setTimeout(r, 3000));
+        return { content: [{ type: 'text', text: 'should-not-surface' }] };
+      },
+    });
+    const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS());
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe('timeout');
+  }, 10_000);
+
   it('ctx.progress refreshes idleTimeoutSec deadline (alias parity)', async () => {
     // Regression: a tool that calls ctx.progress() exclusively (no
     // direct ctx.emit) used to trip the idle watchdog because the

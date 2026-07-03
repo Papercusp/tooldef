@@ -603,7 +603,17 @@ const invokeStep: DispatchStep = {
         // read). `ProjectedTool` carries `capabilities`, not a precomputed `tier`.
         const caps = exec.tool.capabilities;
         const isLowTierRead = caps.length > 0 && caps.every((c) => tierFor(c) === 'low');
-        if (!isLowTierRead) {
+        // Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): a
+        // MUTATION the tool DECLARES idempotent whose handler RAN TO COMPLETION is safe to
+        // surface past the deadline — the write committed (the handler returned a result),
+        // and re-applying an idempotent write can never double-effect, so reporting the
+        // TRUTHFUL success (instead of a spurious `timeout`) is correct AND stops the agent
+        // re-dispatching a write that already landed. This is the 280 `plans:set-status`
+        // false-timeout fix: writes that COMMITTED but returned `timeout` because wall-clock
+        // beat the deadline under load. Absent/false ⇒ the abort stays authoritative (below),
+        // unchanged for every tool that has not opted in.
+        const isIdempotentCompletion = exec.tool.idempotent === true;
+        if (!isLowTierRead && !isIdempotentCompletion) {
           return {
             ok: false,
             error: {
@@ -612,10 +622,10 @@ const invokeStep: DispatchStep = {
             },
           };
         }
-        // Completed read despite the abort: return it directly. Skip the outputRef
-        // chunk-emit below — the stream is already aborted so the client can't
-        // receive it (and emitting could re-throw into the catch); the result still
-        // carries outputRef for a later fetch.
+        // Completed read — OR completed idempotent mutation — despite the abort: return it
+        // directly. Skip the outputRef chunk-emit below — the stream is already aborted so
+        // the client can't receive it (and emitting could re-throw into the catch); the
+        // result still carries outputRef for a later fetch.
         exec.handlerResult = result;
         return { ok: true, result };
       }
