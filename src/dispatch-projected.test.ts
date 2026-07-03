@@ -473,7 +473,8 @@ describe('dispatchProjectedTool', () => {
     });
     const r = await dispatchProjectedTool(tool, 'plans:set-status', {}, MAKE_CTX(), MAKE_DEPS());
     expect(r.ok).toBe(true);
-    expect(r.result?.content?.[0]?.text).toBe('write-committed');
+    const first = r.result?.content?.[0];
+    expect(first?.type === 'text' ? first.text : undefined).toBe('write-committed');
   }, 10_000);
 
   it('ok-on-abort (idempotent opt-in REQUIRED / defaults OFF): the SAME non-low mutation with idempotent:false STILL surfaces timeout', async () => {
