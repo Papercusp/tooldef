@@ -27,6 +27,14 @@ export {
   renderSeeAlsoText,
   readJsonResult,
 } from './see-also';
+// Host-registered ambient result annotator (agent-managed-compaction P-013): the seam
+// the host wires its banded context gauge into. Default no-op; see result-annotator.ts.
+export type { ResultAnnotator } from './result-annotator';
+export {
+  setResultAnnotator,
+  resetResultAnnotator,
+  applyResultAnnotator,
+} from './result-annotator';
 export type {
   AgentRole,
   RoleRegistry,

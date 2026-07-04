@@ -22,6 +22,7 @@
 
 import type { ToolResult } from './wire';
 import { applySeeAlso } from './see-also';
+import { applyResultAnnotator } from './result-annotator';
 import type { AgentRole } from './host-types';
 import { toolDeclaresGate, type ProjectedTool, type UnifiedToolContext } from './tool-projection';
 import {
@@ -580,6 +581,10 @@ const invokeStep: DispatchStep = {
       // Self-gates (unchanged result) when the tool declares none / emits none /
       // errored; never fails the underlying tool call.
       result = applySeeAlso(result, exec.tool.guidance?.seeAlso, input, handlerCtx);
+      // Host ambient annotator (agent-managed-compaction P-013): the host may append a
+      // banded context-usage gauge to EVERY result so a heads-down session that never
+      // calls a coord tool still sees its usage. Default no-op; never throws.
+      result = applyResultAnnotator(result, handlerCtx);
       // ok-on-abort race: the timeout/idle watchdog (or the caller's signal) fired
       // mid-handler, but the handler returned normally without observing
       // ctx.signal.aborted.
