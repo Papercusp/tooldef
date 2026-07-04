@@ -37,7 +37,13 @@
  * tools (B-CX-2A) remain the security model; the worker is an availability/robustness boundary,
  * not a substitute for the whitelist.
  */
-import { Worker } from 'node:worker_threads';
+// ⚠ Node-only dependency, loaded LAZILY inside runOrchestrationScript. This module is re-exported
+// by the tooldef barrel, and tooldef is an isomorphic lib consumed by the browser SPA — a static
+// top-level `import { Worker } from 'node:worker_threads'` here gets externalized by vite and
+// THROWS at module-eval time in the client, blanking the whole app (fleet incident 2026-07-04).
+// The dynamic import defers evaluation to call time; nothing browser-side ever calls this fn.
+// Guarded by browser-safe-barrel.test.ts — keep ALL node: builtins in this lib call-time-lazy.
+import type { Worker as NodeWorker } from 'node:worker_threads';
 import type { ToolFacade } from './tool-facade';
 
 export interface RunScriptResult {
@@ -152,9 +158,12 @@ export async function runOrchestrationScript(
   const maxLogLines = opts.maxLogLines ?? 200;
   const logs: string[] = [];
 
+  // Lazy: keeps the barrel browser-safe (see the header note on the type-only import above).
+  const { Worker } = await import('node:worker_threads');
+
   return await new Promise<RunScriptResult>((resolve) => {
     let settled = false;
-    const worker = new Worker(WORKER_SRC, {
+    const worker: NodeWorker = new Worker(WORKER_SRC, {
       eval: true,
       name: 'code-orchestration',
       workerData: { script, maxLogLines },
