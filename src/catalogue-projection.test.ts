@@ -84,7 +84,7 @@ describe('catalogueProjection', () => {
   });
 
   it('composes the summary from defineGroup guidance.when when no explicit summary', () => {
-    register(tool('hive:get'));
+    register(tool('pot:get'));
     defineGroup('hive', { guidance: { when: 'Spawn and manage sub-agents' } });
     const hive = catalogueProjection().find((e) => e.group === 'hive')!;
     expect(hive.summary).toBe('Spawn and manage sub-agents');

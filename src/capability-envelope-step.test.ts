@@ -146,7 +146,7 @@ describe('capability-envelope step', () => {
       },
     };
     await runDispatchStack(
-      makeTool({ capabilities: ['bee:spawn'] }),
+      makeTool({ capabilities: ['cup:spawn'] }),
       'fix.tool',
       { foo: 1 },
       MAKE_CTX({ role: 'queen' }),
@@ -154,7 +154,7 @@ describe('capability-envelope step', () => {
     );
     expect(received).not.toBeNull();
     expect(received!.toolName).toBe('fix.tool');
-    expect(received!.capabilities).toEqual(['bee:spawn']);
+    expect(received!.capabilities).toEqual(['cup:spawn']);
     expect(received!.args).toEqual({ foo: 1 });
   });
 });

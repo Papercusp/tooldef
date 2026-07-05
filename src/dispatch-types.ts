@@ -101,7 +101,7 @@ export class HarnessRequiredError extends Error {
  * (500) — the distinction matters downstream: error-class telemetry treats
  * `handler_error` as a structural tool bug, so a zod failure coded
  * `handler_error` files false "tool is broken" signals (EI-334's cluster:
- * an oversized bee:spawn `brief` fired the structural watchdog key).
+ * an oversized cup:spawn `brief` fired the structural watchdog key).
  */
 export class InvalidInputError extends Error {
   override readonly name = 'InvalidInputError';
