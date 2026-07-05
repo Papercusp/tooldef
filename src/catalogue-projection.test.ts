@@ -85,10 +85,10 @@ describe('catalogueProjection', () => {
 
   it('composes the summary from defineGroup guidance.when when no explicit summary', () => {
     register(tool('pot:get'));
-    defineGroup('hive', { guidance: { when: 'Spawn and manage sub-agents' } });
-    const hive = catalogueProjection().find((e) => e.group === 'hive')!;
-    expect(hive.summary).toBe('Spawn and manage sub-agents');
-    expect(hive.declared).toBe(true);
+    defineGroup('pot', { guidance: { when: 'Spawn and manage sub-agents' } });
+    const pot = catalogueProjection().find((e) => e.group === 'pot')!;
+    expect(pot.summary).toBe('Spawn and manage sub-agents');
+    expect(pot.declared).toBe(true);
   });
 
   it('honors defineGroup order in the sort, then count desc', () => {

@@ -15,13 +15,30 @@ import type { DispatchProjectedDeps } from '../dispatch-types';
 import type { ToolResult } from '../wire';
 import { dispatchProjectedTool } from '../dispatch-projected';
 import type { FacadeDispatch } from './tool-facade';
+import { decode, isResultFormat } from '@papercusp/result-encoding';
 
 /** The `text` variant of a ToolResult content item, narrowed from the content union. */
 type TextContent = Extract<NonNullable<ToolResult['content']>[number], { type: 'text' }>;
 
+/** Matches the `format: <fmt>\n` self-identifying marker `serializeToolResponse` prefixes onto
+ *  any non-JSON compact body (serialize-result.ts) — JSON itself carries no marker. */
+const FORMAT_MARKER_RE = /^format: (\S+)\n/;
+
 /**
  * Unwrap a settled `ToolResult` into the plain value the script should receive:
- * `structuredContent` if present, else the JSON-parsed text payload, else the raw text.
+ * `structuredContent` if present, else the decoded text payload, else the raw text.
+ *
+ * EI-7689: a compact (non-JSON) tool response self-identifies with a leading `format:
+ * <fmt>\n` marker (TOON/CSV/TSV/MD — serialize-result.ts) — none of those are valid JSON,
+ * so a plain `JSON.parse` always THROWS on them and this used to silently fall back to
+ * handing the script the raw marker+encoded STRING as its `result`. Any in-script
+ * truthiness/property check on that string (`if (result.ok)`) then silently lies: a
+ * non-empty string is always truthy no matter what's encoded inside it, so a genuine
+ * server-side failure can read as success. Reproduced live 2026-07-05 (su-15a64): a
+ * `plans:new` call failed server-side (`similar_exists`) but returned a truthy TOON
+ * string, and the script's `result.ok` check passed, reporting a phantom plan creation.
+ * Parse the marker first and DECODE with the matching format (the lossless inverse of
+ * the encoder that produced it) so the script always sees the real structured value.
  */
 export function unwrapToolResult(result: ToolResult | undefined): unknown {
   if (!result) return undefined;
@@ -31,10 +48,20 @@ export function unwrapToolResult(result: ToolResult | undefined): unknown {
   // the image/resource variants (TS2339). Extracting the 'text' member fixes both.
   const textItem = result.content?.find((c): c is TextContent => c.type === 'text');
   if (!textItem) return result;
+  const text = textItem.text;
+  const marker = FORMAT_MARKER_RE.exec(text);
+  if (marker && isResultFormat(marker[1]) && marker[1] !== 'md') {
+    try {
+      return decode(text.slice(marker[0].length), marker[1]);
+    } catch {
+      // Fall through to the JSON/raw-text attempts below — never let a decode
+      // edge case throw here where the old behavior returned SOMETHING.
+    }
+  }
   try {
-    return JSON.parse(textItem.text);
+    return JSON.parse(text);
   } catch {
-    return textItem.text;
+    return text;
   }
 }
 
