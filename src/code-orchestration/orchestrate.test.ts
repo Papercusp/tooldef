@@ -81,6 +81,7 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     expect(writeFn).toHaveBeenCalledOnce();
     expect(r.plannedMutations).toEqual([{ tool: 'wi:set-status', args: { id: 1 } }]);
     expect(r.okFalseMutations).toEqual([]);
+    expect(r.partial).toBe(false); // EI-7784: no rejected write ⇒ not partial
   });
 
   // EI-7669: a write-effect call can dispatch fine (no throw — realDispatch only throws on a
@@ -104,6 +105,9 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     expect(okFalseMutations).toHaveLength(2); // but the orchestrator caught both rejections
     expect(okFalseMutations.map((m) => m.tool)).toEqual(['wi:set-state', 'wi:set-state']);
     expect(okFalseMutations[0].result).toMatchObject({ ok: false, error: 'completion_integrity_required' });
+    // EI-7784: `ok` alone stays misleadingly true (the script didn't throw) — `partial` is the
+    // SEPARATE, always-populated signal that a caller checking only `ok` would otherwise miss.
+    expect(r.partial).toBe(true);
   });
 
   it('dryRun never populates okFalseMutations — write-effect calls are not executed', async () => {
@@ -113,6 +117,7 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
       { ctx: MAKE_CTX(), deps: DEPS, tools: [setState], dryRun: true },
     );
     expect(r.okFalseMutations).toEqual([]);
+    expect(r.partial).toBe(false); // EI-7784: nothing executed under dryRun ⇒ never partial
   });
 
   // F8 / autonomous-loop-hardening H2 — an unknown tool ref used to fail the WHOLE run at

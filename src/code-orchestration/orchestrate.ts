@@ -101,6 +101,18 @@ export interface OrchestrateResult {
    *  so pre-existing test fixtures constructing an OrchestrateResult literal don't all need
    *  updating; shapeMutationEcho defaults a missing value to `[]`. */
   okFalseMutations?: FailedMutation[];
+  /**
+   * EI-7784: true when `okFalseMutations` is non-empty — the script itself ran to completion
+   * (`ok` stays whatever `run.ok` says: did the SCRIPT throw/timeout), but at least one
+   * write-effect call silently rejected without throwing. `ok` alone cannot carry this (it is
+   * ALREADY a meaningful, independent signal — "did the script itself complete" — that several
+   * existing callers branch on, e.g. `code:run`'s own recipe-capture gate and `recipes:run`'s
+   * per-item `ok`), so this is a SEPARATE flag rather than overloading `ok`'s existing meaning.
+   * A caller that checks only `ok` (not this flag) is exactly the gap that let three real
+   * incidents (EI-7763, EI-7778, WI-3042's assignee:null drop) look like clean successes. Optional
+   * (defaults absent/false-ish) so pre-existing hand-built fixture results are unaffected;
+   * runToolOrchestration's own return always populates it. */
+  partial?: boolean;
 }
 
 /** True when `value` is a plain object carrying a top-level `ok: false` — the tool's own
@@ -165,5 +177,7 @@ export async function runToolOrchestration(
     dryRun,
     plannedMutations,
     okFalseMutations,
+    // EI-7784: surfaced independent of `ok` — see the field doc above.
+    partial: okFalseMutations.length > 0,
   };
 }
