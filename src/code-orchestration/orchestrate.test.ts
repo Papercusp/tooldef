@@ -80,6 +80,38 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     expect(r.ok).toBe(true);
     expect(writeFn).toHaveBeenCalledOnce();
     expect(r.plannedMutations).toEqual([{ tool: 'wi:set-status', args: { id: 1 } }]);
+    expect(r.okFalseMutations).toEqual([]);
+  });
+
+  // EI-7669: a write-effect call can dispatch fine (no throw — realDispatch only throws on a
+  // dispatch-level failure) yet report its OWN semantic rejection (ok: false in its result body,
+  // e.g. work_items:set_state's completion-integrity check). A script that doesn't inspect every
+  // individual result (the reported bug: 8 batched set_state calls all rejected ok:false, the
+  // script counted all 8 as closed) must still get this surfaced structurally.
+  it('a write-effect call that resolves with ok:false (without throwing) is tallied in okFalseMutations', async () => {
+    const setState = mkTool('wi:set-state', 'write', async (a) =>
+      json({ ok: false, error: 'completion_integrity_required', id: (a as { id: string }).id }),
+    );
+    const r = await runToolOrchestration(
+      `const results = [];
+       for (const id of ['A', 'B']) { results.push(await tools.wi.setState({ id })); }
+       return { closedCount: results.length };`, // the script never checks .ok — mirrors the reported bug
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [setState] },
+    );
+    expect(r.ok).toBe(true); // the script itself completes normally — no throw
+    expect((r.summary as { closedCount: number }).closedCount).toBe(2); // the script's own (wrong) count
+    expect(r.okFalseMutations).toHaveLength(2); // but the orchestrator caught both rejections
+    expect(r.okFalseMutations.map((m) => m.tool)).toEqual(['wi:set-state', 'wi:set-state']);
+    expect(r.okFalseMutations[0].result).toMatchObject({ ok: false, error: 'completion_integrity_required' });
+  });
+
+  it('dryRun never populates okFalseMutations — write-effect calls are not executed', async () => {
+    const setState = mkTool('wi:set-state', 'write', async () => json({ ok: false, error: 'nope' }));
+    const r = await runToolOrchestration(
+      `await tools.wi.setState({ id: 'A' }); return 'done';`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [setState], dryRun: true },
+    );
+    expect(r.okFalseMutations).toEqual([]);
   });
 
   // F8 / autonomous-loop-hardening H2 — an unknown tool ref used to fail the WHOLE run at

@@ -70,6 +70,20 @@ export interface PlannedMutation {
   args: unknown;
 }
 
+/**
+ * A write-effect call whose result reported `ok: false` WITHOUT throwing (EI-7669) — the
+ * dispatch itself succeeded (realDispatch only throws on a dispatch-level failure), but the
+ * tool's own business-logic result carries a semantic rejection (e.g. work_items:set_state's
+ * completion-integrity check). A script that doesn't inspect every result (the common case —
+ * `Promise.allSettled` counts a resolved-but-ok:false call the same as a real success) would
+ * otherwise silently treat this as an executed mutation. Empty in dryRun (nothing executed).
+ */
+export interface FailedMutation {
+  tool: string;
+  args: unknown;
+  result: unknown;
+}
+
 export interface OrchestrateResult {
   ok: boolean;
   /** The script's returned summary (what re-enters the model's context). */
@@ -81,6 +95,21 @@ export interface OrchestrateResult {
   dryRun: boolean;
   /** Write-effect calls the script made (recorded in dryRun, observed otherwise). */
   plannedMutations: PlannedMutation[];
+  /** Write-effect calls that resolved with a top-level `ok: false` result (EI-7669). Always
+   *  empty under dryRun (nothing executed yet). */
+  okFalseMutations: FailedMutation[];
+}
+
+/** True when `value` is a plain object carrying a top-level `ok: false` — the tool's own
+ *  reported semantic failure, as distinct from a dispatch-level throw (already handled by
+ *  realDispatch before the result ever reaches here). */
+function isOkFalseResult(value: unknown): value is { ok: false; [key: string]: unknown } {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'ok' in (value as Record<string, unknown>) &&
+    (value as { ok?: unknown }).ok === false
+  );
 }
 
 export async function runToolOrchestration(
@@ -89,6 +118,7 @@ export async function runToolOrchestration(
 ): Promise<OrchestrateResult> {
   const { ctx, deps, tools, allowed, dryRun = false, timeoutMs, wrapDispatch } = opts;
   const plannedMutations: PlannedMutation[] = [];
+  const okFalseMutations: FailedMutation[] = [];
 
   await ensureParseCheckReady(); // lazy-load the TS compiler before the static parse-check (kept out of the eager client bundle)
   const check = checkScript(script, tools, allowed);
@@ -110,7 +140,15 @@ export async function runToolOrchestration(
       }
     }
     const call: DispatchNext = (callCtx) => realDispatch(callCtx, deps)(tool, name, args);
-    return wrapDispatch ? wrapDispatch(tool, name, args, ctx, call) : call(ctx);
+    const result = await (wrapDispatch ? wrapDispatch(tool, name, args, ctx, call) : call(ctx));
+    // EI-7669: realDispatch only throws on a dispatch-level failure — a tool that dispatched fine
+    // but reports its OWN semantic rejection (ok: false in its result body, e.g. a completion-
+    // integrity check) resolves normally here. Tally those so a batched script that doesn't check
+    // every result still gets visibility instead of silently counting the write as executed.
+    if (tool.effect === 'write' && isOkFalseResult(result)) {
+      okFalseMutations.push({ tool: name, args, result });
+    }
+    return result;
   };
 
   const facade = buildToolFacade(tools, dispatch, allowed, unknownRefs);
@@ -123,5 +161,6 @@ export async function runToolOrchestration(
     ...(unknownRefs && unknownRefs.length ? { unknownRefs } : {}),
     dryRun,
     plannedMutations,
+    okFalseMutations,
   };
 }
