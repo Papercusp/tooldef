@@ -100,9 +100,10 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     );
     expect(r.ok).toBe(true); // the script itself completes normally — no throw
     expect((r.summary as { closedCount: number }).closedCount).toBe(2); // the script's own (wrong) count
-    expect(r.okFalseMutations).toHaveLength(2); // but the orchestrator caught both rejections
-    expect(r.okFalseMutations.map((m) => m.tool)).toEqual(['wi:set-state', 'wi:set-state']);
-    expect(r.okFalseMutations[0].result).toMatchObject({ ok: false, error: 'completion_integrity_required' });
+    const okFalseMutations = r.okFalseMutations ?? [];
+    expect(okFalseMutations).toHaveLength(2); // but the orchestrator caught both rejections
+    expect(okFalseMutations.map((m) => m.tool)).toEqual(['wi:set-state', 'wi:set-state']);
+    expect(okFalseMutations[0].result).toMatchObject({ ok: false, error: 'completion_integrity_required' });
   });
 
   it('dryRun never populates okFalseMutations — write-effect calls are not executed', async () => {

@@ -96,8 +96,11 @@ export interface OrchestrateResult {
   /** Write-effect calls the script made (recorded in dryRun, observed otherwise). */
   plannedMutations: PlannedMutation[];
   /** Write-effect calls that resolved with a top-level `ok: false` result (EI-7669). Always
-   *  empty under dryRun (nothing executed yet). */
-  okFalseMutations: FailedMutation[];
+   *  empty (or absent, on a hand-built fixture result predating this field) under dryRun
+   *  (nothing executed yet) — runToolOrchestration's own return always populates it. Optional
+   *  so pre-existing test fixtures constructing an OrchestrateResult literal don't all need
+   *  updating; shapeMutationEcho defaults a missing value to `[]`. */
+  okFalseMutations?: FailedMutation[];
 }
 
 /** True when `value` is a plain object carrying a top-level `ok: false` — the tool's own
