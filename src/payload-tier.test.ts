@@ -22,6 +22,7 @@ import {
   resolvePayloadTier,
   resetPayloadTierRatchet,
   PAYLOAD_TIER_RATCHET_CHARS,
+  PAYLOAD_TIER_HARD_CEILING_CHARS,
 } from './payload-tier';
 import type { ToolResponse } from './types';
 
@@ -70,9 +71,36 @@ describe('applyPayloadTier', () => {
     trimmed: (d: unknown, sctx: { tier: string }) => ({ rows: (d as { rows: number[] }).rows.slice(0, 1), tierMark: sctx.tier }),
   };
 
-  it('full = unshaped, always (zero-migration contract)', () => {
+  it('full = unshaped for a normal-size payload (zero-migration contract)', () => {
     expect(applyPayloadTier({ toolName: 't', shape, response, tier: 'full', args: {} })).toBe(response);
     expect(applyPayloadTier({ toolName: 't', shape: undefined, response, tier: 'full', args: {} })).toBe(response);
+  });
+
+  it('hard ceiling: a full payload over the ceiling force-applies the trimmed shaper (WI-2859)', () => {
+    const log = vi.fn();
+    const fat: ToolResponse = { data: { rows: [1, 2, 3], blob: 'x'.repeat(PAYLOAD_TIER_HARD_CEILING_CHARS + 500) } };
+    const out = applyPayloadTier({ toolName: 'orient', shape, response: fat, tier: 'full', args: {}, log });
+    // The smallest shaper ran even though the tier was `full`…
+    expect((out.data as { tierMark: string }).tierMark).toBe('trimmed');
+    // …and the forced downgrade is marked so the caller knows.
+    expect((out.data as { payloadTierForced?: string }).payloadTierForced).toBe('trimmed');
+    // The result now fits under the ceiling (the whole point).
+    expect(JSON.stringify(out.data).length).toBeLessThan(PAYLOAD_TIER_HARD_CEILING_CHARS);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('hard ceiling'));
+  });
+
+  it('hard ceiling: an over-ceiling payload with NO shaper is served as-is (cannot help, never throws)', () => {
+    const fat: ToolResponse = { data: { blob: 'y'.repeat(PAYLOAD_TIER_HARD_CEILING_CHARS + 500) } };
+    const out = applyPayloadTier({ toolName: 't', shape: undefined, response: fat, tier: 'full', args: {} });
+    expect(out).toBe(fat);
+  });
+
+  it('hard ceiling does NOT trigger when the forced shape would not shrink the payload', () => {
+    // A trimmed shaper that returns the data unchanged: no swap (avoids a pointless re-encode).
+    const identityShape = { trimmed: (d: unknown) => d };
+    const fat: ToolResponse = { data: { blob: 'z'.repeat(PAYLOAD_TIER_HARD_CEILING_CHARS + 500) } };
+    const out = applyPayloadTier({ toolName: 't', shape: identityShape, response: fat, tier: 'full', args: {} });
+    expect((out.data as { payloadTierForced?: string }).payloadTierForced).toBeUndefined();
   });
 
   it('trimmed picks shape.trimmed; standard picks shape.standard', () => {
