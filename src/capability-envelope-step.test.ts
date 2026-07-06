@@ -42,7 +42,10 @@ const makeTool = (over: Partial<ProjectedTool> = {}): ProjectedTool => ({
   ...over,
 });
 
-afterEach(() => _resetProjectionRegistryForTests());
+afterEach(() => {
+  vi.restoreAllMocks();
+  _resetProjectionRegistryForTests();
+});
 
 describe('capability-envelope step', () => {
   it('is a no-op when no checkCapabilityEnvelope port is wired (behavior-neutral)', async () => {
@@ -128,6 +131,7 @@ describe('capability-envelope step', () => {
 
   it('FAILS OPEN when the evaluator throws (sandbox is the backstop) — call proceeds', async () => {
     let invoked = false;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const tool = makeTool({ fn: async () => { invoked = true; return { content: [{ type: 'text', text: 'ok' }] }; } });
     const deps: DispatchProjectedDeps = {
       checkCapabilityEnvelope: () => { throw new Error('evaluator bug'); },
@@ -135,6 +139,9 @@ describe('capability-envelope step', () => {
     const r = await runDispatchStack(tool, 'fix.tool', {}, MAKE_CTX(), deps);
     expect(r.ok).toBe(true);
     expect(invoked).toBe(true);
+    expect(warn).toHaveBeenCalledWith(
+      '[capability-envelope] evaluator threw for "fix.tool" (failing open): evaluator bug',
+    );
   });
 
   it('passes the tool capabilities + args to the port', async () => {
