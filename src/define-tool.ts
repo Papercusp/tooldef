@@ -371,7 +371,8 @@ function applyPositionalWriteShim(name: string, argsJsonSchema: Record<string, u
   if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
   const row = (input as Record<string, unknown>).row;
   if (typeof row !== 'string') return input; // keyed args (or no row) — leave as-is
-  const cols = projectWriteColumns(argsJsonSchema, { freeTextName: getPrePromptEntry(name)?.freeTextArg });
+  const entry = getPrePromptEntry(name);
+  const cols = projectWriteColumns(argsJsonSchema, { freeTextName: entry?.freeTextArg, columnOverrides: entry?.columnOverrides });
   if (!cols) return input; // tool doesn't actually fit the bounded positional shape
   const rec = reconstructArgs(row, cols);
   if (!rec.ok) throw new Error(`invalid_positional_row: ${rec.reason}`);
