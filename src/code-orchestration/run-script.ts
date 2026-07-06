@@ -29,6 +29,15 @@
  * JSON/Math/Promise present) and gives clean compile-error reporting. So the worker is the
  * isolation+kill boundary; the inner vm is the globals-scoping + compile boundary.
  *
+ * `setTimeout`/`setInterval` are Node/DOM globals, not JS-spec intrinsics, so they are NOT
+ * ambient in the vm context (EI-7839: a script calling `setTimeout(...)` throws `setTimeout is
+ * not defined`, immediately, even after prior tool calls already wrote). For a short async delay
+ * (e.g. "write, wait briefly, re-verify"), the script's ambient globals instead include
+ * `sleep(ms)` — an `await`-able helper capped at `SLEEP_MAX_MS` per call, so a runaway wait
+ * degrades to the existing overall `script_timeout` kill rather than an unbounded hang. It is the
+ * ONLY timer primitive exposed; raw `setTimeout`/`setInterval` stay absent so a script can't spin
+ * up an open-ended polling loop instead of using `tools.*` calls directly.
+ *
  * The facade is NOT cloneable into a worker (its members are live host functions that dispatch
  * through the real tool pipeline — DB, ctx, capability envelope), so each `tools.ns.verb(args)`
  * the script makes is RPC'd back to the host over the worker message channel: the worker holds a
@@ -129,11 +138,25 @@ const WORKER_SRC = `(() => {
     },
   });
 
+  // --- EI-7839: a bounded sleep() helper, since the vm context has no setTimeout/setInterval ---
+  // (those are Node/DOM globals, not JS-spec intrinsics — runInNewContext's sandbox omits them
+  // entirely, so a script calling setTimeout() throws ReferenceError, not a timeout). A script
+  // that needs a short async delay (e.g. "fire a write, wait briefly, re-verify") previously had
+  // no way to do that inside code:run at all. Capped at SLEEP_MAX_MS per call so a runaway
+  // sleep(huge) degrades to the existing overall script_timeout kill rather than a surprising
+  // multi-minute hang; built on the WORKER's own (real, Node) setTimeout — this scope is outside
+  // the sandboxed vm context, so it is not itself exposed to the script.
+  const SLEEP_MAX_MS = 10000;
+  const sleep = (ms) => new Promise((resolve) => {
+    const bounded = Math.max(0, Math.min(Number(ms) || 0, SLEEP_MAX_MS));
+    setTimeout(resolve, bounded);
+  });
+
   // --- compile + run the body under vm (globals-scoped); a leading newline guards a trailing // comment ---
   const wrap = (body) => '(async (tools, log) => {\\n' + body + '\\n})';
   let factory;
   try {
-    factory = vm.runInNewContext(wrap(script), { console: { log, error: log, warn: log } }, { displayErrors: true });
+    factory = vm.runInNewContext(wrap(script), { console: { log, error: log, warn: log }, sleep }, { displayErrors: true });
   } catch (err) {
     parentPort.postMessage({ t: 'error', error: 'compile_error: ' + ((err && err.message) || String(err)) });
     return;

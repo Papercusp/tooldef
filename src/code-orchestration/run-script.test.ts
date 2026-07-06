@@ -110,4 +110,31 @@ describe('runOrchestrationScript (B-CX-1A)', () => {
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/not available/);
   });
+
+  // EI-7839: setTimeout is a Node/DOM global, not a JS intrinsic — runInNewContext's sandbox
+  // omits it, so a script that reaches for it throws immediately (even after prior writes already
+  // executed). sleep(ms) is the documented, bounded replacement.
+  it('EI-7839: raw setTimeout is NOT ambient in the sandbox (the bug this fix addresses)', async () => {
+    const r = await runOrchestrationScript(`return typeof setTimeout;`, facade({}));
+    expect(r.ok).toBe(true);
+    expect(r.result).toBe('undefined');
+  });
+
+  it('EI-7839: sleep(ms) is ambient and actually delays before resolving', async () => {
+    const start = Date.now();
+    const r = await runOrchestrationScript(`await sleep(50); return 'done';`, facade({}));
+    expect(r.ok).toBe(true);
+    expect(r.result).toBe('done');
+    expect(Date.now() - start).toBeGreaterThanOrEqual(45); // small slack for timer jitter
+  });
+
+  it('EI-7839: sleep(ms) is capped so a runaway wait degrades to the overall script_timeout', async () => {
+    const r = await runOrchestrationScript(
+      `await sleep(60_000); return 'unreachable';`,
+      facade({}),
+      { timeoutMs: 200 },
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/script_timeout/);
+  });
 });
