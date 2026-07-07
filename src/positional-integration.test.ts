@@ -67,6 +67,30 @@ function defineSetState(name: string): { received: () => unknown } {
   return { received: () => received };
 }
 
+/** Bulk-capable write tool: full keyed schema has array/object alternatives, but row uses the inline shorthand. */
+function defineBulkSetState(name: string): { received: () => unknown } {
+  let received: unknown;
+  defineTool({
+    name,
+    requirePrincipal: false,
+    capability: 'test:write',
+    args: z
+      .object({
+        id: z.string().regex(/^WI-\d+$/).optional(),
+        state: z.enum(['todo', 'passed', 'failing']).optional(),
+        harness: z.string().optional(),
+        ids: z.array(z.string().regex(/^WI-\d+$/)).optional(),
+        items: z.array(z.object({ id: z.string().regex(/^WI-\d+$/), state: z.enum(['todo', 'passed', 'failing']), harness: z.string().optional() })).optional(),
+      })
+      .refine((a) => (a.items?.length ?? 0) > 0 || (a.ids?.length ?? 0) > 0 || (Boolean(a.id) && Boolean(a.state))),
+    handler: async (args) => {
+      received = args;
+      return { data: { ok: true } };
+    },
+  });
+  return { received: () => received };
+}
+
 describe('positional write shim — end-to-end (P-008/P-009)', () => {
   it('advertises a single `row` string for a registry write-positional tool', () => {
     defineSetState('wi:set_state');
@@ -134,6 +158,48 @@ describe('positional write shim — end-to-end (P-008/P-009)', () => {
     );
     expect(r.ok).toBe(true);
     expect(tool.received()).toEqual({ id: 'WI-7', state: 'failing' });
+  });
+
+  it('bulk-capable positional tools advertise row+keyed oneOf and dispatch both shapes', async () => {
+    const tool = defineBulkSetState('wi:bulk_set_state');
+    configurePrePromptRegistry([
+      {
+        name: 'wi:bulk_set_state',
+        write: 'positional',
+        writeColumnNames: ['id', 'state', 'harness'],
+        writeRequiredColumnNames: ['id', 'state'],
+        writeKeyedFallback: true,
+      },
+    ]);
+
+    const listing = listMcpProjections().find((l) => l.name === 'wi:bulk_set_state')!;
+    const advertised = advertisedArgsSchema('wi:bulk_set_state', listing.inputSchema as Record<string, unknown>);
+    const oneOf = (advertised as { oneOf?: unknown[] }).oneOf;
+    expect(oneOf).toHaveLength(2);
+    expect(((oneOf![0] as { properties?: Record<string, unknown> }).properties?.row as { description?: string }).description).toContain(
+      'id, state, harness?',
+    );
+    expect((oneOf![1] as { properties?: Record<string, unknown> }).properties).toHaveProperty('ids');
+
+    const row = await dispatchProjectedTool(
+      lookupByMcpName('wi:bulk_set_state')!,
+      'wi:bulk_set_state',
+      { row: 'WI-12,passed' },
+      ctx(),
+      DEPS,
+    );
+    expect(row.ok).toBe(true);
+    expect(tool.received()).toEqual({ id: 'WI-12', state: 'passed' });
+
+    const keyedBulk = await dispatchProjectedTool(
+      lookupByMcpName('wi:bulk_set_state')!,
+      'wi:bulk_set_state',
+      { ids: ['WI-1', 'WI-2'], state: 'failing' },
+      ctx(),
+      DEPS,
+    );
+    expect(keyedBulk.ok).toBe(true);
+    expect(tool.received()).toEqual({ ids: ['WI-1', 'WI-2'], state: 'failing' });
   });
 
   it('a non-registry tool keeps its keyed args schema', () => {
