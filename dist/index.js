@@ -28,11 +28,29 @@ var __exportStar = (this && this.__exportStar) || function(m, exports) {
     for (var p in m) if (p !== "default" && !Object.prototype.hasOwnProperty.call(exports, p)) __createBinding(exports, m, p);
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.standardValidate = exports.zodJsonSchemaAdapter = exports.setJsonSchemaAdapter = exports.toJsonSchema = exports.defaultTierResolver = exports.setCapabilityTierResolver = exports.tierFor = exports._resetCardCorrelatorForTests = exports.cancelPendingCardsForWorkspaceSwitch = exports.cancelPendingCardsForRun = exports.resolveCardResponse = exports.registerCard = exports._resetStateChannelForTests = exports.dropStateSnapshotsForWorkspaceSwitch = exports.snapshotWorkspace = exports.subscribeWorkspace = exports.subscribeStateChannel = exports.getSnapshot = exports.setToolState = exports.setOpenCards = exports.closeRun = exports.openRun = exports.dispatchWorkspaceSwitch = exports.onWorkspaceSwitch = exports.renderSlashPrompt = exports.slashPromptListingFor = exports.deriveSlashPromptArguments = exports.slashPromptToolName = exports.isSlashPromptName = exports.slashPromptNameFor = exports.resolveSlashExposure = exports.SLASH_PROMPT_PREFIX = exports._resetPromptCatalogForTests = exports.lookupPrompt = exports.getPromptCatalog = exports._resetResourceCatalogForTests = exports.matchResource = exports.lookupResource = exports.getResourceCatalog = exports._resetCollectedToolEmitsForTests = exports.getCollectedToolEmits = exports.collectToolEmits = exports._resetCatalogForTests = exports.lookup = exports.getCatalog = exports.formatOptsFromCtx = exports.serializeToolResponse = exports.definePrompt = exports.defineResource = exports.defineTool = void 0;
+exports.collectToolEmits = exports.declaredGroupSlugs = exports.renderCapabilityMap = exports.catalogueProjection = exports.describeGroupFromMembers = exports.groupOf = exports._resetGroupCatalogForTests = exports.getGroupCatalog = exports.lookupGroup = exports.registerGroup = exports.defineGroup = exports._resetCatalogForTests = exports.lookup = exports.getCatalog = exports.DELTA_MAX_DIGEST_ENTRIES = exports.DELTA_SMALL_RESPONSE_BYTES = exports.deltaCounts = exports.applySemanticDelta = exports.diffFromDigest = exports.computeViewChecksum = exports.computeRowDigest = exports.isSemanticDeltaEnabled = exports.resetSemanticDeltaEnabledResolver = exports.setSemanticDeltaEnabledResolver = exports.negotiateDelta = exports.contentRevision = exports.computeViewFingerprint = exports.decodeDeltaCursor = exports.encodeDeltaCursor = exports.formatDeltaRequest = exports.parseDeltaRequest = exports.formatOptsFromCtx = exports.serializeToolResponse = exports.definePrompt = exports.defineResource = exports.PAYLOAD_TIER_RATCHET_CHARS = exports.PAYLOAD_TIERS = exports.resetPayloadTierRatchet = exports.resolvePayloadTier = exports.parsePayloadTier = exports.extractPayloadTier = exports.applyPayloadTier = exports.defineTool = exports.applyResultAnnotator = exports.resetResultAnnotator = exports.setResultAnnotator = exports.readJsonResult = exports.renderSeeAlsoText = exports.resolveSeeAlso = exports.applySeeAlso = void 0;
+exports.standardValidate = exports.zodJsonSchemaAdapter = exports.setJsonSchemaAdapter = exports.toJsonSchema = exports.defaultTierResolver = exports.setCapabilityTierResolver = exports.tierFor = exports._resetCardCorrelatorForTests = exports.cancelPendingCardsForWorkspaceSwitch = exports.cancelPendingCardsForRun = exports.resolveCardResponse = exports.registerCard = exports.negotiateRowsDelta = exports.dispatchWithBasePresence = exports.BasePresenceTracker = exports.dispatchWithConveyedDelta = exports.dispatchWithDelta = exports.DeltaToolClient = exports.chooseSnapshotEmission = exports.applySnapshotDelta = exports.diffSnapshot = exports._resetStateChannelForTests = exports.dropStateSnapshotsForWorkspaceSwitch = exports.snapshotWorkspace = exports.subscribeWorkspace = exports.subscribeStateChannel = exports.getSnapshot = exports.setToolState = exports.setOpenCards = exports.closeRun = exports.openRun = exports.dispatchWorkspaceSwitch = exports.onWorkspaceSwitch = exports.renderSlashPrompt = exports.slashPromptListingFor = exports.deriveSlashPromptArguments = exports.slashPromptToolName = exports.isSlashPromptName = exports.slashPromptNameFor = exports.resolveSlashExposure = exports.SLASH_PROMPT_PREFIX = exports._resetPromptCatalogForTests = exports.lookupPrompt = exports.getPromptCatalog = exports._resetResourceCatalogForTests = exports.matchResource = exports.lookupResource = exports.getResourceCatalog = exports._resetCollectedToolEmitsForTests = exports.getCollectedToolEmits = void 0;
 exports.toolOperationName = exports.assembleOpenApiDocument = exports.standardResponseComponents = exports.componentKey = exports.toolToOpenApiFragment = exports.replayBufferStats = exports.closeReplayBuffer = exports.readReplayBuffer = exports.ownerOnly = exports.PASS_THROUGH = exports.InvalidInputError = exports.HarnessRequiredError = exports.UnauthorizedToolError = exports.defaultComputeQuotaWindow = exports.dispatchProjectedToolStream = exports.dispatchProjectedTool = exports._resetProjectionRegistryForTests = exports.isPapercuspBinaryEnvelope = exports.emitToSseSink = exports.ToolRegistrationError = exports.listMcpProjections = exports.listAllProjectedTools = exports.lookupByHttpPath = exports.lookupByMcpName = exports.listUngatedProjectedTools = exports.toolDeclaresGate = exports.unregisterProjectedToolsForPlugin = exports.registerProjectedTool = exports.formatIssues = exports.validateSync = void 0;
+var see_also_1 = require("./see-also");
+Object.defineProperty(exports, "applySeeAlso", { enumerable: true, get: function () { return see_also_1.applySeeAlso; } });
+Object.defineProperty(exports, "resolveSeeAlso", { enumerable: true, get: function () { return see_also_1.resolveSeeAlso; } });
+Object.defineProperty(exports, "renderSeeAlsoText", { enumerable: true, get: function () { return see_also_1.renderSeeAlsoText; } });
+Object.defineProperty(exports, "readJsonResult", { enumerable: true, get: function () { return see_also_1.readJsonResult; } });
+var result_annotator_1 = require("./result-annotator");
+Object.defineProperty(exports, "setResultAnnotator", { enumerable: true, get: function () { return result_annotator_1.setResultAnnotator; } });
+Object.defineProperty(exports, "resetResultAnnotator", { enumerable: true, get: function () { return result_annotator_1.resetResultAnnotator; } });
+Object.defineProperty(exports, "applyResultAnnotator", { enumerable: true, get: function () { return result_annotator_1.applyResultAnnotator; } });
 /* ─── defineTool + sibling authoring primitives ──────────────────────── */
 var define_tool_1 = require("./define-tool");
 Object.defineProperty(exports, "defineTool", { enumerable: true, get: function () { return define_tool_1.defineTool; } });
+var payload_tier_1 = require("./payload-tier");
+Object.defineProperty(exports, "applyPayloadTier", { enumerable: true, get: function () { return payload_tier_1.applyPayloadTier; } });
+Object.defineProperty(exports, "extractPayloadTier", { enumerable: true, get: function () { return payload_tier_1.extractPayloadTier; } });
+Object.defineProperty(exports, "parsePayloadTier", { enumerable: true, get: function () { return payload_tier_1.parsePayloadTier; } });
+Object.defineProperty(exports, "resolvePayloadTier", { enumerable: true, get: function () { return payload_tier_1.resolvePayloadTier; } });
+Object.defineProperty(exports, "resetPayloadTierRatchet", { enumerable: true, get: function () { return payload_tier_1.resetPayloadTierRatchet; } });
+Object.defineProperty(exports, "PAYLOAD_TIERS", { enumerable: true, get: function () { return payload_tier_1.PAYLOAD_TIERS; } });
+Object.defineProperty(exports, "PAYLOAD_TIER_RATCHET_CHARS", { enumerable: true, get: function () { return payload_tier_1.PAYLOAD_TIER_RATCHET_CHARS; } });
 var define_resource_1 = require("./define-resource");
 Object.defineProperty(exports, "defineResource", { enumerable: true, get: function () { return define_resource_1.defineResource; } });
 var define_prompt_1 = require("./define-prompt");
@@ -41,11 +59,43 @@ Object.defineProperty(exports, "definePrompt", { enumerable: true, get: function
 var serialize_result_1 = require("./serialize-result");
 Object.defineProperty(exports, "serializeToolResponse", { enumerable: true, get: function () { return serialize_result_1.serializeToolResponse; } });
 Object.defineProperty(exports, "formatOptsFromCtx", { enumerable: true, get: function () { return serialize_result_1.formatOptsFromCtx; } });
+/* ─── Delta protocol — agent tool result freshness negotiation ───────── */
+var delta_protocol_1 = require("./delta-protocol");
+Object.defineProperty(exports, "parseDeltaRequest", { enumerable: true, get: function () { return delta_protocol_1.parseDeltaRequest; } });
+Object.defineProperty(exports, "formatDeltaRequest", { enumerable: true, get: function () { return delta_protocol_1.formatDeltaRequest; } });
+Object.defineProperty(exports, "encodeDeltaCursor", { enumerable: true, get: function () { return delta_protocol_1.encodeDeltaCursor; } });
+Object.defineProperty(exports, "decodeDeltaCursor", { enumerable: true, get: function () { return delta_protocol_1.decodeDeltaCursor; } });
+Object.defineProperty(exports, "computeViewFingerprint", { enumerable: true, get: function () { return delta_protocol_1.computeViewFingerprint; } });
+Object.defineProperty(exports, "contentRevision", { enumerable: true, get: function () { return delta_protocol_1.contentRevision; } });
+Object.defineProperty(exports, "negotiateDelta", { enumerable: true, get: function () { return delta_protocol_1.negotiateDelta; } });
+Object.defineProperty(exports, "setSemanticDeltaEnabledResolver", { enumerable: true, get: function () { return delta_protocol_1.setSemanticDeltaEnabledResolver; } });
+Object.defineProperty(exports, "resetSemanticDeltaEnabledResolver", { enumerable: true, get: function () { return delta_protocol_1.resetSemanticDeltaEnabledResolver; } });
+Object.defineProperty(exports, "isSemanticDeltaEnabled", { enumerable: true, get: function () { return delta_protocol_1.isSemanticDeltaEnabled; } });
+Object.defineProperty(exports, "computeRowDigest", { enumerable: true, get: function () { return delta_protocol_1.computeRowDigest; } });
+Object.defineProperty(exports, "computeViewChecksum", { enumerable: true, get: function () { return delta_protocol_1.computeViewChecksum; } });
+Object.defineProperty(exports, "diffFromDigest", { enumerable: true, get: function () { return delta_protocol_1.diffFromDigest; } });
+Object.defineProperty(exports, "applySemanticDelta", { enumerable: true, get: function () { return delta_protocol_1.applySemanticDelta; } });
+Object.defineProperty(exports, "deltaCounts", { enumerable: true, get: function () { return delta_protocol_1.deltaCounts; } });
+Object.defineProperty(exports, "DELTA_SMALL_RESPONSE_BYTES", { enumerable: true, get: function () { return delta_protocol_1.DELTA_SMALL_RESPONSE_BYTES; } });
+Object.defineProperty(exports, "DELTA_MAX_DIGEST_ENTRIES", { enumerable: true, get: function () { return delta_protocol_1.DELTA_MAX_DIGEST_ENTRIES; } });
 /* ─── Registries ─────────────────────────────────────────────────────── */
 var registry_1 = require("./registry");
 Object.defineProperty(exports, "getCatalog", { enumerable: true, get: function () { return registry_1.getCatalog; } });
 Object.defineProperty(exports, "lookup", { enumerable: true, get: function () { return registry_1.lookup; } });
 Object.defineProperty(exports, "_resetCatalogForTests", { enumerable: true, get: function () { return registry_1._resetCatalogForTests; } });
+/* ─── Catalogue summaries (defineGroup + derived capability map) ──────── */
+var define_group_1 = require("./define-group");
+Object.defineProperty(exports, "defineGroup", { enumerable: true, get: function () { return define_group_1.defineGroup; } });
+Object.defineProperty(exports, "registerGroup", { enumerable: true, get: function () { return define_group_1.registerGroup; } });
+Object.defineProperty(exports, "lookupGroup", { enumerable: true, get: function () { return define_group_1.lookupGroup; } });
+Object.defineProperty(exports, "getGroupCatalog", { enumerable: true, get: function () { return define_group_1.getGroupCatalog; } });
+Object.defineProperty(exports, "_resetGroupCatalogForTests", { enumerable: true, get: function () { return define_group_1._resetGroupCatalogForTests; } });
+var catalogue_projection_1 = require("./catalogue-projection");
+Object.defineProperty(exports, "groupOf", { enumerable: true, get: function () { return catalogue_projection_1.groupOf; } });
+Object.defineProperty(exports, "describeGroupFromMembers", { enumerable: true, get: function () { return catalogue_projection_1.describeGroupFromMembers; } });
+Object.defineProperty(exports, "catalogueProjection", { enumerable: true, get: function () { return catalogue_projection_1.catalogueProjection; } });
+Object.defineProperty(exports, "renderCapabilityMap", { enumerable: true, get: function () { return catalogue_projection_1.renderCapabilityMap; } });
+Object.defineProperty(exports, "declaredGroupSlugs", { enumerable: true, get: function () { return catalogue_projection_1.declaredGroupSlugs; } });
 /* ─── Code-execution tool-orchestration runtime (B-CX-1A / B-CX-2A) ────── */
 __exportStar(require("./code-orchestration"), exports);
 var emits_registry_1 = require("./emits-registry");
@@ -86,6 +136,24 @@ Object.defineProperty(exports, "subscribeWorkspace", { enumerable: true, get: fu
 Object.defineProperty(exports, "snapshotWorkspace", { enumerable: true, get: function () { return state_channel_1.snapshotWorkspace; } });
 Object.defineProperty(exports, "dropStateSnapshotsForWorkspaceSwitch", { enumerable: true, get: function () { return state_channel_1.dropStateSnapshotsForWorkspaceSwitch; } });
 Object.defineProperty(exports, "_resetStateChannelForTests", { enumerable: true, get: function () { return state_channel_1._resetStateChannelForTests; } });
+/* ─── State-channel deltas (agent-tool-delta-protocol P-009) ─────────────── */
+var state_delta_1 = require("./state-delta");
+Object.defineProperty(exports, "diffSnapshot", { enumerable: true, get: function () { return state_delta_1.diffSnapshot; } });
+Object.defineProperty(exports, "applySnapshotDelta", { enumerable: true, get: function () { return state_delta_1.applySnapshotDelta; } });
+Object.defineProperty(exports, "chooseSnapshotEmission", { enumerable: true, get: function () { return state_delta_1.chooseSnapshotEmission; } });
+/* ─── Tool-result delta CLIENT (agent-tool-delta-protocol follow-up — the missing half) ─── */
+var delta_client_1 = require("./delta-client");
+Object.defineProperty(exports, "DeltaToolClient", { enumerable: true, get: function () { return delta_client_1.DeltaToolClient; } });
+Object.defineProperty(exports, "dispatchWithDelta", { enumerable: true, get: function () { return delta_client_1.dispatchWithDelta; } });
+Object.defineProperty(exports, "dispatchWithConveyedDelta", { enumerable: true, get: function () { return delta_client_1.dispatchWithConveyedDelta; } });
+// Harness-side base-presence tracker (the D-006 "harness owns the base" half — when is not_modified/delta safe) — P-003.
+// `dispatchWithBasePresence` is the one-call turn-wrapper integration seam (tracker + client + guarded dispatch).
+var base_presence_1 = require("./base-presence");
+Object.defineProperty(exports, "BasePresenceTracker", { enumerable: true, get: function () { return base_presence_1.BasePresenceTracker; } });
+Object.defineProperty(exports, "dispatchWithBasePresence", { enumerable: true, get: function () { return base_presence_1.dispatchWithBasePresence; } });
+// Server-side rows-array delta negotiation (the sync-resolver/SSE sibling of negotiateToolDelta) — P-006.
+var rows_delta_1 = require("./rows-delta");
+Object.defineProperty(exports, "negotiateRowsDelta", { enumerable: true, get: function () { return rows_delta_1.negotiateRowsDelta; } });
 /* ─── Card correlator (ctx.askUser) ──────────────────────────────────── */
 var card_correlator_1 = require("./card-correlator");
 Object.defineProperty(exports, "registerCard", { enumerable: true, get: function () { return card_correlator_1.registerCard; } });

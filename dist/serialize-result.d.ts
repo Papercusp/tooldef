@@ -21,6 +21,7 @@
 import { type ColumnSpec, type EligibilityResult, type FormatRequest, type ResultFormat } from '@papercusp/result-encoding';
 import type { ToolResponse } from './types';
 import type { UnifiedToolContext } from './tool-projection';
+import type { DeltaNegotiation } from './delta-protocol';
 export interface SerializeFormatOpts {
     /** Explicit client-requested format (negotiation), already parsed. Undefined → transport default. */
     requested?: FormatRequest;
@@ -46,6 +47,16 @@ export interface SerializeFormatOpts {
      * SAME projection drives the prompt legend (anti-desync guarantee, P-011).
      */
     readColumns?: ColumnSpec[];
+    /**
+     * Negotiated freshness outcome (agent-tool-delta-protocol-2026-06-22, P-005),
+     * computed upstream from the tool's `delta` capability + `ctx.requestedDelta`.
+     * When `mode === 'not_modified'` the data body is SUPPRESSED (the harness holds
+     * the matching base) and only the marker + cursor are sent; otherwise the
+     * fresh cursor rides `_meta.delta` alongside the normal full body. Absent ⇒ no
+     * negotiation (today's behavior). The `delta` field never appears for a tool
+     * that didn't declare a `delta` capability AND didn't get a `_delta` request.
+     */
+    delta?: DeltaNegotiation;
 }
 export interface SerializedToolResult {
     content: Array<Record<string, unknown>>;

@@ -23,6 +23,7 @@ import type { AgentRole, Capability, PluginSpawn } from './host-types';
 import type { StandardSchemaV1 } from './standard-schema';
 import type { Authorizer } from './authz';
 import type { EligibilityResult } from '@papercusp/result-encoding';
+import type { DeltaCapability } from './delta-protocol';
 /** Schema for a tool's typed event channel. Keys are wire-level event names. */
 export type EventsSchema = Record<string, ZodTypeAny>;
 /**
@@ -204,9 +205,27 @@ export interface GateBypass {
      */
     policy?: boolean;
 }
+export interface RequestOriginMetadata {
+    /** Transport adapter that observed the request, e.g. "mcp". */
+    transport: string;
+    /** URL pathname only; query params are whitelisted separately below. */
+    path?: string;
+    /** Non-secret request query params useful for attribution/debugging. */
+    query?: Record<string, string>;
+    /** Non-secret request headers useful for attribution/debugging. */
+    headers?: Record<string, string>;
+}
 export interface UnifiedToolContext {
     /** Tool-bound logger. Always populated. */
     log: (msg: string) => void;
+    /**
+     * The session's payload tier (context-trimming-tiers D-004) — wired by the
+     * host from its transport (e.g. an MCP URL `ctx_tier=` param). Read at
+     * serialize time to pick a tool's `shape.trimmed`/`shape.standard`
+     * projection; absent ⇒ 'full' (the unshaped response). A per-call
+     * `payloadTier` arg outranks it.
+     */
+    contextTier?: import('./payload-tier').PayloadTier;
     /** Aborts on per-tool timeout, parent cancellation, or shutdown. */
     signal: AbortSignal;
     /**
@@ -233,6 +252,48 @@ export interface UnifiedToolContext {
      * Always populated; transport adapter installs the right impl.
      */
     emit: EmitCallback;
+    /**
+     * Expand the caller's LIVE tool surface at runtime — activate additional
+     * tools by name for THIS session. The transport adds the names to the
+     * session's mutable allowlist and, if the client negotiated
+     * `tools.listChanged`, fires `notifications/tools/list_changed` so the
+     * client re-fetches `tools/list` and can call the surfaced tools.
+     *
+     * The server-side half of the "small seed + expand on demand" model: a
+     * session launched with a trimmed listing seed (e.g. an MCP `?tools=` core
+     * set) calls this — typically via a discovery tool like `tools:find` — to
+     * surface the long tail on intent, WITHOUT paying the full-catalog token
+     * cost up front. Returns true iff the surface actually grew (something new
+     * was added), so the caller can tell whether a re-fetch will be triggered.
+     *
+     * No-op returning false on transports without a mutable per-session surface
+     * (in-process / non-MCP) or a session that was never seeded (a full-catalog
+     * session already has everything). Optional — reference as
+     * `ctx.activateTools?.(names)`.
+     */
+    activateTools?: (toolNames: readonly string[]) => boolean;
+    /**
+     * Dispatch ANOTHER tool by name server-side and return its result — the
+     * engine behind a `tools:invoke { name, args }` meta-tool. The target runs
+     * under THIS caller's context (same principal / tx / privilege), so it is
+     * gated EXACTLY as a direct call would be — a router, not a privilege bypass.
+     *
+     * The universal reachability escape hatch: a client that never sees the long
+     * tail in its own tool list (a small seed on a client that doesn't act on
+     * `tools/list_changed`) can still reach any tool by routing the call through
+     * the meta-tool — no client-side registry growth required. Complements the
+     * dynamic surface: `tools:find` returns the target's name+schema, then this
+     * calls it.
+     *
+     * Optional — present only on transports with a server-side dispatcher (MCP).
+     * Reference as `ctx.dispatchTool?.(name, args)`.
+     */
+    dispatchTool?: (toolName: string, toolArgs?: unknown) => Promise<{
+        content: ReadonlyArray<unknown>;
+        isError?: boolean;
+        _meta?: Record<string, unknown>;
+        structuredContent?: unknown;
+    }>;
     /** Auth principal resolved from bearer. Null when caller is anonymous. */
     principal?: {
         slug: string;
@@ -306,6 +367,13 @@ export interface UnifiedToolContext {
      */
     transport?: 'http' | 'mcp' | 'ipc' | 'in_process';
     /**
+     * Sanitized transport request provenance. Adapters populate only non-secret
+     * headers/query params, then recordInvocation persists it in
+     * `tool_invocations.metadata_json.requestOrigin` so unattributed loopback
+     * calls can be traced to their client surface without storing auth material.
+     */
+    requestOrigin?: RequestOriginMetadata;
+    /**
      * Client-negotiated result format (token-efficient-tool-result-formats D-005).
      * The RAW request token from the transport — `?format=`/`Accept` on HTTP,
      * `_meta.format` or `?format=` on MCP — parsed by the result serializer via
@@ -322,6 +390,17 @@ export interface UnifiedToolContext {
      * compact text. OFF by default so the model never pays for both at once.
      */
     requestedStructured?: boolean;
+    /**
+     * Client-negotiated freshness request (agent-tool-delta-protocol-2026-06-22,
+     * D-001). The RAW token from the transport — `_meta.delta` or `?delta=` on MCP
+     * (`"<mode>"` / `"<mode>~<cursor>"`, parsed by `parseDeltaRequest`). Like
+     * `requestedFormat`, it is set by the CLIENT/HARNESS process, never the model:
+     * the harness owns cursor storage + base-presence tracking and only asks for
+     * `not_modified` when it can prove the matching base is still in context.
+     * Absent ⇒ no negotiation (serve full, as today). Consumed by the result
+     * serializer when the tool declared a `delta` capability.
+     */
+    requestedDelta?: string;
     workspaceId?: string;
     harnessSlug?: string;
     projectDir?: string;
@@ -365,6 +444,21 @@ export interface UnifiedToolContext {
      * to it. Null/undefined for headless spawns and CLI callers.
      */
     uiClientId?: string | null;
+    /**
+     * The CLI backend the CALLING agent runs under — `'omp' | 'claude' | 'codex'`. The launcher
+     * stamps it onto the session's MCP URL (`?agent=`) and the transport folds it here. It is the
+     * CURRENT process's backend (a resume/handoff is a fresh launch that re-stamps), so a tool can
+     * default a spawned agent's backend to the caller's own instead of a hardcoded guess (e.g.
+     * fleet:launch-on-plan). Undefined for callers whose launcher didn't stamp it. Provenance/
+     * defaulting hint only, never a security boundary.
+     */
+    callerAgent?: string | null;
+    /**
+     * The model the calling agent was launched on (`?model=` on the MCP URL), resolved by the
+     * launcher (explicit `--model` or the backend default). Paired with `callerAgent` so a tool can
+     * inherit the caller's model when it inherits the backend. Undefined when unstamped.
+     */
+    callerModel?: string | null;
     /**
      * The plan-run conversation that this call belongs to, when the
      * caller is an agent launched from a plan (`plans:launch` —
@@ -554,6 +648,21 @@ export interface ProjectedTool {
      */
     effect?: 'read' | 'write';
     /**
+     * Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6 / P-007). When
+     * `true`, a handler that RAN TO COMPLETION but whose `ctx.signal` had already aborted
+     * (the wall-clock/idle timeout fired mid-handler under load) surfaces its COMPLETED
+     * result as success instead of a spurious `timeout` error. Safe ONLY for a tool whose
+     * effect is idempotent — re-applying (or surfacing a completed apply of) the write can
+     * never double-effect or corrupt state (e.g. `plans:set-status` sets a status token to a
+     * fixed value; re-applying is a no-op). Default (absent/false) preserves the conservative
+     * behaviour: a completed non-low-tier mutation past the deadline still reports `timeout`
+     * (the abort stays authoritative). This turns the 280 `plans:set-status` false-timeouts —
+     * writes that COMMITTED but returned a `timeout` because wall-clock beat the deadline —
+     * into honest successes, so the agent never re-dispatches a write that already landed.
+     * ONLY the dispatch abort-race branch reads this; it is inert on the happy path.
+     */
+    idempotent?: boolean;
+    /**
      * Canonical tool names this COMPOSITE tool bundles (tool-call-batching-wrappers
      * P-010). Empty/undefined ⇒ a primitive. Read by agent_tools:list (the queryable
      * composition tag) and prompt-assembly's renderToolsCatalog (the bounded
@@ -726,6 +835,13 @@ export interface ProjectedTool {
      */
     resultEligibility?: EligibilityResult;
     /**
+     * Tool-result freshness capability. Transport clients that own a cursor/base
+     * cache (or a safe proxy that reconstructs a full result for generic clients)
+     * read this registry metadata to decide whether they can negotiate `_meta.delta`
+     * without a brittle per-tool side table.
+     */
+    delta?: DeltaCapability;
+    /**
      * Typed event channel — Zod schemas keyed by event name. Surfaced
      * via tools/list as JSON-Schema for client discovery. No runtime
      * validation of outgoing events (trusted code path). Undefined for
@@ -767,11 +883,14 @@ export interface ProjectedTool {
      *
      * Shape mirrors `ToolGuidance` but without a `byRole` type-import to
      * keep this module free of role-enum imports. Plumbed-through opaque.
+     * `seeAlso` (result-aware cross-links) is read at dispatch time — see
+     * `applySeeAlso` in `./see-also`.
      */
     guidance?: {
         when?: string;
         notWhen?: string;
         chaining?: string;
+        seeAlso?: import('./see-also').SeeAlso;
         byRole?: Record<string, {
             when?: string;
             notWhen?: string;

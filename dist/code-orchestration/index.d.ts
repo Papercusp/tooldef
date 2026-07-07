@@ -8,7 +8,7 @@
  */
 export { buildToolFacade, facadeToolNames, roleScopedToolNames, type ToolFacade, type FacadeDispatch, } from './tool-facade';
 export { runOrchestrationScript, type RunScriptResult, type RunScriptOptions, } from './run-script';
-export { checkScript, type ParseCheckResult } from './parse-check';
+export { checkScript, ensureParseCheckReady, type ParseCheckResult } from './parse-check';
 export { realDispatch, unwrapToolResult } from './dispatch-binding';
-export { runToolOrchestration, type OrchestrateOptions, type OrchestrateResult, type PlannedMutation, } from './orchestrate';
+export { runToolOrchestration, type OrchestrateOptions, type OrchestrateResult, type PlannedMutation, type WrapDispatch, type DispatchNext, } from './orchestrate';
 export { generateToolFacadeTypes, listFacadeNamespaces, toolArgsType, type GenerateFacadeTypesOptions, type FacadeNamespaceIndexEntry, type ToolArgsType, } from './facade-types';

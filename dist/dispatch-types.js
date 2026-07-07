@@ -19,7 +19,7 @@ exports.defaultComputeQuotaWindow = defaultComputeQuotaWindow;
  * A host with richer policy (per-chunk windows, session-keyed quotas, …)
  * supplies `DispatchProjectedDeps.computeQuotaWindow` to override this.
  */
-function defaultComputeQuotaWindow(ctx, roleQuota) {
+function defaultComputeQuotaWindow(ctx, roleQuota, _toolName) {
     return {
         key: ctx.runId ? `run:${ctx.runId}` : null,
         limit: roleQuota?.perRun ?? null,
@@ -54,7 +54,7 @@ exports.HarnessRequiredError = HarnessRequiredError;
  * (500) — the distinction matters downstream: error-class telemetry treats
  * `handler_error` as a structural tool bug, so a zod failure coded
  * `handler_error` files false "tool is broken" signals (EI-334's cluster:
- * an oversized fleet:spawn `brief` fired the structural watchdog key).
+ * an oversized cup:spawn `brief` fired the structural watchdog key).
  */
 class InvalidInputError extends Error {
     name = 'InvalidInputError';

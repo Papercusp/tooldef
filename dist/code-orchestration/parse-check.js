@@ -1,36 +1,57 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.ensureParseCheckReady = ensureParseCheckReady;
 exports.checkScript = checkScript;
-/**
- * code-execution-tool-orchestration B-CX-1A / B-CX-PARSE — static PARSE-CHECK.
- *
- * A fast-fail, pre-execution guard: walks the script's TypeScript AST for references to the
- * injected `tools` facade and reports any that aren't in the agent's allowed set. It resolves the
- * normal forms — `tools.<ns>.<verb>(…)` and the `tools.call('<ns>:<verb>', …)` escape hatch — and
- * also the obfuscated-but-static forms a regex misses:
- *
- *   - computed string-literal access:  `tools['sys']['admin']`, `tools['work_items'].list`
- *   - `tools` aliasing:                `const t = tools; t.sys.admin()`
- *   - namespace / verb destructuring:  `const { coord } = tools; coord.wakeQueue()`
- *                                      `const { list } = tools.work_items; list()`
- *
- * This turns the common typo / disallowed-tool case (incl. an obfuscation attempt) into a clean
- * upfront error listing the offenders, before any tool runs.
- *
- * NOT a security boundary. The runtime WHITELIST in the facade (a disallowed tool is simply
- * absent, and `tools.call` throws on an unknown name) is the boundary; this static walk is a UX +
- * telemetry aid layered on top (the plan §8 consensus). It resolves everything STATICALLY
- * determinable; genuinely dynamic access (`tools[runtimeVar]`, `tools.call(runtimeVar)`) is left
- * to the runtime whitelist by design and is NOT flagged here. If parsing ever fails the walk falls
- * back to a regex scan so the aid degrades gracefully rather than failing open.
- */
-const typescript_1 = __importDefault(require("typescript"));
-/** `wake-queue` / `set_status` → `wakeQueue` / `setStatus` (the facade's JS-identifier keys). */
-const camelVerb = (verb) => verb.replace(/[-_]+([a-z0-9])/gi, (_m, c) => c.toUpperCase());
+const tool_facade_1 = require("./tool-facade");
+let _ts = null;
+/** Lazily load the TS compiler (kept out of the eager client bundle). Await once before checkScript(). Idempotent. */
+async function ensureParseCheckReady() {
+    if (!_ts) {
+        const m = (await Promise.resolve().then(() => __importStar(require('typescript'))));
+        _ts = (m.default ?? m);
+    }
+}
+function tsc() {
+    if (!_ts) {
+        throw new Error('parse-check: ensureParseCheckReady() must be awaited before checkScript() (the TS compiler is lazy-loaded to keep it out of the eager client bundle)');
+    }
+    return _ts;
+}
 function checkScript(script, tools, allowed) {
+    const ts = tsc(); // lazy-loaded TS compiler (see ensureParseCheckReady)
     const memberToName = new Map(); // "ns.camelVerb" → full name
     const fullNames = new Set();
     for (const t of tools) {
@@ -40,7 +61,7 @@ function checkScript(script, tools, allowed) {
         if (allowed && !allowed.has(name))
             continue;
         const ci = name.indexOf(':');
-        memberToName.set(`${name.slice(0, ci)}.${camelVerb(name.slice(ci + 1))}`, name);
+        memberToName.set(`${(0, tool_facade_1.camelNamespace)(name.slice(0, ci))}.${(0, tool_facade_1.camelVerb)(name.slice(ci + 1))}`, name);
         fullNames.add(name);
     }
     const refs = new Set();
@@ -57,7 +78,7 @@ function checkScript(script, tools, allowed) {
     };
     let source;
     try {
-        source = typescript_1.default.createSourceFile('script.ts', script, typescript_1.default.ScriptTarget.Latest, false, typescript_1.default.ScriptKind.TS);
+        source = ts.createSourceFile('script.ts', script, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
     }
     catch {
         return regexFallback(script, memberToName, fullNames);
@@ -69,7 +90,7 @@ function checkScript(script, tools, allowed) {
     const toolsAliases = new Set(['tools']);
     const nsBindings = new Map(); // ident → ns
     const funcBindings = new Map(); // ident → "ns.camelVerb" member
-    const literalKey = (node) => typescript_1.default.isStringLiteralLike(node) ? node.text : null;
+    const literalKey = (node) => ts.isStringLiteralLike(node) ? node.text : null;
     /** One property step within the facade, given the resolved base. */
     const step = (base, prop) => {
         if (base.kind === 'tools') {
@@ -82,10 +103,10 @@ function checkScript(script, tools, allowed) {
     };
     /** Resolve an expression to a facade position, or null if it isn't one / is dynamically computed. */
     const resolve = (node) => {
-        if (typescript_1.default.isParenthesizedExpression(node) || typescript_1.default.isNonNullExpression(node)) {
+        if (ts.isParenthesizedExpression(node) || ts.isNonNullExpression(node)) {
             return resolve(node.expression);
         }
-        if (typescript_1.default.isIdentifier(node)) {
+        if (ts.isIdentifier(node)) {
             const n = node.text;
             if (toolsAliases.has(n))
                 return { kind: 'tools' };
@@ -97,11 +118,11 @@ function checkScript(script, tools, allowed) {
                 return { kind: 'member', member };
             return null;
         }
-        if (typescript_1.default.isPropertyAccessExpression(node)) {
+        if (ts.isPropertyAccessExpression(node)) {
             const base = resolve(node.expression);
             return base ? step(base, node.name.text) : null;
         }
-        if (typescript_1.default.isElementAccessExpression(node)) {
+        if (ts.isElementAccessExpression(node)) {
             const base = resolve(node.expression);
             if (!base)
                 return null;
@@ -112,13 +133,13 @@ function checkScript(script, tools, allowed) {
     };
     const bindElements = (pattern, r) => {
         for (const el of pattern.elements) {
-            if (!typescript_1.default.isIdentifier(el.name))
+            if (!ts.isIdentifier(el.name))
                 continue; // nested patterns aren't facade bindings
             const local = el.name.text;
             const pn = el.propertyName;
-            const key = pn && typescript_1.default.isIdentifier(pn)
+            const key = pn && ts.isIdentifier(pn)
                 ? pn.text
-                : pn && typescript_1.default.isStringLiteralLike(pn)
+                : pn && ts.isStringLiteralLike(pn)
                     ? pn.text
                     : local;
             if (r.kind === 'tools') {
@@ -133,10 +154,10 @@ function checkScript(script, tools, allowed) {
     };
     const visit = (node) => {
         // 1) Binding collection (source order, before this node's own references are recorded).
-        if (typescript_1.default.isVariableDeclaration(node) && node.initializer) {
+        if (ts.isVariableDeclaration(node) && node.initializer) {
             const r = resolve(node.initializer);
             if (r) {
-                if (typescript_1.default.isIdentifier(node.name)) {
+                if (ts.isIdentifier(node.name)) {
                     if (r.kind === 'tools')
                         toolsAliases.add(node.name.text);
                     else if (r.kind === 'ns')
@@ -144,13 +165,13 @@ function checkScript(script, tools, allowed) {
                     else if (r.kind === 'member')
                         funcBindings.set(node.name.text, r.member);
                 }
-                else if (typescript_1.default.isObjectBindingPattern(node.name) && (r.kind === 'tools' || r.kind === 'ns')) {
+                else if (ts.isObjectBindingPattern(node.name) && (r.kind === 'tools' || r.kind === 'ns')) {
                     bindElements(node.name, r);
                 }
             }
         }
         // 2) Reference recording.
-        if (typescript_1.default.isCallExpression(node)) {
+        if (ts.isCallExpression(node)) {
             const r = resolve(node.expression);
             if (r?.kind === 'callHatch') {
                 const name = node.arguments[0] ? literalKey(node.arguments[0]) : null;
@@ -161,12 +182,12 @@ function checkScript(script, tools, allowed) {
                 recordMember(r.member);
             }
         }
-        else if (typescript_1.default.isPropertyAccessExpression(node) || typescript_1.default.isElementAccessExpression(node)) {
+        else if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
             const r = resolve(node);
             if (r?.kind === 'member')
                 recordMember(r.member);
         }
-        typescript_1.default.forEachChild(node, visit);
+        ts.forEachChild(node, visit);
     };
     visit(source);
     return { ok: unknown.size === 0, unknownRefs: [...unknown].sort(), refs: [...refs].sort() };

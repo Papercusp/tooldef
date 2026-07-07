@@ -40,6 +40,14 @@ export interface StateSnapshot {
 }
 export interface VersionedSnapshot {
     runId: string;
+    /**
+     * The workspace this run is scoped to. Carried on the wire so a stateful
+     * surface can answer a card (`/card-response` `expectedWorkspaceId`) without
+     * out-of-band knowledge of its window's workspace — the desktop chat reads it
+     * from a React prop, but headless consumers (the TUI card renderer) have no
+     * such source. Optional for back-compat with any older serialized snapshot.
+     */
+    workspaceId?: string;
     version: number;
     snapshot: StateSnapshot;
 }

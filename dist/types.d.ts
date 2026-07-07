@@ -8,6 +8,8 @@ import type { StandardSchemaV1 } from './standard-schema';
 import type { EventsSchema, UnifiedToolContext, UserEvents } from './tool-projection';
 import type { Authorizer } from './authz';
 import type { ToolRequireSpec } from './requires';
+import type { DeltaCapability } from './delta-protocol';
+import type { SeeAlso } from './see-also';
 import type { OpenCardSnapshot as WireOpenCardSnapshot, ReportBlock } from '@papercusp/chat-protocol';
 /** A Papercusp capability tier per spec/capabilities §10.6.1. */
 export type CapabilityTier = 'low' | 'medium' | 'high';
@@ -258,6 +260,19 @@ export interface ToolGuidance {
      */
     chaining?: string;
     /**
+     * Result-aware cross-link pointers to the adjacent lens / sibling tool /
+     * history door for THIS tool's output. Distinct from `chaining`: `chaining`
+     * is catalog-time/static (rendered into the DESCRIPTION at selection time,
+     * answers "what to call next"); `seeAlso` is result-time/dynamic — a function
+     * `(result, args, ctx) => Array<{ tool, reason?, selector? }>` computed from
+     * the ACTUAL result so it fills in real counts + the exact selector and
+     * self-gates (return `[]` to emit nothing). A static array is allowed for
+     * simple cases. The dispatch layer renders it uniformly into every transport
+     * envelope (structured `_meta._seeAlso` + a one-line "See also:" text block).
+     * See presence-coord-unification-2026-07-01 D-003.
+     */
+    seeAlso?: SeeAlso;
+    /**
      * Per-role override. Set ONLY the fields that differ from the base
      * guidance; shallowly merged at projection time. Use sparingly — most
      * tools share guidance across roles.
@@ -371,6 +386,14 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
      * sandbox's dry-run/confirm gate (a read-only tool needs no gate).
      */
     effect?: 'read' | 'write';
+    /** Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): when
+     *  true, a handler that COMPLETED but whose `ctx.signal` had already aborted (the
+     *  wall-clock/idle timeout fired mid-handler under load) surfaces its completed result as
+     *  success instead of a spurious `timeout`. Safe ONLY when re-applying (or surfacing a
+     *  completed apply of) the write can never double-effect — e.g. `plans:set-status` sets a
+     *  status token to a fixed value. Default (absent/false) keeps the abort authoritative.
+     *  Threaded onto `ProjectedTool`; read ONLY by the dispatch abort-race branch. */
+    idempotent?: boolean;
     /**
      * Canonical tool names this COMPOSITE tool bundles (tool-call-batching-wrappers
      * P-010). A composite collapses a hot fixed multi-step flow into one call (e.g.
@@ -396,6 +419,15 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
      */
     result?: StandardSchemaV1;
     /**
+     * Opt into framework freshness negotiation (agent-tool-delta-protocol-2026-06-22,
+     * D-001/D-002). Declare a `revision` source and the framework answers an
+     * `_meta.delta` request with `not_modified` when the view is unchanged (else
+     * `full`), via a stateless opaque cursor — no per-tool `args` schema change
+     * (control rides the MCP `_meta` ENVELOPE). Semantic added/updated/removed
+     * deltas are a separate endpoint layer (Lane E) NOT enabled by this field.
+     */
+    delta?: DeltaCapability<StandardSchemaV1.InferOutput<TArgs>, UnifiedToolContext>;
+    /**
      * Implementation. PREFER returning a `ToolResponse` envelope (`{ data }`)
      * — it gets format-aware serialization. A raw `ToolResult` (MCP content
      * shape) is also accepted and passes through untouched (parity with the
@@ -409,6 +441,14 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
      * See `ToolGuidance` for shape.
      */
     guidance?: ToolGuidance;
+    /**
+     * Optional payload-tier shapers (context-trimming-tiers D-004): per-tier
+     * projections of the response `data` for trimmed/standard sessions.
+     * Resolution falls back trimmed → standard → full, where `full` IS the
+     * unshaped response — a tool without `shape` is byte-identical to its
+     * pre-tier behavior on every tier. See `payload-tier.ts`.
+     */
+    shape?: import('./payload-tier').PayloadShapers;
     /** See `ToolDefinitionInput.profile`. */
     profile?: 'engineer' | 'all';
     /** See `ToolDefinitionInput.papercusp`. */
@@ -445,6 +485,14 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
     capability: string;
     /** Read/write effect (B-CX-PRE); inferred from the capability suffix when omitted. See ToolDefinition.effect. */
     effect?: 'read' | 'write';
+    /** Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): when
+     *  true, a handler that COMPLETED but whose `ctx.signal` had already aborted (the
+     *  wall-clock/idle timeout fired mid-handler under load) surfaces its completed result as
+     *  success instead of a spurious `timeout`. Safe ONLY when re-applying (or surfacing a
+     *  completed apply of) the write can never double-effect — e.g. `plans:set-status` sets a
+     *  status token to a fixed value. Default (absent/false) keeps the abort authoritative.
+     *  Threaded onto `ProjectedTool`; read ONLY by the dispatch abort-race branch. */
+    idempotent?: boolean;
     /** Canonical tool names this composite tool bundles (e.g. coord:orient replaces fleet:assignments + work_items:list + coord:inbox). Omitted for primitives. See ToolDefinition.replaces. */
     replaces?: readonly string[];
     args: TArgs;
@@ -452,6 +500,14 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
     handler: (args: StandardSchemaV1.InferOutput<TArgs>, ctx: ToolContext) => Promise<ToolResponse | ToolResult>;
     /** See `ToolGuidance`. */
     guidance?: ToolGuidance;
+    /**
+     * Optional payload-tier shapers (context-trimming-tiers D-004): per-tier
+     * projections of the response `data` for trimmed/standard sessions.
+     * Resolution falls back trimmed → standard → full, where `full` IS the
+     * unshaped response — a tool without `shape` is byte-identical to its
+     * pre-tier behavior on every tier. See `payload-tier.ts`.
+     */
+    shape?: import('./payload-tier').PayloadShapers;
     /**
      * Auth gate. When set, overrides the legacy single-capability gate
      * (`capability`) with a full `PrincipalRequirements`. `'public'` opts
@@ -476,6 +532,12 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
     result?: StandardSchemaV1;
     /** Alias for `result`. */
     output?: StandardSchemaV1;
+    /**
+     * Opt into framework freshness negotiation — see `ToolDefinition.delta`
+     * (agent-tool-delta-protocol-2026-06-22, D-001/D-002). Endpoints declare a
+     * `revision` source; the framework handles cursor + `not_modified` plumbing.
+     */
+    delta?: DeltaCapability<StandardSchemaV1.InferOutput<TArgs>, UnifiedToolContext>;
     /**
      * Telemetry sample rate, 0..1. Default 1 (record every call). High-
      * frequency tools set this < 1 so `tool_invocations` doesn't flood.
@@ -551,6 +613,14 @@ export interface RoleToolDefinition<TArgs extends StandardSchemaV1 = StandardSch
     capability: string;
     /** Read/write effect (B-CX-PRE); inferred from the capability suffix when omitted. See ToolDefinition.effect. */
     effect?: 'read' | 'write';
+    /** Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): when
+     *  true, a handler that COMPLETED but whose `ctx.signal` had already aborted (the
+     *  wall-clock/idle timeout fired mid-handler under load) surfaces its completed result as
+     *  success instead of a spurious `timeout`. Safe ONLY when re-applying (or surfacing a
+     *  completed apply of) the write can never double-effect — e.g. `plans:set-status` sets a
+     *  status token to a fixed value. Default (absent/false) keeps the abort authoritative.
+     *  Threaded onto `ProjectedTool`; read ONLY by the dispatch abort-race branch. */
+    idempotent?: boolean;
     /** Canonical tool names this composite tool bundles. Omitted for primitives. See ToolDefinition.replaces. */
     replaces?: readonly string[];
     /** Derived at defineTool time: 'composite' when `replaces` is non-empty, else 'primitive'. */
@@ -625,6 +695,11 @@ export interface RoleToolDefinition<TArgs extends StandardSchemaV1 = StandardSch
      */
     result?: StandardSchemaV1;
     /**
+     * Opt into framework freshness negotiation — see `ToolDefinition.delta`
+     * (agent-tool-delta-protocol-2026-06-22, D-001/D-002).
+     */
+    delta?: DeltaCapability<StandardSchemaV1.InferOutput<TArgs>, UnifiedToolContext>;
+    /**
      * Handler receives the unified context (no principal). May return either
      * a raw `ToolResult` (MCP shape) or a `ToolResponse` envelope; the
      * wrapper adapts both.
@@ -632,6 +707,14 @@ export interface RoleToolDefinition<TArgs extends StandardSchemaV1 = StandardSch
     handler: (args: StandardSchemaV1.InferOutput<TArgs>, ctx: UnifiedToolContext) => Promise<ToolResult | ToolResponse>;
     /** See `ToolGuidance`. */
     guidance?: ToolGuidance;
+    /**
+     * Optional payload-tier shapers (context-trimming-tiers D-004): per-tier
+     * projections of the response `data` for trimmed/standard sessions.
+     * Resolution falls back trimmed → standard → full, where `full` IS the
+     * unshaped response — a tool without `shape` is byte-identical to its
+     * pre-tier behavior on every tier. See `payload-tier.ts`.
+     */
+    shape?: import('./payload-tier').PayloadShapers;
     /** Intrinsic lifecycle emissions — see `ToolEmitSpec`. Desugared to event rules at load. */
     emits?: readonly ToolEmitSpec[];
     /** Declarative preconditions — see `ToolRequireSpec`. Evaluated by the dispatcher's `preconditions` step. */
@@ -650,6 +733,14 @@ export interface RoleToolDefinitionInput<TArgs extends StandardSchemaV1 = Standa
     capability: string;
     /** Read/write effect (B-CX-PRE); inferred from the capability suffix when omitted. See ToolDefinition.effect. */
     effect?: 'read' | 'write';
+    /** Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): when
+     *  true, a handler that COMPLETED but whose `ctx.signal` had already aborted (the
+     *  wall-clock/idle timeout fired mid-handler under load) surfaces its completed result as
+     *  success instead of a spurious `timeout`. Safe ONLY when re-applying (or surfacing a
+     *  completed apply of) the write can never double-effect — e.g. `plans:set-status` sets a
+     *  status token to a fixed value. Default (absent/false) keeps the abort authoritative.
+     *  Threaded onto `ProjectedTool`; read ONLY by the dispatch abort-race branch. */
+    idempotent?: boolean;
     /** Canonical tool names this composite tool bundles. Omitted for primitives. See ToolDefinition.replaces. */
     replaces?: readonly string[];
     /** Visibility profile gate — see RoleToolDefinition.profile. */
@@ -680,6 +771,14 @@ export interface RoleToolDefinitionInput<TArgs extends StandardSchemaV1 = Standa
     handler: (args: StandardSchemaV1.InferOutput<TArgs>, ctx: UnifiedToolContext) => Promise<ToolResult | ToolResponse>;
     /** See `ToolGuidance`. */
     guidance?: ToolGuidance;
+    /**
+     * Optional payload-tier shapers (context-trimming-tiers D-004): per-tier
+     * projections of the response `data` for trimmed/standard sessions.
+     * Resolution falls back trimmed → standard → full, where `full` IS the
+     * unshaped response — a tool without `shape` is byte-identical to its
+     * pre-tier behavior on every tier. See `payload-tier.ts`.
+     */
+    shape?: import('./payload-tier').PayloadShapers;
     /** See `ToolDefinitionInput.auth`. Phase E2 wiring. */
     auth?: RouteAuth;
     /** Alias for `args`. New callsites prefer `input`. */
@@ -695,6 +794,12 @@ export interface RoleToolDefinitionInput<TArgs extends StandardSchemaV1 = Standa
     result?: StandardSchemaV1;
     /** Alias for `result`. */
     output?: StandardSchemaV1;
+    /**
+     * Opt into framework freshness negotiation — see `ToolDefinition.delta`
+     * (agent-tool-delta-protocol-2026-06-22, D-001/D-002). Endpoints declare a
+     * `revision` source; the framework handles cursor + `not_modified` plumbing.
+     */
+    delta?: DeltaCapability<StandardSchemaV1.InferOutput<TArgs>, UnifiedToolContext>;
     /**
      * Intrinsic lifecycle emissions (coord-lifecycle-automation D-002). Each
      * entry desugars to an event-reaction rule registered at load. See

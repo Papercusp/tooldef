@@ -85,6 +85,7 @@ function emit(entry) {
     // mutate; deep-cloning arbitrary toolState shapes is too expensive).
     const vs = {
         runId: entry.runId,
+        workspaceId: entry.workspaceId,
         version: entry.version,
         snapshot: {
             openCards: [...entry.snapshot.openCards],
@@ -175,6 +176,7 @@ function getSnapshot(runId) {
         return null;
     return {
         runId: entry.runId,
+        workspaceId: entry.workspaceId,
         version: entry.version,
         snapshot: entry.snapshot,
     };
@@ -195,7 +197,12 @@ function subscribe(runId, cb) {
     // Emit current state immediately so new connections get the snapshot.
     // Isolate throw — see emit() — so a buggy subscriber can't kill the caller.
     try {
-        cb({ runId: entry.runId, version: entry.version, snapshot: entry.snapshot });
+        cb({
+            runId: entry.runId,
+            workspaceId: entry.workspaceId,
+            version: entry.version,
+            snapshot: entry.snapshot,
+        });
     }
     catch (e) {
         console.warn('[state-channel] subscriber threw on initial emit', { runId: entry.runId, error: e });
@@ -250,6 +257,7 @@ function snapshotWorkspace(workspaceId) {
         if (entry.workspaceId === workspaceId) {
             out.push({
                 runId: entry.runId,
+                workspaceId: entry.workspaceId,
                 version: entry.version,
                 snapshot: entry.snapshot,
             });

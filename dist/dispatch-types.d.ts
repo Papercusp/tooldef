@@ -38,7 +38,7 @@ export interface QuotaWindow {
  * A host with richer policy (per-chunk windows, session-keyed quotas, …)
  * supplies `DispatchProjectedDeps.computeQuotaWindow` to override this.
  */
-export declare function defaultComputeQuotaWindow(ctx: UnifiedToolContext, roleQuota: RolesQuota | undefined): QuotaWindow;
+export declare function defaultComputeQuotaWindow(ctx: UnifiedToolContext, roleQuota: RolesQuota | undefined, _toolName?: string): QuotaWindow;
 export type DispatchProjectedErrorCode = 'unknown_tool' | 'unauthorized' | 'role_not_allowed' | 'missing_capability' | 'capability_denied' | 'missing_role' | 'harness_required' | 'quota_exceeded' | 'invalid_input' | 'handler_error' | 'authorization_denied' | 'precondition_failed' | 'ungated' | 'timeout';
 /**
  * Throw to signal that the request lacks the authentication the tool
@@ -67,7 +67,7 @@ export declare class HarnessRequiredError extends Error {
  * (500) — the distinction matters downstream: error-class telemetry treats
  * `handler_error` as a structural tool bug, so a zod failure coded
  * `handler_error` files false "tool is broken" signals (EI-334's cluster:
- * an oversized fleet:spawn `brief` fired the structural watchdog key).
+ * an oversized cup:spawn `brief` fired the structural watchdog key).
  */
 export declare class InvalidInputError extends Error {
     readonly name = "InvalidInputError";
@@ -161,8 +161,11 @@ export interface DispatchProjectedDeps {
      * e.g. Papercusp keys workers on `chunk:<id>`/`perChunk`, power-user
      * sessions on the stable auth session, everyone else on `run:<id>`/`perRun`.
      * `roleQuota` is the tool's `rolesQuota[ctx.role]` entry (or undefined).
+     * `toolName` is the dispatched tool's name — passed so a host can resolve a
+     * per-(tool,role) runtime override (Papercusp's quota:set_tool dial) in front
+     * of the baked `roleQuota`. Optional + ignored by the default; back-compat.
      */
-    computeQuotaWindow?(ctx: UnifiedToolContext, roleQuota: RolesQuota | undefined): QuotaWindow;
+    computeQuotaWindow?(ctx: UnifiedToolContext, roleQuota: RolesQuota | undefined, toolName?: string): QuotaWindow;
     /** Read current quota usage. Return null to disable quota enforcement. */
     readQuotaState?(toolName: string, ctx: UnifiedToolContext, windowKey: string): Promise<{
         count: number;

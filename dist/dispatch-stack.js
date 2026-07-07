@@ -24,6 +24,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.DEFAULT_DISPATCH_STACK = void 0;
 exports.withReplacedStep = withReplacedStep;
 exports.runDispatchStack = runDispatchStack;
+const see_also_1 = require("./see-also");
+const result_annotator_1 = require("./result-annotator");
 const tool_projection_1 = require("./tool-projection");
 const replay_buffer_1 = require("./replay-buffer");
 const card_correlator_1 = require("./card-correlator");
@@ -37,7 +39,7 @@ function initExecution(tool, toolName, input, ctx, deps) {
     // both the quota gate and telemetry, so it must be computed for every call
     // (not just quota'd ones). `roleQuota` is the tool's entry for this role.
     const roleQuota = ctx.role ? tool.rolesQuota?.[ctx.role] : undefined;
-    const { key: windowKey, limit: quotaLimit } = (deps.computeQuotaWindow ?? dispatch_types_1.defaultComputeQuotaWindow)(ctx, roleQuota);
+    const { key: windowKey, limit: quotaLimit } = (deps.computeQuotaWindow ?? dispatch_types_1.defaultComputeQuotaWindow)(ctx, roleQuota, toolName);
     return {
         tool,
         toolName,
@@ -458,6 +460,15 @@ const invokeStep = {
             else {
                 result = await tool.fn(input, handlerCtx);
             }
+            // guidance.seeAlso — result-aware cross-link pointers rendered uniformly
+            // into the envelope (_meta._seeAlso + a one-line "See also:" text block).
+            // Self-gates (unchanged result) when the tool declares none / emits none /
+            // errored; never fails the underlying tool call.
+            result = (0, see_also_1.applySeeAlso)(result, exec.tool.guidance?.seeAlso, input, handlerCtx);
+            // Host ambient annotator (agent-managed-compaction P-013): the host may append a
+            // banded context-usage gauge to EVERY result so a heads-down session that never
+            // calls a coord tool still sees its usage. Default no-op; never throws.
+            result = (0, result_annotator_1.applyResultAnnotator)(result, handlerCtx);
             // ok-on-abort race: the timeout/idle watchdog (or the caller's signal) fired
             // mid-handler, but the handler returned normally without observing
             // ctx.signal.aborted.
@@ -481,7 +492,17 @@ const invokeStep = {
                 // read). `ProjectedTool` carries `capabilities`, not a precomputed `tier`.
                 const caps = exec.tool.capabilities;
                 const isLowTierRead = caps.length > 0 && caps.every((c) => (0, capability_tiers_1.tierFor)(c) === 'low');
-                if (!isLowTierRead) {
+                // Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): a
+                // MUTATION the tool DECLARES idempotent whose handler RAN TO COMPLETION is safe to
+                // surface past the deadline — the write committed (the handler returned a result),
+                // and re-applying an idempotent write can never double-effect, so reporting the
+                // TRUTHFUL success (instead of a spurious `timeout`) is correct AND stops the agent
+                // re-dispatching a write that already landed. This is the 280 `plans:set-status`
+                // false-timeout fix: writes that COMMITTED but returned `timeout` because wall-clock
+                // beat the deadline under load. Absent/false ⇒ the abort stays authoritative (below),
+                // unchanged for every tool that has not opted in.
+                const isIdempotentCompletion = exec.tool.idempotent === true;
+                if (!isLowTierRead && !isIdempotentCompletion) {
                     return {
                         ok: false,
                         error: {
@@ -490,10 +511,10 @@ const invokeStep = {
                         },
                     };
                 }
-                // Completed read despite the abort: return it directly. Skip the outputRef
-                // chunk-emit below — the stream is already aborted so the client can't
-                // receive it (and emitting could re-throw into the catch); the result still
-                // carries outputRef for a later fetch.
+                // Completed read — OR completed idempotent mutation — despite the abort: return it
+                // directly. Skip the outputRef chunk-emit below — the stream is already aborted so
+                // the client can't receive it (and emitting could re-throw into the catch); the
+                // result still carries outputRef for a later fetch.
                 exec.handlerResult = result;
                 return { ok: true, result };
             }
@@ -829,6 +850,27 @@ async function recordTelemetry(exec, result) {
     try {
         if (result.ok && result.result) {
             const r = result.result;
+            // Capture the SERVED result format (json/toon/csv/tsv/md) into metadata_json so
+            // compact-encoding ADOPTION is a measurable signal — `metadata_json->>'format'`
+            // GROUP BY gives the toon-vs-json share per tool over time, the success metric
+            // for the token-optimization rollout (definetool-usage-insights-tab P-002 / D-002).
+            // It rides metadata_json (jsonb) — no DDL. Absent _meta.format ⇒ not recorded
+            // (the consumer reads absent as the unmarked JSON default).
+            const servedFormat = r._meta?.format;
+            // The negotiated freshness mode (full | not_modified), when the call went
+            // through delta negotiation (agent-tool-delta-protocol-2026-06-22, P-005).
+            // Captured into metadata_json so `metadata_json->>'deltaMode'` GROUP BY gives
+            // the not_modified hit-rate per tool over time — the success metric for the
+            // delta rollout (mirrors the `format` capture; rides jsonb, no DDL). Absent
+            // _meta.delta ⇒ not recorded (the tool wasn't delta-negotiated).
+            const servedDeltaMode = r._meta?.delta?.mode;
+            let metaWithFormat = metadataJson;
+            if (typeof servedFormat === 'string') {
+                metaWithFormat = { ...(metaWithFormat ?? {}), format: servedFormat };
+            }
+            if (typeof servedDeltaMode === 'string') {
+                metaWithFormat = { ...(metaWithFormat ?? {}), deltaMode: servedDeltaMode };
+            }
             await deps.recordInvocation({
                 toolName,
                 pluginName: tool.pluginName,
@@ -840,7 +882,7 @@ async function recordTelemetry(exec, result) {
                 ...(r.outputRef ? { outputRef: r.outputRef } : {}),
                 args: input,
                 eventCount,
-                metadataJson,
+                metadataJson: metaWithFormat,
             });
         }
         else {

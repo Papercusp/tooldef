@@ -1,46 +1,39 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.runOrchestrationScript = runOrchestrationScript;
-/**
- * code-execution-tool-orchestration B-CX-1A / B-CX-SANDBOX — the sandbox EXECUTOR.
- *
- * Runs a model-submitted orchestration script with the tool facade injected as `tools`, and
- * returns ONLY the script's returned summary. Intermediate tool results live here in the
- * runtime and never re-enter the model's context — that, plus collapsing many tool round-trips
- * into one `code:run` call, is the token win the plan is built around.
- *
- *   // model writes:
- *   const open = await tools.work_items.list({ status: 'open' });
- *   const failing = [];
- *   for (const w of open.items) {
- *     const d = await tools.work_items.get({ id: w.id });
- *     if (d.checks?.failing) failing.push(w.id);
- *   }
- *   return { scanned: open.items.length, failing };   // ← only THIS returns to the model
- *
- * ISOLATION (B-CX-SANDBOX): the script runs in a dedicated **worker thread**, NOT on the host
- * event loop. The worker gives us two things the old in-host `node:vm` executor could not:
- *
- *   1. A *synchronous* infinite loop (`while (true) {}`) blocks only the WORKER thread; the host
- *      stays responsive and `worker.terminate()` HARD-KILLS the runaway at the timeout. (The old
- *      executor's vm `timeout` only applied while *compiling* the async wrapper — the wrapper's
- *      body ran on the host loop afterward, so a sync loop froze the whole process.)
- *   2. Optional memory bounds via the worker's V8 heap cap (`maxOldGenerationSizeMb`).
- *
- * Inside the worker we STILL run the body under `node:vm.runInNewContext`, which scopes the
- * script's globals (no `require`/`process`/`module`/`Buffer`; standard intrinsics like
- * JSON/Math/Promise present) and gives clean compile-error reporting. So the worker is the
- * isolation+kill boundary; the inner vm is the globals-scoping + compile boundary.
- *
- * The facade is NOT cloneable into a worker (its members are live host functions that dispatch
- * through the real tool pipeline — DB, ctx, capability envelope), so each `tools.ns.verb(args)`
- * the script makes is RPC'd back to the host over the worker message channel: the worker holds a
- * Proxy facade, the host runs the REAL facade fn and posts the result back. The whitelist in
- * tool-facade.ts (the agent's capability envelope) + the dry-run/confirm gate on write-effect
- * tools (B-CX-2A) remain the security model; the worker is an availability/robustness boundary,
- * not a substitute for the whitelist.
- */
-const node_worker_threads_1 = require("node:worker_threads");
 /**
  * The worker body, embedded as a string and run via `new Worker(src, { eval: true })`.
  *
@@ -101,11 +94,25 @@ const WORKER_SRC = `(() => {
     },
   });
 
+  // --- EI-7839: a bounded sleep() helper, since the vm context has no setTimeout/setInterval ---
+  // (those are Node/DOM globals, not JS-spec intrinsics — runInNewContext's sandbox omits them
+  // entirely, so a script calling setTimeout() throws ReferenceError, not a timeout). A script
+  // that needs a short async delay (e.g. "fire a write, wait briefly, re-verify") previously had
+  // no way to do that inside code:run at all. Capped at SLEEP_MAX_MS per call so a runaway
+  // sleep(huge) degrades to the existing overall script_timeout kill rather than a surprising
+  // multi-minute hang; built on the WORKER's own (real, Node) setTimeout — this scope is outside
+  // the sandboxed vm context, so it is not itself exposed to the script.
+  const SLEEP_MAX_MS = 10000;
+  const sleep = (ms) => new Promise((resolve) => {
+    const bounded = Math.max(0, Math.min(Number(ms) || 0, SLEEP_MAX_MS));
+    setTimeout(resolve, bounded);
+  });
+
   // --- compile + run the body under vm (globals-scoped); a leading newline guards a trailing // comment ---
   const wrap = (body) => '(async (tools, log) => {\\n' + body + '\\n})';
   let factory;
   try {
-    factory = vm.runInNewContext(wrap(script), { console: { log, error: log, warn: log } }, { displayErrors: true });
+    factory = vm.runInNewContext(wrap(script), { console: { log, error: log, warn: log }, sleep }, { displayErrors: true });
   } catch (err) {
     parentPort.postMessage({ t: 'error', error: 'compile_error: ' + ((err && err.message) || String(err)) });
     return;
@@ -124,9 +131,11 @@ async function runOrchestrationScript(script, facade, opts = {}) {
     const timeoutMs = opts.timeoutMs ?? 30_000;
     const maxLogLines = opts.maxLogLines ?? 200;
     const logs = [];
+    // Lazy: keeps the barrel browser-safe (see the header note on the type-only import above).
+    const { Worker } = await Promise.resolve().then(() => __importStar(require('node:worker_threads')));
     return await new Promise((resolve) => {
         let settled = false;
-        const worker = new node_worker_threads_1.Worker(WORKER_SRC, {
+        const worker = new Worker(WORKER_SRC, {
             eval: true,
             name: 'code-orchestration',
             workerData: { script, maxLogLines },

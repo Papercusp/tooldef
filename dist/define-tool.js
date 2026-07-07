@@ -25,6 +25,8 @@ const emits_registry_1 = require("./emits-registry");
 const tool_projection_1 = require("./tool-projection");
 const dispatch_projected_1 = require("./dispatch-projected");
 const serialize_result_1 = require("./serialize-result");
+const payload_tier_1 = require("./payload-tier");
+const delta_protocol_1 = require("./delta-protocol");
 const result_encoding_1 = require("@papercusp/result-encoding");
 /**
  * Walk up the call stack to find the file that called defineTool, then
@@ -116,7 +118,123 @@ function computeOutputEligibility(resultSchema) {
  * declared, the returned `data` is validated against it and a mismatch is
  * logged (best-effort, never throws — D-003 payoff #3).
  */
-async function serializeProjectedResult(response, ctx, eligibility, def, readColumns) {
+/**
+ * Resolve the freshness negotiation for one projected tool call (agent-tool-delta-
+ * protocol-2026-06-22). Layers the Lane-E semantic upgrade on top of the Lane-B
+ * view-level decision (`negotiateDelta`):
+ *
+ *   - no `_delta` request AND no `delta` capability → undefined (today's path).
+ *   - `_delta` request, non-capable tool → full, `supported:false`.
+ *   - capable tool: small-response bypass → full; else compute the view revision +
+ *     (for a semantic tool) the row digest + checksum, run the Lane-B decision, and
+ *     UPGRADE a `changed` outcome to `mode:'delta'` when the request wants it, the
+ *     prior cursor carried a digest, the cursor is within `maxDeltaAge`, and the
+ *     computed delta is actually smaller than a full resend.
+ *
+ * Never throws: a thrown `revision()`/`changesSince()` degrades to a full body.
+ */
+async function negotiateToolDelta(def, ctx, args, response) {
+    const request = (0, delta_protocol_1.parseDeltaRequest)(ctx.requestedDelta);
+    if (!request && !def.delta)
+        return undefined;
+    if (!def.delta)
+        return (0, delta_protocol_1.negotiateDelta)({ request, capabilityDeclared: false });
+    const cap = def.delta;
+    const scope = cap.scope?.(args, ctx);
+    const fingerprint = (0, delta_protocol_1.computeViewFingerprint)({ toolName: def.name, args: args ?? null, scope, format: ctx.requestedFormat });
+    const body = response && typeof response === 'object' ? response.data : undefined;
+    const fullJsonLen = JSON.stringify(body ?? null).length;
+    if (fullJsonLen < delta_protocol_1.DELTA_SMALL_RESPONSE_BYTES) {
+        return (0, delta_protocol_1.negotiateDelta)({ request, capabilityDeclared: true, currentFingerprint: fingerprint, bypass: true });
+    }
+    // Semantic surface active when the tool can produce a diffable row array — via
+    // the `rows` selector (e.g. flatten groups) or because the body IS the array —
+    // AND declared `itemKey`. Otherwise it's a Lane-B (full | not_modified) tool.
+    const rows = cap.rows ? cap.rows(body) ?? null : Array.isArray(body) ? body : null;
+    const itemKey = cap.itemKey;
+    let digest = null;
+    let checksum;
+    if (rows && itemKey) {
+        digest = (0, delta_protocol_1.computeRowDigest)(rows, itemKey, cap.rowRevision);
+        checksum = (0, delta_protocol_1.computeViewChecksum)(rows, itemKey, cap.rowRevision);
+    }
+    // Revision precedence: an explicit `cap.revision` (the cheapest signal) → the
+    // view checksum for a semantic tool → a content hash of the whole body. Only the
+    // explicit path can throw; the derived paths are pure over the handler's output.
+    let currentRevision;
+    try {
+        currentRevision = cap.revision
+            ? String(await cap.revision(args, ctx))
+            : checksum !== undefined
+                ? checksum
+                : (0, delta_protocol_1.contentRevision)(body ?? null);
+    }
+    catch (err) {
+        ctx.log(`[delta] ${def.name} revision() threw; serving full: ${err instanceof Error ? err.message : String(err)}`);
+        return { mode: 'full', supported: true, reason: 'revision_error' };
+    }
+    const nowMs = Date.now();
+    const cursorExtra = digest ? { dg: digest, ts: nowMs } : undefined;
+    const base = (0, delta_protocol_1.negotiateDelta)({
+        request,
+        capabilityDeclared: true,
+        currentRevision,
+        currentFingerprint: fingerprint,
+        schemaVersion: cap.schemaVersion,
+        cursorExtra,
+    });
+    // A semantic full/not_modified response carries the view checksum so the harness
+    // can verify a later merge (and store it with the base).
+    if (checksum && base.mode !== 'delta')
+        base.checksum = checksum;
+    // Convey the itemKey FIELD NAME so an OUT-OF-PROCESS client (the MCP proxy) can merge
+    // a delta generically (`row[itemKeyField]`); in-process clients read `itemKey` from the
+    // registry and ignore it. Only meaningful for a semantic (itemKey-declared) tool.
+    if (cap.itemKeyField && itemKey && base.supported)
+        base.itemKeyField = cap.itemKeyField;
+    // Upgrade `changed` → `delta` only when the harness wants a delta body (mode
+    // `auto`; an explicit `not_modified`/`full` is honored as-is) and it's safe.
+    const wantsDelta = !!request && request.mode !== 'full' && request.mode !== 'not_modified';
+    if (rows && itemKey && base.mode === 'full' && base.reason === 'changed' && wantsDelta) {
+        // The semantic-delta upgrade is host-gated (FLAGS.TOOL_DELTA_PROTOCOL). The
+        // flag read sits HERE — after the structural narrowing — so it runs only on a
+        // changed-view + delta-request call (never per-call) and degrades to the
+        // unconditionally-safe Lane-B `full` (reason `flag_off`) when off, never a
+        // semantic delta. dormant-safe: OFF is byte-identical to a delta-unaware host.
+        if (!(await (0, delta_protocol_1.isSemanticDeltaEnabled)(ctx))) {
+            base.reason = 'flag_off';
+            return base;
+        }
+        // reason 'changed' ⇒ the request cursor decoded and its fp+sv matched.
+        const decoded = (0, delta_protocol_1.decodeDeltaCursor)(request.cursor);
+        if (!decoded?.dg) {
+            base.reason = 'no_digest';
+        }
+        else if (cap.maxDeltaAge !== undefined && decoded.ts !== undefined && nowMs - decoded.ts > cap.maxDeltaAge) {
+            base.reason = 'max_age';
+        }
+        else {
+            try {
+                const changes = cap.changesSince
+                    ? await cap.changesSince(args, decoded, ctx)
+                    : (0, delta_protocol_1.diffFromDigest)(decoded.dg, rows, itemKey, { rowRevision: cap.rowRevision, rowType: cap.rowType });
+                // The delta must actually be smaller than a full resend, else just send full.
+                if (JSON.stringify(changes).length >= fullJsonLen) {
+                    base.reason = 'delta_too_large';
+                }
+                else {
+                    return { mode: 'delta', supported: true, cursor: base.cursor, changes, checksum, counts: (0, delta_protocol_1.deltaCounts)(changes) };
+                }
+            }
+            catch (err) {
+                ctx.log(`[delta] ${def.name} changesSince() threw; serving full: ${err instanceof Error ? err.message : String(err)}`);
+                base.reason = 'changesSince_error';
+            }
+        }
+    }
+    return base;
+}
+async function serializeProjectedResult(response, ctx, eligibility, def, readColumns, args) {
     if (def.result &&
         process.env.PAPERCUSP_VALIDATE_TOOL_OUTPUT === '1' &&
         response &&
@@ -132,10 +250,16 @@ async function serializeProjectedResult(response, ctx, eligibility, def, readCol
             /* validation is best-effort; never fail the call on it */
         }
     }
+    // Framework freshness negotiation (agent-tool-delta-protocol-2026-06-22, P-005 +
+    // P-011/P-012 semantic deltas). No-op unless the call carries a `_delta` request
+    // or the endpoint declared a `delta` capability; never fails a call (a thrown
+    // revision()/changesSince() degrades to full).
+    const delta = await negotiateToolDelta(def, ctx, args, response);
     const serialized = (0, serialize_result_1.serializeToolResponse)(response, {
         ...(0, serialize_result_1.formatOptsFromCtx)(ctx, eligibility),
         toolName: def.name,
         readColumns,
+        ...(delta ? { delta } : {}),
     });
     const result = { content: serialized.content };
     if (Object.keys(serialized._meta).length > 0)
@@ -212,7 +336,13 @@ function applyPositionalWriteShim(name, argsJsonSchema, input) {
     const row = input.row;
     if (typeof row !== 'string')
         return input; // keyed args (or no row) — leave as-is
-    const cols = (0, result_encoding_1.projectWriteColumns)(argsJsonSchema, { freeTextName: (0, result_encoding_1.getPrePromptEntry)(name)?.freeTextArg });
+    const entry = (0, result_encoding_1.getPrePromptEntry)(name);
+    const cols = (0, result_encoding_1.projectWriteColumns)(argsJsonSchema, {
+        freeTextName: entry?.freeTextArg,
+        columnOverrides: entry?.columnOverrides,
+        columnNames: entry?.writeColumnNames,
+        requiredColumnNames: entry?.writeRequiredColumnNames,
+    });
     if (!cols)
         return input; // tool doesn't actually fit the bounded positional shape
     const rec = (0, result_encoding_1.reconstructArgs)(row, cols);
@@ -302,12 +432,15 @@ function definePrincipalGatedTool(input) {
         capability: input.capability,
         tier,
         effect: inferEffect(input.capability, input.effect),
+        idempotent: input.idempotent,
         replaces: input.replaces,
         composition: (input.replaces?.length ?? 0) > 0 ? 'composite' : 'primitive',
         args: input.args,
         result: input.result ?? input.output,
+        delta: input.delta,
         handler: input.handler,
         guidance: input.guidance,
+        shape: input.shape,
         profile: input.profile,
         harness: input.harness,
         authorize: input.authorize,
@@ -358,6 +491,7 @@ function defineRoleGatedTool(input) {
         capability: input.capability,
         tier,
         effect: inferEffect(input.capability, input.effect),
+        idempotent: input.idempotent,
         replaces: input.replaces,
         composition: (input.replaces?.length ?? 0) > 0 ? 'composite' : 'primitive',
         requirePrincipal: false,
@@ -373,10 +507,12 @@ function defineRoleGatedTool(input) {
         modality: input.modality,
         args: input.args,
         result: input.result ?? input.output,
+        delta: input.delta,
         events: input.events,
         state: input.state,
         handler: input.handler,
         guidance: input.guidance,
+        shape: input.shape,
         profile: input.profile,
         harness: input.harness,
         emits: input.emits,
@@ -498,12 +634,20 @@ function registerLegacyAsProjected(def, expose) {
             throw new dispatch_projected_1.UnauthorizedToolError(`built-in tool "${def.name}" requires a workspace-scoped call — this session has no workspace transaction. ` +
                 `Scope the session to a workspace, or pass a per-call workspace where the host/tool supports one.`);
         }
+        // Framework-reserved per-call tier override — stripped BEFORE validation
+        // (context-trimming-tiers D-004; not part of any tool's schema).
+        const { input: tierlessInput, callTier } = (0, payload_tier_1.extractPayloadTier)(input);
         const legacyCtx = {
             principal: ctx.principal,
             tx: ctx.tx,
             log: (level, msg, meta) => ctx.log(`[${level}] ${msg}${meta ? ` ${JSON.stringify(meta)}` : ''}`),
+            // Thread the RESOLVED payload tier so principal-gated tools that keep a
+            // hand-rolled JSON ToolResult (byte-stable contracts — memory:search)
+            // can adapt their defaults off ctx.contextTier, same as the role-gated
+            // wrapper below (context-trimming-tiers P-024).
+            ...(callTier ?? ctx.contextTier ? { contextTier: callTier ?? ctx.contextTier } : {}),
         };
-        const shimmed = applyPositionalWriteShim(def.name, rawSchema, input);
+        const shimmed = applyPositionalWriteShim(def.name, rawSchema, tierlessInput);
         const parsed = await (0, standard_schema_1.standardValidate)(def.args, shimmed);
         if (!parsed.ok) {
             throw new dispatch_projected_1.InvalidInputError(`invalid_args: ${(0, standard_schema_1.formatIssues)(parsed.issues)}`);
@@ -521,11 +665,22 @@ function registerLegacyAsProjected(def, expose) {
         if (response && typeof response === 'object' && Array.isArray(response.content)) {
             const reencodable = reencodableJsonPayload(response, ctx);
             if (reencodable !== undefined) {
-                return serializeProjectedResult({ data: reencodable }, ctx, eligibility, def, readColumns);
+                return serializeProjectedResult({ data: reencodable }, ctx, eligibility, def, readColumns, parsed.value);
             }
             return response;
         }
-        return serializeProjectedResult(response, ctx, eligibility, def, readColumns);
+        // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
+        // the session/call tier before format-aware serialization. Unshaped tools
+        // pass through byte-identical.
+        const shaped = (0, payload_tier_1.applyPayloadTier)({
+            toolName: def.name,
+            shape: def.shape,
+            response: response,
+            tier: (0, payload_tier_1.resolvePayloadTier)(callTier, ctx.contextTier),
+            args: parsed.value,
+            log: (m) => ctx.log(m),
+        });
+        return serializeProjectedResult(shaped, ctx, eligibility, def, readColumns, parsed.value);
     };
     (0, tool_projection_1.registerProjectedTool)({
         pluginName: 'agent-mcp',
@@ -533,6 +688,7 @@ function registerLegacyAsProjected(def, expose) {
         inputSchema,
         capabilities: [def.capability],
         effect: def.effect,
+        idempotent: def.idempotent,
         replaces: def.replaces,
         composition: def.composition,
         profile: def.profile,
@@ -553,6 +709,7 @@ function registerLegacyAsProjected(def, expose) {
         outputSchema: def.result,
         outputJsonSchema,
         resultEligibility: eligibility,
+        delta: def.delta,
         expose: {
             mcp: { name: def.name },
             http: { path: httpPath, methods: ['POST'] },
@@ -586,12 +743,22 @@ function registerRoleGatedAsProjected(def, expose) {
     const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
     const readColumns = (0, result_encoding_1.projectReadColumns)(outputJsonSchema);
     const projectedFn = async (input, ctx) => {
-        const shimmed = applyPositionalWriteShim(def.name, rawSchema, input);
+        // Framework-reserved per-call tier override — stripped BEFORE validation
+        // (context-trimming-tiers D-004; not part of any tool's schema).
+        const { input: tierlessInput, callTier } = (0, payload_tier_1.extractPayloadTier)(input);
+        const shimmed = applyPositionalWriteShim(def.name, rawSchema, tierlessInput);
         const parsed = await (0, standard_schema_1.standardValidate)(def.args, shimmed);
         if (!parsed.ok) {
             throw new dispatch_projected_1.InvalidInputError(`invalid_args: ${(0, standard_schema_1.formatIssues)(parsed.issues)}`);
         }
-        const out = await def.handler(parsed.value, ctx);
+        // Thread the per-call tier override into the HANDLER's ctx too: tools that
+        // must keep a hand-rolled JSON ToolResult (hook-consumed — coord:inbox /
+        // coord:plan-events / coord:glance) adapt their DEFAULTS off
+        // ctx.contextTier instead of declaring `shape`, and without this overlay a
+        // per-call `payloadTier:"full"` would be stripped above and silently
+        // ignored by that pattern (context-trimming-tiers P-022).
+        const handlerCtx = callTier !== undefined ? { ...ctx, contextTier: callTier } : ctx;
+        const out = await def.handler(parsed.value, handlerCtx);
         // Already a ToolResult? The handler self-serialized its content — pass it
         // through untouched (format-aware serialization only applies to handlers
         // that return a ToolResponse envelope with structured `data`). EXCEPT: on
@@ -601,12 +768,23 @@ function registerRoleGatedAsProjected(def, expose) {
         if (out && typeof out === 'object' && Array.isArray(out.content)) {
             const reencodable = reencodableJsonPayload(out, ctx);
             if (reencodable !== undefined) {
-                return serializeProjectedResult({ data: reencodable }, ctx, eligibility, def, readColumns);
+                return serializeProjectedResult({ data: reencodable }, ctx, eligibility, def, readColumns, parsed.value);
             }
             return out;
         }
+        // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
+        // the session/call tier before format-aware serialization. Unshaped tools
+        // pass through byte-identical.
+        const shaped = (0, payload_tier_1.applyPayloadTier)({
+            toolName: def.name,
+            shape: def.shape,
+            response: out,
+            tier: (0, payload_tier_1.resolvePayloadTier)(callTier, ctx.contextTier),
+            args: parsed.value,
+            log: (m) => ctx.log(m),
+        });
         // ToolResponse envelope → format-aware MCP content[] + _meta.
-        return serializeProjectedResult(out, ctx, eligibility, def, readColumns);
+        return serializeProjectedResult(shaped, ctx, eligibility, def, readColumns, parsed.value);
     };
     (0, tool_projection_1.registerProjectedTool)({
         pluginName: 'agent-mcp',
@@ -614,6 +792,7 @@ function registerRoleGatedAsProjected(def, expose) {
         inputSchema,
         capabilities: [def.capability],
         effect: def.effect,
+        idempotent: def.idempotent,
         replaces: def.replaces,
         composition: def.composition,
         profile: def.profile,
@@ -621,6 +800,7 @@ function registerRoleGatedAsProjected(def, expose) {
         outputSchema: def.result,
         outputJsonSchema,
         resultEligibility: eligibility,
+        delta: def.delta,
         agentRoles: def.agentRoles,
         rolesQuota: def.rolesQuota,
         authorize: def.authorize,

@@ -5,7 +5,7 @@
  * surface the model writes against:
  *
  *     declare const tools: {
- *       work_items: {
+ *       workItems: {
  *         // List work-items across kinds …
  *         list(args?: { harness?: string; kind?: "feature" | "bug"; limit?: number }): Promise<unknown>;
  *       };
@@ -23,8 +23,9 @@
  * Anthropic "on-demand tool discovery" token win — the `code:tools` lookup serves signatures for
  * only the namespaces a task needs, instead of dumping every tool def into every prompt.
  *
- * Verb naming is shared with the runtime via `camelVerb` (tool-facade.ts) so the generated
- * `tools.<ns>.<verb>` names ALWAYS match what the runtime facade actually exposes.
+ * Namespace + verb naming are shared with the runtime via `camelNamespace` / `camelVerb`
+ * (tool-facade.ts) so the generated `tools.<ns>.<verb>` names ALWAYS match what the runtime
+ * facade actually exposes.
  *
  * Scoping mirrors the runtime: pass the agent's `allowed` set and tools outside it are omitted —
  * the model never sees a signature for a tool it cannot call.

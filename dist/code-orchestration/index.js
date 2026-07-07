@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.toolArgsType = exports.listFacadeNamespaces = exports.generateToolFacadeTypes = exports.runToolOrchestration = exports.unwrapToolResult = exports.realDispatch = exports.checkScript = exports.runOrchestrationScript = exports.roleScopedToolNames = exports.facadeToolNames = exports.buildToolFacade = void 0;
+exports.toolArgsType = exports.listFacadeNamespaces = exports.generateToolFacadeTypes = exports.runToolOrchestration = exports.unwrapToolResult = exports.realDispatch = exports.ensureParseCheckReady = exports.checkScript = exports.runOrchestrationScript = exports.roleScopedToolNames = exports.facadeToolNames = exports.buildToolFacade = void 0;
 /**
  * code-execution-tool-orchestration runtime (B-CX-1A / B-CX-2A).
  *
@@ -17,6 +17,7 @@ var run_script_1 = require("./run-script");
 Object.defineProperty(exports, "runOrchestrationScript", { enumerable: true, get: function () { return run_script_1.runOrchestrationScript; } });
 var parse_check_1 = require("./parse-check");
 Object.defineProperty(exports, "checkScript", { enumerable: true, get: function () { return parse_check_1.checkScript; } });
+Object.defineProperty(exports, "ensureParseCheckReady", { enumerable: true, get: function () { return parse_check_1.ensureParseCheckReady; } });
 var dispatch_binding_1 = require("./dispatch-binding");
 Object.defineProperty(exports, "realDispatch", { enumerable: true, get: function () { return dispatch_binding_1.realDispatch; } });
 Object.defineProperty(exports, "unwrapToolResult", { enumerable: true, get: function () { return dispatch_binding_1.unwrapToolResult; } });

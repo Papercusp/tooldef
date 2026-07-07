@@ -23,6 +23,19 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.formatOptsFromCtx = formatOptsFromCtx;
 exports.serializeToolResponse = serializeToolResponse;
 const result_encoding_1 = require("@papercusp/result-encoding");
+/** Shape the negotiation into the compact `_meta.delta` envelope (omit absent fields). */
+function deltaMeta(delta) {
+    return {
+        mode: delta.mode,
+        supported: delta.supported,
+        ...(delta.cursor ? { cursor: delta.cursor } : {}),
+        ...(delta.reason ? { reason: delta.reason } : {}),
+        ...(delta.checksum ? { checksum: delta.checksum } : {}),
+        ...(delta.counts ? { counts: delta.counts } : {}),
+        // itemKey FIELD NAME for out-of-process generic merge (the MCP proxy) — P-004.
+        ...(delta.itemKeyField ? { itemKeyField: delta.itemKeyField } : {}),
+    };
+}
 /** Build the format options for a call from the request context + the tool's precomputed eligibility. */
 function formatOptsFromCtx(ctx, eligibility) {
     return {
@@ -62,33 +75,46 @@ function chooseFormat(data, opts) {
     // an object is safe — a non-lossless shape falls through to JSON below.
     // (definetool-token-optimization-adoption P-001.)
     const autoBest = Array.isArray(data) || (0, result_encoding_1.isObjectWithArrayField)(data) ? 'toon' : 'json';
-    // `want` = the format the request IDEALLY maps to (what a successful serve
-    // looks like); `candidates` = the ordered try-list (excludes formats the
-    // capability set disallows). `fallback` is then "we served something other
-    // than `want`" — which correctly flags both an unsupported explicit request
-    // and a compact request whose ideal format couldn't represent the data.
-    let want;
-    let candidates;
+    // `json` request → lossless JSON, unconditionally.
     if (req === 'json') {
-        want = 'json';
-        candidates = ['json'];
+        return { format: 'json', text: (0, result_encoding_1.encode)(data, 'json'), fallback: false };
     }
-    else if (req === 'compact') {
-        want = opts.eligibility ? opts.eligibility.bestFormat : autoBest;
-        candidates = [want, 'json'];
+    // `compact` request (the agent default) → the auto pick (schema bestFormat,
+    // else autoBest), but SIZE-GUARDED (D-005): never serve a compact body that
+    // isn't actually SMALLER than JSON. TOON is lossless-checked yet can be LARGER
+    // than JSON for a HETEROGENEOUS object array — rows with differing key sets
+    // (e.g. a bulk envelope whose failed items carry an extra `error` field) defeat
+    // TOON's tabular form and fall back to a per-row expansion bigger than JSON;
+    // serving it would INCREASE tokens. Choosing JSON there is the honest optimum,
+    // NOT a degradation, so `fallback` stays false. (CSV/TSV are only reached here
+    // via an eligibility bestFormat over a proven-flat array, where they are
+    // reliably smaller, so the same size check is safe for them.)
+    if (req === 'compact') {
+        const jsonText = (0, result_encoding_1.encode)(data, 'json');
+        const want = opts.eligibility ? opts.eligibility.bestFormat : autoBest;
+        if (want !== 'json') {
+            const r = tryEncode(want, data);
+            if (r && r.text.length < jsonText.length)
+                return { ...r, fallback: false };
+        }
+        return { format: 'json', text: jsonText, fallback: false };
     }
-    else {
-        want = req; // the client explicitly named this format
-        const allowed = opts.eligibility ? opts.eligibility.capabilities.has(req) : true;
-        const fb = opts.eligibility ? opts.eligibility.bestFormat : autoBest;
-        candidates = allowed ? [req, fb, 'json'] : [fb, 'json'];
-    }
+    // Explicit non-JSON format (csv/toon/tsv/md): a DELIBERATE client ask — honor it
+    // (no size guard; the client chose it), trying it first, then the
+    // eligibility/auto fallback, then JSON. `fallback` flags "served other than
+    // `want`" — an unsupported explicit request or a shape the format can't hold.
+    const want = req;
+    const allowed = opts.eligibility ? opts.eligibility.capabilities.has(req) : true;
+    const fb = opts.eligibility ? opts.eligibility.bestFormat : autoBest;
+    const candidates = allowed ? [req, fb, 'json'] : [fb, 'json'];
     for (const f of candidates) {
         const r = tryEncode(f, data);
         if (r)
             return { ...r, fallback: r.format !== want };
     }
     // Unreachable in practice (json always encodes), but keep the contract total.
+    // `want` is typed to the non-json formats, so the comparison is dead — cast to keep
+    // the contract explicit (and tsc happy after a concurrent narrowing of the format type).
     return { format: 'json', text: (0, result_encoding_1.encode)(data, 'json'), fallback: want !== 'json' };
 }
 /**
@@ -138,6 +164,49 @@ function serializeToolResponse(response, opts) {
             _meta.degradedReasons = response.degradedReasons;
     }
     const data = response.data ?? response;
+    // Freshness negotiation (agent-tool-delta-protocol-2026-06-22, P-005). A
+    // `not_modified` outcome SUPPRESSES the body entirely — the harness already
+    // holds the matching base in context, so we send only a tiny marker + the
+    // fresh cursor. This is the whole point of the protocol: don't replay an
+    // unchanged snapshot into the model's context. (No data → nothing to merge →
+    // base-presence-safe, D-004/D-006.) The `full` branch below attaches the
+    // fresh cursor so the NEXT call can ask `not_modified`.
+    if (opts.delta && opts.delta.mode === 'not_modified') {
+        _meta.delta = deltaMeta(opts.delta);
+        const count = Array.isArray(data)
+            ? data.length
+            : (0, result_encoding_1.isObjectWithArrayField)(data)
+                ? undefined
+                : undefined;
+        const text = count !== undefined ? `mode: not_modified\ncount: ${count}` : 'mode: not_modified';
+        const content = [{ type: 'text', text }];
+        if (Array.isArray(response.uiResources)) {
+            for (const ui of response.uiResources)
+                content.push(ui);
+        }
+        // `format: 'json'` is the internal label only — `_meta.format` is deliberately
+        // left unset (there is no compact body to tag; telemetry reads delta.mode).
+        return { content, _meta, format: 'json', fallback: false };
+    }
+    // Semantic delta (Lane E): the BODY is the changed rows (added/updated/removed),
+    // not the full snapshot — a compact array the harness merges onto its retained
+    // base, then verifies against `_meta.delta.checksum`. Same format machinery as a
+    // full body (TOON/compact-eligible), so the changes ride the token-efficient path.
+    if (opts.delta && opts.delta.mode === 'delta') {
+        _meta.delta = deltaMeta(opts.delta);
+        const changes = opts.delta.changes ?? [];
+        const chosen = chooseFormat(changes, opts);
+        _meta.format = chosen.format;
+        if (chosen.fallback)
+            _meta.formatFallback = true;
+        const text = chosen.format === 'json' ? chosen.text : `format: ${chosen.format}\n${chosen.text}`;
+        const content = [{ type: 'text', text }];
+        if (Array.isArray(response.uiResources)) {
+            for (const ui of response.uiResources)
+                content.push(ui);
+        }
+        return { content, _meta, format: chosen.format, fallback: chosen.fallback };
+    }
     // Tier-3 (prompt-declared columns) takes precedence over the generic compact
     // path for registry tools; otherwise fall through to bestFormat/TOON-auto.
     const tier3 = tryTier3Read(data, opts);
@@ -155,6 +224,11 @@ function serializeToolResponse(response, opts) {
         for (const ui of response.uiResources)
             content.push(ui);
     }
+    // Full-body path: attach the negotiated freshness envelope (fresh cursor, so
+    // the next call can request `not_modified`; `supported:false` tells a harness
+    // this endpoint isn't delta-capable so it stops sending `_delta`).
+    if (opts.delta)
+        _meta.delta = deltaMeta(opts.delta);
     const result = { content, _meta, format: chosen.format, fallback: chosen.fallback };
     // Opt-in lossless structured payload for UI/programmatic consumers (P-010).
     // Only meaningful when the body itself isn't already the lossless JSON.

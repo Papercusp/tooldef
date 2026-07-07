@@ -190,12 +190,13 @@ function facadeEntries(tools, opts) {
             continue;
         if (opts.allowed && !opts.allowed.has(name))
             continue;
-        const ns = name.slice(0, ci);
-        if (ns === 'call')
+        const rawNs = name.slice(0, ci);
+        const ns = (0, tool_facade_1.camelNamespace)(rawNs);
+        if (rawNs === 'call' || ns === 'call')
             continue; // never shadow the escape hatch
         // When a subset is requested, include a tool if its ns OR its full name matches.
         if (nsFilter || nameFilter) {
-            const hit = (nsFilter && nsFilter.has(ns)) || (nameFilter && nameFilter.has(name));
+            const hit = (nsFilter && (nsFilter.has(ns) || nsFilter.has(rawNs))) || (nameFilter && nameFilter.has(name));
             if (!hit)
                 continue;
         }
