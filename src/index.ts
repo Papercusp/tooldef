@@ -252,6 +252,7 @@ export {
   type ToolExposureSlash,
   type UnifiedToolContext,
   type GateBypass,
+  type RequestOriginMetadata,
   type MinimalEventSink,
   type PapercuspBinaryEnvelope,
   type EventWireKind,

@@ -305,6 +305,17 @@ export interface GateBypass {
   policy?: boolean;
 }
 
+export interface RequestOriginMetadata {
+  /** Transport adapter that observed the request, e.g. "mcp". */
+  transport: string;
+  /** URL pathname only; query params are whitelisted separately below. */
+  path?: string;
+  /** Non-secret request query params useful for attribution/debugging. */
+  query?: Record<string, string>;
+  /** Non-secret request headers useful for attribution/debugging. */
+  headers?: Record<string, string>;
+}
+
 export interface UnifiedToolContext {
   /** Tool-bound logger. Always populated. */
   log: (msg: string) => void;
@@ -463,6 +474,14 @@ export interface UnifiedToolContext {
    * through an adapter — `recordInvocation` writes null in that case.
    */
   transport?: 'http' | 'mcp' | 'ipc' | 'in_process';
+
+  /**
+   * Sanitized transport request provenance. Adapters populate only non-secret
+   * headers/query params, then recordInvocation persists it in
+   * `tool_invocations.metadata_json.requestOrigin` so unattributed loopback
+   * calls can be traced to their client surface without storing auth material.
+   */
+  requestOrigin?: RequestOriginMetadata;
 
   /**
    * Client-negotiated result format (token-efficient-tool-result-formats D-005).
