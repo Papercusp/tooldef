@@ -256,4 +256,96 @@ describe('runDispatchStack — custom stack', () => {
     });
     expect((captured ?? {}).deltaMode).toBeUndefined();
   });
+
+  // EI-9130: a generic, queryable "was this response served as a delta?" breadcrumb —
+  // derived from the formal protocol's mode when present, or preserved verbatim when a
+  // handler already stamped it itself via ctx.metadata({ deltaServed }) (e.g. coord:orient's
+  // bespoke fleetDelta/planEvents/fleetCatchUp cursors, which don't ride `_meta.delta`).
+  it("derives deltaServed:true from a served _meta.delta.mode:'delta'", async () => {
+    let capturedMeta: Record<string, unknown> | null | undefined;
+    const tool = makeTool({
+      fn: async () => ({ content: [{ type: 'text', text: '[]' }], _meta: { delta: { mode: 'delta', cursor: 'c1' } } }),
+    });
+    await runDispatchStack(tool, 'fix.tool', {}, MAKE_CTX(), {
+      computeQuotaWindow: () => ({ key: 'w', limit: 0 }),
+      recordInvocation: vi.fn(async (i) => {
+        capturedMeta = i.metadataJson;
+      }),
+    });
+    expect(capturedMeta?.deltaServed).toBe(true);
+  });
+
+  it("derives deltaServed:true from a served _meta.delta.mode:'not_modified'", async () => {
+    let capturedMeta: Record<string, unknown> | null | undefined;
+    const tool = makeTool({
+      fn: async () => ({ content: [{ type: 'text', text: '' }], _meta: { delta: { mode: 'not_modified', cursor: 'c2' } } }),
+    });
+    await runDispatchStack(tool, 'fix.tool', {}, MAKE_CTX(), {
+      computeQuotaWindow: () => ({ key: 'w', limit: 0 }),
+      recordInvocation: vi.fn(async (i) => {
+        capturedMeta = i.metadataJson;
+      }),
+    });
+    expect(capturedMeta?.deltaServed).toBe(true);
+  });
+
+  it("derives deltaServed:false from a served _meta.delta.mode:'full' (negotiated but not narrowed)", async () => {
+    let capturedMeta: Record<string, unknown> | null | undefined;
+    const tool = makeTool({
+      fn: async () => ({ content: [{ type: 'text', text: '[]' }], _meta: { delta: { mode: 'full', cursor: 'c3' } } }),
+    });
+    await runDispatchStack(tool, 'fix.tool', {}, MAKE_CTX(), {
+      computeQuotaWindow: () => ({ key: 'w', limit: 0 }),
+      recordInvocation: vi.fn(async (i) => {
+        capturedMeta = i.metadataJson;
+      }),
+    });
+    expect(capturedMeta?.deltaServed).toBe(false);
+  });
+
+  it('records NO deltaServed key when the result carries no _meta.delta and the handler stamped none', async () => {
+    let captured: Record<string, unknown> | null | undefined = { sentinel: 1 };
+    const tool = makeTool({ fn: async () => ({ content: [{ type: 'text', text: 'x' }] }) });
+    await runDispatchStack(tool, 'fix.tool', {}, MAKE_CTX(), {
+      computeQuotaWindow: () => ({ key: 'w', limit: 0 }),
+      recordInvocation: vi.fn(async (i) => {
+        captured = i.metadataJson;
+      }),
+    });
+    expect((captured ?? {}).deltaServed).toBeUndefined();
+  });
+
+  it("preserves a handler's own explicit ctx.metadata({ deltaServed }) stamp verbatim, even with no _meta.delta (coord:orient's bespoke cursor-delta shape)", async () => {
+    let capturedMeta: Record<string, unknown> | null | undefined;
+    const tool = makeTool({
+      fn: async (_input, ctx) => {
+        ctx.metadata?.({ deltaServed: true });
+        return { content: [{ type: 'text', text: 'x' }] };
+      },
+    });
+    await runDispatchStack(tool, 'fix.tool', {}, MAKE_CTX(), {
+      computeQuotaWindow: () => ({ key: 'w', limit: 0 }),
+      recordInvocation: vi.fn(async (i) => {
+        capturedMeta = i.metadataJson;
+      }),
+    });
+    expect(capturedMeta?.deltaServed).toBe(true);
+  });
+
+  it("a handler's explicit deltaServed:false stamp wins over a formal _meta.delta.mode present on the SAME call", async () => {
+    let capturedMeta: Record<string, unknown> | null | undefined;
+    const tool = makeTool({
+      fn: async (_input, ctx) => {
+        ctx.metadata?.({ deltaServed: false });
+        return { content: [{ type: 'text', text: '[]' }], _meta: { delta: { mode: 'delta', cursor: 'c4' } } };
+      },
+    });
+    await runDispatchStack(tool, 'fix.tool', {}, MAKE_CTX(), {
+      computeQuotaWindow: () => ({ key: 'w', limit: 0 }),
+      recordInvocation: vi.fn(async (i) => {
+        capturedMeta = i.metadataJson;
+      }),
+    });
+    expect(capturedMeta?.deltaServed).toBe(false);
+  });
 });

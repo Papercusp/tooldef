@@ -1008,6 +1008,24 @@ async function recordTelemetry(
       if (typeof servedDeltaMode === 'string') {
         metaWithFormat = { ...(metaWithFormat ?? {}), deltaMode: servedDeltaMode };
       }
+      // EI-9130: a generic, queryable "was this response served as a delta?" breadcrumb.
+      // `metadata_json->>'deltaMode'` (above) only fires for tools riding the FORMAL
+      // delta protocol (_meta.delta) — a handler with its own bespoke cursor-delta shape
+      // (e.g. coord:orient's fleetDelta/planEvents/fleetCatchUp cursors, which don't ride
+      // `_meta.delta`) has no equivalent signal, so a delta rollout's live win can't be
+      // queried uniformly across mechanisms — only inferred. Fix: normalize BOTH into one
+      // boolean field. A handler that already knows it served a delta stamps it directly
+      // via `ctx.metadata({ deltaServed: true })` (folded into `metadataJson` above by
+      // `finalizeMetadata`) — that explicit stamp always wins. Otherwise, derive it from
+      // the formal protocol's mode (anything but 'full' is a delta). Absent ⇒ no delta
+      // mechanism was in play at all (never recorded as `false` — mirrors the `format` /
+      // `deltaMode` absent-means-unmarked convention above).
+      if ((metaWithFormat as { deltaServed?: unknown } | null)?.deltaServed === undefined) {
+        const derivedDeltaServed = typeof servedDeltaMode === 'string' ? servedDeltaMode !== 'full' : undefined;
+        if (derivedDeltaServed !== undefined) {
+          metaWithFormat = { ...(metaWithFormat ?? {}), deltaServed: derivedDeltaServed };
+        }
+      }
       await deps.recordInvocation({
         toolName,
         pluginName: tool.pluginName,
