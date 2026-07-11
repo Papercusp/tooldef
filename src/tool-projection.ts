@@ -1231,9 +1231,62 @@ export function unregisterProjectedToolsForPlugin(pluginName: string): number {
   return removed;
 }
 
-/** Look up by MCP name (e.g. 'repomix.pack'). */
+/** Look up by MCP name (e.g. 'repomix.pack') — EXACT match only. */
 export function lookupByMcpName(name: string): ProjectedTool | undefined {
   return BY_MCP_NAME.get(name);
+}
+
+/**
+ * Normalize an MCP tool name for TOLERANT resolution: strip a client's
+ * `mcp__<server>__` advertisement wrapper, then collapse every separator
+ * (`:` `_` `.` `-`) to one. So the canonical registered name
+ * (`curation:state-of-pot`), the underscore/group_verb form
+ * (`curation_state-of-pot`), and the fully client-mangled form
+ * (`mcp__papercusp-su__curation_state-of-pot`) all reduce to ONE key.
+ *
+ * This is the single source of truth for tool-name normalization — operator-
+ * core's unknown-tool suggestion path aliases to it, so a SUGGESTED name and a
+ * RESOLVED name can never disagree (the drift that would make "did you mean X?"
+ * point at a name that then fails to resolve).
+ */
+export function normalizeMcpName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/^mcp__[^_]+(?:[^_]|_(?!_))*__/, '') // mcp__<server>__<tool> → <tool>
+    .replace(/[:_.\-]+/g, ':');
+}
+
+/**
+ * Resolve an MCP tool name TOLERANTLY (WI-3930). Exact registered name first —
+ * the fast, unchanged path that every canonical (colon-form) call takes. Only
+ * on an exact miss does it fall back to a NORMALIZED match, which accepts the
+ * underscore/group_verb and fully-mangled forms an agent naturally copies from
+ * its own advertised tool list (`mcp__papercusp-su__curation_state-of-pot`) or
+ * from a hook/error string. The docs tell agents to fall back to
+ * `tools:invoke { name }` with the colon-form name; this makes that fallback
+ * also accept the other two forms, so a single paste resolves instead of
+ * costing a wasted unknown-tool round-trip.
+ *
+ * The normalized fallback resolves ONLY when it is UNAMBIGUOUS — exactly one
+ * registered tool normalizes to the requested key. If two do (a real name
+ * collision under separator-folding), it returns undefined so the caller
+ * surfaces the honest unknown-tool / disambiguation path rather than silently
+ * guessing one. A genuine typo (`curatoin:state-of-pot`) normalizes to a key no
+ * tool matches → undefined, exactly as before.
+ */
+export function resolveMcpName(name: string): ProjectedTool | undefined {
+  const exact = BY_MCP_NAME.get(name);
+  if (exact) return exact;
+  const norm = normalizeMcpName(name);
+  if (!norm) return undefined;
+  let hit: ProjectedTool | undefined;
+  for (const [registered, tool] of BY_MCP_NAME) {
+    if (normalizeMcpName(registered) === norm) {
+      if (hit && hit !== tool) return undefined; // ambiguous → don't guess
+      hit = tool;
+    }
+  }
+  return hit;
 }
 
 /** Look up by HTTP path (e.g. '/api/plugins/repomix/pack'). */
