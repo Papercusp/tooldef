@@ -144,7 +144,13 @@ export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
     tier === 'full' ? undefined : tier === 'trimmed' ? (shape?.trimmed ?? shape?.standard) : shape?.standard;
   if (tierShaper) {
     try {
-      out = { ...response, data: tierShaper(response.data, { args, tier }) };
+      // `tierShaper` is only ever set (see the ternary above) when
+      // `tier !== 'full'` — TS can't see that implication through the
+      // separate `tierShaper` variable, so narrow explicitly at the call
+      // site rather than widening PayloadShaperCtx.tier to include 'full'
+      // (a shaper is never invoked for 'full', so it should never need to
+      // handle it).
+      out = { ...response, data: tierShaper(response.data, { args, tier: tier as 'trimmed' | 'standard' }) };
     } catch (err) {
       (log ?? console.warn)(
         `[payload-tier] ${toolName} ${tier} shaper threw (serving unshaped data): ${err instanceof Error ? err.message : String(err)}`,

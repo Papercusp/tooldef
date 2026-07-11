@@ -229,7 +229,7 @@ export async function runOrchestrationScript(
 
 /** Run one RPC'd tool call against the REAL host facade and post the reply back to the worker. */
 async function handleCall(
-  worker: Worker,
+  worker: NodeWorker,
   facade: ToolFacade,
   m: CallMessage,
   isSettled: () => boolean,

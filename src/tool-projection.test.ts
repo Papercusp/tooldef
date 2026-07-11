@@ -7,6 +7,8 @@ import { z } from 'zod';
 import {
   registerProjectedTool,
   lookupByMcpName,
+  resolveMcpName,
+  normalizeMcpName,
   lookupByHttpPath,
   listAllProjectedTools,
   listMcpProjections,
@@ -31,6 +33,63 @@ const baseTool = (over: Partial<ProjectedTool> = {}): ProjectedTool => ({
 });
 
 afterEach(() => _resetProjectionRegistryForTests());
+
+describe('normalizeMcpName (WI-3930)', () => {
+  it('collapses the colon, underscore, and fully-mangled forms to ONE key', () => {
+    const canonical = normalizeMcpName('curation:state-of-pot');
+    expect(normalizeMcpName('curation_state-of-pot')).toBe(canonical);
+    expect(normalizeMcpName('mcp__papercusp-su__curation_state-of-pot')).toBe(canonical);
+    expect(normalizeMcpName('CURATION:STATE-OF-POT')).toBe(canonical); // case-insensitive
+  });
+
+  it('strips only the mcp__<server>__ wrapper, not a real leading segment', () => {
+    expect(normalizeMcpName('mcp__papercusp-su__rubrics_list')).toBe('rubrics:list');
+    expect(normalizeMcpName('rubrics:list')).toBe('rubrics:list');
+  });
+
+  it('leaves a distinct name distinct (no false collision)', () => {
+    expect(normalizeMcpName('rubrics:list')).not.toBe(normalizeMcpName('rubrics:get'));
+  });
+});
+
+describe('resolveMcpName (WI-3930 — tolerant tool-name resolution)', () => {
+  // The registered name is canonical colon form; agents commonly paste the
+  // underscore/group_verb or fully client-mangled form they see advertised.
+  const register = () =>
+    registerProjectedTool(baseTool({ expose: { mcp: { name: 'curation:state-of-pot' } } }));
+
+  it('resolves the exact canonical (colon) name — the unchanged fast path', () => {
+    register();
+    expect(resolveMcpName('curation:state-of-pot')).toBeDefined();
+  });
+
+  it('resolves the underscore / group_verb form', () => {
+    register();
+    expect(resolveMcpName('curation_state-of-pot')).toBeDefined();
+  });
+
+  it('resolves the fully client-mangled mcp__server__ form', () => {
+    register();
+    expect(resolveMcpName('mcp__papercusp-su__curation_state-of-pot')).toBeDefined();
+  });
+
+  it('returns undefined for a genuine typo (no fabricated match)', () => {
+    register();
+    expect(resolveMcpName('curatoin:state-of-pot')).toBeUndefined();
+    expect(resolveMcpName('curation:completely-different')).toBeUndefined();
+  });
+
+  it('refuses to guess when the normalized form is AMBIGUOUS (two tools collide)', () => {
+    // Two DISTINCT registered names that fold to the same normalized key.
+    registerProjectedTool(baseTool({ pluginName: 'p1', expose: { mcp: { name: 'x:a-b' } } }));
+    registerProjectedTool(baseTool({ pluginName: 'p2', expose: { mcp: { name: 'x:a_b' } } }));
+    // Exact still works for each…
+    expect(resolveMcpName('x:a-b')).toBeDefined();
+    expect(resolveMcpName('x:a_b')).toBeDefined();
+    // …but a form that isn't either exact name and folds to both → no guess.
+    expect(resolveMcpName('mcp__srv__x_a_b')).toBeUndefined();
+  });
+});
 
 describe('registerProjectedTool', () => {
   it('registers a tool with both http + mcp exposure', () => {

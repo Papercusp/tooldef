@@ -237,6 +237,8 @@ export {
   toolDeclaresGate,
   listUngatedProjectedTools,
   lookupByMcpName,
+  resolveMcpName,
+  normalizeMcpName,
   lookupByHttpPath,
   listAllProjectedTools,
   listMcpProjections,
