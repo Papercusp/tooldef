@@ -15,7 +15,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { defineTool } from './define-tool';
 import { dispatchProjectedTool, type DispatchProjectedDeps } from './dispatch-projected';
-import { _resetProjectionRegistryForTests, type UnifiedToolContext } from './tool-projection';
+import { _resetProjectionRegistryForTests, lookupByMcpName, type UnifiedToolContext } from './tool-projection';
 import type { ToolContext } from './types';
 
 const DEPS: DispatchProjectedDeps = {};
@@ -38,7 +38,7 @@ afterEach(() => _resetProjectionRegistryForTests());
 describe('registerLegacyAsProjected — role/uiClientId threading (EI-10358)', () => {
   it('threads role + uiClientId from the outer ctx into the handler legacyCtx', async () => {
     let received: (ToolContext & { role?: string; uiClientId?: string | null }) | undefined;
-    const tool = defineTool({
+    defineTool({
       name: 'test:legacy-ctx-identity',
       capability: 'test:read',
       description: 'fixture',
@@ -50,7 +50,7 @@ describe('registerLegacyAsProjected — role/uiClientId threading (EI-10358)', (
     });
 
     await dispatchProjectedTool(
-      tool,
+      lookupByMcpName('test:legacy-ctx-identity')!,
       'test:legacy-ctx-identity',
       {},
       ctx({ role: 'worker', uiClientId: 'su-abc123' }),
@@ -63,7 +63,7 @@ describe('registerLegacyAsProjected — role/uiClientId threading (EI-10358)', (
 
   it('omits role/uiClientId (not undefined-valued keys) when the outer ctx carries neither', async () => {
     let received: (ToolContext & { role?: string; uiClientId?: string | null }) | undefined;
-    const tool = defineTool({
+    defineTool({
       name: 'test:legacy-ctx-no-identity',
       capability: 'test:read',
       description: 'fixture',
@@ -74,7 +74,13 @@ describe('registerLegacyAsProjected — role/uiClientId threading (EI-10358)', (
       },
     });
 
-    await dispatchProjectedTool(tool, 'test:legacy-ctx-no-identity', {}, ctx(), DEPS);
+    await dispatchProjectedTool(
+      lookupByMcpName('test:legacy-ctx-no-identity')!,
+      'test:legacy-ctx-no-identity',
+      {},
+      ctx(),
+      DEPS,
+    );
 
     expect(received?.role).toBeUndefined();
     expect(received?.uiClientId).toBeUndefined();
