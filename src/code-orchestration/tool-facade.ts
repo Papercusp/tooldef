@@ -55,6 +55,23 @@ export function camelVerb(verb: string): string {
 }
 
 /**
+ * The ergonomic spellings an agent might write for ONE identifier (a namespace
+ * or a verb), so any of them resolves against the facade:
+ *   - the camel form            — `workItems`, `wakeQueue`
+ *   - the snake_underscore form  — `work_items`, `wake_queue` (dot-accessible)
+ *   - the raw MCP spelling       — `work_items`, `wake-queue` (for exact bracket
+ *                                  access, e.g. `tools.coord['wake-queue']`)
+ * The canonical MCP name is snake/hyphen (`work_items:wake-queue`), so an agent
+ * naturally types the snake spelling — this makes it Just Work. Deterministic
+ * and lossless (all forms derive from the same name), so it can never
+ * mis-target. Deduped; single-word identifiers collapse to one entry.
+ */
+export function aliasSpellings(raw: string, camel: string): string[] {
+  const snake = raw.replace(/-/g, '_');
+  return [...new Set([camel, snake, raw])];
+}
+
+/**
  * Build the `tools` facade the sandbox injects. One callable per ALLOWED tool, both
  * namespaced (`tools.camelNamespace.camelVerb`) and flat (`tools.call('ns:verb', …)`).
  * Tools outside `allowed` are absent. Returns an empty-but-callable facade if `tools` is empty.
