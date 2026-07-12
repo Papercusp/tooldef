@@ -22,6 +22,24 @@ describe('checkScript (B-CX-1A parse-check)', () => {
     expect(r.refs).toContain('coord.wakeQueue');
   });
 
+  it('accepts the raw snake_case spelling of ns/verb (matches the canonical MCP name)', () => {
+    const r = checkScript(
+      `await tools.work_items.get({ id: 'EI-1' });
+       await tools.coord.wake_queue();
+       await tools.workItems.list({});`, // camel still fine, mixed in
+      tools,
+    );
+    expect(r.ok).toBe(true);
+    expect(r.unknownRefs).toEqual([]);
+    expect(r.refs).toContain('work_items.get'); // raw form recorded for telemetry
+  });
+
+  it('still flags a snake_case ref to a tool genuinely absent from the facade', () => {
+    const r = checkScript(`await tools.secret_store.read({});`, tools);
+    expect(r.ok).toBe(false);
+    expect(r.unknownRefs).toContain('secret_store.read');
+  });
+
   it('flags a reference to a tool not in the facade', () => {
     const r = checkScript(`await tools.system.admin({ drop: true });`, tools);
     expect(r.ok).toBe(false);

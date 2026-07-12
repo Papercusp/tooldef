@@ -20,6 +20,37 @@ describe('buildToolFacade (B-CX-1A)', () => {
     expect(dispatch).toHaveBeenCalledWith(expect.anything(), 'coord:wake-queue', {});
   });
 
+  it('also accepts the raw snake_case spelling of ns + verb (the canonical MCP name)', async () => {
+    const dispatch = vi.fn(async () => ({ ok: true }));
+    const f = buildToolFacade([mkTool('work_items:checkpoint'), mkTool('coord:wake-queue')], dispatch);
+
+    // snake namespace + snake verb — the same string as the MCP name, dotted.
+    await f.work_items.checkpoint({ id: 'EI-1' });
+    expect(dispatch).toHaveBeenCalledWith(expect.anything(), 'work_items:checkpoint', { id: 'EI-1' });
+
+    // camel spelling still works and routes identically (same fn, same bucket).
+    await f.workItems.checkpoint({ id: 'EI-2' });
+    expect(dispatch).toHaveBeenCalledWith(expect.anything(), 'work_items:checkpoint', { id: 'EI-2' });
+    expect(f.work_items.checkpoint).toBe(f.workItems.checkpoint);
+
+    // hyphenated verb reachable under its raw underscore spelling too.
+    await f.coord.wake_queue();
+    expect(dispatch).toHaveBeenCalledWith(expect.anything(), 'coord:wake-queue', {});
+  });
+
+  it('snake aliases respect the allowed-set whitelist (no bypass)', () => {
+    const f = buildToolFacade(
+      [mkTool('work_items:list'), mkTool('system:admin')],
+      vi.fn(),
+      new Set(['work_items:list']),
+    );
+    // omitted tool has neither spelling
+    expect(f.system).toBeUndefined();
+    // single-word namespace needs no alias key beyond itself
+    expect(typeof f.workItems.list).toBe('function');
+    expect(typeof f.work_items.list).toBe('function');
+  });
+
   it('exposes the call() escape hatch keyed by full MCP name', async () => {
     const dispatch = vi.fn(async () => 'ok');
     const f = buildToolFacade([mkTool('plans:set-status')], dispatch);

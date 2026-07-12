@@ -83,9 +83,19 @@ export function checkScript(
 
   const refs = new Set<string>();
   const unknown = new Set<string>();
+  // Accept the snake_case OR camelCase spelling of a `ns.verb` member: the
+  // facade exposes BOTH (the canonical MCP name is snake_case), so normalize to
+  // the camel key before deciding "unknown". Deterministic, not fuzzy — mirrors
+  // the raw-alias registration in buildToolFacade. A member is always exactly
+  // `ns.verb` (one dot) as built by `step`.
+  const canonMember = (member: string): string => {
+    const dot = member.indexOf('.');
+    if (dot <= 0) return member;
+    return `${camelNamespace(member.slice(0, dot))}.${camelVerb(member.slice(dot + 1))}`;
+  };
   const recordMember = (member: string): void => {
     refs.add(member);
-    if (!memberToName.has(member)) unknown.add(member);
+    if (!memberToName.has(member) && !memberToName.has(canonMember(member))) unknown.add(member);
   };
   const recordFull = (name: string): void => {
     refs.add(name);
@@ -220,8 +230,9 @@ function regexFallback(
   for (const m of script.matchAll(/\btools\.([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)/g)) {
     if (m[1] === 'call') continue;
     const member = `${m[1]}.${m[2]}`;
+    const canon = `${camelNamespace(m[1])}.${camelVerb(m[2])}`; // snake OR camel spelling
     refs.add(member);
-    if (!memberToName.has(member)) unknown.add(member);
+    if (!memberToName.has(member) && !memberToName.has(canon)) unknown.add(member);
   }
   for (const m of script.matchAll(/\btools\.call\(\s*['"`]([^'"`]+)['"`]/g)) {
     refs.add(m[1]);
