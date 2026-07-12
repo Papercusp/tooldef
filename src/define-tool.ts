@@ -709,6 +709,27 @@ function flattenForOpenAi(schema: Record<string, unknown>): Record<string, unkno
   };
 }
 
+/** Bounded render of a tool's full args JSON schema, appended to invalid_args errors (P-004,
+ *  code-run-batch-adoption-2026-07-12). A terse per-issue message alone leaves a schema-blind
+ *  caller (e.g. a tools:invoke route with no loaded schema) probing solo, call-by-call — the
+ *  2026-07-11 release-fleet burst repeated the identical wrong arg shape twice in a row. With the
+ *  schema in the failure, ONE failed call teaches the whole shape, so batching becomes the cheapest
+ *  way to learn it. Rendered lazily on first failure (failures are rare), cached per registration. */
+const ARGS_SCHEMA_HINT_MAX = 1800;
+function argsSchemaHint(rawSchema: unknown, cache: { hint?: string }): string {
+  if (cache.hint === undefined) {
+    let json = '';
+    try {
+      json = JSON.stringify(rawSchema) ?? '';
+    } catch {
+      json = '';
+    }
+    if (json.length > ARGS_SCHEMA_HINT_MAX) json = `${json.slice(0, ARGS_SCHEMA_HINT_MAX)} …(truncated)`;
+    cache.hint = json.length > 0 ? ` — full args schema: ${json}` : '';
+  }
+  return cache.hint;
+}
+
 function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
   def: ToolDefinition<TArgs>,
   expose?: ToolExposure,
@@ -723,6 +744,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
   const inputSchema = flattenForOpenAi(rawSchema);
   const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
   const readColumns = projectReadColumns(outputJsonSchema);
+  const schemaHintCache: { hint?: string } = {};
 
   const projectedFn: ToolFn = async (input, ctx) => {
     if (!ctx.principal || !ctx.tx) {
@@ -752,7 +774,9 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     const shimmed = applyPositionalWriteShim(def.name, rawSchema, tierlessInput);
     const parsed = await standardValidate(def.args, shimmed);
     if (!parsed.ok) {
-      throw new InvalidInputError(`invalid_args: ${formatIssues(parsed.issues)}`);
+      throw new InvalidInputError(
+        `invalid_args: ${formatIssues(parsed.issues)}${argsSchemaHint(rawSchema, schemaHintCache)}`,
+      );
     }
     const response = await def.handler(parsed.value, legacyCtx);
     // A raw ToolResult (MCP content shape) normally passes through untouched —
@@ -849,6 +873,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
   const inputSchema = flattenForOpenAi(rawSchema);
   const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
   const readColumns = projectReadColumns(outputJsonSchema);
+  const schemaHintCache: { hint?: string } = {};
 
   const projectedFn: ToolFn = async (input, ctx) => {
     // Framework-reserved per-call tier override — stripped BEFORE validation
@@ -857,7 +882,9 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     const shimmed = applyPositionalWriteShim(def.name, rawSchema, tierlessInput);
     const parsed = await standardValidate(def.args, shimmed);
     if (!parsed.ok) {
-      throw new InvalidInputError(`invalid_args: ${formatIssues(parsed.issues)}`);
+      throw new InvalidInputError(
+        `invalid_args: ${formatIssues(parsed.issues)}${argsSchemaHint(rawSchema, schemaHintCache)}`,
+      );
     }
     // Thread the per-call tier override into the HANDLER's ctx too: tools that
     // must keep a hand-rolled JSON ToolResult (hook-consumed — coord:inbox /
