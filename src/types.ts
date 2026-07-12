@@ -239,6 +239,23 @@ export interface ToolContext<Tx = any> {
   tx: Tx;
   /** Logger bound to the tool name + principal. */
   log: (level: 'info' | 'warn' | 'error', msg: string, meta?: Record<string, unknown>) => void;
+  /**
+   * Calling agent role, when the transport carries one (EI-10358). Threaded
+   * through from the outer `UnifiedToolContext.role` by
+   * `registerLegacyAsProjected`'s `legacyCtx` — NOT resolved from `principal`,
+   * which for every su session collapses to the single shared
+   * `system:superuser` principal and so cannot answer "who wrote this".
+   * Absent on transports/callers that never set it (pre-existing rows, a
+   * bare HTTP call with no spawn context).
+   */
+  role?: AgentRole;
+  /**
+   * Per-session/per-launch caller id, when the transport carries one
+   * (EI-10358) — mirrors `UnifiedToolContext.uiClientId` (an su session's
+   * PAPERCUSP_SID, or a spawned agent's `?client=`). Same threading + same
+   * "may be absent" caveat as `role` above.
+   */
+  uiClientId?: string | null;
 }
 
 /**

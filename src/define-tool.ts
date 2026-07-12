@@ -770,6 +770,15 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       // can adapt their defaults off ctx.contextTier, same as the role-gated
       // wrapper below (context-trimming-tiers P-024).
       ...(callTier ?? ctx.contextTier ? { contextTier: callTier ?? ctx.contextTier } : {}),
+      // EI-10358: thread the caller's role + per-session id through — the outer
+      // `ctx` (UnifiedToolContext) already carries both (populated by the MCP
+      // dispatch layer from the spawn/su URL context), but this legacy shim
+      // previously dropped them, leaving every principal-gated handler
+      // (memory:remember, …) unable to attribute a write to a real session —
+      // `ctx.principal` alone collapses every su session to the single shared
+      // `system:superuser` principal.
+      ...(ctx.role ? { role: ctx.role } : {}),
+      ...(ctx.uiClientId ? { uiClientId: ctx.uiClientId } : {}),
     };
     const shimmed = applyPositionalWriteShim(def.name, rawSchema, tierlessInput);
     const parsed = await standardValidate(def.args, shimmed);
