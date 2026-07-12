@@ -112,19 +112,15 @@ export function buildToolFacade(
     if (rawNs === 'call' || ns === 'call') continue; // never shadow the escape hatch
     const bucket = (facade[ns] ??= {} as Record<string, unknown>);
     const fn = (args?: unknown): Promise<unknown> => dispatch(tool, name, args ?? {});
-    bucket[verb] = fn;
-    // SNAKE_CASE ALIASES (agent ergonomics). The CANONICAL MCP name is
-    // snake_case (`work_items:checkpoint`), so an agent naturally writes
-    // `tools.work_items.checkpoint` — the same string, dotted. Expose the raw
-    // snake spellings alongside the camel ones so BOTH resolve. This is a
-    // DETERMINISTIC, lossless transform (camelNamespace/camelVerb are the same
-    // ones used to build the camel key), NOT a fuzzy guess, so it can never
-    // mis-target: a snake namespace maps to exactly one camel namespace, and
-    // never collides with a real (camel) namespace key. The namespace alias
-    // points at the SAME bucket object, so every verb is reachable under either
-    // namespace spelling; per-verb we add the raw verb only when it differs.
-    if (rawVerb !== verb) bucket[rawVerb] = fn;
-    if (rawNs !== ns) facade[rawNs] = bucket;
+    // SNAKE_CASE ALIASES (agent ergonomics). The canonical MCP name is
+    // snake/hyphen (`work_items:wake-queue`), so an agent naturally writes the
+    // snake spelling `tools.work_items.wakeQueue` (or fully-snake
+    // `tools.work_items.wake_queue`). Register every ergonomic spelling of the
+    // verb, and alias the SAME bucket object under every spelling of the
+    // namespace so any combination resolves. Deterministic + lossless (all
+    // forms derive from the one MCP name), so it can never mis-target.
+    for (const key of aliasSpellings(rawVerb, verb)) bucket[key] = fn;
+    for (const key of aliasSpellings(rawNs, ns)) if (key !== ns) facade[key] = bucket;
   }
 
   // F8 (autonomous-loop-hardening / H2): bind each parse-check UNKNOWN ref to a stub that REJECTS
