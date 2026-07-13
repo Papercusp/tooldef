@@ -88,3 +88,73 @@ describe('registerLegacyAsProjected — role/uiClientId threading (EI-10358)', (
     expect(received && 'uiClientId' in received).toBe(false);
   });
 });
+
+/**
+ * EI-10767 — the SAME allowlist, its third victim.
+ *
+ * A compound stamps `telemetrySurface` on the inner ctx (`inProcessCall(ctx, {
+ * telemetrySurface: 'orient' })`) so its folded sub-call self-identifies: coord:orient's
+ * memory:search fold should record recall telemetry under 'orient' instead of blending
+ * into generic 'search'. memory:search is PRINCIPAL-gated, so it lands in this legacy
+ * shim — which dropped the stamp. Live consequence: `orient` had ZERO rows in
+ * memory_recall_stats for weeks while demonstrably folding recall on every call, so
+ * per-entry-point recall quality was unmeasurable — the exact thing the stamp exists for.
+ *
+ * WHY IT SHIPPED GREEN: the unit test for this feature called
+ * `search.handler(input, { telemetrySurface: 'orient' })` DIRECTLY. That proves the
+ * handler READS the field; it can never prove dispatch DELIVERS it. A ctx-borne field
+ * has two halves and the test only pinned one. These cases pin the other half — the
+ * delivery — by driving the real `dispatchProjectedTool` path.
+ */
+describe('registerLegacyAsProjected — telemetrySurface threading (EI-10767)', () => {
+  it("threads a compound's telemetrySurface stamp into the handler legacyCtx", async () => {
+    let received: (ToolContext & { telemetrySurface?: string }) | undefined;
+    defineTool({
+      name: 'test:legacy-ctx-telemetry',
+      capability: 'test:read',
+      description: 'fixture',
+      args: z.object({}),
+      async handler(_args, handlerCtx) {
+        received = handlerCtx as typeof received;
+        return { content: [{ type: 'text', text: 'ok' }] };
+      },
+    });
+
+    await dispatchProjectedTool(
+      lookupByMcpName('test:legacy-ctx-telemetry')!,
+      'test:legacy-ctx-telemetry',
+      {},
+      ctx({ telemetrySurface: 'orient' }),
+      DEPS,
+    );
+
+    expect(received?.telemetrySurface).toBe('orient');
+  });
+
+  it('omits telemetrySurface when the outer ctx carries none (a DIRECT call must stay unstamped)', async () => {
+    let received: (ToolContext & { telemetrySurface?: string }) | undefined;
+    defineTool({
+      name: 'test:legacy-ctx-no-telemetry',
+      capability: 'test:read',
+      description: 'fixture',
+      args: z.object({}),
+      async handler(_args, handlerCtx) {
+        received = handlerCtx as typeof received;
+        return { content: [{ type: 'text', text: 'ok' }] };
+      },
+    });
+
+    await dispatchProjectedTool(
+      lookupByMcpName('test:legacy-ctx-no-telemetry')!,
+      'test:legacy-ctx-no-telemetry',
+      {},
+      ctx(),
+      DEPS,
+    );
+
+    // Absent, not an undefined-valued key — the consumer's `?? 'search'` fallback
+    // is what makes a direct memory:search record as 'search'.
+    expect(received?.telemetrySurface).toBeUndefined();
+    expect(received && 'telemetrySurface' in received).toBe(false);
+  });
+});

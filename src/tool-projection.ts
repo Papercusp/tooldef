@@ -562,6 +562,22 @@ export interface UnifiedToolContext {
   uiClientId?: string | null;
 
   /**
+   * Recall-telemetry surface label for a sub-call folded by a COMPOUND tool
+   * (`inProcessCall(ctx, { telemetrySurface })`). It lets the folded tool
+   * self-identify its entry point — coord:orient's `memory:search` fold records
+   * under `'orient'` rather than blending into generic `'search'` — so
+   * per-entry-point recall quality is measurable. Telemetry only: never affects
+   * what a tool returns, and never agent-settable (ctx-borne, not a tool arg).
+   *
+   * DECLARED here on purpose (EI-10767): it was previously carried only as a cast
+   * (`ctx as { telemetrySurface?: string }`), so the principal-gated legacy shim's
+   * hand-rolled ctx silently dropped it with no type error — orient recorded ZERO
+   * rows for weeks. A ctx-borne field that no type describes is a field the next
+   * ctx rebuild will eat.
+   */
+  telemetrySurface?: string;
+
+  /**
    * The CLI backend the CALLING agent runs under — `'omp' | 'claude' | 'codex'`. The launcher
    * stamps it onto the session's MCP URL (`?agent=`) and the transport folds it here. It is the
    * CURRENT process's backend (a resume/handoff is a fresh launch that re-stamps), so a tool can

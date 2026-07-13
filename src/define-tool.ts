@@ -519,7 +519,8 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
     idempotent: input.idempotent,
     replaces: input.replaces,
     composition: (input.replaces?.length ?? 0) > 0 ? 'composite' : 'primitive',
-    args: input.args,
+    // EI-10883: closed shape — an undeclared arg errors instead of being silently dropped.
+    args: strictArgs(input.args),
     result: input.result ?? input.output,
     delta: input.delta,
     handler: input.handler,
@@ -597,7 +598,8 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
     replayBufferSize: input.replayBufferSize,
     crossWorkspace: input.crossWorkspace,
     modality: input.modality,
-    args: input.args,
+    // EI-10883: closed shape — an undeclared arg errors instead of being silently dropped.
+    args: strictArgs(input.args),
     result: input.result ?? input.output,
     delta: input.delta,
     events: input.events,
@@ -709,6 +711,39 @@ function flattenForOpenAi(schema: Record<string, unknown>): Record<string, unkno
   };
 }
 
+/**
+ * EI-10883 — an unknown arg must be a HARD ERROR, never a silent drop.
+ *
+ * Zod object schemas STRIP unknown keys by default. So a caller who passes an
+ * arg the tool does not declare (`sessions:read { order:'asc' }`) gets back
+ * `ok:true` and the tool's DEFAULT behaviour — a result that is byte-identical
+ * to success while doing something other than what was asked. That is the worst
+ * possible failure mode: it cannot be detected by the caller, it cannot be
+ * detected by the tool-efficiency telemetry (which only counts hard failures),
+ * and it silently teaches the model a wrong mental model of the tool.
+ *
+ * Observed cost (agent-DX audit 2026-07-13, session 5c5a2f50): `order:'asc'` was
+ * accepted and ignored by sessions:read; the agent concluded the tool had no head
+ * read, burned two more calls, and drew a wrong conclusion about the data.
+ *
+ * Strictifying HERE — once, at registration — closes the class for the whole
+ * catalog rather than tool-by-tool. It also runs BEFORE `toJsonSchema`, so the
+ * published input schema now advertises `additionalProperties: false` and the
+ * model can SEE that the shape is closed instead of discovering it by accident.
+ *
+ * Only object schemas can be strictified (a union/discriminatedUnion has no
+ * `.strict()`); anything else passes through untouched.
+ */
+function strictArgs<T>(schema: T): T {
+  const s = schema as unknown as { strict?: () => unknown };
+  if (typeof s?.strict !== 'function') return schema;
+  try {
+    return s.strict() as unknown as T;
+  } catch {
+    return schema;
+  }
+}
+
 /** Bounded render of a tool's full args JSON schema, appended to invalid_args errors (P-004,
  *  code-run-batch-adoption-2026-07-12). A terse per-issue message alone leaves a schema-blind
  *  caller (e.g. a tools:invoke route with no loaded schema) probing solo, call-by-call — the
@@ -716,6 +751,30 @@ function flattenForOpenAi(schema: Record<string, unknown>): Record<string, unkno
  *  schema in the failure, ONE failed call teaches the whole shape, so batching becomes the cheapest
  *  way to learn it. Rendered lazily on first failure (failures are rare), cached per registration. */
 const ARGS_SCHEMA_HINT_MAX = 1800;
+
+/**
+ * EI-10883 — make the closed-shape rejection TEACH, not merely fail.
+ *
+ * Zod renders an undeclared key as `Unrecognized key(s) in object: "order"`, which
+ * says what was wrong but not what to do instead. Naming the accepted keys turns
+ * ONE failed call into a corrected call — the same principle as `argsSchemaHint`
+ * (P-004), and the reason the strictness change is a net WIN for agents rather
+ * than a new tax: the old behaviour cost a silent wrong answer, the new behaviour
+ * costs one loud, self-correcting error.
+ */
+function unknownArgHint(issues: ReadonlyArray<{ message?: string }> | undefined, rawSchema: unknown): string {
+  const msgs = (issues ?? []).map((i) => i?.message ?? '').join(' ');
+  if (!/nrecognized key/i.test(msgs)) return '';
+  const props = (rawSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
+  const keys = props ? Object.keys(props) : [];
+  if (keys.length === 0) return '';
+  return (
+    ` — this tool accepts ONLY: ${keys.join(', ')}.` +
+    ' An undeclared arg is REJECTED, not silently ignored (EI-10883): passing an arg a tool does not declare used to return ok:true' +
+    ' while quietly doing something else, which is indistinguishable from success. Re-send using only the keys above.'
+  );
+}
+
 function argsSchemaHint(rawSchema: unknown, cache: { hint?: string }): string {
   if (cache.hint === undefined) {
     let json = '';
@@ -761,7 +820,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     // Framework-reserved per-call tier override — stripped BEFORE validation
     // (context-trimming-tiers D-004; not part of any tool's schema).
     const { input: tierlessInput, callTier } = extractPayloadTier(input);
-    const legacyCtx: ToolContext & { contextTier?: string } = {
+    const legacyCtx: ToolContext & { contextTier?: string; telemetrySurface?: string } = {
       principal: ctx.principal as unknown as ToolContext['principal'],
       tx: ctx.tx,
       log: (level, msg, meta) => ctx.log(`[${level}] ${msg}${meta ? ` ${JSON.stringify(meta)}` : ''}`),
@@ -779,12 +838,32 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       // `system:superuser` principal.
       ...(ctx.role ? { role: ctx.role } : {}),
       ...(ctx.uiClientId ? { uiClientId: ctx.uiClientId } : {}),
+      // EI-10767: thread the ctx-borne telemetry surface. A compound's
+      // inProcessCall stamps `telemetrySurface` on the inner ctx so its folded
+      // sub-call self-identifies (coord:orient's memory:search fold records under
+      // 'orient', not generic 'search'). memory:search is PRINCIPAL-gated, so it
+      // lands in THIS shim — which dropped the stamp, and its recall telemetry
+      // blended back into 'search' for weeks. orient had ZERO rows in
+      // memory_recall_stats while demonstrably folding recall on every call.
+      //
+      // ⚠ THIS ALLOWLIST IS THE BUG, AND THIS IS ITS THIRD VICTIM (contextTier,
+      // then role/uiClientId per EI-10358, now telemetrySurface). The role-gated
+      // wrapper below passes the WHOLE ctx (`{ ...ctx }`); only this legacy shim
+      // rebuilds it field-by-field, so every ctx-borne field must be re-threaded
+      // here BY HAND or it vanishes silently — no type error, no runtime error,
+      // just a handler reading `undefined` and taking its fallback. If you add a
+      // ctx-borne field, add it here too, and pin it with a test that drives the
+      // REAL dispatch path (inProcessCall → dispatchProjectedTool → handler) —
+      // a test that calls `handler(input, ctxLiteral)` directly proves only that
+      // the handler READS the field, never that dispatch DELIVERS it. That gap is
+      // exactly why this shipped green.
+      ...(ctx.telemetrySurface ? { telemetrySurface: ctx.telemetrySurface } : {}),
     };
     const shimmed = applyPositionalWriteShim(def.name, rawSchema, tierlessInput);
     const parsed = await standardValidate(def.args, shimmed);
     if (!parsed.ok) {
       throw new InvalidInputError(
-        `invalid_args: ${formatIssues(parsed.issues)}${argsSchemaHint(rawSchema, schemaHintCache)}`,
+        `invalid_args: ${formatIssues(parsed.issues)}${unknownArgHint(parsed.issues, rawSchema)}${argsSchemaHint(rawSchema, schemaHintCache)}`,
       );
     }
     const response = await def.handler(parsed.value, legacyCtx);
@@ -892,7 +971,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     const parsed = await standardValidate(def.args, shimmed);
     if (!parsed.ok) {
       throw new InvalidInputError(
-        `invalid_args: ${formatIssues(parsed.issues)}${argsSchemaHint(rawSchema, schemaHintCache)}`,
+        `invalid_args: ${formatIssues(parsed.issues)}${unknownArgHint(parsed.issues, rawSchema)}${argsSchemaHint(rawSchema, schemaHintCache)}`,
       );
     }
     // Thread the per-call tier override into the HANDLER's ctx too: tools that
