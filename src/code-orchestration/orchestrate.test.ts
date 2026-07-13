@@ -108,6 +108,23 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     // EI-7784: `ok` alone stays misleadingly true (the script didn't throw) — `partial` is the
     // SEPARATE, always-populated signal that a caller checking only `ok` would otherwise miss.
     expect(r.partial).toBe(true);
+    expect(r.childFailures).toEqual([
+      expect.objectContaining({ tool: 'wi:set-state', kind: 'semantic' }),
+      expect.objectContaining({ tool: 'wi:set-state', kind: 'semantic' }),
+    ]);
+  });
+
+  it('a read call returning ok:false makes an otherwise successful script partial', async () => {
+    const read = mkTool('dev:pg-query', 'read', async () => json({ ok: false, error: 'bad_sql' }));
+    const r = await runToolOrchestration(
+      `await tools.dev.pgQuery({ sql: 'bad' }); return { inspected: true };`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [read] },
+    );
+    expect(r.ok).toBe(true);
+    expect(r.partial).toBe(true);
+    expect(r.childFailures).toEqual([
+      expect.objectContaining({ tool: 'dev:pg-query', kind: 'semantic' }),
+    ]);
   });
 
   it('dryRun never populates okFalseMutations — write-effect calls are not executed', async () => {

@@ -92,6 +92,14 @@ export interface ThrownMutation {
   error: string;
 }
 
+/** A child call that failed semantically or threw, regardless of read/write effect. */
+export interface ChildFailure {
+  tool: string;
+  kind: 'semantic' | 'rejected' | 'uncertain';
+  result?: unknown;
+  error?: string;
+}
+
 export interface OrchestrateResult {
   ok: boolean;
   /** The script's returned summary (what re-enters the model's context). */
@@ -118,6 +126,9 @@ export interface OrchestrateResult {
    *  so pre-existing test fixtures constructing an OrchestrateResult literal don't all need
    *  updating; shapeMutationEcho defaults a missing value to `[]`. */
   okFalseMutations?: FailedMutation[];
+  /** Every failed child call, including reads. This is the aggregate truth surface used by
+   * wrappers/telemetry; mutation-specific arrays above remain the recovery/safety surface. */
+  childFailures?: ChildFailure[];
   /**
    * EI-7784: true when `okFalseMutations` is non-empty — the script itself ran to completion
    * (`ok` stays whatever `run.ok` says: did the SCRIPT throw/timeout), but at least one
@@ -151,6 +162,7 @@ export async function runToolOrchestration(
   const { ctx, deps, tools, allowed, dryRun = false, timeoutMs, wrapDispatch } = opts;
   const plannedMutations: PlannedMutation[] = [];
   const okFalseMutations: FailedMutation[] = [];
+  const childFailures: ChildFailure[] = [];
   // EI-10951: a write that THREW never landed (rejected) or may have (uncertain) — but it
   // certainly was not "already executed", which is what we used to tell the caller.
   const rejectedMutations: ThrownMutation[] = [];
@@ -182,8 +194,11 @@ export async function runToolOrchestration(
       // but reports its OWN semantic rejection (ok: false in its result body, e.g. a completion-
       // integrity check) resolves normally here. Tally those so a batched script that doesn't check
       // every result still gets visibility instead of silently counting the write as executed.
-      if (tool.effect === 'write' && isOkFalseResult(result)) {
-        okFalseMutations.push({ tool: name, args, result });
+      if (isOkFalseResult(result)) {
+        childFailures.push({ tool: name, kind: 'semantic', result });
+        if (tool.effect === 'write') {
+          okFalseMutations.push({ tool: name, args, result });
+        }
       }
       return result;
     } catch (err) {
@@ -192,8 +207,14 @@ export async function runToolOrchestration(
       // landed, do NOT re-run" warning. Record WHY it threw: a pre-execution rejection
       // (bad args, a denied gate) provably wrote nothing and is safe to re-run, while any
       // other throw stays UNKNOWN and keeps the loud warning it deserves.
+      const preExecution = isPreExecutionFailure(err);
+      childFailures.push({
+        tool: name,
+        kind: preExecution ? 'rejected' : 'uncertain',
+        error: err instanceof Error ? err.message : String(err),
+      });
       if (tool.effect === 'write') {
-        (isPreExecutionFailure(err) ? rejectedMutations : uncertainMutations).push({
+        (preExecution ? rejectedMutations : uncertainMutations).push({
           tool: name,
           args,
           error: err instanceof Error ? err.message : String(err),
@@ -214,9 +235,10 @@ export async function runToolOrchestration(
     dryRun,
     plannedMutations,
     okFalseMutations,
+    childFailures,
     ...(rejectedMutations.length ? { rejectedMutations } : {}),
     ...(uncertainMutations.length ? { uncertainMutations } : {}),
     // EI-7784: surfaced independent of `ok` — see the field doc above.
-    partial: okFalseMutations.length > 0,
+    partial: run.ok && childFailures.length > 0,
   };
 }
