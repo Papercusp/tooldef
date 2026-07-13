@@ -14,7 +14,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { strictArgs } from './define-tool';
+import { strictArgs, suggestArgName } from './define-tool';
 
 /** Zod 4 exposes safeParse on the schema; keep the test honest about the shape. */
 function parse(schema: unknown, value: unknown): { ok: boolean; message: string } {
@@ -76,5 +76,21 @@ describe('strictArgs (EI-10883)', () => {
     const weird = { not: 'a schema' } as unknown;
     expect(() => strictArgs(weird)).not.toThrow();
     expect(strictArgs(weird)).toBe(weird);
+  });
+});
+
+describe('suggestArgName', () => {
+  it('corrects a typo to the nearest declared field', () => {
+    expect(suggestArgName('summry', ['id', 'summary', 'harness'])).toBe('summary');
+  });
+
+  it('maps common CRUD aliases to the valid name exposed by this tool', () => {
+    expect(suggestArgName('assignee', ['id', 'assign_to', 'state'])).toBe('assign_to');
+    expect(suggestArgName('summary', ['id', 'body', 'confirmShrink'])).toBe('body');
+    expect(suggestArgName('found_during', ['id', 'foundDuring'])).toBe('foundDuring');
+  });
+
+  it('does not invent a correction for an unrelated field', () => {
+    expect(suggestArgName('completelyDifferent', ['id', 'state', 'harness'])).toBeNull();
   });
 });

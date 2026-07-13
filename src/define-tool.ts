@@ -762,14 +762,86 @@ const ARGS_SCHEMA_HINT_MAX = 1800;
  * than a new tax: the old behaviour cost a silent wrong answer, the new behaviour
  * costs one loud, self-correcting error.
  */
-function unknownArgHint(issues: ReadonlyArray<{ message?: string }> | undefined, rawSchema: unknown): string {
+const COMMON_ARG_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  assignee: ['assign_to', 'assignTo', 'owner', 'ownerId'],
+  assignto: ['assign_to', 'assignee', 'owner', 'ownerId'],
+  body: ['summary', 'comment', 'text'],
+  comment: ['body', 'summary', 'text'],
+  completionref: ['completionRef', 'completion_ref', 'completion'],
+  foundduring: ['foundDuring', 'found_during'],
+  linkedfeatureid: ['linkedFeatureId', 'linked_feature_id'],
+  owner: ['ownerId', 'assignee', 'assign_to'],
+  ownerid: ['owner', 'assignee', 'assign_to'],
+  planitem: ['plan_item', 'itemId', 'item'],
+  summary: ['body', 'comment', 'text'],
+};
+
+function compactArgName(value: string): string {
+  return value.replace(/[^a-z0-9]/gi, '').toLowerCase();
+}
+
+function editDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= a.length; i += 1) {
+    const current = [i];
+    for (let j = 1; j <= b.length; j += 1) {
+      current[j] = Math.min(
+        current[j - 1] + 1,
+        previous[j] + 1,
+        previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+    previous = current;
+  }
+  return previous[b.length];
+}
+
+/** Return the closest declared field for an unknown arg, when confidence is high. */
+export function suggestArgName(unknown: string, accepted: readonly string[]): string | null {
+  const compactUnknown = compactArgName(unknown);
+  const semanticAliases = COMMON_ARG_ALIASES[compactUnknown] ?? [];
+  const semantic = semanticAliases.find((alias) =>
+    accepted.some((candidate) => compactArgName(candidate) === compactArgName(alias)),
+  );
+  if (semantic) {
+    return accepted.find((candidate) => compactArgName(candidate) === compactArgName(semantic)) ?? semantic;
+  }
+
+  const ranked = accepted
+    .map((candidate) => ({ candidate, distance: editDistance(compactUnknown, compactArgName(candidate)) }))
+    .sort((a, b) => a.distance - b.distance || a.candidate.localeCompare(b.candidate));
+  const best = ranked[0];
+  if (!best) return null;
+  const threshold = Math.max(1, Math.min(3, Math.floor(Math.max(compactUnknown.length, compactArgName(best.candidate).length) / 3)));
+  return best.distance <= threshold ? best.candidate : null;
+}
+
+function unknownArgHint(
+  issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
+  rawSchema: unknown,
+): string {
   const msgs = (issues ?? []).map((i) => i?.message ?? '').join(' ');
   if (!/nrecognized key/i.test(msgs)) return '';
   const props = (rawSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
   const keys = props ? Object.keys(props) : [];
   if (keys.length === 0) return '';
+  const unknownKeys = [
+    ...new Set([
+      ...(issues ?? []).flatMap((issue) => issue.keys ?? []),
+      ...Array.from(msgs.matchAll(/["']([^"']+)["']/g), (match) => match[1]),
+    ]),
+  ].filter((key) => !keys.includes(key));
+  const corrections = unknownKeys
+    .map((unknown) => ({ unknown, suggestion: suggestArgName(unknown, keys) }))
+    .filter((item): item is { unknown: string; suggestion: string } => item.suggestion !== null);
+  const correctionText = corrections.length > 0
+    ? ` Did you mean ${corrections.map(({ unknown, suggestion }) => `\`${suggestion}\` for \`${unknown}\``).join('; ')}?`
+    : '';
   return (
-    ` — this tool accepts ONLY: ${keys.join(', ')}.` +
+    ` — this tool accepts ONLY: ${keys.join(', ')}.${correctionText}` +
     ' An undeclared arg is REJECTED, not silently ignored (EI-10883): passing an arg a tool does not declare used to return ok:true' +
     ' while quietly doing something else, which is indistinguishable from success. Re-send using only the keys above.'
   );
