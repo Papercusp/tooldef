@@ -325,6 +325,28 @@ export interface ToolGuidance {
    */
   chaining?: string;
   /**
+   * EI-10882 — the RESPONSE shape, in one line, as the caller will actually
+   * read it (top-level keys, the row shape of any array, and any field whose
+   * name lies about its meaning).
+   *
+   * Arg schemas are published; return shapes were NOT. To write a `code:run`
+   * batch over a tool you must know its response shape, and the only way to
+   * learn it was to call the tool once and JSON.stringify the result — one
+   * guaranteed wasted round-trip per tool, per agent, forever. In the agent-DX
+   * audit (2026-07-13) that single gap caused most of a session's wasted calls:
+   * `sessions:search` hits were mapped as `x.session_id` / `x.text` (really
+   * `results[].provenance.session_id` / `.excerpt`), and `work_items:get` as
+   * `w.state` (really `results[0].workItem.state`, with `checkpoint` a SIBLING
+   * of `workItem`). Both returned `ok:true` with every field empty.
+   *
+   * This is a DOC string, deliberately not a schema: it costs nothing to add,
+   * cannot change serialization (unlike declaring `result`, which switches the
+   * response through the column encoder), and is surfaced verbatim by
+   * `tools:find` / `agent_tools:list` so an agent reads the shape BEFORE calling.
+   * Prefer it on any tool an agent is likely to batch over.
+   */
+  returns?: string;
+  /**
    * Result-aware cross-link pointers to the adjacent lens / sibling tool /
    * history door for THIS tool's output. Distinct from `chaining`: `chaining`
    * is catalog-time/static (rendered into the DESCRIPTION at selection time,

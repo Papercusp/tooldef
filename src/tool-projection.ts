@@ -569,7 +569,7 @@ export interface UnifiedToolContext {
    * per-entry-point recall quality is measurable. Telemetry only: never affects
    * what a tool returns, and never agent-settable (ctx-borne, not a tool arg).
    *
-   * DECLARED here on purpose (EI-10767): it was previously carried only as a cast
+   * DECLARED here on purpose (WI-4549): it was previously carried only as a cast
    * (`ctx as { telemetrySurface?: string }`), so the principal-gated legacy shim's
    * hand-rolled ctx silently dropped it with no type error — orient recorded ZERO
    * rows for weeks. A ctx-borne field that no type describes is a field the next

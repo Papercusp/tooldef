@@ -90,7 +90,7 @@ describe('registerLegacyAsProjected — role/uiClientId threading (EI-10358)', (
 });
 
 /**
- * EI-10767 — the SAME allowlist, its third victim.
+ * WI-4549 — the SAME allowlist, its third victim.
  *
  * A compound stamps `telemetrySurface` on the inner ctx (`inProcessCall(ctx, {
  * telemetrySurface: 'orient' })`) so its folded sub-call self-identifies: coord:orient's
@@ -106,7 +106,7 @@ describe('registerLegacyAsProjected — role/uiClientId threading (EI-10358)', (
  * has two halves and the test only pinned one. These cases pin the other half — the
  * delivery — by driving the real `dispatchProjectedTool` path.
  */
-describe('registerLegacyAsProjected — telemetrySurface threading (EI-10767)', () => {
+describe('registerLegacyAsProjected — telemetrySurface threading (WI-4549)', () => {
   it("threads a compound's telemetrySurface stamp into the handler legacyCtx", async () => {
     let received: (ToolContext & { telemetrySurface?: string }) | undefined;
     defineTool({

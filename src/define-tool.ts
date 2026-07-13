@@ -838,7 +838,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       // `system:superuser` principal.
       ...(ctx.role ? { role: ctx.role } : {}),
       ...(ctx.uiClientId ? { uiClientId: ctx.uiClientId } : {}),
-      // EI-10767: thread the ctx-borne telemetry surface. A compound's
+      // WI-4549: thread the ctx-borne telemetry surface. A compound's
       // inProcessCall stamps `telemetrySurface` on the inner ctx so its folded
       // sub-call self-identifies (coord:orient's memory:search fold records under
       // 'orient', not generic 'search'). memory:search is PRINCIPAL-gated, so it
