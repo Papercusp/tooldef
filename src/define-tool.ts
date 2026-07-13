@@ -789,6 +789,40 @@ function argsSchemaHint(rawSchema: unknown, cache: { hint?: string }): string {
   return cache.hint;
 }
 
+/**
+ * Convert a tool's `args` to JSON Schema — failing LOUD and, crucially, NAMED.
+ *
+ * A tool's args schema is its CALLABLE CONTRACT, so unlike an unrepresentable *event*
+ * schema (which degrades to a placeholder, keeping the tool usable) there is nothing to
+ * degrade to: an args schema that cannot be advertised is a fatal authoring error.
+ *
+ * But it must fail with the TOOL'S NAME. This conversion runs at REGISTRATION — i.e.
+ * during module import — and the same unguarded conversion runs again in the MCP
+ * tools/list handlers. So one bad schema does not break one tool: it throws mid-import
+ * and takes down the WHOLE catalog, surfacing as a bare, anonymous adapter error with no
+ * tool, no file, nothing to grep (observed: `Transforms cannot be represented in JSON
+ * Schema`, which reads like an unrelated infra/zod break and was mis-triaged as one).
+ *
+ * The overwhelmingly common cause is a TRAILING `.transform()` in the args schema, whose
+ * output type JSON Schema cannot express. Refinements (`.refine` / `.superRefine`) and
+ * `preprocess` are all representable and fine.
+ */
+function toArgsJsonSchema(toolName: string, args: StandardSchemaV1): Record<string, unknown> {
+  try {
+    return toJsonSchema(args);
+  } catch (err) {
+    throw new Error(
+      `Tool "${toolName}": its \`args\` schema cannot be represented in JSON Schema — ` +
+        `${(err as Error).message}. This is FATAL FOR THE WHOLE TOOL CATALOG, not just this tool: ` +
+        `the conversion runs at registration and again (unguarded) when tools/list is served, so a ` +
+        `single unrepresentable schema breaks tool discovery for every client. ` +
+        `The usual cause is a trailing \`.transform()\` — do that normalization in the HANDLER instead ` +
+        `(read the value, resolve it there), or, if a transform is genuinely required, terminate it with ` +
+        `\`.pipe(<schema>)\` so the OUTPUT stays representable. Refinements are always fine.`,
+    );
+  }
+}
+
 function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
   def: ToolDefinition<TArgs>,
   expose?: ToolExposure,
@@ -798,7 +832,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
   // Pluggable schema→JSON-Schema (P-021); default adapter is Zod 4's
   // toJSONSchema. zod-to-json-schema@3 returned just `{ $schema }` for zod 4
   // schemas (empty input schemas) — the built-in path fixed that.
-  const rawSchema = toJsonSchema(def.args);
+  const rawSchema = toArgsJsonSchema(def.name, def.args);
   delete (rawSchema as Record<string, unknown>).$schema;
   const inputSchema = flattenForOpenAi(rawSchema);
   const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
@@ -956,7 +990,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
   expose?: ToolExposure,
 ): void {
   const httpPath = `/api/agent-tools/${def.name.replaceAll(':', '/')}`;
-  const rawSchema = toJsonSchema(def.args);
+  const rawSchema = toArgsJsonSchema(def.name, def.args);
   delete (rawSchema as Record<string, unknown>).$schema;
   const inputSchema = flattenForOpenAi(rawSchema);
   const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
