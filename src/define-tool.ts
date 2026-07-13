@@ -734,7 +734,7 @@ function flattenForOpenAi(schema: Record<string, unknown>): Record<string, unkno
  * Only object schemas can be strictified (a union/discriminatedUnion has no
  * `.strict()`); anything else passes through untouched.
  */
-function strictArgs<T>(schema: T): T {
+export function strictArgs<T>(schema: T): T {
   const s = schema as unknown as { strict?: () => unknown };
   if (typeof s?.strict !== 'function') return schema;
   try {
