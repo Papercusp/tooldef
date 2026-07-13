@@ -27,9 +27,17 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import { defineTool } from './define-tool';
+import { getCatalog, lookup } from './registry';
 
 let n = 0;
 const uniq = (base: string) => `${base}${(n += 1)}`;
+
+/** The exact shape that broke a real tool (EI-10996): an alias resolved with a
+ *  trailing transform, whose OUTPUT type JSON Schema cannot express. */
+const unrepresentableArgs = () =>
+  z
+    .object({ body: z.string().optional(), comment: z.string().optional() })
+    .transform((v) => ({ ...v, body: v.body ?? v.comment }));
 
 describe('args schemas must be JSON-Schema-representable', () => {
   it('names the offending tool when its args carry a trailing .transform()', () => {
@@ -106,4 +114,57 @@ describe('args schemas must be JSON-Schema-representable', () => {
       }),
     ).not.toThrow();
   });
+
+  /**
+   * WI-4596 — the guard above is necessary but was not SUFFICIENT.
+   *
+   * The principal-gated path used to `register()` the tool into the catalog and only
+   * THEN run the guarded conversion. While the throw is fatal that ordering is
+   * invisible: the process dies either way. But the throw is not always fatal — any
+   * caller that CATCHES a module-import error (HMR re-eval, a test harness, a plugin
+   * loader) carries on with an unrepresentable-schema tool still seated in the catalog.
+   * The very next tools/list then maps that tool straight back through the conversion
+   * and dies ANONYMOUSLY, catalog-wide — precisely the failure the guard was added to
+   * eliminate, resurrected one layer downstream.
+   *
+   * So the invariant is not "registration throws"; it is "a tool the catalog cannot
+   * serve never ENTERS the catalog". Projecting before registering is what makes that
+   * true, and this test is what keeps it true if the two lines are ever reordered.
+   */
+  it('a tool with an unrepresentable args schema never ENTERS the catalog (order: project, then register)', () => {
+    const name = uniq('guard:catalog_ordering_');
+
+    // NOTE: `requirePrincipal` is deliberately OMITTED. Only the principal-gated path
+    // populates the registry catalog that tools/list iterates; the role-gated path
+    // (requirePrincipal:false — what the tests above use) never calls register(), so it
+    // cannot exercise this ordering at all.
+    expect(() =>
+      defineTool({
+        name,
+        capability: 'test:read',
+        description: 'fixture',
+        args: unrepresentableArgs(),
+        handler: async () => ({ content: [{ type: 'text', text: 'ok' }] }),
+      }),
+    ).toThrow(new RegExp(name));
+
+    // The load-bearing assertions: the failed tool left NO residue behind. A survivor
+    // here is a live catalog-wide tools/list crash for every client.
+    expect(lookup(name)).toBeUndefined();
+    expect(getCatalog().some((t) => t.name === name)).toBe(false);
+  });
+
+  /*
+   * DELIBERATELY NOT HERE: a catalog-wide "every registered tool is representable" sweep.
+   * It looks like the obvious companion test and it is a trap — under vitest the registry
+   * holds only ~40 of the ~590 tools (nothing imports the full catalog), so it passes by
+   * iterating almost nothing and ships VACUOUSLY GREEN, buying false assurance against
+   * exactly the failure it appears to cover. su-f69a7079 measured this and su-02434335
+   * removed an earlier copy of it; it is recorded here so the next reader does not
+   * helpfully add it back a third time.
+   *
+   * The guarantee is enforced where it is cheap and total instead: at registration (the
+   * guard above) and at the two tools/list conversion sites, which now call the same
+   * named-throw wrapper rather than a raw z.toJSONSchema.
+   */
 });

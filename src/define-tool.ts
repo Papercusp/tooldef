@@ -540,11 +540,23 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
     crossWorkspace: input.crossWorkspace,
   };
 
+  // ORDER IS LOAD-BEARING: project FIRST (its first act is the guarded
+  // args→JSON-Schema conversion), and only then enter the catalog.
+  //
+  // These two lines used to be reversed, which left a real hole: `register()`
+  // seated the tool in the catalog and THEN the guard threw. While the throw is
+  // fatal that is invisible — the process dies either way. But any caller that
+  // CATCHES a module-import error (HMR re-eval, a test harness, a plugin loader)
+  // resumes with an unrepresentable-schema tool still sitting in the catalog, and
+  // the next tools/list serves it straight into `toArgsJsonSchema` — the exact
+  // anonymous catalog-wide crash this guard exists to prevent. Projecting first
+  // means a tool that cannot be represented never becomes catalog state at all.
+  //
   // The catalog stores defs with their schema type erased (handlers run on
   // post-validation values); a specific TArgs isn't assignable to the
   // unknown-output base under Standard Schema's variance, so widen explicitly.
-  register(def as unknown as ToolDefinition);
   registerLegacyAsProjected(def, input.expose);
+  register(def as unknown as ToolDefinition);
   // Co-located intrinsic emissions → the generic collector; the operator-core
   // desugar registers them as event-reaction rules at load (D-002).
   collectToolEmits(name, input.emits);
@@ -879,7 +891,7 @@ function argsSchemaHint(rawSchema: unknown, cache: { hint?: string }): string {
  * output type JSON Schema cannot express. Refinements (`.refine` / `.superRefine`) and
  * `preprocess` are all representable and fine.
  */
-function toArgsJsonSchema(toolName: string, args: StandardSchemaV1): Record<string, unknown> {
+export function toArgsJsonSchema(toolName: string, args: StandardSchemaV1): Record<string, unknown> {
   try {
     return toJsonSchema(args);
   } catch (err) {

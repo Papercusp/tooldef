@@ -45,7 +45,7 @@ export type {
 } from './host-types';
 
 /* ─── defineTool + sibling authoring primitives ──────────────────────── */
-export { defineTool } from './define-tool';
+export { defineTool, toArgsJsonSchema } from './define-tool';
 export {
   applyPayloadTier,
   extractPayloadTier,
