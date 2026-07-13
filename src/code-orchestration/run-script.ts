@@ -3,8 +3,10 @@
  *
  * Runs a model-submitted orchestration script with the tool facade injected as `tools`, and
  * returns ONLY the script's returned summary. Intermediate tool results live here in the
- * runtime and never re-enter the model's context — that, plus collapsing many tool round-trips
- * into one `code:run` call, is the token win the plan is built around.
+ * runtime and never re-enter the model's context — that, plus collapsing a flow that would require
+ * multiple MODEL inference turns into one `code:run` call, is the token win. Independent direct
+ * calls emitted together in one assistant turn already cost one inference turn; raw RPC count alone
+ * is not a reason to script them.
  *
  *   // model writes:
  *   const open = await tools.workItems.list({ status: 'open' });
