@@ -5,8 +5,9 @@
  * If the engine reached for any Zod-specific method, none of this would work.
  */
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import type { StandardSchemaV1 } from './standard-schema';
-import { standardValidate, validateSync, formatIssues } from './standard-schema';
+import { standardValidate, validateSync, formatIssues, issuesAreValueLevel } from './standard-schema';
 
 /** A non-Zod Standard Schema: accepts `{ n: number }`, synchronous. */
 const numberBox: StandardSchemaV1<unknown, { n: number }> = {
