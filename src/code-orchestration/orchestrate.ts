@@ -20,7 +20,7 @@
 import type { ProjectedTool, UnifiedToolContext } from '../tool-projection';
 import type { DispatchProjectedDeps } from '../dispatch-types';
 import { buildToolFacade, type FacadeDispatch } from './tool-facade';
-import { realDispatch } from './dispatch-binding';
+import { realDispatch, isPreExecutionFailure } from './dispatch-binding';
 import { runOrchestrationScript } from './run-script';
 import { checkScript, ensureParseCheckReady } from './parse-check';
 
@@ -84,6 +84,14 @@ export interface FailedMutation {
   result: unknown;
 }
 
+/** EI-10951: a write-effect call that THREW — recorded with why, so the caller can tell a
+ *  provably-never-landed rejection from an honestly-uncertain one. */
+export interface ThrownMutation {
+  tool: string;
+  args: unknown;
+  error: string;
+}
+
 export interface OrchestrateResult {
   ok: boolean;
   /** The script's returned summary (what re-enters the model's context). */
@@ -93,8 +101,17 @@ export interface OrchestrateResult {
   /** Set when the parse-check failed. */
   unknownRefs?: string[];
   dryRun: boolean;
-  /** Write-effect calls the script made (recorded in dryRun, observed otherwise). */
+  /** Write-effect calls the script made (recorded in dryRun, observed otherwise).
+   *  NOTE: recorded at DISPATCH time, so this includes calls that then threw — subtract
+   *  `rejectedMutations` + `uncertainMutations` for the set that actually landed. */
   plannedMutations: PlannedMutation[];
+  /** EI-10951: write-effect calls the dispatcher REJECTED before the handler ran (bad args,
+   *  a denied gate). These provably wrote NOTHING — safe to fix and re-run. */
+  rejectedMutations?: ThrownMutation[];
+  /** EI-10951: write-effect calls that threw for some OTHER reason (a handler error, a
+   *  timeout mid-flight). These MAY have partially landed — the honestly-uncertain set, and
+   *  the only one that still warrants a "verify before you re-run" warning. */
+  uncertainMutations?: ThrownMutation[];
   /** Write-effect calls that resolved with a top-level `ok: false` result (EI-7669). Always
    *  empty (or absent, on a hand-built fixture result predating this field) under dryRun
    *  (nothing executed yet) — runToolOrchestration's own return always populates it. Optional
@@ -134,6 +151,10 @@ export async function runToolOrchestration(
   const { ctx, deps, tools, allowed, dryRun = false, timeoutMs, wrapDispatch } = opts;
   const plannedMutations: PlannedMutation[] = [];
   const okFalseMutations: FailedMutation[] = [];
+  // EI-10951: a write that THREW never landed (rejected) or may have (uncertain) — but it
+  // certainly was not "already executed", which is what we used to tell the caller.
+  const rejectedMutations: ThrownMutation[] = [];
+  const uncertainMutations: ThrownMutation[] = [];
 
   await ensureParseCheckReady(); // lazy-load the TS compiler before the static parse-check (kept out of the eager client bundle)
   const check = checkScript(script, tools, allowed);
@@ -155,15 +176,31 @@ export async function runToolOrchestration(
       }
     }
     const call: DispatchNext = (callCtx) => realDispatch(callCtx, deps)(tool, name, args);
-    const result = await (wrapDispatch ? wrapDispatch(tool, name, args, ctx, call) : call(ctx));
-    // EI-7669: realDispatch only throws on a dispatch-level failure — a tool that dispatched fine
-    // but reports its OWN semantic rejection (ok: false in its result body, e.g. a completion-
-    // integrity check) resolves normally here. Tally those so a batched script that doesn't check
-    // every result still gets visibility instead of silently counting the write as executed.
-    if (tool.effect === 'write' && isOkFalseResult(result)) {
-      okFalseMutations.push({ tool: name, args, result });
+    try {
+      const result = await (wrapDispatch ? wrapDispatch(tool, name, args, ctx, call) : call(ctx));
+      // EI-7669: realDispatch only throws on a dispatch-level failure — a tool that dispatched fine
+      // but reports its OWN semantic rejection (ok: false in its result body, e.g. a completion-
+      // integrity check) resolves normally here. Tally those so a batched script that doesn't check
+      // every result still gets visibility instead of silently counting the write as executed.
+      if (tool.effect === 'write' && isOkFalseResult(result)) {
+        okFalseMutations.push({ tool: name, args, result });
+      }
+      return result;
+    } catch (err) {
+      // EI-10951: a write-effect call that THREW was still being counted as "already
+      // executed", so a typo'd argument produced a scary — and false — "N writes already
+      // landed, do NOT re-run" warning. Record WHY it threw: a pre-execution rejection
+      // (bad args, a denied gate) provably wrote nothing and is safe to re-run, while any
+      // other throw stays UNKNOWN and keeps the loud warning it deserves.
+      if (tool.effect === 'write') {
+        (isPreExecutionFailure(err) ? rejectedMutations : uncertainMutations).push({
+          tool: name,
+          args,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      throw err;
     }
-    return result;
   };
 
   const facade = buildToolFacade(tools, dispatch, allowed, unknownRefs);
@@ -177,6 +214,8 @@ export async function runToolOrchestration(
     dryRun,
     plannedMutations,
     okFalseMutations,
+    ...(rejectedMutations.length ? { rejectedMutations } : {}),
+    ...(uncertainMutations.length ? { uncertainMutations } : {}),
     // EI-7784: surfaced independent of `ok` — see the field doc above.
     partial: okFalseMutations.length > 0,
   };
