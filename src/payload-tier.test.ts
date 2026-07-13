@@ -3,8 +3,8 @@
  * (context-trimming-tiers-2026-07-01 D-004).
  *
  * The load-bearing semantics:
- *   - `full` IS the unshaped response; an unshaped tool is byte-identical on
- *     every tier (zero-migration contract);
+ *   - `full` IS the normal-size unshaped response; oversized default-tier
+ *     output gets a loud generic projection;
  *   - resolution falls back trimmed → standard → full;
  *   - a per-call `payloadTier` arg outranks the session tier and is stripped
  *     before schema validation;
@@ -21,6 +21,7 @@ import {
   parsePayloadTier,
   resolvePayloadTier,
   resetPayloadTierRatchet,
+  projectBoundedPayload,
   PAYLOAD_TIER_RATCHET_CHARS,
   PAYLOAD_TIER_HARD_CEILING_CHARS,
 } from './payload-tier';
@@ -89,18 +90,27 @@ describe('applyPayloadTier', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('hard ceiling'));
   });
 
-  it('hard ceiling: an over-ceiling payload with NO shaper is served as-is (cannot help, never throws)', () => {
+  it('hard ceiling: an over-ceiling payload with NO shaper gets a loud bounded projection', () => {
     const fat: ToolResponse = { data: { blob: 'y'.repeat(PAYLOAD_TIER_HARD_CEILING_CHARS + 500) } };
     const out = applyPayloadTier({ toolName: 't', shape: undefined, response: fat, tier: 'full', args: {} });
-    expect(out).toBe(fat);
+    const projected = out.data as ReturnType<typeof projectBoundedPayload>;
+    expect(projected._projection).toMatchObject({
+      kind: 'bounded-payload',
+      truncated: true,
+      tier: 'full',
+      forced: true,
+      cursor: { kind: 'full-detail', payloadTier: 'full' },
+    });
+    expect(projected._projection.next).toContain('narrower filters/ids');
+    expect(JSON.stringify(projected).length).toBeLessThan(PAYLOAD_TIER_HARD_CEILING_CHARS);
   });
 
-  it('hard ceiling does NOT trigger when the forced shape would not shrink the payload', () => {
-    // A trimmed shaper that returns the data unchanged: no swap (avoids a pointless re-encode).
+  it('hard ceiling falls back to the generic projection when a custom shape does not shrink', () => {
     const identityShape = { trimmed: (d: unknown) => d };
     const fat: ToolResponse = { data: { blob: 'z'.repeat(PAYLOAD_TIER_HARD_CEILING_CHARS + 500) } };
     const out = applyPayloadTier({ toolName: 't', shape: identityShape, response: fat, tier: 'full', args: {} });
-    expect((out.data as { payloadTierForced?: string }).payloadTierForced).toBeUndefined();
+    expect((out.data as ReturnType<typeof projectBoundedPayload>)._projection.forced).toBe(true);
+    expect(JSON.stringify(out.data).length).toBeLessThan(PAYLOAD_TIER_HARD_CEILING_CHARS);
   });
 
   it('trimmed picks shape.trimmed; standard picks shape.standard', () => {
@@ -132,13 +142,17 @@ describe('applyPayloadTier', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('shaper threw'));
   });
 
-  it('ratchet: a fat unshaped payload to a non-full session warns ONCE per tool+tier', () => {
+  it('ratchet: a fat unshaped payload warns once and is auto-projected with exact re-fetch guidance', () => {
     const log = vi.fn();
     const fat: ToolResponse = { data: { blob: 'x'.repeat(PAYLOAD_TIER_RATCHET_CHARS + 100) } };
-    applyPayloadTier({ toolName: 'fat:tool', shape: undefined, response: fat, tier: 'trimmed', args: {}, log });
+    const first = applyPayloadTier({ toolName: 'fat:tool', shape: undefined, response: fat, tier: 'trimmed', args: {}, log });
     applyPayloadTier({ toolName: 'fat:tool', shape: undefined, response: fat, tier: 'trimmed', args: {}, log });
     expect(log).toHaveBeenCalledTimes(1);
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('no trimmed shaper'));
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('bounded'));
+    const projected = first.data as ReturnType<typeof projectBoundedPayload>;
+    expect(projected._projection.omittedCount).toBeGreaterThan(0);
+    expect(projected._projection.next).toContain('payloadTier:"full"');
+    expect(JSON.stringify(projected).length).toBeLessThan(PAYLOAD_TIER_RATCHET_CHARS);
     // envelope fields survive shaping
     const enveloped = applyPayloadTier({
       toolName: 'env:tool',
@@ -149,5 +163,25 @@ describe('applyPayloadTier', () => {
     });
     expect(enveloped.nextCursor).toBe('c1');
     expect(enveloped.degraded).toBe(true);
+  });
+
+  it('wraps top-level arrays so bounded output always carries omission metadata', () => {
+    const original = Array.from({ length: 200 }, (_, i) => ({ i, blob: 'x'.repeat(100) }));
+    const projected = projectBoundedPayload(original, { toolName: 'catalog:list', tier: 'trimmed' });
+    expect(projected.items).toBeInstanceOf(Array);
+    expect((projected.items as unknown[]).length).toBeLessThan(original.length);
+    expect(projected._projection.omittedCount).toBeGreaterThan(0);
+    expect(projected._projection.omitted[0]).toHaveProperty('path');
+    expect(original).toHaveLength(200);
+  });
+
+  it('handles circular data in the generic projector without throwing', () => {
+    const circular: { name: string; self?: unknown } = { name: 'loop' };
+    circular.self = circular;
+    const projected = projectBoundedPayload(circular, { toolName: 'diagnostic:get', tier: 'trimmed' });
+    expect(projected.self).toBe('[circular]');
+    expect(projected._projection.omitted).toEqual(expect.arrayContaining([
+      expect.objectContaining({ reason: 'circular reference omitted' }),
+    ]));
   });
 });

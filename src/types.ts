@@ -526,9 +526,9 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
   /**
    * Optional payload-tier shapers (context-trimming-tiers D-004): per-tier
    * projections of the response `data` for trimmed/standard sessions.
-   * Resolution falls back trimmed → standard → full, where `full` IS the
-   * unshaped response — a tool without `shape` is byte-identical to its
-   * pre-tier behavior on every tier. See `payload-tier.ts`.
+   * Resolution falls back trimmed → standard → full. Normal-size unshaped
+   * responses remain byte-identical; oversized default-tier results receive
+   * a loud generic bounded projection. See `payload-tier.ts`.
    */
   shape?: import('./payload-tier').PayloadShapers;
   /** See `ToolDefinitionInput.profile`. */
@@ -586,9 +586,9 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
   /**
    * Optional payload-tier shapers (context-trimming-tiers D-004): per-tier
    * projections of the response `data` for trimmed/standard sessions.
-   * Resolution falls back trimmed → standard → full, where `full` IS the
-   * unshaped response — a tool without `shape` is byte-identical to its
-   * pre-tier behavior on every tier. See `payload-tier.ts`.
+   * Resolution falls back trimmed → standard → full. Normal-size unshaped
+   * responses remain byte-identical; oversized default-tier results receive
+   * a loud generic bounded projection. See `payload-tier.ts`.
    */
   shape?: import('./payload-tier').PayloadShapers;
   /* ─── Unified-primitive forward-compat fields (Phase E1, no behavior change) ─────
@@ -807,9 +807,9 @@ export interface RoleToolDefinition<
   /**
    * Optional payload-tier shapers (context-trimming-tiers D-004): per-tier
    * projections of the response `data` for trimmed/standard sessions.
-   * Resolution falls back trimmed → standard → full, where `full` IS the
-   * unshaped response — a tool without `shape` is byte-identical to its
-   * pre-tier behavior on every tier. See `payload-tier.ts`.
+   * Resolution falls back trimmed → standard → full. Normal-size unshaped
+   * responses remain byte-identical; oversized default-tier results receive
+   * a loud generic bounded projection. See `payload-tier.ts`.
    */
   shape?: import('./payload-tier').PayloadShapers;
   /** Intrinsic lifecycle emissions — see `ToolEmitSpec`. Desugared to event rules at load. */
@@ -878,9 +878,9 @@ export interface RoleToolDefinitionInput<
   /**
    * Optional payload-tier shapers (context-trimming-tiers D-004): per-tier
    * projections of the response `data` for trimmed/standard sessions.
-   * Resolution falls back trimmed → standard → full, where `full` IS the
-   * unshaped response — a tool without `shape` is byte-identical to its
-   * pre-tier behavior on every tier. See `payload-tier.ts`.
+   * Resolution falls back trimmed → standard → full. Normal-size unshaped
+   * responses remain byte-identical; oversized default-tier results receive
+   * a loud generic bounded projection. See `payload-tier.ts`.
    */
   shape?: import('./payload-tier').PayloadShapers;
   /* ─── Unified-primitive forward-compat fields (Phase E1) — see ToolDefinitionInput. */

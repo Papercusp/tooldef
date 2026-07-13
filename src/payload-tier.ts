@@ -4,8 +4,9 @@
  * (serialize-result.ts, which encodes whatever data it is given).
  *
  * Contract (context-trimming-tiers-2026-07-01 D-004, owner-ratified):
- *   - `full` IS the tool's unshaped response — an unshaped tool is
- *     byte-identical to its pre-tier behavior on EVERY tier (zero migration).
+ *   - `full` IS the tool's unshaped response while it fits the transport.
+ *     Normal-size unshaped tools remain byte-identical (zero migration);
+ *     oversized default-tier responses get a loud generic projection.
  *   - Tools opt in incrementally by declaring `shape.standard` /
  *     `shape.trimmed` on their definition; resolution falls back
  *     trimmed → standard → full.
@@ -15,9 +16,10 @@
  *     validation), so a trimmed session can always fetch one full payload.
  *   - Shaping NEVER breaks a call: a throwing shaper logs and serves the
  *     unshaped data.
- *   - No silent caps at the meta level: when a non-full session receives a
- *     LARGE unshaped payload (no applicable shaper), a once-per-tool ratchet
- *     warning names it — that log is the shaper-migration worklist.
+ *   - No silent caps at the meta level: when a non-full session would receive
+ *     a LARGE unshaped payload, the framework returns a bounded projection
+ *     with omission evidence + a full-detail re-fetch instruction. A
+ *     once-per-tool ratchet warning still names the missing custom shaper.
  *   - HARD CEILING (WI-2859): even `full` must fit the transport result cap —
  *     an over-cap result is rejected/file-dumped by the client, which is worse
  *     than a graceful downgrade. So a result over PAYLOAD_TIER_HARD_CEILING_CHARS
@@ -88,6 +90,29 @@ export const PAYLOAD_TIER_RATCHET_CHARS = 8_000;
  * triggers on genuinely oversized payloads, so normal results are untouched. */
 export const PAYLOAD_TIER_HARD_CEILING_CHARS = 30_000;
 
+/** Generic projections intentionally leave ample room for transport envelopes. */
+const GENERIC_PROJECTION_TARGET_CHARS: Record<'trimmed' | 'standard', number> = {
+  trimmed: 7_000,
+  standard: 18_000,
+};
+const GENERIC_PROJECTION_OMISSION_SAMPLES = 20;
+
+export interface BoundedPayloadProjection {
+  _projection: {
+    kind: 'bounded-payload';
+    truncated: true;
+    tier: PayloadTier;
+    forced: boolean;
+    originalChars: number;
+    returnedChars: number;
+    omittedCount: number;
+    omitted: Array<{ path: string; reason: string }>;
+    cursor: { kind: 'full-detail'; payloadTier: 'full' };
+    next: string;
+  };
+  [key: string]: unknown;
+}
+
 /** Once-per-(tool,tier) dedup for ratchet warnings — a worklist, not a log storm. */
 const ratchetWarned = new Set<string>();
 
@@ -103,6 +128,156 @@ function jsonLen(v: unknown): number {
   } catch {
     return 0;
   }
+}
+
+interface ProjectionState {
+  remaining: number;
+  omittedCount: number;
+  omitted: Array<{ path: string; reason: string }>;
+  active: WeakSet<object>;
+  limits: { maxArray: number; maxDepth: number; maxKeys: number; maxString: number };
+}
+
+function recordOmission(state: ProjectionState, path: string, reason: string, count = 1): void {
+  state.omittedCount += Math.max(1, count);
+  if (state.omitted.length < GENERIC_PROJECTION_OMISSION_SAMPLES) {
+    state.omitted.push({ path, reason });
+  }
+}
+
+function takePrimitive(state: ProjectionState, value: unknown, path: string): unknown {
+  let candidate = value;
+  if (typeof value === 'string' && value.length > state.limits.maxString) {
+    candidate = `${value.slice(0, state.limits.maxString)}…`;
+    recordOmission(state, path, `${value.length - state.limits.maxString} string characters omitted`);
+  }
+  let size = jsonLen(candidate);
+  while (typeof candidate === 'string' && size > state.remaining && candidate.length > 32) {
+    candidate = `${candidate.slice(0, Math.max(32, Math.floor(candidate.length / 2) - 1))}…`;
+    size = jsonLen(candidate);
+  }
+  if (size > state.remaining) {
+    recordOmission(state, path, 'value omitted to fit projection budget');
+    return '[omitted: projection budget]';
+  }
+  state.remaining -= size;
+  return candidate;
+}
+
+function projectValue(value: unknown, path: string, depth: number, state: ProjectionState): unknown {
+  if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return takePrimitive(state, value, path);
+  }
+  if (typeof value === 'bigint') return takePrimitive(state, value.toString(), path);
+  if (typeof value === 'undefined') return takePrimitive(state, '[undefined]', path);
+  if (typeof value === 'function' || typeof value === 'symbol') {
+    return takePrimitive(state, `[${typeof value}]`, path);
+  }
+  if (value instanceof Date) return takePrimitive(state, value.toISOString(), path);
+  if (value instanceof Error) {
+    return projectValue({ name: value.name, message: value.message }, path, depth, state);
+  }
+  if (typeof value !== 'object') return takePrimitive(state, String(value), path);
+  if (state.active.has(value)) {
+    recordOmission(state, path, 'circular reference omitted');
+    return '[circular]';
+  }
+  if (depth >= state.limits.maxDepth) {
+    recordOmission(state, path, 'nested value omitted at projection depth limit');
+    return '[omitted: depth limit]';
+  }
+
+  state.active.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const shown = value.slice(0, state.limits.maxArray);
+      const projected: unknown[] = [];
+      for (let i = 0; i < shown.length; i += 1) {
+        if (state.remaining < 128) {
+          recordOmission(state, `${path}[${i}]`, 'remaining array values omitted to fit projection budget', value.length - i);
+          break;
+        }
+        projected.push(projectValue(shown[i], `${path}[${i}]`, depth + 1, state));
+      }
+      if (value.length > shown.length) {
+        recordOmission(state, `${path}[${shown.length}]`, `${value.length - shown.length} array items omitted`, value.length - shown.length);
+      }
+      return projected;
+    }
+
+    const entries = Object.entries(value as Record<string, unknown>);
+    const projected: Record<string, unknown> = {};
+    const shown = entries.slice(0, state.limits.maxKeys);
+    for (let i = 0; i < shown.length; i += 1) {
+      const [key, child] = shown[i];
+      const keyCost = jsonLen(key) + 2;
+      if (state.remaining < keyCost + 128) {
+        recordOmission(state, `${path}.${key}`, 'remaining fields omitted to fit projection budget', entries.length - i);
+        break;
+      }
+      state.remaining -= keyCost;
+      projected[key] = projectValue(child, `${path}.${key}`, depth + 1, state);
+    }
+    if (entries.length > shown.length) {
+      recordOmission(state, `${path}.*`, `${entries.length - shown.length} object fields omitted`, entries.length - shown.length);
+    }
+    return projected;
+  } finally {
+    state.active.delete(value);
+  }
+}
+
+/**
+ * Framework fallback for a large result whose tool has no usable custom
+ * shaper. It preserves a structural preview, makes every omission explicit,
+ * and points to the opt-in full-detail request. The returned value is always
+ * an object so arrays/scalars can carry projection metadata too.
+ */
+export function projectBoundedPayload(
+  data: unknown,
+  opts: { toolName: string; tier: PayloadTier; forced?: boolean; originalChars?: number },
+): BoundedPayloadProjection {
+  const projectionTier = opts.tier === 'standard' ? 'standard' : 'trimmed';
+  const target = GENERIC_PROJECTION_TARGET_CHARS[projectionTier];
+  const state: ProjectionState = {
+    remaining: Math.max(1_000, target - 1_600),
+    omittedCount: 0,
+    omitted: [],
+    active: new WeakSet<object>(),
+    limits: projectionTier === 'standard'
+      ? { maxArray: 40, maxDepth: 8, maxKeys: 100, maxString: 2_500 }
+      : { maxArray: 12, maxDepth: 5, maxKeys: 40, maxString: 800 },
+  };
+  const preview = projectValue(data, '$', 0, state);
+  const metadata: BoundedPayloadProjection['_projection'] = {
+    kind: 'bounded-payload',
+    truncated: true,
+    tier: opts.tier,
+    forced: opts.forced === true,
+    originalChars: opts.originalChars ?? jsonLen(data),
+    returnedChars: 0,
+    omittedCount: Math.max(1, state.omittedCount),
+    omitted: state.omitted,
+    cursor: { kind: 'full-detail', payloadTier: 'full' },
+    next: `Re-call ${opts.toolName} with payloadTier:"full" and narrower filters/ids for exact detail.`,
+  };
+  let result: BoundedPayloadProjection = Array.isArray(preview)
+    ? { items: preview, _projection: metadata }
+    : preview && typeof preview === 'object'
+      ? { ...(preview as Record<string, unknown>), _projection: metadata }
+      : { value: preview, _projection: metadata };
+  metadata.returnedChars = jsonLen(result);
+
+  // Exact last-line defense: pathological keys/escaping must not defeat the
+  // transport bound even if the approximate recursion budget under-counted.
+  if (metadata.returnedChars >= PAYLOAD_TIER_HARD_CEILING_CHARS) {
+    result = {
+      summary: '[payload preview omitted: serialized projection exceeded transport budget]',
+      _projection: { ...metadata, returnedChars: 0 },
+    };
+    result._projection.returnedChars = jsonLen(result);
+  }
+  return result;
 }
 
 /** Stamp a marker so a caller can tell its `full`/`standard` request was
@@ -126,9 +301,10 @@ export interface ApplyPayloadTierOpts {
 /**
  * Apply the resolved tier's shaper to a `{ data }` response.
  * Resolution: trimmed → shape.trimmed ?? shape.standard ?? unshaped;
- * standard → shape.standard ?? unshaped; full → unshaped. A missing shaper on
- * a LARGE payload fires the once-per-tool ratchet warning (the migration
- * worklist); a throwing shaper logs and serves the unshaped data.
+ * standard → shape.standard ?? generic bounded projection; full → unshaped
+ * while it fits the transport. A missing/throwing shaper on a LARGE default
+ * payload fires the once-per-tool ratchet warning and returns the generic
+ * projection instead of flooding the model context.
  *
  * FINALLY, regardless of tier, a HARD CEILING guard force-applies the smallest
  * available shaper if the result is still oversized — so a shaper-tool can never
@@ -142,6 +318,7 @@ export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
   let out: ToolResponse = response;
   const tierShaper =
     tier === 'full' ? undefined : tier === 'trimmed' ? (shape?.trimmed ?? shape?.standard) : shape?.standard;
+  let customShapeApplied = false;
   if (tierShaper) {
     try {
       // `tierShaper` is only ever set (see the ternary above) when
@@ -151,26 +328,32 @@ export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
       // (a shaper is never invoked for 'full', so it should never need to
       // handle it).
       out = { ...response, data: tierShaper(response.data, { args, tier: tier as 'trimmed' | 'standard' }) };
+      customShapeApplied = true;
     } catch (err) {
       (log ?? console.warn)(
         `[payload-tier] ${toolName} ${tier} shaper threw (serving unshaped data): ${err instanceof Error ? err.message : String(err)}`,
       );
       out = response;
     }
-  } else if (tier !== 'full') {
-    // Ratchet: name the fat unshaped payloads non-full sessions are paying for.
+  }
+
+  if (tier !== 'full' && !customShapeApplied) {
+    // Ratchet + safe default: name fat unshaped payloads and bound them now.
     const size = jsonLen(response.data);
     const key = `${toolName} ${tier}`;
-    if (size > PAYLOAD_TIER_RATCHET_CHARS && !ratchetWarned.has(key)) {
-      ratchetWarned.add(key);
-      (log ?? console.warn)(
-        `[payload-tier] ${toolName} served a ${size}-char full payload to a '${tier}' session with no ${tier} shaper — add shape.${tier} (context-trimming-tiers P-011)`,
-      );
+    if (size > PAYLOAD_TIER_RATCHET_CHARS) {
+      if (!ratchetWarned.has(key)) {
+        ratchetWarned.add(key);
+        (log ?? console.warn)(
+          `[payload-tier] ${toolName} bounded a ${size}-char unshaped payload for a '${tier}' session — add shape.${tier} for a domain-specific projection (context-trimming-tiers P-011)`,
+        );
+      }
+      out = { ...response, data: projectBoundedPayload(response.data, { toolName, tier, originalChars: size }) };
     }
   }
 
-  // 2. Hard ceiling: never emit an over-cap result. If still oversized and a
-  //    shaper exists, force the SMALLEST one (even for `full`).
+  // 2. Hard ceiling: never emit an over-cap result. Prefer the tool's smallest
+  //    domain-specific shaper, then fall back to the generic bounded projection.
   const size = jsonLen(out.data);
   if (size > PAYLOAD_TIER_HARD_CEILING_CHARS) {
     const smallest = shape?.trimmed ?? shape?.standard;
@@ -180,7 +363,7 @@ export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
         const forcedSize = jsonLen(forced);
         // Only swap if it genuinely shrank (a trimmed tier already at this size
         // gains nothing — that shaper still needs to bound a growing field).
-        if (forcedSize < size) {
+        if (forcedSize < size && forcedSize <= PAYLOAD_TIER_HARD_CEILING_CHARS) {
           (log ?? console.warn)(
             `[payload-tier] ${toolName} '${tier}' result ${size} chars > hard ceiling ${PAYLOAD_TIER_HARD_CEILING_CHARS}; force-applied the trimmed shaper (${forcedSize} chars) to fit the transport cap (WI-2859)`,
           );
@@ -188,10 +371,17 @@ export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
         }
       } catch (err) {
         (log ?? console.warn)(
-          `[payload-tier] ${toolName} hard-ceiling force-shape threw (serving as-is): ${err instanceof Error ? err.message : String(err)}`,
+          `[payload-tier] ${toolName} hard-ceiling force-shape threw (using generic bounded projection): ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }
+    (log ?? console.warn)(
+      `[payload-tier] ${toolName} '${tier}' result ${size} chars > hard ceiling ${PAYLOAD_TIER_HARD_CEILING_CHARS}; used the generic bounded projection to fit the transport cap`,
+    );
+    return {
+      ...response,
+      data: projectBoundedPayload(out.data, { toolName, tier, forced: true, originalChars: size }),
+    };
   }
   return out;
 }
