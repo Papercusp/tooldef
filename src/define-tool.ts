@@ -18,7 +18,7 @@
 import { type ZodTypeAny } from 'zod';
 import { tierFor } from './capability-tiers';
 import { toJsonSchema } from './schema-adapter';
-import { standardValidate, formatIssues, type StandardSchemaV1 } from './standard-schema';
+import { standardValidate, formatIssues, issuesAreValueLevel, type StandardSchemaV1 } from './standard-schema';
 import { register } from './registry';
 import { collectToolEmits } from './emits-registry';
 import { registerProjectedTool, type ToolFn, type ToolExposure, type UnifiedToolContext } from './tool-projection';
@@ -981,7 +981,12 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     const parsed = await standardValidate(def.args, shimmed);
     if (!parsed.ok) {
       throw new InvalidInputError(
-        `invalid_args: ${formatIssues(parsed.issues)}${unknownArgHint(parsed.issues, rawSchema)}${argsSchemaHint(rawSchema, schemaHintCache)}`,
+        // EI-10943: the full-schema dump is for a SHAPE-blind caller (unknown key, missing
+        // required field). A caller who used the right key and merely overran a limit already
+        // knows the shape — appending 1,800 chars of schema to "too long by 3 chars" is pure
+        // context burn for the agent least able to spare it.
+        `invalid_args: ${formatIssues(parsed.issues, shimmed)}${unknownArgHint(parsed.issues, rawSchema)}` +
+          (issuesAreValueLevel(parsed.issues) ? '' : argsSchemaHint(rawSchema, schemaHintCache)),
       );
     }
     const response = await def.handler(parsed.value, legacyCtx);
@@ -1089,7 +1094,12 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     const parsed = await standardValidate(def.args, shimmed);
     if (!parsed.ok) {
       throw new InvalidInputError(
-        `invalid_args: ${formatIssues(parsed.issues)}${unknownArgHint(parsed.issues, rawSchema)}${argsSchemaHint(rawSchema, schemaHintCache)}`,
+        // EI-10943: the full-schema dump is for a SHAPE-blind caller (unknown key, missing
+        // required field). A caller who used the right key and merely overran a limit already
+        // knows the shape — appending 1,800 chars of schema to "too long by 3 chars" is pure
+        // context burn for the agent least able to spare it.
+        `invalid_args: ${formatIssues(parsed.issues, shimmed)}${unknownArgHint(parsed.issues, rawSchema)}` +
+          (issuesAreValueLevel(parsed.issues) ? '' : argsSchemaHint(rawSchema, schemaHintCache)),
       );
     }
     // Thread the per-call tier override into the HANDLER's ctx too: tools that

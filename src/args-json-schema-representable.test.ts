@@ -53,7 +53,7 @@ describe('args schemas must be JSON-Schema-representable', () => {
         args: z
           .object({ body: z.string().optional(), comment: z.string().optional() })
           .transform((v) => ({ ...v, body: v.body ?? v.comment })),
-        handler: async () => ({ ok: true }),
+        handler: async () => ({ content: [{ type: 'text' as const, text: 'ok' }] }),
       });
 
     // Fails loudly...
@@ -83,7 +83,7 @@ describe('args schemas must be JSON-Schema-representable', () => {
           .superRefine((v, ctx) => {
             if (!v.body && !v.comment) ctx.addIssue({ code: 'custom', message: 'need one' });
           }),
-        handler: async () => ({ ok: true }),
+        handler: async () => ({ content: [{ type: 'text' as const, text: 'ok' }] }),
       }),
     ).not.toThrow();
 
@@ -99,7 +99,7 @@ describe('args schemas must be JSON-Schema-representable', () => {
             .transform((v) => (Array.isArray(v) ? v : [v]))
             .pipe(z.array(z.string())),
         }),
-        handler: async () => ({ ok: true }),
+        handler: async () => ({ content: [{ type: 'text' as const, text: 'ok' }] }),
       }),
     ).not.toThrow();
 
@@ -110,7 +110,7 @@ describe('args schemas must be JSON-Schema-representable', () => {
         requirePrincipal: false,
         capability: 'test:read',
         args: z.preprocess((v) => v, z.object({ a: z.string() })),
-        handler: async () => ({ ok: true }),
+        handler: async () => ({ content: [{ type: 'text' as const, text: 'ok' }] }),
       }),
     ).not.toThrow();
   });
