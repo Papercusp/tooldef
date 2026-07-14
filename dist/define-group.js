@@ -1,4 +1,3 @@
-"use strict";
 /**
  * defineGroup — the catalogue analogue of `defineTool`, for NAMESPACE-level
  * one-line summaries.
@@ -24,12 +23,6 @@
  * Mirrors `registry.ts` (a tiny in-memory registry populated by importing the
  * `tools/**` tree once at startup).
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.defineGroup = defineGroup;
-exports.registerGroup = registerGroup;
-exports.lookupGroup = lookupGroup;
-exports.getGroupCatalog = getGroupCatalog;
-exports._resetGroupCatalogForTests = _resetGroupCatalogForTests;
 const GROUPS = new Map();
 /**
  * Declare a namespace's one-line summary (and optional sort order). Idempotent:
@@ -38,22 +31,22 @@ const GROUPS = new Map();
  * metadata (never dispatch-load-bearing), so a differing re-declaration is also
  * last-wins rather than a hard throw — unlike `register()` for tools.
  */
-function defineGroup(slug, input = {}) {
+export function defineGroup(slug, input = {}) {
     const summary = (input.summary ?? input.guidance?.when)?.trim() || undefined;
     const def = { slug, summary, order: input.order };
     registerGroup(def);
     return def;
 }
-function registerGroup(def) {
+export function registerGroup(def) {
     GROUPS.set(def.slug, def);
 }
-function lookupGroup(slug) {
+export function lookupGroup(slug) {
     return GROUPS.get(slug);
 }
-function getGroupCatalog() {
+export function getGroupCatalog() {
     return [...GROUPS.values()];
 }
 /** Clears the group registry. Test-only. */
-function _resetGroupCatalogForTests() {
+export function _resetGroupCatalogForTests() {
     GROUPS.clear();
 }

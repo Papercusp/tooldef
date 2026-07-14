@@ -1,4 +1,3 @@
-"use strict";
 /**
  * Workspace-lifecycle hook (H4 in bespoke-card-improvements-2026-05-13.md).
  *
@@ -15,17 +14,12 @@
  * Caller (operator on session/workspace change) invokes
  * `dispatchWorkspaceSwitch(newWorkspaceId)`.
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.onWorkspaceSwitch = onWorkspaceSwitch;
-exports.dispatchWorkspaceSwitch = dispatchWorkspaceSwitch;
-exports._resetWorkspaceLifecycleForTests = _resetWorkspaceLifecycleForTests;
-exports._subscriberCountForTests = _subscriberCountForTests;
 const SUBSCRIBERS = new Set();
 /**
  * Subscribe a callback. Returns an unsubscribe function.
  * Callbacks run in registration order on `dispatchWorkspaceSwitch`.
  */
-function onWorkspaceSwitch(cb) {
+export function onWorkspaceSwitch(cb) {
     SUBSCRIBERS.add(cb);
     return () => {
         SUBSCRIBERS.delete(cb);
@@ -35,7 +29,7 @@ function onWorkspaceSwitch(cb) {
  * Notify every subscriber. One subscriber throwing does NOT block others;
  * errors are aggregated and logged.
  */
-async function dispatchWorkspaceSwitch(workspaceId) {
+export async function dispatchWorkspaceSwitch(workspaceId) {
     const errors = [];
     for (const cb of SUBSCRIBERS) {
         try {
@@ -50,10 +44,10 @@ async function dispatchWorkspaceSwitch(workspaceId) {
     }
 }
 /** Test-only: clear all subscribers. */
-function _resetWorkspaceLifecycleForTests() {
+export function _resetWorkspaceLifecycleForTests() {
     SUBSCRIBERS.clear();
 }
 /** Test-only: read current subscriber count. */
-function _subscriberCountForTests() {
+export function _subscriberCountForTests() {
     return SUBSCRIBERS.size;
 }

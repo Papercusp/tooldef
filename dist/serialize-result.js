@@ -1,4 +1,3 @@
-"use strict";
 /**
  * Format-aware serialization of a `ToolResponse` → MCP `content[]` + `_meta`.
  *
@@ -19,10 +18,7 @@
  *     chosen compact format can't faithfully represent the data; the downgrade
  *     is labeled via `_meta.formatFallback`.
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.formatOptsFromCtx = formatOptsFromCtx;
-exports.serializeToolResponse = serializeToolResponse;
-const result_encoding_1 = require("@papercusp/result-encoding");
+import { encode, encodeToonChecked, encodePositionalRows, isFlatObjectArray, isObjectWithArrayField, parseFormatRequest, readPrePromptFormat, } from '@papercusp/result-encoding';
 /** Shape the negotiation into the compact `_meta.delta` envelope (omit absent fields). */
 function deltaMeta(delta) {
     return {
@@ -37,9 +33,9 @@ function deltaMeta(delta) {
     };
 }
 /** Build the format options for a call from the request context + the tool's precomputed eligibility. */
-function formatOptsFromCtx(ctx, eligibility) {
+export function formatOptsFromCtx(ctx, eligibility) {
     return {
-        requested: (0, result_encoding_1.parseFormatRequest)(ctx.requestedFormat),
+        requested: parseFormatRequest(ctx.requestedFormat),
         eligibility,
         // The MCP transport is the agent-facing surface (the LLM reads content text):
         // deliver compact by default. Every other transport (HTTP catch-all,
@@ -52,15 +48,15 @@ function formatOptsFromCtx(ctx, eligibility) {
 function tryEncode(format, data) {
     try {
         if (format === 'json')
-            return { format, text: (0, result_encoding_1.encode)(data, 'json') };
+            return { format, text: encode(data, 'json') };
         if (format === 'toon') {
-            const t = (0, result_encoding_1.encodeToonChecked)(data);
+            const t = encodeToonChecked(data);
             return t.lossless ? { format, text: t.text } : null;
         }
         // csv / tsv / md require a flat array of scalar-only objects at runtime.
-        if (!(0, result_encoding_1.isFlatObjectArray)(data))
+        if (!isFlatObjectArray(data))
             return null;
-        return { format, text: (0, result_encoding_1.encode)(data, format) };
+        return { format, text: encode(data, format) };
     }
     catch {
         return null;
@@ -74,10 +70,10 @@ function chooseFormat(data, opts) {
     // marginal). `encodeToonChecked` is lossless-or-fallback, so attempting TOON on
     // an object is safe — a non-lossless shape falls through to JSON below.
     // (definetool-token-optimization-adoption P-001.)
-    const autoBest = Array.isArray(data) || (0, result_encoding_1.isObjectWithArrayField)(data) ? 'toon' : 'json';
+    const autoBest = Array.isArray(data) || isObjectWithArrayField(data) ? 'toon' : 'json';
     // `json` request → lossless JSON, unconditionally.
     if (req === 'json') {
-        return { format: 'json', text: (0, result_encoding_1.encode)(data, 'json'), fallback: false };
+        return { format: 'json', text: encode(data, 'json'), fallback: false };
     }
     // `compact` request (the agent default) → the auto pick (schema bestFormat,
     // else autoBest), but SIZE-GUARDED (D-005): never serve a compact body that
@@ -90,7 +86,7 @@ function chooseFormat(data, opts) {
     // via an eligibility bestFormat over a proven-flat array, where they are
     // reliably smaller, so the same size check is safe for them.)
     if (req === 'compact') {
-        const jsonText = (0, result_encoding_1.encode)(data, 'json');
+        const jsonText = encode(data, 'json');
         const want = opts.eligibility ? opts.eligibility.bestFormat : autoBest;
         if (want !== 'json') {
             const r = tryEncode(want, data);
@@ -115,7 +111,7 @@ function chooseFormat(data, opts) {
     // Unreachable in practice (json always encodes), but keep the contract total.
     // `want` is typed to the non-json formats, so the comparison is dead — cast to keep
     // the contract explicit (and tsc happy after a concurrent narrowing of the format type).
-    return { format: 'json', text: (0, result_encoding_1.encode)(data, 'json'), fallback: want !== 'json' };
+    return { format: 'json', text: encode(data, 'json'), fallback: want !== 'json' };
 }
 /**
  * Tier-3 read path (token-efficient-agent-io P-004/D-001): when the tool is in
@@ -129,7 +125,7 @@ function chooseFormat(data, opts) {
 function tryTier3Read(data, opts) {
     if (!opts.toolName || !opts.readColumns || opts.readColumns.length === 0)
         return null;
-    const fmt = (0, result_encoding_1.readPrePromptFormat)(opts.toolName);
+    const fmt = readPrePromptFormat(opts.toolName);
     if (fmt !== 'csv' && fmt !== 'tsv')
         return null; // 'toon' / 'off' → normal path
     if (opts.includeStructured)
@@ -143,16 +139,16 @@ function tryTier3Read(data, opts) {
     // a nested cell declines Tier-3 → safe fallback to the compact/lossless path.
     if (!Array.isArray(data))
         return null;
-    if (data.length > 0 && !(0, result_encoding_1.isFlatObjectArray)(data))
+    if (data.length > 0 && !isFlatObjectArray(data))
         return null;
-    const text = (0, result_encoding_1.encodePositionalRows)(data, opts.readColumns, fmt === 'tsv' ? '\t' : ',');
+    const text = encodePositionalRows(data, opts.readColumns, fmt === 'tsv' ? '\t' : ',');
     return { format: fmt, text };
 }
 /**
  * Serialize a `ToolResponse` into MCP `content[]` + `_meta`. `uiResources` are
  * appended verbatim after the text item (parity with the legacy wrappers).
  */
-function serializeToolResponse(response, opts) {
+export function serializeToolResponse(response, opts) {
     const _meta = {};
     const hasData = response.data !== undefined && response.data !== null;
     if (hasData) {
@@ -175,7 +171,7 @@ function serializeToolResponse(response, opts) {
         _meta.delta = deltaMeta(opts.delta);
         const count = Array.isArray(data)
             ? data.length
-            : (0, result_encoding_1.isObjectWithArrayField)(data)
+            : isObjectWithArrayField(data)
                 ? undefined
                 : undefined;
         const text = count !== undefined ? `mode: not_modified\ncount: ${count}` : 'mode: not_modified';

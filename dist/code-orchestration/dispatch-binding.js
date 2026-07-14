@@ -1,9 +1,5 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.unwrapToolResult = unwrapToolResult;
-exports.realDispatch = realDispatch;
-const dispatch_projected_1 = require("../dispatch-projected");
-const result_encoding_1 = require("@papercusp/result-encoding");
+import { dispatchProjectedTool } from '../dispatch-projected';
+import { decode, isResultFormat } from '@papercusp/result-encoding';
 /** Matches the `format: <fmt>\n` self-identifying marker `serializeToolResponse` prefixes onto
  *  any non-JSON compact body (serialize-result.ts) — JSON itself carries no marker. */
 const FORMAT_MARKER_RE = /^format: (\S+)\n/;
@@ -23,7 +19,7 @@ const FORMAT_MARKER_RE = /^format: (\S+)\n/;
  * Parse the marker first and DECODE with the matching format (the lossless inverse of
  * the encoder that produced it) so the script always sees the real structured value.
  */
-function unwrapToolResult(result) {
+export function unwrapToolResult(result) {
     if (!result)
         return undefined;
     if (result.structuredContent !== undefined)
@@ -36,9 +32,9 @@ function unwrapToolResult(result) {
         return result;
     const text = textItem.text;
     const marker = FORMAT_MARKER_RE.exec(text);
-    if (marker && (0, result_encoding_1.isResultFormat)(marker[1]) && marker[1] !== 'md') {
+    if (marker && isResultFormat(marker[1]) && marker[1] !== 'md') {
         try {
-            return (0, result_encoding_1.decode)(text.slice(marker[0].length), marker[1]);
+            return decode(text.slice(marker[0].length), marker[1]);
         }
         catch {
             // Fall through to the JSON/raw-text attempts below — never let a decode
@@ -52,11 +48,67 @@ function unwrapToolResult(result) {
         return text;
     }
 }
-function realDispatch(ctx, deps) {
+/**
+ * Dispatcher error codes decided BEFORE the tool's handler runs — a gate or a schema
+ * rejection. When dispatch fails with one of these, the tool's side effects
+ * DEFINITIVELY did not happen: nothing was written, so a retry is safe.
+ *
+ * This distinction is load-bearing (EI-10951). The orchestrator used to count every
+ * DISPATCHED write-effect call as "executed", including one the dispatcher rejected on
+ * its args — so a script whose last call had a typo'd argument came back with
+ * "1 write-effect call(s) already executed before this failure — do NOT blindly re-run
+ * … to avoid a double-write." Nothing had executed. The warning sent the agent off to
+ * verify a write that never happened, and taught it to distrust a warning that is
+ * RIGHT in the case it exists for (a real partial batch). A safety warning that cries
+ * wolf on the most common failure (a bad arg) is worse than no warning.
+ *
+ * Conservative by construction: a code NOT in this set is treated as UNKNOWN (it may
+ * have landed), so a genuinely ambiguous failure still gets the loud warning. Only
+ * codes that provably precede the handler belong here.
+ */
+export const PRE_EXECUTION_ERROR_CODES = new Set([
+    'invalid_input',
+    'invalid_args',
+    'schema_validation_failed',
+    'unknown_tool',
+    'tool_not_found',
+    'role_not_allowed',
+    'missing_capability',
+    'capability_denied',
+    'envelope_denied',
+    'quota_exceeded',
+    'rate_limited',
+]);
+/**
+ * A dispatch-level failure, carrying the dispatcher's own error `code` instead of
+ * flattening it into a string. `preExecution` answers the only question a caller
+ * recovering from a failed batch actually has: did this write land or not?
+ *
+ * The `message` format is UNCHANGED (`tool <name> failed [<code>]: <msg>`) — scripts in
+ * the wild match on it, and this is a strictly additive widening of the thrown value.
+ */
+export class ToolDispatchError extends Error {
+    code;
+    toolName;
+    /** True ⇒ the dispatcher rejected the call before the handler ran; nothing was written. */
+    preExecution;
+    constructor(toolName, code, message) {
+        super(`tool ${toolName} failed [${code}]: ${message}`);
+        this.name = 'ToolDispatchError';
+        this.code = code;
+        this.toolName = toolName;
+        this.preExecution = PRE_EXECUTION_ERROR_CODES.has(code);
+    }
+}
+/** True when a thrown value is a dispatch rejection that provably never reached the handler. */
+export function isPreExecutionFailure(err) {
+    return err instanceof ToolDispatchError && err.preExecution;
+}
+export function realDispatch(ctx, deps) {
     return async (tool, toolName, args) => {
-        const r = await (0, dispatch_projected_1.dispatchProjectedTool)(tool, toolName, args, ctx, deps);
+        const r = await dispatchProjectedTool(tool, toolName, args, ctx, deps);
         if (!r.ok) {
-            throw new Error(`tool ${toolName} failed [${r.error?.code ?? 'error'}]: ${r.error?.message ?? 'unknown error'}`);
+            throw new ToolDispatchError(toolName, r.error?.code ?? 'error', r.error?.message ?? 'unknown error');
         }
         return unwrapToolResult(r.result);
     };

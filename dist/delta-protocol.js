@@ -1,4 +1,3 @@
-"use strict";
 /**
  * delta-protocol.ts — framework freshness plumbing for agent tool results.
  * (agent-tool-delta-protocol-2026-06-22, Lane B / P-004 contract + P-005 impl.)
@@ -38,23 +37,6 @@
  * APIs beyond an optional `Buffer` fast-path): the generic `tooldef` lib owns
  * the protocol mechanics; endpoints opt in by declaring a `DeltaCapability`.
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.DELTA_MAX_DIGEST_ENTRIES = exports.DELTA_SMALL_RESPONSE_BYTES = void 0;
-exports.parseDeltaRequest = parseDeltaRequest;
-exports.formatDeltaRequest = formatDeltaRequest;
-exports.encodeDeltaCursor = encodeDeltaCursor;
-exports.decodeDeltaCursor = decodeDeltaCursor;
-exports.computeViewFingerprint = computeViewFingerprint;
-exports.contentRevision = contentRevision;
-exports.negotiateDelta = negotiateDelta;
-exports.setSemanticDeltaEnabledResolver = setSemanticDeltaEnabledResolver;
-exports.resetSemanticDeltaEnabledResolver = resetSemanticDeltaEnabledResolver;
-exports.isSemanticDeltaEnabled = isSemanticDeltaEnabled;
-exports.computeRowDigest = computeRowDigest;
-exports.computeViewChecksum = computeViewChecksum;
-exports.diffFromDigest = diffFromDigest;
-exports.applySemanticDelta = applySemanticDelta;
-exports.deltaCounts = deltaCounts;
 /**
  * Parse the raw `_meta.delta` / `?delta=` token into a `DeltaRequest`.
  *
@@ -65,7 +47,7 @@ exports.deltaCounts = deltaCounts;
  * An unrecognized mode is coerced to `auto` (defensive: never throw on a stray
  * token; `auto` without a cursor degrades to `full` anyway).
  */
-function parseDeltaRequest(raw) {
+export function parseDeltaRequest(raw) {
     if (raw == null)
         return undefined;
     const trimmed = String(raw).trim();
@@ -78,7 +60,7 @@ function parseDeltaRequest(raw) {
     return cursor ? { mode, cursor } : { mode };
 }
 /** Re-serialize a `DeltaRequest` to its wire token (the inverse of `parseDeltaRequest`). */
-function formatDeltaRequest(req) {
+export function formatDeltaRequest(req) {
     return req.cursor ? `${req.mode}~${req.cursor}` : req.mode;
 }
 function toBase64Url(s) {
@@ -107,7 +89,7 @@ function fromBase64Url(s) {
     }
 }
 /** Encode a cursor payload into a compact, URL-safe, opaque token. */
-function encodeDeltaCursor(payload) {
+export function encodeDeltaCursor(payload) {
     return toBase64Url(JSON.stringify(payload));
 }
 /**
@@ -115,7 +97,7 @@ function encodeDeltaCursor(payload) {
  * / unversioned / structurally-invalid token — the caller treats a `null` decode
  * exactly like a missing cursor and falls back to `full`.
  */
-function decodeDeltaCursor(token) {
+export function decodeDeltaCursor(token) {
     if (!token)
         return null;
     const json = fromBase64Url(token);
@@ -196,7 +178,7 @@ function fnv1a64(str) {
  * which is chosen downstream and would couple the fingerprint to size-guard
  * decisions.
  */
-function computeViewFingerprint(input) {
+export function computeViewFingerprint(input) {
     const material = canonicalStringify([
         input.toolName,
         input.args ?? null,
@@ -212,7 +194,7 @@ function computeViewFingerprint(input) {
  * "the whole rendered output is byte-identical to last time" (safe for any shape,
  * incl. a grouped aggregate like `plans:attention`).
  */
-function contentRevision(value) {
+export function contentRevision(value) {
     return fnv1a64(canonicalStringify(value));
 }
 /**
@@ -221,7 +203,7 @@ function contentRevision(value) {
  * (~120 bytes) is counted, so the framework skips delta machinery and serves
  * full with no cursor. (agent-tool-delta-protocol-2026-06-22, P-004.)
  */
-exports.DELTA_SMALL_RESPONSE_BYTES = 256;
+export const DELTA_SMALL_RESPONSE_BYTES = 256;
 /**
  * The pure negotiation. Given the parsed request and the endpoint's current
  * revision/fingerprint (both already computed by the caller, since `revision`
@@ -238,7 +220,7 @@ exports.DELTA_SMALL_RESPONSE_BYTES = 256;
  * A non-capable endpoint (or the small-response bypass) always returns `full`
  * with `supported:false`/`bypass` and NO cursor.
  */
-function negotiateDelta(input) {
+export function negotiateDelta(input) {
     const { request, capabilityDeclared, currentRevision, currentFingerprint, schemaVersion, bypass, cursorExtra } = input;
     if (!capabilityDeclared) {
         return { mode: 'full', supported: false, reason: 'not_capable' };
@@ -292,15 +274,15 @@ function negotiateDelta(input) {
  */
 let semanticDeltaEnabledResolver = () => true;
 /** Install the host's flag-backed resolver (Papercusp wires this at boot). */
-function setSemanticDeltaEnabledResolver(fn) {
+export function setSemanticDeltaEnabledResolver(fn) {
     semanticDeltaEnabledResolver = fn;
 }
 /** Reset to the always-on default (tests). */
-function resetSemanticDeltaEnabledResolver() {
+export function resetSemanticDeltaEnabledResolver() {
     semanticDeltaEnabledResolver = () => true;
 }
 /** Is the `mode:'delta'` upgrade permitted for this call? (full/not_modified are always allowed.) */
-function isSemanticDeltaEnabled(ctx) {
+export function isSemanticDeltaEnabled(ctx) {
     return semanticDeltaEnabledResolver(ctx);
 }
 /* ──────────────────────────────────────────────────────────────────────────
@@ -312,7 +294,7 @@ function isSemanticDeltaEnabled(ctx) {
  * a bounded view (e.g. `plans:attention`, tens of rows) gets full semantic deltas;
  * an unbounded one should supply `changesSince` (watermark-backed) instead.
  */
-exports.DELTA_MAX_DIGEST_ENTRIES = 500;
+export const DELTA_MAX_DIGEST_ENTRIES = 500;
 /** Per-row revision: the endpoint's `rowRevision`, else a stable content hash. */
 function rowRev(row, rowRevision) {
     return rowRevision ? String(rowRevision(row)) : fnv1a64(canonicalStringify(row));
@@ -322,8 +304,8 @@ function rowRev(row, rowRevision) {
  * cursor so the next call can diff statelessly. Returns null when the view
  * exceeds `DELTA_MAX_DIGEST_ENTRIES` (caller omits the digest → no semantic delta).
  */
-function computeRowDigest(rows, itemKey, rowRevision) {
-    if (rows.length > exports.DELTA_MAX_DIGEST_ENTRIES)
+export function computeRowDigest(rows, itemKey, rowRevision) {
+    if (rows.length > DELTA_MAX_DIGEST_ENTRIES)
         return null;
     const out = {};
     for (const row of rows)
@@ -337,7 +319,7 @@ function computeRowDigest(rows, itemKey, rowRevision) {
  * declared `orderKey` field carried in each row's data, so a pure reorder doesn't
  * need to bust the checksum.
  */
-function computeViewChecksum(rows, itemKey, rowRevision) {
+export function computeViewChecksum(rows, itemKey, rowRevision) {
     const pairs = [];
     for (const row of rows)
         pairs.push(`${itemKey(row)}=${rowRev(row, rowRevision)}`);
@@ -351,7 +333,7 @@ function computeViewChecksum(rows, itemKey, rowRevision) {
  * id absent from the digest; `updated` = id present but the rowRevision differs;
  * `removed` = a digest id absent from the current rows.
  */
-function diffFromDigest(priorDigest, rows, itemKey, opts = {}) {
+export function diffFromDigest(priorDigest, rows, itemKey, opts = {}) {
     const { rowRevision, rowType } = opts;
     const changes = [];
     const seen = new Set();
@@ -379,7 +361,7 @@ function diffFromDigest(priorDigest, rows, itemKey, opts = {}) {
  * tests that prove merge-correctness) share ONE implementation. Returns the
  * merged rows in insertion order (the caller re-sorts by `orderKey`).
  */
-function applySemanticDelta(base, changes, itemKey) {
+export function applySemanticDelta(base, changes, itemKey) {
     const map = new Map();
     for (const row of base)
         map.set(itemKey(row), row);
@@ -392,7 +374,7 @@ function applySemanticDelta(base, changes, itemKey) {
     return [...map.values()];
 }
 /** `{ added, updated, removed }` counts over a change set (for the envelope + telemetry). */
-function deltaCounts(changes) {
+export function deltaCounts(changes) {
     const counts = { added: 0, updated: 0, removed: 0 };
     for (const c of changes)
         counts[c.change]++;

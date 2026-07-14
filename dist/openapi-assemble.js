@@ -1,4 +1,3 @@
-"use strict";
 /**
  * OpenAPI 3.1 document assembler.
  *
@@ -13,17 +12,14 @@
  * the registry, so it's trivially testable and the caller decides
  * whether to pass the full catalog or a filtered subset.
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.toolOperationName = toolOperationName;
-exports.assembleOpenApiDocument = assembleOpenApiDocument;
-const openapi_fragments_1 = require("./openapi-fragments");
+import { standardResponseComponents, toolToOpenApiFragment, } from './openapi-fragments';
 /**
  * Resolve the operation name for a projected tool. Prefers the MCP
  * dotted name; falls back to the HTTP path's last segment. Tools with
  * neither are skipped by the caller (registerProjectedTool already
  * rejects them, so this is defense-in-depth).
  */
-function toolOperationName(tool) {
+export function toolOperationName(tool) {
     if (tool.expose.mcp?.name)
         return tool.expose.mcp.name;
     if (tool.expose.http?.path) {
@@ -40,7 +36,7 @@ function toolOperationName(tool) {
  * registry already enforces unique MCP names + HTTP paths, so a
  * collision here means a bug upstream, not a recoverable condition.
  */
-function assembleOpenApiDocument(tools, opts = {}) {
+export function assembleOpenApiDocument(tools, opts = {}) {
     const pathPrefix = opts.pathPrefix ?? '/api';
     const securitySchemeName = opts.securitySchemeName ?? 'bearerAuth';
     const paths = {};
@@ -67,13 +63,13 @@ function assembleOpenApiDocument(tools, opts = {}) {
         }
     };
     for (const { tool, name } of named) {
-        mergeFragment((0, openapi_fragments_1.toolToOpenApiFragment)(name, tool, { pathPrefix, securitySchemeName }));
+        mergeFragment(toolToOpenApiFragment(name, tool, { pathPrefix, securitySchemeName }));
     }
     // defineTool fragments (R3) — already pathPrefix-resolved by the host.
     for (const frag of opts.extraFragments ?? []) {
         mergeFragment(frag);
     }
-    const responses = (0, openapi_fragments_1.standardResponseComponents)();
+    const responses = standardResponseComponents();
     const doc = {
         openapi: '3.1.0',
         info: {

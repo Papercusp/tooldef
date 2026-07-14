@@ -1,8 +1,3 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.DeltaToolClient = void 0;
-exports.dispatchWithDelta = dispatchWithDelta;
-exports.dispatchWithConveyedDelta = dispatchWithConveyedDelta;
 /**
  * delta-client — the CLIENT side of the agent tool-result delta protocol (the inverse
  * of `negotiateDelta`). agent-tool-delta-protocol-2026-06-22 follow-up: the server has
@@ -25,13 +20,13 @@ exports.dispatchWithConveyedDelta = dispatchWithConveyedDelta;
  * it). Assumes the server's default content-hash row revision (the checksum machinery the
  * adopted tools use); a tool declaring a custom `rowRevision` must convey it to the client.
  */
-const delta_protocol_1 = require("./delta-protocol");
+import { applySemanticDelta, computeViewChecksum } from './delta-protocol';
 /**
  * Per-consumer cache of tool VIEWS for the delta protocol. One instance per agent
  * session / conversation; `viewKey` is a stable id for a logical view (e.g.
  * `"plans:list:" + canonicalArgs`). Not thread-safe; drive it from one tool-call loop.
  */
-class DeltaToolClient {
+export class DeltaToolClient {
     views = new Map();
     /** The cursor to attach as `_meta.delta` for `viewKey`, or undefined for a cold first read. */
     cursorFor(viewKey) {
@@ -55,8 +50,8 @@ class DeltaToolClient {
             return { rows: prev.rows, refetchFull: false };
         }
         // mode === 'delta'
-        const merged = (0, delta_protocol_1.applySemanticDelta)(prev.rows, res.changes, itemKey);
-        if (res.checksum != null && (0, delta_protocol_1.computeViewChecksum)(merged, itemKey) !== res.checksum) {
+        const merged = applySemanticDelta(prev.rows, res.changes, itemKey);
+        if (res.checksum != null && computeViewChecksum(merged, itemKey) !== res.checksum) {
             // The merged set diverged from the server's authoritative view — never hand a
             // possibly-wrong view to the model. Drop the base + force a clean full refetch.
             this.views.delete(viewKey);
@@ -74,7 +69,6 @@ class DeltaToolClient {
         return this.views.size;
     }
 }
-exports.DeltaToolClient = DeltaToolClient;
 /**
  * One delta-negotiated read for a view. Sends the cached cursor, ingests the response, and —
  * if the delta can't be safely applied (checksum mismatch / no base) — re-dispatches WITHOUT
@@ -82,7 +76,7 @@ exports.DeltaToolClient = DeltaToolClient;
  * Pure orchestration over an abstract {@link DeltaDispatch}; the wiring layer provides the
  * concrete dispatch + the registry-resolved `itemKey`.
  */
-async function dispatchWithDelta(client, viewKey, itemKey, dispatch) {
+export async function dispatchWithDelta(client, viewKey, itemKey, dispatch) {
     const cursor = client.cursorFor(viewKey);
     let res = await dispatch(cursor);
     let ingested = client.ingest(viewKey, res, itemKey);
@@ -114,7 +108,7 @@ async function dispatchWithDelta(client, viewKey, itemKey, dispatch) {
  * stops here: the merge LOGIC ships; the Claude-Code-facing compact-delta delivery is by-design
  * absent.
  */
-async function dispatchWithConveyedDelta(client, fieldByView, viewKey, dispatch) {
+export async function dispatchWithConveyedDelta(client, fieldByView, viewKey, dispatch) {
     // Dynamic itemKey — re-reads the learned field, so a relearn after a refetch takes effect.
     const itemKey = (row) => {
         const f = fieldByView.get(viewKey);

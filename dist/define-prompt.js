@@ -1,14 +1,11 @@
-"use strict";
 /**
  * definePrompt — symmetric to defineTool / defineResource.
  *
  * Place files under `src/prompts/<group>/<verb>.ts`. The macro derives
  * the prompt name from the file path and self-registers.
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.definePrompt = definePrompt;
-const capability_tiers_1 = require("./capability-tiers");
-const prompt_registry_1 = require("./prompt-registry");
+import { tierFor } from './capability-tiers';
+import { registerPrompt } from './prompt-registry';
 function deriveNameFromCallSite() {
     const ErrorAny = Error;
     const orig = ErrorAny.prepareStackTrace;
@@ -34,7 +31,7 @@ function deriveNameFromCallSite() {
         ErrorAny.prepareStackTrace = orig;
     }
 }
-function definePrompt(input) {
+export function definePrompt(input) {
     const name = input.name ?? deriveNameFromCallSite();
     if (!name) {
         throw new Error('definePrompt: could not derive name from call site. ' +
@@ -42,7 +39,7 @@ function definePrompt(input) {
     }
     const description = input.description ?? `Prompt ${name}`;
     // Public prompts (no capability) are tier "low" by default.
-    const tier = input.capability ? (0, capability_tiers_1.tierFor)(input.capability) : 'low';
+    const tier = input.capability ? tierFor(input.capability) : 'low';
     const def = {
         name,
         description,
@@ -51,6 +48,6 @@ function definePrompt(input) {
         arguments: input.arguments,
         render: input.render,
     };
-    (0, prompt_registry_1.registerPrompt)(def);
+    registerPrompt(def);
     return def;
 }

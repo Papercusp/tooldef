@@ -1,4 +1,3 @@
-"use strict";
 /**
  * OpenAPI 3.1 fragment emitter for projected tools.
  *
@@ -19,15 +18,11 @@
  *
  * Spec ref: openapi-design-spike-2026-05-20.md.
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.componentKey = componentKey;
-exports.toolToOpenApiFragment = toolToOpenApiFragment;
-exports.standardResponseComponents = standardResponseComponents;
-const schema_adapter_1 = require("./schema-adapter");
+import { toJsonSchema } from './schema-adapter';
 // componentKey: sanitize tool names for OpenAPI 3.1 component-schema map keys
 // (regex ^[A-Za-z0-9._-]+$). Tool names use ":" as namespace separator (legal
 // in paths per Q3, illegal in component keys). Swap any disallowed char to "_".
-function componentKey(name) {
+export function componentKey(name) {
     return name.replace(/[^A-Za-z0-9._-]/g, '_');
 }
 /**
@@ -37,7 +32,7 @@ function componentKey(name) {
  * `/api`); a custom security-scheme name (default `bearerAuth`) maps to
  * the `securitySchemes` entry the assembler will register.
  */
-function toolToOpenApiFragment(toolName, tool, opts = {}) {
+export function toolToOpenApiFragment(toolName, tool, opts = {}) {
     const pathPrefix = opts.pathPrefix ?? '/api';
     const securitySchemeName = opts.securitySchemeName ?? 'bearerAuth';
     const path = `${pathPrefix}/${toolName}`;
@@ -154,7 +149,7 @@ function toolToOpenApiFragment(toolName, tool, opts = {}) {
  * Returned as a single object so the assembler can spread it into
  * `components.responses` once per document instead of N times.
  */
-function standardResponseComponents() {
+export function standardResponseComponents() {
     const errorEnvelope = {
         type: 'object',
         required: ['error'],
@@ -242,7 +237,7 @@ function stripJsonSchemaMeta(schema) {
  */
 function zodToJsonSchemaSafe(schema) {
     try {
-        const raw = (0, schema_adapter_1.toJsonSchema)(schema);
+        const raw = toJsonSchema(schema);
         return stripJsonSchemaMeta(raw);
     }
     catch {

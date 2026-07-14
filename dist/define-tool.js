@@ -1,4 +1,3 @@
-"use strict";
 /**
  * defineTool — the simplification engine.
  *
@@ -15,19 +14,17 @@
  * response is generated from the catalog at startup. Adding a tool is
  * dropping a file; no manual list to maintain.
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.defineTool = defineTool;
-const capability_tiers_1 = require("./capability-tiers");
-const schema_adapter_1 = require("./schema-adapter");
-const standard_schema_1 = require("./standard-schema");
-const registry_1 = require("./registry");
-const emits_registry_1 = require("./emits-registry");
-const tool_projection_1 = require("./tool-projection");
-const dispatch_projected_1 = require("./dispatch-projected");
-const serialize_result_1 = require("./serialize-result");
-const payload_tier_1 = require("./payload-tier");
-const delta_protocol_1 = require("./delta-protocol");
-const result_encoding_1 = require("@papercusp/result-encoding");
+import { tierFor } from './capability-tiers';
+import { toJsonSchema } from './schema-adapter';
+import { standardValidate, formatIssues, issuesAreValueLevel } from './standard-schema';
+import { register } from './registry';
+import { collectToolEmits } from './emits-registry';
+import { registerProjectedTool } from './tool-projection';
+import { UnauthorizedToolError, InvalidInputError } from './dispatch-projected';
+import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
+import { applyPayloadTier, extractPayloadTier, resolvePayloadTier } from './payload-tier';
+import { parseDeltaRequest, computeViewFingerprint, contentRevision, negotiateDelta, decodeDeltaCursor, computeRowDigest, computeViewChecksum, diffFromDigest, deltaCounts, isSemanticDeltaEnabled, DELTA_SMALL_RESPONSE_BYTES, } from './delta-protocol';
+import { analyzeSchema, projectReadColumns, projectWriteColumns, reconstructArgs, isWritePositional, getPrePromptEntry, isObjectWithArrayField, } from '@papercusp/result-encoding';
 /**
  * Walk up the call stack to find the file that called defineTool, then
  * derive a tool name from that file's path. Convention:
@@ -101,9 +98,9 @@ function computeOutputEligibility(resultSchema) {
     if (!resultSchema)
         return {};
     try {
-        const js = (0, schema_adapter_1.toJsonSchema)(resultSchema);
+        const js = toJsonSchema(resultSchema);
         delete js.$schema;
-        return { jsonSchema: js, eligibility: (0, result_encoding_1.analyzeSchema)(js) };
+        return { jsonSchema: js, eligibility: analyzeSchema(js) };
     }
     catch {
         return {};
@@ -134,18 +131,18 @@ function computeOutputEligibility(resultSchema) {
  * Never throws: a thrown `revision()`/`changesSince()` degrades to a full body.
  */
 async function negotiateToolDelta(def, ctx, args, response) {
-    const request = (0, delta_protocol_1.parseDeltaRequest)(ctx.requestedDelta);
+    const request = parseDeltaRequest(ctx.requestedDelta);
     if (!request && !def.delta)
         return undefined;
     if (!def.delta)
-        return (0, delta_protocol_1.negotiateDelta)({ request, capabilityDeclared: false });
+        return negotiateDelta({ request, capabilityDeclared: false });
     const cap = def.delta;
     const scope = cap.scope?.(args, ctx);
-    const fingerprint = (0, delta_protocol_1.computeViewFingerprint)({ toolName: def.name, args: args ?? null, scope, format: ctx.requestedFormat });
+    const fingerprint = computeViewFingerprint({ toolName: def.name, args: args ?? null, scope, format: ctx.requestedFormat });
     const body = response && typeof response === 'object' ? response.data : undefined;
     const fullJsonLen = JSON.stringify(body ?? null).length;
-    if (fullJsonLen < delta_protocol_1.DELTA_SMALL_RESPONSE_BYTES) {
-        return (0, delta_protocol_1.negotiateDelta)({ request, capabilityDeclared: true, currentFingerprint: fingerprint, bypass: true });
+    if (fullJsonLen < DELTA_SMALL_RESPONSE_BYTES) {
+        return negotiateDelta({ request, capabilityDeclared: true, currentFingerprint: fingerprint, bypass: true });
     }
     // Semantic surface active when the tool can produce a diffable row array — via
     // the `rows` selector (e.g. flatten groups) or because the body IS the array —
@@ -155,8 +152,8 @@ async function negotiateToolDelta(def, ctx, args, response) {
     let digest = null;
     let checksum;
     if (rows && itemKey) {
-        digest = (0, delta_protocol_1.computeRowDigest)(rows, itemKey, cap.rowRevision);
-        checksum = (0, delta_protocol_1.computeViewChecksum)(rows, itemKey, cap.rowRevision);
+        digest = computeRowDigest(rows, itemKey, cap.rowRevision);
+        checksum = computeViewChecksum(rows, itemKey, cap.rowRevision);
     }
     // Revision precedence: an explicit `cap.revision` (the cheapest signal) → the
     // view checksum for a semantic tool → a content hash of the whole body. Only the
@@ -167,7 +164,7 @@ async function negotiateToolDelta(def, ctx, args, response) {
             ? String(await cap.revision(args, ctx))
             : checksum !== undefined
                 ? checksum
-                : (0, delta_protocol_1.contentRevision)(body ?? null);
+                : contentRevision(body ?? null);
     }
     catch (err) {
         ctx.log(`[delta] ${def.name} revision() threw; serving full: ${err instanceof Error ? err.message : String(err)}`);
@@ -175,7 +172,7 @@ async function negotiateToolDelta(def, ctx, args, response) {
     }
     const nowMs = Date.now();
     const cursorExtra = digest ? { dg: digest, ts: nowMs } : undefined;
-    const base = (0, delta_protocol_1.negotiateDelta)({
+    const base = negotiateDelta({
         request,
         capabilityDeclared: true,
         currentRevision,
@@ -201,12 +198,12 @@ async function negotiateToolDelta(def, ctx, args, response) {
         // changed-view + delta-request call (never per-call) and degrades to the
         // unconditionally-safe Lane-B `full` (reason `flag_off`) when off, never a
         // semantic delta. dormant-safe: OFF is byte-identical to a delta-unaware host.
-        if (!(await (0, delta_protocol_1.isSemanticDeltaEnabled)(ctx))) {
+        if (!(await isSemanticDeltaEnabled(ctx))) {
             base.reason = 'flag_off';
             return base;
         }
         // reason 'changed' ⇒ the request cursor decoded and its fp+sv matched.
-        const decoded = (0, delta_protocol_1.decodeDeltaCursor)(request.cursor);
+        const decoded = decodeDeltaCursor(request.cursor);
         if (!decoded?.dg) {
             base.reason = 'no_digest';
         }
@@ -217,13 +214,13 @@ async function negotiateToolDelta(def, ctx, args, response) {
             try {
                 const changes = cap.changesSince
                     ? await cap.changesSince(args, decoded, ctx)
-                    : (0, delta_protocol_1.diffFromDigest)(decoded.dg, rows, itemKey, { rowRevision: cap.rowRevision, rowType: cap.rowType });
+                    : diffFromDigest(decoded.dg, rows, itemKey, { rowRevision: cap.rowRevision, rowType: cap.rowType });
                 // The delta must actually be smaller than a full resend, else just send full.
                 if (JSON.stringify(changes).length >= fullJsonLen) {
                     base.reason = 'delta_too_large';
                 }
                 else {
-                    return { mode: 'delta', supported: true, cursor: base.cursor, changes, checksum, counts: (0, delta_protocol_1.deltaCounts)(changes) };
+                    return { mode: 'delta', supported: true, cursor: base.cursor, changes, checksum, counts: deltaCounts(changes) };
                 }
             }
             catch (err) {
@@ -241,9 +238,9 @@ async function serializeProjectedResult(response, ctx, eligibility, def, readCol
         typeof response === 'object' &&
         response.data !== undefined) {
         try {
-            const v = await (0, standard_schema_1.standardValidate)(def.result, response.data);
+            const v = await standardValidate(def.result, response.data);
             if (!v.ok) {
-                ctx.log(`[output-schema] ${def.name} returned data not matching its declared result schema: ${(0, standard_schema_1.formatIssues)(v.issues)}`);
+                ctx.log(`[output-schema] ${def.name} returned data not matching its declared result schema: ${formatIssues(v.issues)}`);
             }
         }
         catch {
@@ -255,8 +252,8 @@ async function serializeProjectedResult(response, ctx, eligibility, def, readCol
     // or the endpoint declared a `delta` capability; never fails a call (a thrown
     // revision()/changesSince() degrades to full).
     const delta = await negotiateToolDelta(def, ctx, args, response);
-    const serialized = (0, serialize_result_1.serializeToolResponse)(response, {
-        ...(0, serialize_result_1.formatOptsFromCtx)(ctx, eligibility),
+    const serialized = serializeToolResponse(response, {
+        ...formatOptsFromCtx(ctx, eligibility),
         toolName: def.name,
         readColumns,
         ...(delta ? { delta } : {}),
@@ -315,7 +312,7 @@ function reencodableJsonPayload(out, ctx) {
     catch {
         return undefined; // non-JSON text (a plain string / human message) — leave as-is
     }
-    if (!Array.isArray(parsed) && !(0, result_encoding_1.isObjectWithArrayField)(parsed))
+    if (!Array.isArray(parsed) && !isObjectWithArrayField(parsed))
         return undefined;
     return parsed;
 }
@@ -329,15 +326,15 @@ function reencodableJsonPayload(out, ctx) {
  * rather than writing wrong-but-valid data (Zod checks shape, not alignment).
  */
 function applyPositionalWriteShim(name, argsJsonSchema, input) {
-    if (!(0, result_encoding_1.isWritePositional)(name))
+    if (!isWritePositional(name))
         return input;
     if (!input || typeof input !== 'object' || Array.isArray(input))
         return input;
     const row = input.row;
     if (typeof row !== 'string')
         return input; // keyed args (or no row) — leave as-is
-    const entry = (0, result_encoding_1.getPrePromptEntry)(name);
-    const cols = (0, result_encoding_1.projectWriteColumns)(argsJsonSchema, {
+    const entry = getPrePromptEntry(name);
+    const cols = projectWriteColumns(argsJsonSchema, {
         freeTextName: entry?.freeTextArg,
         columnOverrides: entry?.columnOverrides,
         columnNames: entry?.writeColumnNames,
@@ -345,12 +342,12 @@ function applyPositionalWriteShim(name, argsJsonSchema, input) {
     });
     if (!cols)
         return input; // tool doesn't actually fit the bounded positional shape
-    const rec = (0, result_encoding_1.reconstructArgs)(row, cols);
+    const rec = reconstructArgs(row, cols);
     if (!rec.ok)
         throw new Error(`invalid_positional_row: ${rec.reason}`);
     return rec.args;
 }
-function defineTool(input) {
+export function defineTool(input) {
     // Route-shaped — discriminated by `method` (tool inputs never carry it).
     if ('method' in input && 'path' in input) {
         return defineRouteShaped(input);
@@ -425,7 +422,7 @@ function definePrincipalGatedTool(input) {
     const description = input.description ??
         describeFromGuidance(input.guidance) ??
         `Tool ${name}`;
-    const tier = (0, capability_tiers_1.tierFor)(input.capability);
+    const tier = tierFor(input.capability);
     const def = {
         name,
         description,
@@ -435,7 +432,8 @@ function definePrincipalGatedTool(input) {
         idempotent: input.idempotent,
         replaces: input.replaces,
         composition: (input.replaces?.length ?? 0) > 0 ? 'composite' : 'primitive',
-        args: input.args,
+        // EI-10883: closed shape — an undeclared arg errors instead of being silently dropped.
+        args: strictArgs(input.args),
         result: input.result ?? input.output,
         delta: input.delta,
         handler: input.handler,
@@ -454,14 +452,26 @@ function definePrincipalGatedTool(input) {
         // principal-gated cross-workspace tool failed `workspace_required`. See the field doc.
         crossWorkspace: input.crossWorkspace,
     };
+    // ORDER IS LOAD-BEARING: project FIRST (its first act is the guarded
+    // args→JSON-Schema conversion), and only then enter the catalog.
+    //
+    // These two lines used to be reversed, which left a real hole: `register()`
+    // seated the tool in the catalog and THEN the guard threw. While the throw is
+    // fatal that is invisible — the process dies either way. But any caller that
+    // CATCHES a module-import error (HMR re-eval, a test harness, a plugin loader)
+    // resumes with an unrepresentable-schema tool still sitting in the catalog, and
+    // the next tools/list serves it straight into `toArgsJsonSchema` — the exact
+    // anonymous catalog-wide crash this guard exists to prevent. Projecting first
+    // means a tool that cannot be represented never becomes catalog state at all.
+    //
     // The catalog stores defs with their schema type erased (handlers run on
     // post-validation values); a specific TArgs isn't assignable to the
     // unknown-output base under Standard Schema's variance, so widen explicitly.
-    (0, registry_1.register)(def);
     registerLegacyAsProjected(def, input.expose);
+    register(def);
     // Co-located intrinsic emissions → the generic collector; the operator-core
     // desugar registers them as event-reaction rules at load (D-002).
-    (0, emits_registry_1.collectToolEmits)(name, input.emits);
+    collectToolEmits(name, input.emits);
     return def;
 }
 /**
@@ -484,7 +494,7 @@ function defineRoleGatedTool(input) {
     const description = input.description ??
         describeFromGuidance(input.guidance) ??
         `Tool ${name}`;
-    const tier = (0, capability_tiers_1.tierFor)(input.capability);
+    const tier = tierFor(input.capability);
     const def = {
         name,
         description,
@@ -505,7 +515,8 @@ function defineRoleGatedTool(input) {
         replayBufferSize: input.replayBufferSize,
         crossWorkspace: input.crossWorkspace,
         modality: input.modality,
-        args: input.args,
+        // EI-10883: closed shape — an undeclared arg errors instead of being silently dropped.
+        args: strictArgs(input.args),
         result: input.result ?? input.output,
         delta: input.delta,
         events: input.events,
@@ -521,7 +532,7 @@ function defineRoleGatedTool(input) {
     registerRoleGatedAsProjected(def, input.expose);
     // Co-located intrinsic emissions → the generic collector; the operator-core
     // desugar registers them as event-reaction rules at load (D-002).
-    (0, emits_registry_1.collectToolEmits)(name, input.emits);
+    collectToolEmits(name, input.emits);
     return def;
 }
 /**
@@ -613,17 +624,197 @@ function flattenForOpenAi(schema) {
         description: typeof schema.description === 'string' ? schema.description : undefined,
     };
 }
+/**
+ * EI-10883 — an unknown arg must be a HARD ERROR, never a silent drop.
+ *
+ * Zod object schemas STRIP unknown keys by default. So a caller who passes an
+ * arg the tool does not declare (`sessions:read { order:'asc' }`) gets back
+ * `ok:true` and the tool's DEFAULT behaviour — a result that is byte-identical
+ * to success while doing something other than what was asked. That is the worst
+ * possible failure mode: it cannot be detected by the caller, it cannot be
+ * detected by the tool-efficiency telemetry (which only counts hard failures),
+ * and it silently teaches the model a wrong mental model of the tool.
+ *
+ * Observed cost (agent-DX audit 2026-07-13, session 5c5a2f50): `order:'asc'` was
+ * accepted and ignored by sessions:read; the agent concluded the tool had no head
+ * read, burned two more calls, and drew a wrong conclusion about the data.
+ *
+ * Strictifying HERE — once, at registration — closes the class for the whole
+ * catalog rather than tool-by-tool. It also runs BEFORE `toJsonSchema`, so the
+ * published input schema now advertises `additionalProperties: false` and the
+ * model can SEE that the shape is closed instead of discovering it by accident.
+ *
+ * Only object schemas can be strictified (a union/discriminatedUnion has no
+ * `.strict()`); anything else passes through untouched.
+ */
+export function strictArgs(schema) {
+    const s = schema;
+    if (typeof s?.strict !== 'function')
+        return schema;
+    try {
+        return s.strict();
+    }
+    catch {
+        return schema;
+    }
+}
+/** Bounded render of a tool's full args JSON schema, appended to invalid_args errors (P-004,
+ *  code-run-batch-adoption-2026-07-12). A terse per-issue message alone leaves a schema-blind
+ *  caller (e.g. a tools:invoke route with no loaded schema) probing solo, call-by-call — the
+ *  2026-07-11 release-fleet burst repeated the identical wrong arg shape twice in a row. With the
+ *  schema in the failure, ONE failed call teaches the whole shape, so batching becomes the cheapest
+ *  way to learn it. Rendered lazily on first failure (failures are rare), cached per registration. */
+const ARGS_SCHEMA_HINT_MAX = 1800;
+/**
+ * EI-10883 — make the closed-shape rejection TEACH, not merely fail.
+ *
+ * Zod renders an undeclared key as `Unrecognized key(s) in object: "order"`, which
+ * says what was wrong but not what to do instead. Naming the accepted keys turns
+ * ONE failed call into a corrected call — the same principle as `argsSchemaHint`
+ * (P-004), and the reason the strictness change is a net WIN for agents rather
+ * than a new tax: the old behaviour cost a silent wrong answer, the new behaviour
+ * costs one loud, self-correcting error.
+ */
+const COMMON_ARG_ALIASES = {
+    assignee: ['assign_to', 'assignTo', 'owner', 'ownerId'],
+    assignto: ['assign_to', 'assignee', 'owner', 'ownerId'],
+    body: ['content', 'summary', 'comment', 'text'],
+    code: ['script'],
+    comment: ['body', 'summary', 'text'],
+    content: ['body', 'description', 'summary', 'text'],
+    completionref: ['completionRef', 'completion_ref', 'completion'],
+    description: ['content', 'summary', 'body', 'text'],
+    foundduring: ['foundDuring', 'found_during'],
+    itemid: ['item'],
+    linkedfeatureid: ['linkedFeatureId', 'linked_feature_id'],
+    owner: ['ownerEmail', 'ownerId', 'assignee', 'assign_to'],
+    ownerid: ['ownerEmail', 'owner', 'assignee', 'assign_to'],
+    planitem: ['plan_item', 'itemId', 'item'],
+    rubricid: ['rubricRef'],
+    rubricids: ['rubricRefs'],
+    script: ['code'],
+    summary: ['body', 'comment', 'text'],
+};
+function compactArgName(value) {
+    return value.replace(/[^a-z0-9]/gi, '').toLowerCase();
+}
+function editDistance(a, b) {
+    if (a === b)
+        return 0;
+    if (a.length === 0)
+        return b.length;
+    if (b.length === 0)
+        return a.length;
+    let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+    for (let i = 1; i <= a.length; i += 1) {
+        const current = [i];
+        for (let j = 1; j <= b.length; j += 1) {
+            current[j] = Math.min(current[j - 1] + 1, previous[j] + 1, previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+        }
+        previous = current;
+    }
+    return previous[b.length];
+}
+/** Return the closest declared field for an unknown arg, when confidence is high. */
+export function suggestArgName(unknown, accepted) {
+    const compactUnknown = compactArgName(unknown);
+    const semanticAliases = COMMON_ARG_ALIASES[compactUnknown] ?? [];
+    const semantic = semanticAliases.find((alias) => accepted.some((candidate) => compactArgName(candidate) === compactArgName(alias)));
+    if (semantic) {
+        return accepted.find((candidate) => compactArgName(candidate) === compactArgName(semantic)) ?? semantic;
+    }
+    const ranked = accepted
+        .map((candidate) => ({ candidate, distance: editDistance(compactUnknown, compactArgName(candidate)) }))
+        .sort((a, b) => a.distance - b.distance || a.candidate.localeCompare(b.candidate));
+    const best = ranked[0];
+    if (!best)
+        return null;
+    const threshold = Math.max(1, Math.min(3, Math.floor(Math.max(compactUnknown.length, compactArgName(best.candidate).length) / 3)));
+    return best.distance <= threshold ? best.candidate : null;
+}
+function unknownArgHint(issues, rawSchema) {
+    const msgs = (issues ?? []).map((i) => i?.message ?? '').join(' ');
+    if (!/nrecognized key/i.test(msgs))
+        return '';
+    const props = rawSchema?.properties;
+    const keys = props ? Object.keys(props) : [];
+    if (keys.length === 0)
+        return '';
+    const unknownKeys = [
+        ...new Set([
+            ...(issues ?? []).flatMap((issue) => issue.keys ?? []),
+            ...Array.from(msgs.matchAll(/["']([^"']+)["']/g), (match) => match[1]),
+        ]),
+    ].filter((key) => !keys.includes(key));
+    const corrections = unknownKeys
+        .map((unknown) => ({ unknown, suggestion: suggestArgName(unknown, keys) }))
+        .filter((item) => item.suggestion !== null);
+    const correctionText = corrections.length > 0
+        ? ` Did you mean ${corrections.map(({ unknown, suggestion }) => `\`${suggestion}\` for \`${unknown}\``).join('; ')}?`
+        : '';
+    return (` — this tool accepts ONLY: ${keys.join(', ')}.${correctionText}` +
+        ' An undeclared arg is REJECTED, not silently ignored (EI-10883): passing an arg a tool does not declare used to return ok:true' +
+        ' while quietly doing something else, which is indistinguishable from success. Re-send using only the keys above.');
+}
+function argsSchemaHint(rawSchema, cache) {
+    if (cache.hint === undefined) {
+        let json = '';
+        try {
+            json = JSON.stringify(rawSchema) ?? '';
+        }
+        catch {
+            json = '';
+        }
+        if (json.length > ARGS_SCHEMA_HINT_MAX)
+            json = `${json.slice(0, ARGS_SCHEMA_HINT_MAX)} …(truncated)`;
+        cache.hint = json.length > 0 ? ` — full args schema: ${json}` : '';
+    }
+    return cache.hint;
+}
+/**
+ * Convert a tool's `args` to JSON Schema — failing LOUD and, crucially, NAMED.
+ *
+ * A tool's args schema is its CALLABLE CONTRACT, so unlike an unrepresentable *event*
+ * schema (which degrades to a placeholder, keeping the tool usable) there is nothing to
+ * degrade to: an args schema that cannot be advertised is a fatal authoring error.
+ *
+ * But it must fail with the TOOL'S NAME. This conversion runs at REGISTRATION — i.e.
+ * during module import — and the same unguarded conversion runs again in the MCP
+ * tools/list handlers. So one bad schema does not break one tool: it throws mid-import
+ * and takes down the WHOLE catalog, surfacing as a bare, anonymous adapter error with no
+ * tool, no file, nothing to grep (observed: `Transforms cannot be represented in JSON
+ * Schema`, which reads like an unrelated infra/zod break and was mis-triaged as one).
+ *
+ * The overwhelmingly common cause is a TRAILING `.transform()` in the args schema, whose
+ * output type JSON Schema cannot express. Refinements (`.refine` / `.superRefine`) and
+ * `preprocess` are all representable and fine.
+ */
+export function toArgsJsonSchema(toolName, args) {
+    try {
+        return toJsonSchema(args);
+    }
+    catch (err) {
+        throw new Error(`Tool "${toolName}": its \`args\` schema cannot be represented in JSON Schema — ` +
+            `${err.message}. This is FATAL FOR THE WHOLE TOOL CATALOG, not just this tool: ` +
+            `the conversion runs at registration and again (unguarded) when tools/list is served, so a ` +
+            `single unrepresentable schema breaks tool discovery for every client. ` +
+            `The usual cause is a trailing \`.transform()\` — do that normalization in the HANDLER instead ` +
+            `(read the value, resolve it there), or, if a transform is genuinely required, terminate it with ` +
+            `\`.pipe(<schema>)\` so the OUTPUT stays representable. Refinements are always fine.`);
+    }
+}
 function registerLegacyAsProjected(def, expose) {
     // tasks:list → /api/agent-tools/tasks/list
     const httpPath = `/api/agent-tools/${def.name.replaceAll(':', '/')}`;
     // Pluggable schema→JSON-Schema (P-021); default adapter is Zod 4's
     // toJSONSchema. zod-to-json-schema@3 returned just `{ $schema }` for zod 4
     // schemas (empty input schemas) — the built-in path fixed that.
-    const rawSchema = (0, schema_adapter_1.toJsonSchema)(def.args);
+    const rawSchema = toArgsJsonSchema(def.name, def.args);
     delete rawSchema.$schema;
     const inputSchema = flattenForOpenAi(rawSchema);
     const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
-    const readColumns = (0, result_encoding_1.projectReadColumns)(outputJsonSchema);
+    const readColumns = projectReadColumns(outputJsonSchema);
+    const schemaHintCache = {};
     const projectedFn = async (input, ctx) => {
         if (!ctx.principal || !ctx.tx) {
             // Almost always this is a workspace-SCOPING gap, not an auth failure:
@@ -631,12 +822,12 @@ function registerLegacyAsProjected(def, expose) {
             // concrete workspace, so the host synthesized no workspace
             // transaction. Say so — "requires authenticated request" sent
             // authenticated callers down the wrong debugging path (EI-30).
-            throw new dispatch_projected_1.UnauthorizedToolError(`built-in tool "${def.name}" requires a workspace-scoped call — this session has no workspace transaction. ` +
+            throw new UnauthorizedToolError(`built-in tool "${def.name}" requires a workspace-scoped call — this session has no workspace transaction. ` +
                 `Scope the session to a workspace, or pass a per-call workspace where the host/tool supports one.`);
         }
         // Framework-reserved per-call tier override — stripped BEFORE validation
         // (context-trimming-tiers D-004; not part of any tool's schema).
-        const { input: tierlessInput, callTier } = (0, payload_tier_1.extractPayloadTier)(input);
+        const { input: tierlessInput, callTier } = extractPayloadTier(input);
         const legacyCtx = {
             principal: ctx.principal,
             tx: ctx.tx,
@@ -646,11 +837,46 @@ function registerLegacyAsProjected(def, expose) {
             // can adapt their defaults off ctx.contextTier, same as the role-gated
             // wrapper below (context-trimming-tiers P-024).
             ...(callTier ?? ctx.contextTier ? { contextTier: callTier ?? ctx.contextTier } : {}),
+            // EI-10358: thread the caller's role + per-session id through — the outer
+            // `ctx` (UnifiedToolContext) already carries both (populated by the MCP
+            // dispatch layer from the spawn/su URL context), but this legacy shim
+            // previously dropped them, leaving every principal-gated handler
+            // (memory:remember, …) unable to attribute a write to a real session —
+            // `ctx.principal` alone collapses every su session to the single shared
+            // `system:superuser` principal.
+            ...(ctx.role ? { role: ctx.role } : {}),
+            ...(ctx.uiClientId ? { uiClientId: ctx.uiClientId } : {}),
+            // WI-4549: thread the ctx-borne telemetry surface. A compound's
+            // inProcessCall stamps `telemetrySurface` on the inner ctx so its folded
+            // sub-call self-identifies (coord:orient's memory:search fold records under
+            // 'orient', not generic 'search'). memory:search is PRINCIPAL-gated, so it
+            // lands in THIS shim — which dropped the stamp, and its recall telemetry
+            // blended back into 'search' for weeks. orient had ZERO rows in
+            // memory_recall_stats while demonstrably folding recall on every call.
+            //
+            // ⚠ THIS ALLOWLIST IS THE BUG, AND THIS IS ITS THIRD VICTIM (contextTier,
+            // then role/uiClientId per EI-10358, now telemetrySurface). The role-gated
+            // wrapper below passes the WHOLE ctx (`{ ...ctx }`); only this legacy shim
+            // rebuilds it field-by-field, so every ctx-borne field must be re-threaded
+            // here BY HAND or it vanishes silently — no type error, no runtime error,
+            // just a handler reading `undefined` and taking its fallback. If you add a
+            // ctx-borne field, add it here too, and pin it with a test that drives the
+            // REAL dispatch path (inProcessCall → dispatchProjectedTool → handler) —
+            // a test that calls `handler(input, ctxLiteral)` directly proves only that
+            // the handler READS the field, never that dispatch DELIVERS it. That gap is
+            // exactly why this shipped green.
+            ...(ctx.telemetrySurface ? { telemetrySurface: ctx.telemetrySurface } : {}),
         };
         const shimmed = applyPositionalWriteShim(def.name, rawSchema, tierlessInput);
-        const parsed = await (0, standard_schema_1.standardValidate)(def.args, shimmed);
+        const parsed = await standardValidate(def.args, shimmed);
         if (!parsed.ok) {
-            throw new dispatch_projected_1.InvalidInputError(`invalid_args: ${(0, standard_schema_1.formatIssues)(parsed.issues)}`);
+            throw new InvalidInputError(
+            // EI-10943: the full-schema dump is for a SHAPE-blind caller (unknown key, missing
+            // required field). A caller who used the right key and merely overran a limit already
+            // knows the shape — appending 1,800 chars of schema to "too long by 3 chars" is pure
+            // context burn for the agent least able to spare it.
+            `invalid_args: ${formatIssues(parsed.issues, shimmed)}${unknownArgHint(parsed.issues, rawSchema)}` +
+                (issuesAreValueLevel(parsed.issues) ? '' : argsSchemaHint(rawSchema, schemaHintCache)));
         }
         const response = await def.handler(parsed.value, legacyCtx);
         // A raw ToolResult (MCP content shape) normally passes through untouched —
@@ -672,17 +898,17 @@ function registerLegacyAsProjected(def, expose) {
         // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
         // the session/call tier before format-aware serialization. Unshaped tools
         // pass through byte-identical.
-        const shaped = (0, payload_tier_1.applyPayloadTier)({
+        const shaped = applyPayloadTier({
             toolName: def.name,
             shape: def.shape,
             response: response,
-            tier: (0, payload_tier_1.resolvePayloadTier)(callTier, ctx.contextTier),
+            tier: resolvePayloadTier(callTier, ctx.contextTier),
             args: parsed.value,
             log: (m) => ctx.log(m),
         });
         return serializeProjectedResult(shaped, ctx, eligibility, def, readColumns, parsed.value);
     };
-    (0, tool_projection_1.registerProjectedTool)({
+    registerProjectedTool({
         pluginName: 'agent-mcp',
         description: def.description,
         inputSchema,
@@ -737,19 +963,26 @@ function registerLegacyAsProjected(def, expose) {
  */
 function registerRoleGatedAsProjected(def, expose) {
     const httpPath = `/api/agent-tools/${def.name.replaceAll(':', '/')}`;
-    const rawSchema = (0, schema_adapter_1.toJsonSchema)(def.args);
+    const rawSchema = toArgsJsonSchema(def.name, def.args);
     delete rawSchema.$schema;
     const inputSchema = flattenForOpenAi(rawSchema);
     const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
-    const readColumns = (0, result_encoding_1.projectReadColumns)(outputJsonSchema);
+    const readColumns = projectReadColumns(outputJsonSchema);
+    const schemaHintCache = {};
     const projectedFn = async (input, ctx) => {
         // Framework-reserved per-call tier override — stripped BEFORE validation
         // (context-trimming-tiers D-004; not part of any tool's schema).
-        const { input: tierlessInput, callTier } = (0, payload_tier_1.extractPayloadTier)(input);
+        const { input: tierlessInput, callTier } = extractPayloadTier(input);
         const shimmed = applyPositionalWriteShim(def.name, rawSchema, tierlessInput);
-        const parsed = await (0, standard_schema_1.standardValidate)(def.args, shimmed);
+        const parsed = await standardValidate(def.args, shimmed);
         if (!parsed.ok) {
-            throw new dispatch_projected_1.InvalidInputError(`invalid_args: ${(0, standard_schema_1.formatIssues)(parsed.issues)}`);
+            throw new InvalidInputError(
+            // EI-10943: the full-schema dump is for a SHAPE-blind caller (unknown key, missing
+            // required field). A caller who used the right key and merely overran a limit already
+            // knows the shape — appending 1,800 chars of schema to "too long by 3 chars" is pure
+            // context burn for the agent least able to spare it.
+            `invalid_args: ${formatIssues(parsed.issues, shimmed)}${unknownArgHint(parsed.issues, rawSchema)}` +
+                (issuesAreValueLevel(parsed.issues) ? '' : argsSchemaHint(rawSchema, schemaHintCache)));
         }
         // Thread the per-call tier override into the HANDLER's ctx too: tools that
         // must keep a hand-rolled JSON ToolResult (hook-consumed — coord:inbox /
@@ -775,18 +1008,18 @@ function registerRoleGatedAsProjected(def, expose) {
         // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
         // the session/call tier before format-aware serialization. Unshaped tools
         // pass through byte-identical.
-        const shaped = (0, payload_tier_1.applyPayloadTier)({
+        const shaped = applyPayloadTier({
             toolName: def.name,
             shape: def.shape,
             response: out,
-            tier: (0, payload_tier_1.resolvePayloadTier)(callTier, ctx.contextTier),
+            tier: resolvePayloadTier(callTier, ctx.contextTier),
             args: parsed.value,
             log: (m) => ctx.log(m),
         });
         // ToolResponse envelope → format-aware MCP content[] + _meta.
         return serializeProjectedResult(shaped, ctx, eligibility, def, readColumns, parsed.value);
     };
-    (0, tool_projection_1.registerProjectedTool)({
+    registerProjectedTool({
         pluginName: 'agent-mcp',
         description: def.description,
         inputSchema,

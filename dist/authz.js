@@ -1,6 +1,3 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.ownerOnly = ownerOnly;
 /**
  * The most common resource rule, as a ready-made `PolicyDecisionPoint`: allow iff the
  * principal owns the resource. `getOwnerId` extracts the owner id from the resource
@@ -8,7 +5,7 @@ exports.ownerOnly = ownerOnly;
  * `principal.slug`. Hosts needing relationship/attribute rules supply their own PDP
  * instead — this is the floor, not the ceiling.
  */
-function ownerOnly(getOwnerId = (r) => r.attributes?.ownerId) {
+export function ownerOnly(getOwnerId = (r) => r.attributes?.ownerId) {
     return {
         decide(q) {
             if (!q.resource) {

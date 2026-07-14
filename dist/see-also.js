@@ -1,9 +1,3 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.resolveSeeAlso = resolveSeeAlso;
-exports.renderSeeAlsoText = renderSeeAlsoText;
-exports.readJsonResult = readJsonResult;
-exports.applySeeAlso = applySeeAlso;
 /** Normalize a single entry to a pointer; a bare string becomes `{ tool }`. */
 function normalizeEntry(entry) {
     if (typeof entry === 'string') {
@@ -30,7 +24,7 @@ function normalizeEntry(entry) {
  * seeAlso callback must never fail the underlying tool call, so we swallow and
  * return `[]`.
  */
-function resolveSeeAlso(seeAlso, result, args, ctx) {
+export function resolveSeeAlso(seeAlso, result, args, ctx) {
     if (!seeAlso)
         return [];
     let entries;
@@ -56,7 +50,7 @@ function resolveSeeAlso(seeAlso, result, args, ctx) {
     return out;
 }
 /** Render pointers to a single "See also:" line: `tool selector — reason; …`. */
-function renderSeeAlsoText(pointers) {
+export function renderSeeAlsoText(pointers) {
     const parts = pointers.map((p) => {
         let s = p.tool;
         if (p.selector)
@@ -72,7 +66,7 @@ function renderSeeAlsoText(pointers) {
  * output as the first text block): parse it back into the semantic object a
  * `seeAlso` callback wants to read. Returns `undefined` on any failure.
  */
-function readJsonResult(result) {
+export function readJsonResult(result) {
     const first = result.content?.find((c) => c.type === 'text');
     if (!first || first.type !== 'text')
         return undefined;
@@ -90,7 +84,7 @@ function readJsonResult(result) {
  * (self-gating), when the tool declares no `seeAlso`, or when the result is a
  * soft error — so unrelated / failed calls pay nothing. Never throws.
  */
-function applySeeAlso(result, seeAlso, args, ctx) {
+export function applySeeAlso(result, seeAlso, args, ctx) {
     if (!seeAlso || result.isError)
         return result;
     const pointers = resolveSeeAlso(seeAlso, result, args, ctx);

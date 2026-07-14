@@ -1,4 +1,3 @@
-"use strict";
 /**
  * Card correlator — server-side state machine for ctx.askUser.
  *
@@ -17,17 +16,10 @@
  * State source-of-truth: the PENDING map IS what `setOpenCards` mirrors
  * to the state channel. No double-bookkeeping (H2).
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.registerCard = registerCard;
-exports.resolveCardResponse = resolveCardResponse;
-exports.cancelPendingCardsForRun = cancelPendingCardsForRun;
-exports.cancelPendingCardsForWorkspaceSwitch = cancelPendingCardsForWorkspaceSwitch;
-exports._resetCardCorrelatorForTests = _resetCardCorrelatorForTests;
-exports._cardCorrelatorStatsForTests = _cardCorrelatorStatsForTests;
-const state_channel_1 = require("./state-channel");
-const workspace_lifecycle_1 = require("./workspace-lifecycle");
-const schema_adapter_1 = require("./schema-adapter");
-const standard_schema_1 = require("./standard-schema");
+import { setOpenCards } from './state-channel';
+import { onWorkspaceSwitch } from './workspace-lifecycle';
+import { toJsonSchema } from './schema-adapter';
+import { validateSync } from './standard-schema';
 function makeDeferred() {
     let resolve;
     const promise = new Promise((res) => {
@@ -48,7 +40,7 @@ function registry() {
     }
     const r = g[__SYM];
     if (!r.lifecycleSubscribed) {
-        (0, workspace_lifecycle_1.onWorkspaceSwitch)((wid) => cancelPendingCardsForWorkspaceSwitch(wid));
+        onWorkspaceSwitch((wid) => cancelPendingCardsForWorkspaceSwitch(wid));
         r.lifecycleSubscribed = true;
     }
     return r;
@@ -56,7 +48,7 @@ function registry() {
 function zodToJsonSchema(schema) {
     // Pluggable schema→JSON-Schema (P-021); default adapter is Zod 4's
     // toJSONSchema (zod-to-json-schema@3 produced empty results for Zod 4).
-    const raw = (0, schema_adapter_1.toJsonSchema)(schema);
+    const raw = toJsonSchema(schema);
     delete raw.$schema;
     return raw;
 }
@@ -83,7 +75,7 @@ function republishRunSnapshot(runId) {
                 cards.push(pendingToOpenCard(card));
         }
     }
-    (0, state_channel_1.setOpenCards)(runId, cards);
+    setOpenCards(runId, cards);
 }
 /**
  * Write a resolved card response to the idempotency cache synchronously
@@ -131,7 +123,7 @@ function drop(correlationId) {
  * response for the same (runId, idempotencyKey), return the cached
  * response immediately without registering or emitting.
  */
-function registerCard(opts) {
+export function registerCard(opts) {
     const r = registry();
     if (opts.spec.idempotencyKey) {
         const cache = r.idempotency.get(opts.runId);
@@ -187,7 +179,7 @@ function registerCard(opts) {
  * against cross-workspace replay; the route's auth check is the
  * primary defense).
  */
-function resolveCardResponse(opts) {
+export function resolveCardResponse(opts) {
     const r = registry();
     const card = r.pending.get(opts.correlationId);
     if (!card) {
@@ -200,7 +192,7 @@ function resolveCardResponse(opts) {
     // validation may fail, in which case we leave the card pending.
     let response;
     if (opts.action === 'submit') {
-        const parsed = (0, standard_schema_1.validateSync)(card.spec.dataSchema, opts.payload);
+        const parsed = validateSync(card.spec.dataSchema, opts.payload);
         if (!parsed.ok) {
             return {
                 ok: false,
@@ -237,7 +229,7 @@ function resolveCardResponse(opts) {
 /**
  * Cancel every pending card under a run. Used at run-end / abort.
  */
-function cancelPendingCardsForRun(runId) {
+export function cancelPendingCardsForRun(runId) {
     const r = registry();
     const ids = r.byRun.get(runId);
     if (!ids)
@@ -255,7 +247,7 @@ function cancelPendingCardsForRun(runId) {
  * Cancel every pending card in a workspace. Subscribed via
  * onWorkspaceSwitch.
  */
-function cancelPendingCardsForWorkspaceSwitch(workspaceId) {
+export function cancelPendingCardsForWorkspaceSwitch(workspaceId) {
     const r = registry();
     const toDrop = [];
     const runsToDrop = new Set();
@@ -272,7 +264,7 @@ function cancelPendingCardsForWorkspaceSwitch(workspaceId) {
         r.idempotency.delete(rid);
 }
 /** Test-only: clear everything. */
-function _resetCardCorrelatorForTests() {
+export function _resetCardCorrelatorForTests() {
     const r = registry();
     for (const card of r.pending.values()) {
         if (card.timeoutHandle)
@@ -283,7 +275,7 @@ function _resetCardCorrelatorForTests() {
     r.idempotency.clear();
 }
 /** Test-only stats. */
-function _cardCorrelatorStatsForTests() {
+export function _cardCorrelatorStatsForTests() {
     const r = registry();
     return { pendingCount: r.pending.size, runCount: r.byRun.size };
 }

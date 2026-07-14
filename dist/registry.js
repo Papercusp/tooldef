@@ -1,4 +1,3 @@
-"use strict";
 /**
  * In-memory tool catalog. Tools self-register via `defineTool`.
  *
@@ -6,13 +5,8 @@
  * after that, `getCatalog()` returns the full catalog and `lookup(name)`
  * fetches a specific tool.
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.register = register;
-exports.lookup = lookup;
-exports.getCatalog = getCatalog;
-exports._resetCatalogForTests = _resetCatalogForTests;
 const CATALOG = new Map();
-function register(def) {
+export function register(def) {
     if (CATALOG.has(def.name)) {
         const existing = CATALOG.get(def.name);
         if (existing === def)
@@ -54,19 +48,19 @@ function register(def) {
 function toolSignature(def) {
     return JSON.stringify({ description: def.description ?? '', capability: def.capability });
 }
-function lookup(name) {
+export function lookup(name) {
     return CATALOG.get(name);
 }
-function getCatalog() {
+export function getCatalog() {
     return [...CATALOG.values()];
 }
-const tool_projection_1 = require("./tool-projection");
+import { _resetProjectionRegistryForTests } from './tool-projection';
 /** Clears the catalog. Test-only. */
-function _resetCatalogForTests() {
+export function _resetCatalogForTests() {
     CATALOG.clear();
     // Also flush the projection registry — defineTool now auto-registers
     // legacy tools as projected, so a test that resets the legacy catalog
     // must also flush the projected mirror to avoid duplicate-name errors
     // when the same tool is re-defined.
-    (0, tool_projection_1._resetProjectionRegistryForTests)();
+    _resetProjectionRegistryForTests();
 }

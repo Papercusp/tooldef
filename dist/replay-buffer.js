@@ -1,4 +1,3 @@
-"use strict";
 /**
  * Per-call replay ring buffer for streaming tools. Phase 4 T2.2.
  *
@@ -22,14 +21,7 @@
  *
  * Plan ref: phase-4-endpoint-system-2026-05-12.md § T2.2.
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.openBuffer = openBuffer;
-exports.readBuffer = readBuffer;
-exports.closeBuffer = closeBuffer;
-exports.clearRingBuffersForWorkspaceSwitch = clearRingBuffersForWorkspaceSwitch;
-exports.clearAllBuffersForTests = clearAllBuffersForTests;
-exports.replayBufferStats = replayBufferStats;
-const workspace_lifecycle_1 = require("./workspace-lifecycle");
+import { onWorkspaceSwitch } from './workspace-lifecycle';
 const BUFFER_TTL_MS = 5 * 60 * 1000;
 /**
  * Garbage-collection scan interval. Drops every buffer past its TTL.
@@ -52,7 +44,7 @@ function registry() {
     }
     const r = g[__SYM];
     if (!r.lifecycleSubscribed) {
-        (0, workspace_lifecycle_1.onWorkspaceSwitch)((wid) => clearRingBuffersForWorkspaceSwitch(wid));
+        onWorkspaceSwitch((wid) => clearRingBuffersForWorkspaceSwitch(wid));
         r.lifecycleSubscribed = true;
     }
     return r;
@@ -79,7 +71,7 @@ function ensureGc() {
  * with the same key returns the same entry — useful if a tool
  * call is somehow re-entered (shouldn't happen, but defensive).
  */
-function openBuffer(opts) {
+export function openBuffer(opts) {
     ensureGc();
     const r = registry();
     const k = key(opts.workspaceId, opts.toolName, opts.runId);
@@ -117,7 +109,7 @@ function openBuffer(opts) {
  * past the next GC sweep — buffers stay warm while consumers are
  * actively reconnecting.
  */
-function readBuffer(opts) {
+export function readBuffer(opts) {
     const r = registry();
     const k = key(opts.workspaceId, opts.toolName, opts.runId);
     const entry = r.buffers.get(k);
@@ -136,7 +128,7 @@ function readBuffer(opts) {
  * reconnect). Not strictly necessary — GC would clean up — but
  * trims peak memory.
  */
-function closeBuffer(opts) {
+export function closeBuffer(opts) {
     const r = registry();
     r.buffers.delete(key(opts.workspaceId, opts.toolName, opts.runId));
 }
@@ -146,7 +138,7 @@ function closeBuffer(opts) {
  * workspace's tail. Buffer keys are `${workspaceId}:${tool}:${runId}`
  * so we match on the prefix.
  */
-function clearRingBuffersForWorkspaceSwitch(workspaceId) {
+export function clearRingBuffersForWorkspaceSwitch(workspaceId) {
     const r = registry();
     const prefix = `${workspaceId}:`;
     for (const k of r.buffers.keys()) {
@@ -158,12 +150,12 @@ function clearRingBuffersForWorkspaceSwitch(workspaceId) {
  * Test-only: clear every buffer in every workspace. Use
  * `clearRingBuffersForWorkspaceSwitch(id)` from production code.
  */
-function clearAllBuffersForTests() {
+export function clearAllBuffersForTests() {
     const r = registry();
     r.buffers.clear();
 }
 /** Public — read-only stats for /dev telemetry. */
-function replayBufferStats() {
+export function replayBufferStats() {
     const r = registry();
     let totalEvents = 0;
     let totalEvicted = 0;

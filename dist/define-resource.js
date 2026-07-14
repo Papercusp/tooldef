@@ -1,4 +1,3 @@
-"use strict";
 /**
  * defineResource — symmetric to defineTool.
  *
@@ -11,10 +10,8 @@
  *
  * The catalog is the result of importing `resources/**`.
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.defineResource = defineResource;
-const capability_tiers_1 = require("./capability-tiers");
-const resource_registry_1 = require("./resource-registry");
+import { tierFor } from './capability-tiers';
+import { registerResource } from './resource-registry';
 function deriveNameFromCallSite() {
     const ErrorAny = Error;
     const orig = ErrorAny.prepareStackTrace;
@@ -41,14 +38,14 @@ function deriveNameFromCallSite() {
         ErrorAny.prepareStackTrace = orig;
     }
 }
-function defineResource(input) {
+export function defineResource(input) {
     const name = input.name ?? deriveNameFromCallSite();
     if (!name) {
         throw new Error('defineResource: could not derive name from call site. ' +
             'Pass `name` explicitly or place the file under `resources/<group>/<verb>.ts`.');
     }
     const description = input.description ?? `Resource ${name}`;
-    const tier = (0, capability_tiers_1.tierFor)(input.capability);
+    const tier = tierFor(input.capability);
     const def = {
         uri: input.uri,
         name,
@@ -59,6 +56,6 @@ function defineResource(input) {
         list: input.list,
         read: input.read,
     };
-    (0, resource_registry_1.registerResource)(def);
+    registerResource(def);
     return def;
 }

@@ -1,4 +1,3 @@
-"use strict";
 /**
  * Pluggable JSON-Schema generation (plan P-021 / D-002).
  *
@@ -16,24 +15,19 @@
  * converted eagerly at `defineTool` time, same load-order contract as the
  * capability-tier resolver — see capability-tiers.ts).
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.zodJsonSchemaAdapter = void 0;
-exports.setJsonSchemaAdapter = setJsonSchemaAdapter;
-exports.toJsonSchema = toJsonSchema;
-const zod_1 = require("zod");
+import { z } from 'zod';
 /**
  * Default adapter — Zod 4's built-in `toJSONSchema`. Shipped as the default so
  * the conversion is zero-config for Zod consumers; swappable via
  * `setJsonSchemaAdapter`.
  */
-const zodJsonSchemaAdapter = (schema) => zod_1.z.toJSONSchema(schema);
-exports.zodJsonSchemaAdapter = zodJsonSchemaAdapter;
-let adapter = exports.zodJsonSchemaAdapter;
+export const zodJsonSchemaAdapter = (schema) => z.toJSONSchema(schema);
+let adapter = zodJsonSchemaAdapter;
 /** Register the host's schema→JSON-Schema adapter. Call once at startup. */
-function setJsonSchemaAdapter(fn) {
+export function setJsonSchemaAdapter(fn) {
     adapter = fn;
 }
 /** Convert a schema to JSON Schema via the active adapter. */
-function toJsonSchema(schema) {
+export function toJsonSchema(schema) {
     return adapter(schema);
 }

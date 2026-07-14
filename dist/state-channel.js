@@ -1,4 +1,3 @@
-"use strict";
 /**
  * State channel — per-run snapshot store for stateful surfaces.
  *
@@ -32,19 +31,7 @@
  *   - closeRun(runId)                       → drop after retention window (5min)
  *   - dispatchWorkspaceSwitch → drops all snapshots for that workspace
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.openRun = openRun;
-exports.setOpenCards = setOpenCards;
-exports.setToolState = setToolState;
-exports.getSnapshot = getSnapshot;
-exports.subscribe = subscribe;
-exports.closeRun = closeRun;
-exports.subscribeWorkspace = subscribeWorkspace;
-exports.snapshotWorkspace = snapshotWorkspace;
-exports.dropStateSnapshotsForWorkspaceSwitch = dropStateSnapshotsForWorkspaceSwitch;
-exports._resetStateChannelForTests = _resetStateChannelForTests;
-exports._stateChannelStatsForTests = _stateChannelStatsForTests;
-const workspace_lifecycle_1 = require("./workspace-lifecycle");
+import { onWorkspaceSwitch } from './workspace-lifecycle';
 const STATE_TTL_MS = 5 * 60 * 1000;
 const __SYM = Symbol.for('papercusp.stateChannelRegistry');
 function registry() {
@@ -59,7 +46,7 @@ function registry() {
     }
     const r = g[__SYM];
     if (!r.lifecycleSubscribed) {
-        (0, workspace_lifecycle_1.onWorkspaceSwitch)((wid) => dropStateSnapshotsForWorkspaceSwitch(wid));
+        onWorkspaceSwitch((wid) => dropStateSnapshotsForWorkspaceSwitch(wid));
         r.lifecycleSubscribed = true;
     }
     if (!r.gcTimer) {
@@ -122,7 +109,7 @@ function emit(entry) {
  * Initialize an empty snapshot for a run. Idempotent — safe to call
  * multiple times; returns the existing entry if present.
  */
-function openRun(opts) {
+export function openRun(opts) {
     const r = registry();
     const existing = r.runs.get(opts.runId);
     if (existing) {
@@ -144,7 +131,7 @@ function openRun(opts) {
  * Replace the openCards field. Bumps version + re-emits to subscribers.
  * No-op if no run entry exists for the runId.
  */
-function setOpenCards(runId, openCards) {
+export function setOpenCards(runId, openCards) {
     const entry = registry().runs.get(runId);
     if (!entry)
         return;
@@ -157,7 +144,7 @@ function setOpenCards(runId, openCards) {
  * Replace the toolState field. Bumps version + re-emits.
  * Used by ctx.publishState in PR 2.
  */
-function setToolState(runId, toolState) {
+export function setToolState(runId, toolState) {
     const entry = registry().runs.get(runId);
     if (!entry)
         return;
@@ -170,7 +157,7 @@ function setToolState(runId, toolState) {
  * Snapshot the current state for a run. Returns null if no run entry
  * exists (or it has been GC'd past retention).
  */
-function getSnapshot(runId) {
+export function getSnapshot(runId) {
     const entry = registry().runs.get(runId);
     if (!entry)
         return null;
@@ -186,7 +173,7 @@ function getSnapshot(runId) {
  * with the current snapshot, then again on every mutation.
  * Returns an unsubscribe function.
  */
-function subscribe(runId, cb) {
+export function subscribe(runId, cb) {
     const entry = registry().runs.get(runId);
     if (!entry) {
         // Subscribing to a non-existent run is allowed (e.g., race with openRun);
@@ -214,7 +201,7 @@ function subscribe(runId, cb) {
  * late reconnects, then is GC'd. Subscribers are NOT auto-removed —
  * transport adapters should call their own unsubscribe.
  */
-function closeRun(runId) {
+export function closeRun(runId) {
     const entry = registry().runs.get(runId);
     if (!entry)
         return;
@@ -231,7 +218,7 @@ function closeRun(runId) {
  * open runs; the caller should walk getSnapshot(runId) for known
  * runIds if they need that. This API is for live updates only.
  */
-function subscribeWorkspace(workspaceId, cb) {
+export function subscribeWorkspace(workspaceId, cb) {
     const r = registry();
     let set = r.workspaceSubs.get(workspaceId);
     if (!set) {
@@ -250,7 +237,7 @@ function subscribeWorkspace(workspaceId, cb) {
  * SSE consumers right after subscribeWorkspace, so the client sees
  * every currently-open card on stream open.
  */
-function snapshotWorkspace(workspaceId) {
+export function snapshotWorkspace(workspaceId) {
     const r = registry();
     const out = [];
     for (const entry of r.runs.values()) {
@@ -268,7 +255,7 @@ function snapshotWorkspace(workspaceId) {
 /**
  * Workspace-switch subscriber. Drops every run scoped to the workspace.
  */
-function dropStateSnapshotsForWorkspaceSwitch(workspaceId) {
+export function dropStateSnapshotsForWorkspaceSwitch(workspaceId) {
     const r = registry();
     for (const [rid, entry] of r.runs) {
         if (entry.workspaceId === workspaceId) {
@@ -279,13 +266,13 @@ function dropStateSnapshotsForWorkspaceSwitch(workspaceId) {
     r.workspaceSubs.delete(workspaceId);
 }
 /** Test-only: clear everything. */
-function _resetStateChannelForTests() {
+export function _resetStateChannelForTests() {
     const r = registry();
     r.runs.clear();
     r.workspaceSubs.clear();
 }
 /** Test-only stats. */
-function _stateChannelStatsForTests() {
+export function _stateChannelStatsForTests() {
     const r = registry();
     let subs = 0;
     for (const entry of r.runs.values())

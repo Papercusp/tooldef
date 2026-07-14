@@ -1,4 +1,3 @@
-"use strict";
 /**
  * Host-specialized seams — types the framework references but does not own.
  *
@@ -18,4 +17,4 @@
  * `Capability` is still a bare `string`; its host-injection (the `tierFor`
  * rule) is P-012, not P-010.
  */
-Object.defineProperty(exports, "__esModule", { value: true });
+export {};

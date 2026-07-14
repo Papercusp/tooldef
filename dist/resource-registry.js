@@ -1,4 +1,3 @@
-"use strict";
 /**
  * Resource catalog. Symmetric to registry.ts (tools).
  *
@@ -10,12 +9,6 @@
  * RFC 6570 `{var}` segments; this is a deliberately small subset
  * (named segments only — no operators, no level-2 expansions).
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.registerResource = registerResource;
-exports.lookupResource = lookupResource;
-exports.getResourceCatalog = getResourceCatalog;
-exports.matchResource = matchResource;
-exports._resetResourceCatalogForTests = _resetResourceCatalogForTests;
 const CATALOG = new Map();
 const MATCHERS = new Map();
 /** Compile a template like `papercusp://harness/{slug}/issues` into a regex. */
@@ -26,7 +19,7 @@ function compileMatcher(template) {
     const pattern = escaped.replace(/\{([a-zA-Z_][a-zA-Z0-9_]*)\}/g, '(?<$1>[^/]+)');
     return new RegExp(`^${pattern}$`);
 }
-function registerResource(def) {
+export function registerResource(def) {
     if (CATALOG.has(def.name)) {
         const existing = CATALOG.get(def.name);
         if (existing === def)
@@ -44,17 +37,17 @@ function registerResource(def) {
     CATALOG.set(def.name, def);
     MATCHERS.set(def.name, compileMatcher(def.uri));
 }
-function lookupResource(name) {
+export function lookupResource(name) {
     return CATALOG.get(name);
 }
-function getResourceCatalog() {
+export function getResourceCatalog() {
     return [...CATALOG.values()];
 }
 /**
  * Find the resource definition whose template/uri matches `uri`. Returns
  * the resource and any extracted path variables, or null if no match.
  */
-function matchResource(uri) {
+export function matchResource(uri) {
     for (const [name, matcher] of MATCHERS) {
         const m = matcher.exec(uri);
         if (m) {
@@ -66,7 +59,7 @@ function matchResource(uri) {
     return null;
 }
 /** Test-only — clear all registered resources. */
-function _resetResourceCatalogForTests() {
+export function _resetResourceCatalogForTests() {
     CATALOG.clear();
     MATCHERS.clear();
 }

@@ -1,46 +1,9 @@
-"use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.ensureParseCheckReady = ensureParseCheckReady;
-exports.checkScript = checkScript;
-const tool_facade_1 = require("./tool-facade");
+import { camelNamespace, camelVerb } from './tool-facade';
 let _ts = null;
 /** Lazily load the TS compiler (kept out of the eager client bundle). Await once before checkScript(). Idempotent. */
-async function ensureParseCheckReady() {
+export async function ensureParseCheckReady() {
     if (!_ts) {
-        const m = (await Promise.resolve().then(() => __importStar(require('typescript'))));
+        const m = (await import('typescript'));
         _ts = (m.default ?? m);
     }
 }
@@ -50,7 +13,7 @@ function tsc() {
     }
     return _ts;
 }
-function checkScript(script, tools, allowed) {
+export function checkScript(script, tools, allowed) {
     const ts = tsc(); // lazy-loaded TS compiler (see ensureParseCheckReady)
     const memberToName = new Map(); // "ns.camelVerb" → full name
     const fullNames = new Set();
@@ -61,14 +24,25 @@ function checkScript(script, tools, allowed) {
         if (allowed && !allowed.has(name))
             continue;
         const ci = name.indexOf(':');
-        memberToName.set(`${(0, tool_facade_1.camelNamespace)(name.slice(0, ci))}.${(0, tool_facade_1.camelVerb)(name.slice(ci + 1))}`, name);
+        memberToName.set(`${camelNamespace(name.slice(0, ci))}.${camelVerb(name.slice(ci + 1))}`, name);
         fullNames.add(name);
     }
     const refs = new Set();
     const unknown = new Set();
+    // Accept the snake_case OR camelCase spelling of a `ns.verb` member: the
+    // facade exposes BOTH (the canonical MCP name is snake_case), so normalize to
+    // the camel key before deciding "unknown". Deterministic, not fuzzy — mirrors
+    // the raw-alias registration in buildToolFacade. A member is always exactly
+    // `ns.verb` (one dot) as built by `step`.
+    const canonMember = (member) => {
+        const dot = member.indexOf('.');
+        if (dot <= 0)
+            return member;
+        return `${camelNamespace(member.slice(0, dot))}.${camelVerb(member.slice(dot + 1))}`;
+    };
     const recordMember = (member) => {
         refs.add(member);
-        if (!memberToName.has(member))
+        if (!memberToName.has(member) && !memberToName.has(canonMember(member)))
             unknown.add(member);
     };
     const recordFull = (name) => {
@@ -200,8 +174,9 @@ function regexFallback(script, memberToName, fullNames) {
         if (m[1] === 'call')
             continue;
         const member = `${m[1]}.${m[2]}`;
+        const canon = `${camelNamespace(m[1])}.${camelVerb(m[2])}`; // snake OR camel spelling
         refs.add(member);
-        if (!memberToName.has(member))
+        if (!memberToName.has(member) && !memberToName.has(canon))
             unknown.add(member);
     }
     for (const m of script.matchAll(/\btools\.call\(\s*['"`]([^'"`]+)['"`]/g)) {

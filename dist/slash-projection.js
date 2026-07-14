@@ -1,4 +1,3 @@
-"use strict";
 /**
  * Slash exposure — project MCP-exposed tools onto the MCP **prompts**
  * primitive so agent clients (Claude Code, …) surface every tool the
@@ -18,18 +17,9 @@
  * Dynamic prompts live under the reserved `tool:` name namespace (plan
  * D-006); `prompt-registry.ts` rejects static prompts claiming it.
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.SLASH_PROMPT_PREFIX = void 0;
-exports.resolveSlashExposure = resolveSlashExposure;
-exports.slashPromptNameFor = slashPromptNameFor;
-exports.isSlashPromptName = isSlashPromptName;
-exports.slashPromptToolName = slashPromptToolName;
-exports.deriveSlashPromptArguments = deriveSlashPromptArguments;
-exports.slashPromptListingFor = slashPromptListingFor;
-exports.renderSlashPrompt = renderSlashPrompt;
-const capability_tiers_1 = require("./capability-tiers");
+import { tierFor } from './capability-tiers';
 /** Reserved name prefix for dynamic tool prompts (plan D-006). */
-exports.SLASH_PROMPT_PREFIX = 'tool:';
+export const SLASH_PROMPT_PREFIX = 'tool:';
 /**
  * Normalize a tool's slash exposure. Returns the override object (possibly
  * empty) when the tool projects onto the slash surface, or null when it is
@@ -37,7 +27,7 @@ exports.SLASH_PROMPT_PREFIX = 'tool:';
  * tool has no agent-callable name for the rendered instruction to target).
  * Absent/`true` ⇒ ON with defaults (owner-ratified default-on, plan D-003).
  */
-function resolveSlashExposure(tool) {
+export function resolveSlashExposure(tool) {
     if (!tool.expose.mcp)
         return null;
     const slash = tool.expose.slash;
@@ -48,20 +38,20 @@ function resolveSlashExposure(tool) {
     return slash;
 }
 /** The dynamic prompt name for a tool: `tool:<override ?? mcp name>`. */
-function slashPromptNameFor(tool) {
+export function slashPromptNameFor(tool) {
     const slash = resolveSlashExposure(tool);
     if (!slash)
         return null;
     const suffix = slash.name ?? tool.expose.mcp.name;
-    return `${exports.SLASH_PROMPT_PREFIX}${suffix}`;
+    return `${SLASH_PROMPT_PREFIX}${suffix}`;
 }
 /** True when a prompt name addresses the dynamic tool-prompt namespace. */
-function isSlashPromptName(name) {
-    return name.startsWith(exports.SLASH_PROMPT_PREFIX);
+export function isSlashPromptName(name) {
+    return name.startsWith(SLASH_PROMPT_PREFIX);
 }
 /** Strip the `tool:` prefix back to the (overridden or MCP) tool name. */
-function slashPromptToolName(promptName) {
-    return promptName.slice(exports.SLASH_PROMPT_PREFIX.length);
+export function slashPromptToolName(promptName) {
+    return promptName.slice(SLASH_PROMPT_PREFIX.length);
 }
 const SCALAR_TYPES = new Set(['string', 'number', 'integer', 'boolean']);
 function isScalarProperty(prop) {
@@ -87,7 +77,7 @@ function isScalarProperty(prop) {
  * `/command` invocation, which is exactly the elicitation flow we want to
  * keep available (implementation note on plan D-004).
  */
-function deriveSlashPromptArguments(inputSchema, restrict) {
+export function deriveSlashPromptArguments(inputSchema, restrict) {
     const props = inputSchema?.properties;
     if (!props || typeof props !== 'object')
         return [];
@@ -121,14 +111,14 @@ function deriveSlashPromptArguments(inputSchema, restrict) {
  * registry write tools) so prompt args match what is callable; defaults to
  * the registered schema.
  */
-function slashPromptListingFor(tool, advertisedInputSchema) {
+export function slashPromptListingFor(tool, advertisedInputSchema) {
     const slash = resolveSlashExposure(tool);
     if (!slash)
         return null;
     const description = slash.description ?? tool.guidance?.when ?? tool.description ?? tool.expose.mcp.name;
     const args = deriveSlashPromptArguments(advertisedInputSchema ?? tool.inputSchema, slash.args);
     return {
-        name: `${exports.SLASH_PROMPT_PREFIX}${slash.name ?? tool.expose.mcp.name}`,
+        name: `${SLASH_PROMPT_PREFIX}${slash.name ?? tool.expose.mcp.name}`,
         description,
         ...(args.length > 0 ? { arguments: args } : {}),
     };
@@ -142,11 +132,11 @@ function slashPromptListingFor(tool, advertisedInputSchema) {
  * invoking, confirm first for high-tier (and apparently-destructive)
  * invocations, then call the tool over this MCP session and summarize.
  */
-function renderSlashPrompt(tool, args, advertisedInputSchema, opts) {
+export function renderSlashPrompt(tool, args, advertisedInputSchema, opts) {
     const mcpName = tool.expose.mcp.name;
     const schema = advertisedInputSchema ?? tool.inputSchema;
     const capability = tool.capabilities[0] ? String(tool.capabilities[0]) : undefined;
-    const tier = capability ? (0, capability_tiers_1.tierFor)(capability) : 'low';
+    const tier = capability ? tierFor(capability) : 'low';
     const supplied = Object.entries(args).filter(([, v]) => v !== undefined && v !== '');
     const suppliedBlock = opts?.suppliedArgsText ??
         (supplied.length > 0

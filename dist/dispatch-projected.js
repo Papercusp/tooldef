@@ -1,4 +1,3 @@
-"use strict";
 /**
  * Unified dispatcher entrypoints for projected tools.
  *
@@ -17,28 +16,17 @@
  *
  * Spec: apps/operator/docs/plugin-mcp-host-design.md.
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.withReplacedStep = exports.DEFAULT_DISPATCH_STACK = exports.InvalidInputError = exports.HarnessRequiredError = exports.UnauthorizedToolError = exports.PASS_THROUGH = exports.defaultComputeQuotaWindow = void 0;
-exports.dispatchProjectedTool = dispatchProjectedTool;
-exports.dispatchProjectedToolStream = dispatchProjectedToolStream;
-const dispatch_stack_1 = require("./dispatch-stack");
-var dispatch_types_1 = require("./dispatch-types");
-Object.defineProperty(exports, "defaultComputeQuotaWindow", { enumerable: true, get: function () { return dispatch_types_1.defaultComputeQuotaWindow; } });
-Object.defineProperty(exports, "PASS_THROUGH", { enumerable: true, get: function () { return dispatch_types_1.PASS_THROUGH; } });
-Object.defineProperty(exports, "UnauthorizedToolError", { enumerable: true, get: function () { return dispatch_types_1.UnauthorizedToolError; } });
-Object.defineProperty(exports, "HarnessRequiredError", { enumerable: true, get: function () { return dispatch_types_1.HarnessRequiredError; } });
-Object.defineProperty(exports, "InvalidInputError", { enumerable: true, get: function () { return dispatch_types_1.InvalidInputError; } });
-var dispatch_stack_2 = require("./dispatch-stack");
-Object.defineProperty(exports, "DEFAULT_DISPATCH_STACK", { enumerable: true, get: function () { return dispatch_stack_2.DEFAULT_DISPATCH_STACK; } });
-Object.defineProperty(exports, "withReplacedStep", { enumerable: true, get: function () { return dispatch_stack_2.withReplacedStep; } });
+import { DEFAULT_DISPATCH_STACK, runDispatchStack, } from './dispatch-stack';
+export { defaultComputeQuotaWindow, PASS_THROUGH, UnauthorizedToolError, HarnessRequiredError, InvalidInputError, } from './dispatch-types';
+export { DEFAULT_DISPATCH_STACK, withReplacedStep, } from './dispatch-stack';
 /* ─── Dispatcher entrypoint ──────────────────────────────────────────── */
 /**
  * Dispatch a projected tool. Drives the default dispatch stack (gates,
  * decorators, invoke, telemetry); hosts that need a custom stack should
  * call `runDispatchStack` directly with their stack.
  */
-async function dispatchProjectedTool(tool, toolName, input, ctx, deps, stack = dispatch_stack_1.DEFAULT_DISPATCH_STACK) {
-    return (0, dispatch_stack_1.runDispatchStack)(tool, toolName, input, ctx, deps, stack);
+export async function dispatchProjectedTool(tool, toolName, input, ctx, deps, stack = DEFAULT_DISPATCH_STACK) {
+    return runDispatchStack(tool, toolName, input, ctx, deps, stack);
 }
 /**
  * In-process streaming wrapper around `dispatchProjectedTool` for
@@ -52,7 +40,7 @@ async function dispatchProjectedTool(tool, toolName, input, ctx, deps, stack = d
  *
  * Yields exactly one terminal event (`done` or `error`) before returning.
  */
-async function* dispatchProjectedToolStream(tool, toolName, input, ctx, deps) {
+export async function* dispatchProjectedToolStream(tool, toolName, input, ctx, deps) {
     const queue = [];
     let resolveWait = null;
     const wake = () => {

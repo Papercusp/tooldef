@@ -1,4 +1,3 @@
-"use strict";
 /**
  * requires.ts — declarative tool PRECONDITIONS (the preInvoke mirror of `emits:`).
  *
@@ -30,4 +29,4 @@
  * (inspectability, serializability). Host state enters through the spec's
  * `state` resolver instead.
  */
-Object.defineProperty(exports, "__esModule", { value: true });
+export {};

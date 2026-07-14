@@ -1,4 +1,3 @@
-"use strict";
 /**
  * Tool projection registry — the function-as-truth abstraction.
  *
@@ -18,28 +17,14 @@
  *
  * Spec: apps/operator/docs/plugin-mcp-host-design.md.
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.ToolRegistrationError = exports.RESERVED_EVENT_NAMES = void 0;
-exports.classifyEventWire = classifyEventWire;
-exports.isPapercuspBinaryEnvelope = isPapercuspBinaryEnvelope;
-exports.emitToSseSink = emitToSseSink;
-exports.registerProjectedTool = registerProjectedTool;
-exports.unregisterProjectedToolsForPlugin = unregisterProjectedToolsForPlugin;
-exports.lookupByMcpName = lookupByMcpName;
-exports.lookupByHttpPath = lookupByHttpPath;
-exports.listAllProjectedTools = listAllProjectedTools;
-exports.toolDeclaresGate = toolDeclaresGate;
-exports.listUngatedProjectedTools = listUngatedProjectedTools;
-exports.listMcpProjections = listMcpProjections;
-exports._resetProjectionRegistryForTests = _resetProjectionRegistryForTests;
-const schema_adapter_1 = require("./schema-adapter");
+import { toJsonSchema } from './schema-adapter';
 /**
  * Runtime list of reserved event names. The compile-time `UserEvents<T>`
  * guard rejects them in TS, but the projection registry also checks at
  * register time so plugins (which can bypass the TS layer via JSON
  * manifests) get a loud failure. Phase 4 T2.3.
  */
-exports.RESERVED_EVENT_NAMES = [
+export const RESERVED_EVENT_NAMES = [
     // Truly framework-only events. Tools MUST NOT redeclare them.
     'done', // dispatcher emits at successful completion with ToolResult.content
     'heartbeat', // transport pings to keep idle connections alive
@@ -65,7 +50,7 @@ exports.RESERVED_EVENT_NAMES = [
  * Cheap one-time call per declared event at register time; result is
  * cached on the tool entry so emit-time has no schema-introspection cost.
  */
-function classifyEventWire(schema) {
+export function classifyEventWire(schema) {
     // Binary check: detect `z.instanceof(Uint8Array)` by probing the
     // schema with a real Uint8Array. Zod 4 represents instanceof as
     // `{ type: 'custom', fn }` with the Class captured in the fn closure,
@@ -87,7 +72,7 @@ function classifyEventWire(schema) {
     }
     try {
         // Pluggable schema→JSON-Schema (P-021); same path as inputSchema serialization.
-        const json = (0, schema_adapter_1.toJsonSchema)(schema);
+        const json = toJsonSchema(schema);
         return json.type === 'string' ? 'string' : 'json';
     }
     catch {
@@ -96,13 +81,13 @@ function classifyEventWire(schema) {
         return 'json';
     }
 }
-function isPapercuspBinaryEnvelope(v) {
+export function isPapercuspBinaryEnvelope(v) {
     return (typeof v === 'object' &&
         v !== null &&
         v.$papercuspBinary === true &&
         typeof v.data === 'string');
 }
-function emitToSseSink(sink, tool, name, data) {
+export function emitToSseSink(sink, tool, name, data) {
     const kind = tool.eventWireKinds?.[name];
     if (kind === 'string') {
         sink.eventRaw(name, typeof data === 'string' ? data : String(data));
@@ -146,13 +131,12 @@ function entryKey(tool) {
         return `http:${tool.expose.http.path}`;
     return `${tool.pluginName}:?`;
 }
-class ToolRegistrationError extends Error {
+export class ToolRegistrationError extends Error {
     constructor(message) {
         super(message);
         this.name = 'ToolRegistrationError';
     }
 }
-exports.ToolRegistrationError = ToolRegistrationError;
 /**
  * Structural fingerprint of a projected tool — stable across a re-import of
  * the SAME source (HMR / double-import re-eval produces a fresh object that
@@ -202,7 +186,7 @@ function assertNotShadowingCollision(kind, key, prior, tool) {
  *     registry.
  *   - `expose.http.path` must be unique across the registry.
  */
-function registerProjectedTool(tool) {
+export function registerProjectedTool(tool) {
     if (!tool.expose.http && !tool.expose.mcp) {
         throw new ToolRegistrationError(`tool from plugin "${tool.pluginName}" must declare at least one of expose.http / expose.mcp`);
     }
@@ -215,9 +199,9 @@ function registerProjectedTool(tool) {
         ...(tool.eventsJsonSchema ? Object.keys(tool.eventsJsonSchema) : []),
     ];
     for (const name of declaredEventNames) {
-        if (exports.RESERVED_EVENT_NAMES.includes(name)) {
+        if (RESERVED_EVENT_NAMES.includes(name)) {
             throw new ToolRegistrationError(`tool "${tool.expose.mcp?.name ?? tool.expose.http?.path}" declared the reserved event name "${name}". ` +
-                `Reserved names (auto-emitted by the framework): ${exports.RESERVED_EVENT_NAMES.join(', ')}.` +
+                `Reserved names (auto-emitted by the framework): ${RESERVED_EVENT_NAMES.join(', ')}.` +
                 (name === 'chunk' ? ' Declare `largeOutput: true` instead and return outputRef from the handler.' : ''));
         }
     }
@@ -275,7 +259,7 @@ function registerProjectedTool(tool) {
  * tripping the cross-plugin name-collision guard against its own prior
  * entries.
  */
-function unregisterProjectedToolsForPlugin(pluginName) {
+export function unregisterProjectedToolsForPlugin(pluginName) {
     let removed = 0;
     for (const [k, t] of Array.from(REGISTRY.entries())) {
         if (t.pluginName === pluginName) {
@@ -293,16 +277,70 @@ function unregisterProjectedToolsForPlugin(pluginName) {
     }
     return removed;
 }
-/** Look up by MCP name (e.g. 'repomix.pack'). */
-function lookupByMcpName(name) {
+/** Look up by MCP name (e.g. 'repomix.pack') — EXACT match only. */
+export function lookupByMcpName(name) {
     return BY_MCP_NAME.get(name);
 }
+/**
+ * Normalize an MCP tool name for TOLERANT resolution: strip a client's
+ * `mcp__<server>__` advertisement wrapper, then collapse every separator
+ * (`:` `_` `.` `-`) to one. So the canonical registered name
+ * (`curation:state-of-pot`), the underscore/group_verb form
+ * (`curation_state-of-pot`), and the fully client-mangled form
+ * (`mcp__papercusp-su__curation_state-of-pot`) all reduce to ONE key.
+ *
+ * This is the single source of truth for tool-name normalization — operator-
+ * core's unknown-tool suggestion path aliases to it, so a SUGGESTED name and a
+ * RESOLVED name can never disagree (the drift that would make "did you mean X?"
+ * point at a name that then fails to resolve).
+ */
+export function normalizeMcpName(name) {
+    return name
+        .toLowerCase()
+        .replace(/^mcp__[^_]+(?:[^_]|_(?!_))*__/, '') // mcp__<server>__<tool> → <tool>
+        .replace(/[:_.\-]+/g, ':');
+}
+/**
+ * Resolve an MCP tool name TOLERANTLY (WI-3930). Exact registered name first —
+ * the fast, unchanged path that every canonical (colon-form) call takes. Only
+ * on an exact miss does it fall back to a NORMALIZED match, which accepts the
+ * underscore/group_verb and fully-mangled forms an agent naturally copies from
+ * its own advertised tool list (`mcp__papercusp-su__curation_state-of-pot`) or
+ * from a hook/error string. The docs tell agents to fall back to
+ * `tools:invoke { name }` with the colon-form name; this makes that fallback
+ * also accept the other two forms, so a single paste resolves instead of
+ * costing a wasted unknown-tool round-trip.
+ *
+ * The normalized fallback resolves ONLY when it is UNAMBIGUOUS — exactly one
+ * registered tool normalizes to the requested key. If two do (a real name
+ * collision under separator-folding), it returns undefined so the caller
+ * surfaces the honest unknown-tool / disambiguation path rather than silently
+ * guessing one. A genuine typo (`curatoin:state-of-pot`) normalizes to a key no
+ * tool matches → undefined, exactly as before.
+ */
+export function resolveMcpName(name) {
+    const exact = BY_MCP_NAME.get(name);
+    if (exact)
+        return exact;
+    const norm = normalizeMcpName(name);
+    if (!norm)
+        return undefined;
+    let hit;
+    for (const [registered, tool] of BY_MCP_NAME) {
+        if (normalizeMcpName(registered) === norm) {
+            if (hit && hit !== tool)
+                return undefined; // ambiguous → don't guess
+            hit = tool;
+        }
+    }
+    return hit;
+}
 /** Look up by HTTP path (e.g. '/api/plugins/repomix/pack'). */
-function lookupByHttpPath(path) {
+export function lookupByHttpPath(path) {
     return BY_HTTP_PATH.get(path);
 }
 /** Snapshot of all registered projected tools. */
-function listAllProjectedTools() {
+export function listAllProjectedTools() {
     return Array.from(REGISTRY.values());
 }
 /**
@@ -311,7 +349,7 @@ function listAllProjectedTools() {
  * default-deny dispatch gate and `listUngatedProjectedTools` (RFC tooldef-auth Phase 3),
  * so the enforcement and the migration aid can't drift.
  */
-function toolDeclaresGate(tool) {
+export function toolDeclaresGate(tool) {
     return (tool.capabilities.length > 0 ||
         (tool.agentRoles?.length ?? 0) > 0 ||
         (tool.requireRoles?.length ?? 0) > 0 ||
@@ -323,7 +361,7 @@ function toolDeclaresGate(tool) {
  * run it (with the full tool registry loaded) BEFORE enabling default-deny, triage each
  * (declare a gate or mark `public`), then flip. Empty result = safe to flip.
  */
-function listUngatedProjectedTools() {
+export function listUngatedProjectedTools() {
     return Array.from(REGISTRY.values()).filter((t) => !t.public && !toolDeclaresGate(t));
 }
 /**
@@ -354,7 +392,7 @@ function serializeEventsSchema(events) {
         try {
             // Pluggable schema→JSON-Schema (P-021); default adapter is Zod 4's
             // toJSONSchema (zod-to-json-schema@3 returned empty schemas on zod 4).
-            const json = (0, schema_adapter_1.toJsonSchema)(schema);
+            const json = toJsonSchema(schema);
             // Drop $schema — MCP clients don't need it and it's noise in tools/list.
             delete json.$schema;
             out[name] = json;
@@ -369,7 +407,7 @@ function serializeEventsSchema(events) {
     EVENTS_JSON_CACHE.set(events, out);
     return out;
 }
-function listMcpProjections(role, profile) {
+export function listMcpProjections(role, profile) {
     const out = [];
     for (const tool of REGISTRY.values()) {
         if (!tool.expose.mcp)
@@ -423,7 +461,7 @@ function listMcpProjections(role, profile) {
     return out;
 }
 /** Test-only — flushes the registry between tests. */
-function _resetProjectionRegistryForTests() {
+export function _resetProjectionRegistryForTests() {
     REGISTRY.clear();
     BY_MCP_NAME.clear();
     BY_HTTP_PATH.clear();

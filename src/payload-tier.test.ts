@@ -99,9 +99,9 @@ describe('applyPayloadTier', () => {
       truncated: true,
       tier: 'full',
       forced: true,
-      cursor: { kind: 'full-detail', payloadTier: 'full' },
+      cursor: { kind: 'full-detail', tool: 't', args: { payloadTier: 'full' } },
     });
-    expect(projected._projection.next).toContain('narrower filters/ids');
+    expect(projected._projection.next).toContain('_projection.cursor.args');
     expect(JSON.stringify(projected).length).toBeLessThan(PAYLOAD_TIER_HARD_CEILING_CHARS);
   });
 
@@ -151,7 +151,11 @@ describe('applyPayloadTier', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('bounded'));
     const projected = first.data as ReturnType<typeof projectBoundedPayload>;
     expect(projected._projection.omittedCount).toBeGreaterThan(0);
-    expect(projected._projection.next).toContain('payloadTier:"full"');
+    expect(projected._projection.cursor).toEqual({
+      kind: 'full-detail',
+      tool: 'fat:tool',
+      args: { payloadTier: 'full' },
+    });
     expect(JSON.stringify(projected).length).toBeLessThan(PAYLOAD_TIER_RATCHET_CHARS);
     // envelope fields survive shaping
     const enveloped = applyPayloadTier({
@@ -183,5 +187,49 @@ describe('applyPayloadTier', () => {
     expect(projected._projection.omitted).toEqual(expect.arrayContaining([
       expect.objectContaining({ reason: 'circular reference omitted' }),
     ]));
+  });
+
+  it('retains identity for every deeply nested recipe-result row and returns a callable continuation (EI-11404)', () => {
+    const summary = Array.from({ length: 10 }, (_, i) => ({
+      ok: true,
+      results: [{
+        ok: true,
+        id: `WI-${4600 + i}`,
+        workItem: {
+          id: `WI-${4600 + i}`,
+          title: `Operability item ${i}`,
+          state: i % 2 === 0 ? 'todo' : 'passed',
+          summary: 'x'.repeat(2_000),
+        },
+      }],
+      counts: { ok: 1, failed: 0 },
+    }));
+    const nested = {
+      ok: true,
+      results: [{
+        ok: true,
+        id: 'read-existing-agent-operability-work-items',
+        result: { ok: true, summary, logs: [], dryRun: false, plannedMutations: [] },
+      }],
+      counts: { ok: 1, failed: 0 },
+    };
+
+    const projected = projectBoundedPayload(nested, {
+      toolName: 'recipes:run',
+      tier: 'trimmed',
+      args: { id: 'read-existing-agent-operability-work-items' },
+    });
+    const rows = (((projected.results as any[])[0].result.summary) as Array<any>);
+    expect(rows).toHaveLength(10);
+    expect(rows.every((row) => typeof row !== 'string')).toBe(true);
+    expect(rows.map((row) => row.results[0].id)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `WI-${4600 + i}`),
+    );
+    expect(projected._projection.cursor).toEqual({
+      kind: 'full-detail',
+      tool: 'recipes:run',
+      args: { id: 'read-existing-agent-operability-work-items', payloadTier: 'full' },
+    });
+    expect(projected._projection.next).not.toContain('narrower filters/ids');
   });
 });

@@ -1,9 +1,4 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.toolArgsType = toolArgsType;
-exports.generateToolFacadeTypes = generateToolFacadeTypes;
-exports.listFacadeNamespaces = listFacadeNamespaces;
-const tool_facade_1 = require("./tool-facade");
+import { camelNamespace, camelVerb } from './tool-facade';
 /** Default nesting depth before a deep/recursive schema collapses to `Record<string, unknown>`. */
 const DEFAULT_MAX_DEPTH = 8;
 /** Truncation cap for the per-signature description comment (token economy). */
@@ -160,7 +155,7 @@ function rootDefs(schema) {
  * Render a tool's `inputSchema` (a JSON Schema object) to its TS args type + whether all
  * fields are optional (so the generated signature can mark `args?`).
  */
-function toolArgsType(tool, maxDepth = DEFAULT_MAX_DEPTH) {
+export function toolArgsType(tool, maxDepth = DEFAULT_MAX_DEPTH) {
     const schema = tool.inputSchema;
     if (!isObj(schema))
         return { type: 'Record<string, unknown>', optional: true };
@@ -191,7 +186,7 @@ function facadeEntries(tools, opts) {
         if (opts.allowed && !opts.allowed.has(name))
             continue;
         const rawNs = name.slice(0, ci);
-        const ns = (0, tool_facade_1.camelNamespace)(rawNs);
+        const ns = camelNamespace(rawNs);
         if (rawNs === 'call' || ns === 'call')
             continue; // never shadow the escape hatch
         // When a subset is requested, include a tool if its ns OR its full name matches.
@@ -202,7 +197,7 @@ function facadeEntries(tools, opts) {
         }
         entries.push({
             ns,
-            verb: (0, tool_facade_1.camelVerb)(name.slice(ci + 1)),
+            verb: camelVerb(name.slice(ci + 1)),
             name,
             desc: shortDesc(tool.description),
             args: toolArgsType(tool, opts.maxDepth),
@@ -216,7 +211,7 @@ function facadeEntries(tools, opts) {
  * scoped to `allowed` (and optionally to a `namespaces`/`names` subset for on-demand loading).
  * The universal `call(toolName, args?)` escape hatch is always included.
  */
-function generateToolFacadeTypes(tools, opts = {}) {
+export function generateToolFacadeTypes(tools, opts = {}) {
     const entries = facadeEntries(tools, opts);
     const byNs = new Map();
     for (const e of entries) {
@@ -248,7 +243,7 @@ function generateToolFacadeTypes(tools, opts = {}) {
  * full arg types. The model reads this first, then requests `generateToolFacadeTypes` for the
  * one or two namespaces it actually needs — the token win.
  */
-function listFacadeNamespaces(tools, allowed) {
+export function listFacadeNamespaces(tools, allowed) {
     const entries = facadeEntries(tools, { allowed });
     const byNs = new Map();
     for (const e of entries) {

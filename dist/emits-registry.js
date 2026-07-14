@@ -1,4 +1,3 @@
-"use strict";
 /**
  * emits-registry.ts — the generic collector for tools' intrinsic `emits`
  * declarations (coord-lifecycle-automation-2026-06-04 D-002).
@@ -13,10 +12,6 @@
  * rules. Generic (no domain knowledge of what `fire` means) by design; the
  * meaning lives in the operator-core adapter.
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.collectToolEmits = collectToolEmits;
-exports.getCollectedToolEmits = getCollectedToolEmits;
-exports._resetCollectedToolEmitsForTests = _resetCollectedToolEmitsForTests;
 const COLLECTED = [];
 /** Track names already seen so a re-registered tool (hot-reload, test) replaces. */
 const INDEX = new Map();
@@ -26,7 +21,7 @@ const INDEX = new Map();
  * `PAPERCUSP_RELOAD_PROMPTS`, tests) replaces its prior entry rather than
  * duplicating it. A tool with no (or empty) `emits` is a no-op.
  */
-function collectToolEmits(toolName, emits) {
+export function collectToolEmits(toolName, emits) {
     if (!emits || emits.length === 0) {
         // If the tool previously had emits and now declares none, drop the stale entry.
         const prior = INDEX.get(toolName);
@@ -49,11 +44,11 @@ function collectToolEmits(toolName, emits) {
     COLLECTED.push({ toolName, emits });
 }
 /** Every tool that declared `emits`, in declaration order. The desugar reads this. */
-function getCollectedToolEmits() {
+export function getCollectedToolEmits() {
     return COLLECTED;
 }
 /** Test seam — clear the collector between cases. */
-function _resetCollectedToolEmitsForTests() {
+export function _resetCollectedToolEmitsForTests() {
     COLLECTED.length = 0;
     INDEX.clear();
 }

@@ -1,4 +1,3 @@
-"use strict";
 /**
  * base-presence — the HARNESS half of the tool-result delta base-presence contract (D-006,
  * `agent-insights/tool-delta-base-presence-contract.mdx`). `delta-client.ts` (DeltaToolClient)
@@ -22,15 +21,12 @@
  * `runAgentChat`, which only OBSERVES a child agent process's event stream and owns no message
  * array (see the P-003 scoping note in the plan).
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.BasePresenceTracker = void 0;
-exports.dispatchWithBasePresence = dispatchWithBasePresence;
 /**
  * Per-conversation tracker of which tool VIEWS still have their base snapshot in the model's
  * context. `viewKey` is the stable id for a logical view (e.g. `"plans:attention:" +
  * canonicalArgsHash`) — the SAME key the DeltaToolClient caches rows under, so the two compose.
  */
-class BasePresenceTracker {
+export class BasePresenceTracker {
     bases = new Map();
     enabled;
     constructor(opts = {}) {
@@ -124,7 +120,6 @@ class BasePresenceTracker {
         return this.enabled;
     }
 }
-exports.BasePresenceTracker = BasePresenceTracker;
 /**
  * One base-presence-guarded delta read — the turn-wrapper integration in a SINGLE call,
  * composing a {@link BasePresenceTracker} (is the base still in the model's context?) with a
@@ -148,7 +143,7 @@ exports.BasePresenceTracker = BasePresenceTracker;
  * {@link BasePresenceTracker.onUnsupported} (the {@link DeltaResponse} the client observes does
  * not convey `supported`).
  */
-async function dispatchWithBasePresence(tracker, client, viewKey, itemKey, dispatch, opts = {}) {
+export async function dispatchWithBasePresence(tracker, client, viewKey, itemKey, dispatch, opts = {}) {
     // Ask for a delta ONLY when the base is provably in the model's context; else force full.
     const wire = tracker.negotiationFor(viewKey, opts.wantSemantic ?? false);
     const requested = wire === 'full' ? undefined : wire;

@@ -1,4 +1,3 @@
-"use strict";
 /**
  * Named, ordered, replaceable dispatch pipeline.
  *
@@ -20,26 +19,22 @@
  * denial, success, error, timeout). Surfaces as `recordTelemetry()` here
  * so it stays co-located with the steps it observes.
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.DEFAULT_DISPATCH_STACK = void 0;
-exports.withReplacedStep = withReplacedStep;
-exports.runDispatchStack = runDispatchStack;
-const see_also_1 = require("./see-also");
-const result_annotator_1 = require("./result-annotator");
-const tool_projection_1 = require("./tool-projection");
-const replay_buffer_1 = require("./replay-buffer");
-const card_correlator_1 = require("./card-correlator");
-const state_channel_1 = require("./state-channel");
-const standard_schema_1 = require("./standard-schema");
-const capability_tiers_1 = require("./capability-tiers");
-const dispatch_types_1 = require("./dispatch-types");
-const rules_1 = require("@papercusp/rules");
+import { applySeeAlso } from './see-also';
+import { applyResultAnnotator } from './result-annotator';
+import { toolDeclaresGate } from './tool-projection';
+import { openBuffer as openReplayBuffer, } from './replay-buffer';
+import { cancelPendingCardsForRun, registerCard, } from './card-correlator';
+import { openRun, closeRun, setToolState } from './state-channel';
+import { validateSync, formatIssues } from './standard-schema';
+import { tierFor } from './capability-tiers';
+import { PASS_THROUGH, HarnessRequiredError, InvalidInputError, UnauthorizedToolError, defaultComputeQuotaWindow, } from './dispatch-types';
+import { evaluateDataCondition } from '@papercusp/rules';
 function initExecution(tool, toolName, input, ctx, deps) {
     // Resolve the quota window + ceiling once, up front: the window key feeds
     // both the quota gate and telemetry, so it must be computed for every call
     // (not just quota'd ones). `roleQuota` is the tool's entry for this role.
     const roleQuota = ctx.role ? tool.rolesQuota?.[ctx.role] : undefined;
-    const { key: windowKey, limit: quotaLimit } = (deps.computeQuotaWindow ?? dispatch_types_1.defaultComputeQuotaWindow)(ctx, roleQuota, toolName);
+    const { key: windowKey, limit: quotaLimit } = (deps.computeQuotaWindow ?? defaultComputeQuotaWindow)(ctx, roleQuota, toolName);
     return {
         tool,
         toolName,
@@ -82,7 +77,7 @@ const defaultDenyStep = {
         const { tool, toolName, deps } = exec;
         if (!deps.defaultDeny || tool.public)
             return null;
-        if ((0, tool_projection_1.toolDeclaresGate)(tool))
+        if (toolDeclaresGate(tool))
             return null;
         return {
             ok: false,
@@ -336,7 +331,7 @@ const replayBufferStep = {
         // is "latest snapshot," not "event history."
         const replayCap = tool.state ? 0 : (tool.replayBufferSize ?? 0);
         if (replayCap > 0 && ctx.workspaceId && ctx.runId) {
-            exec.bufferWriter = (0, replay_buffer_1.openBuffer)({
+            exec.bufferWriter = openReplayBuffer({
                 workspaceId: ctx.workspaceId,
                 toolName,
                 runId: ctx.runId,
@@ -378,9 +373,9 @@ const ctxBindingsStep = {
         if (ctx.workspaceId && ctx.runId) {
             const wsId = ctx.workspaceId;
             const runId = ctx.runId;
-            (0, state_channel_1.openRun)({ workspaceId: wsId, runId });
+            openRun({ workspaceId: wsId, runId });
             askUser = async (spec) => {
-                const { correlationId, result } = (0, card_correlator_1.registerCard)({ workspaceId: wsId, runId, spec });
+                const { correlationId, result } = registerCard({ workspaceId: wsId, runId, spec });
                 // Surface the freshly-minted id so a caller can link an external
                 // durable record (Phase D). Skip an idempotency-cache hit (no card was
                 // registered — correlationId is the 'idempotent' sentinel).
@@ -419,11 +414,11 @@ const ctxBindingsStep = {
                 }
                 // Validate synchronously — publishState is fire-and-forget (tools call
                 // it without await), so an async validator can't be supported here.
-                const parsed = (0, standard_schema_1.validateSync)(stateSchema, snapshot);
+                const parsed = validateSync(stateSchema, snapshot);
                 if (!parsed.ok) {
-                    throw new Error(`ctx.publishState: snapshot does not match tool.state schema: ${(0, standard_schema_1.formatIssues)(parsed.issues)}`);
+                    throw new Error(`ctx.publishState: snapshot does not match tool.state schema: ${formatIssues(parsed.issues)}`);
                 }
-                (0, state_channel_1.setToolState)(runIdLocal, parsed.value);
+                setToolState(runIdLocal, parsed.value);
             };
         }
         // metadata — overwrite-not-merge semantics, last write wins.
@@ -450,7 +445,7 @@ const invokeStep = {
             let result;
             if (deps.overrideTool) {
                 const ov = await deps.overrideTool(toolName, input, handlerCtx);
-                if (ov !== dispatch_types_1.PASS_THROUGH) {
+                if (ov !== PASS_THROUGH) {
                     result = ov;
                 }
                 else {
@@ -464,11 +459,11 @@ const invokeStep = {
             // into the envelope (_meta._seeAlso + a one-line "See also:" text block).
             // Self-gates (unchanged result) when the tool declares none / emits none /
             // errored; never fails the underlying tool call.
-            result = (0, see_also_1.applySeeAlso)(result, exec.tool.guidance?.seeAlso, input, handlerCtx);
+            result = applySeeAlso(result, exec.tool.guidance?.seeAlso, input, handlerCtx);
             // Host ambient annotator (agent-managed-compaction P-013): the host may append a
             // banded context-usage gauge to EVERY result so a heads-down session that never
             // calls a coord tool still sees its usage. Default no-op; never throws.
-            result = (0, result_annotator_1.applyResultAnnotator)(result, handlerCtx);
+            result = applyResultAnnotator(result, handlerCtx);
             // ok-on-abort race: the timeout/idle watchdog (or the caller's signal) fired
             // mid-handler, but the handler returned normally without observing
             // ctx.signal.aborted.
@@ -491,7 +486,7 @@ const invokeStep = {
                 // capability ⇒ treat as non-low (don't assume an ungated utility is a safe
                 // read). `ProjectedTool` carries `capabilities`, not a precomputed `tier`.
                 const caps = exec.tool.capabilities;
-                const isLowTierRead = caps.length > 0 && caps.every((c) => (0, capability_tiers_1.tierFor)(c) === 'low');
+                const isLowTierRead = caps.length > 0 && caps.every((c) => tierFor(c) === 'low');
                 // Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): a
                 // MUTATION the tool DECLARES idempotent whose handler RAN TO COMPLETION is safe to
                 // surface past the deadline — the write committed (the handler returned a result),
@@ -543,17 +538,17 @@ const invokeStep = {
             // false — without the name check the clean 401/precondition codes
             // degrade to a generic handler_error 500.
             const errName = err?.name;
-            if (err instanceof dispatch_types_1.UnauthorizedToolError || errName === 'UnauthorizedToolError') {
+            if (err instanceof UnauthorizedToolError || errName === 'UnauthorizedToolError') {
                 return { ok: false, error: { code: 'unauthorized', message: err.message } };
             }
-            if (err instanceof dispatch_types_1.HarnessRequiredError || errName === 'HarnessRequiredError') {
+            if (err instanceof HarnessRequiredError || errName === 'HarnessRequiredError') {
                 return { ok: false, error: { code: 'harness_required', message: err.message } };
             }
             // Schema-validation failure thrown by defineTool's projected fn (or any
             // handler-level input check). Coding it `invalid_input` (400) instead of
             // `handler_error` (500) keeps caller mistakes out of the structural
             // tool-error telemetry class (EI-334's false-fire leg).
-            if (err instanceof dispatch_types_1.InvalidInputError || errName === 'InvalidInputError') {
+            if (err instanceof InvalidInputError || errName === 'InvalidInputError') {
                 return { ok: false, error: { code: 'invalid_input', message: err.message } };
             }
             return {
@@ -686,7 +681,7 @@ const preconditionsStep = {
                 if (spec.state)
                     state = await spec.state(args, eventCtx);
                 const event = { tool: toolName, args, ctx: eventCtx, state };
-                return { holds: (0, rules_1.evaluateDataCondition)(spec.when, event), event };
+                return { holds: evaluateDataCondition(spec.when, event), event };
             };
             let first;
             try {
@@ -771,7 +766,7 @@ const preconditionsStep = {
  *   - `ctx-bindings` is the last decorator before `invoke`.
  *   - `invoke` is always terminal.
  */
-exports.DEFAULT_DISPATCH_STACK = Object.freeze([
+export const DEFAULT_DISPATCH_STACK = Object.freeze([
     defaultDenyStep,
     roleAllowlistStep,
     capabilityCheckStep,
@@ -799,7 +794,7 @@ exports.DEFAULT_DISPATCH_STACK = Object.freeze([
  * and a single replaceable position is the smallest knob that proves
  * the surface is real.
  */
-function withReplacedStep(stack, name, replacement) {
+export function withReplacedStep(stack, name, replacement) {
     let found = false;
     const out = stack.map((s) => {
         if (s.name === name) {
@@ -871,6 +866,24 @@ async function recordTelemetry(exec, result) {
             if (typeof servedDeltaMode === 'string') {
                 metaWithFormat = { ...(metaWithFormat ?? {}), deltaMode: servedDeltaMode };
             }
+            // EI-9130: a generic, queryable "was this response served as a delta?" breadcrumb.
+            // `metadata_json->>'deltaMode'` (above) only fires for tools riding the FORMAL
+            // delta protocol (_meta.delta) — a handler with its own bespoke cursor-delta shape
+            // (e.g. coord:orient's fleetDelta/planEvents/fleetCatchUp cursors, which don't ride
+            // `_meta.delta`) has no equivalent signal, so a delta rollout's live win can't be
+            // queried uniformly across mechanisms — only inferred. Fix: normalize BOTH into one
+            // boolean field. A handler that already knows it served a delta stamps it directly
+            // via `ctx.metadata({ deltaServed: true })` (folded into `metadataJson` above by
+            // `finalizeMetadata`) — that explicit stamp always wins. Otherwise, derive it from
+            // the formal protocol's mode (anything but 'full' is a delta). Absent ⇒ no delta
+            // mechanism was in play at all (never recorded as `false` — mirrors the `format` /
+            // `deltaMode` absent-means-unmarked convention above).
+            if (metaWithFormat?.deltaServed === undefined) {
+                const derivedDeltaServed = typeof servedDeltaMode === 'string' ? servedDeltaMode !== 'full' : undefined;
+                if (derivedDeltaServed !== undefined) {
+                    metaWithFormat = { ...(metaWithFormat ?? {}), deltaServed: derivedDeltaServed };
+                }
+            }
             await deps.recordInvocation({
                 toolName,
                 pluginName: tool.pluginName,
@@ -924,7 +937,7 @@ function finalizeMetadata(exec) {
  * the first short-circuiting step produced — or the result `invoke`
  * returned, if no gate fired.
  */
-async function runDispatchStack(tool, toolName, input, ctx, deps, stack = exports.DEFAULT_DISPATCH_STACK) {
+export async function runDispatchStack(tool, toolName, input, ctx, deps, stack = DEFAULT_DISPATCH_STACK) {
     const exec = initExecution(tool, toolName, input, ctx, deps);
     let result = null;
     try {
@@ -979,8 +992,8 @@ async function runDispatchStack(tool, toolName, input, ctx, deps, stack = export
         if (exec.idleTimer)
             clearInterval(exec.idleTimer);
         if (ctx.runId) {
-            (0, card_correlator_1.cancelPendingCardsForRun)(ctx.runId);
-            (0, state_channel_1.closeRun)(ctx.runId);
+            cancelPendingCardsForRun(ctx.runId);
+            closeRun(ctx.runId);
         }
     }
 }

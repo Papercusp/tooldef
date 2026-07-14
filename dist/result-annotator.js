@@ -1,15 +1,10 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.setResultAnnotator = setResultAnnotator;
-exports.resetResultAnnotator = resetResultAnnotator;
-exports.applyResultAnnotator = applyResultAnnotator;
 let annotator = null;
 /** Register the host result annotator (last registration wins). */
-function setResultAnnotator(fn) {
+export function setResultAnnotator(fn) {
     annotator = fn;
 }
 /** Clear the registered annotator — test seam + host teardown. */
-function resetResultAnnotator() {
+export function resetResultAnnotator() {
     annotator = null;
 }
 /**
@@ -18,7 +13,7 @@ function resetResultAnnotator() {
  * failed call). NEVER throws — a broken annotator must not fail the underlying tool call,
  * so a thrown annotator error is swallowed and the original result returned.
  */
-function applyResultAnnotator(result, ctx) {
+export function applyResultAnnotator(result, ctx) {
     if (!annotator || result.isError)
         return result;
     try {
