@@ -107,7 +107,11 @@ export interface BoundedPayloadProjection {
     returnedChars: number;
     omittedCount: number;
     omitted: Array<{ path: string; reason: string }>;
-    cursor: { kind: 'full-detail'; payloadTier: 'full' };
+    cursor: {
+      kind: 'full-detail';
+      tool: string;
+      args: Record<string, unknown> & { payloadTier: 'full' };
+    };
     next: string;
   };
   [key: string]: unknown;
@@ -164,6 +168,94 @@ function takePrimitive(state: ProjectionState, value: unknown, path: string): un
   return candidate;
 }
 
+/**
+ * Identity fields survive when a useful row lands exactly at the generic depth
+ * limit. EI-11404's concrete failure was a recipes:run summary containing ten
+ * successful work_items:get envelopes: every array element became the same
+ * `[omitted: depth limit]` scalar, erasing the ids needed to fetch or act on a
+ * row. At the boundary we now spend the remaining budget on a deliberately
+ * small per-row projection instead of erasing the whole value.
+ */
+const IDENTITY_FIELDS = new Set([
+  'id', 'title', 'name', 'slug', 'ref', 'kind', 'state', 'status', 'ok', 'error',
+  'item', 'itemId', 'plan', 'planSlug', 'rubricRef', 'workItemId',
+]);
+const IDENTITY_ENVELOPES = new Set(['results', 'items', 'workItem', 'counts']);
+const IDENTITY_PREVIEW_DEPTH = 4;
+
+function projectIdentityPreview(
+  value: unknown,
+  path: string,
+  depth: number,
+  state: ProjectionState,
+): unknown {
+  if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return takePrimitive(state, value, path);
+  }
+  if (typeof value === 'bigint') return takePrimitive(state, value.toString(), path);
+  if (typeof value === 'undefined') return takePrimitive(state, '[undefined]', path);
+  if (typeof value === 'function' || typeof value === 'symbol') {
+    return takePrimitive(state, `[${typeof value}]`, path);
+  }
+  if (value instanceof Date) return takePrimitive(state, value.toISOString(), path);
+  if (value instanceof Error) {
+    return projectIdentityPreview({ name: value.name, error: value.message }, path, depth, state);
+  }
+  if (typeof value !== 'object') return takePrimitive(state, String(value), path);
+  if (state.active.has(value)) {
+    recordOmission(state, path, 'circular reference omitted');
+    return '[circular]';
+  }
+  if (depth >= IDENTITY_PREVIEW_DEPTH) {
+    recordOmission(state, path, 'non-identity detail omitted at compact preview depth');
+    return '[omitted: compact preview depth]';
+  }
+
+  state.active.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const shown = value.slice(0, state.limits.maxArray);
+      const projected: unknown[] = [];
+      for (let i = 0; i < shown.length; i += 1) {
+        if (state.remaining < 128) {
+          recordOmission(state, `${path}[${i}]`, 'remaining identity rows omitted to fit projection budget', value.length - i);
+          break;
+        }
+        projected.push(projectIdentityPreview(shown[i], `${path}[${i}]`, depth + 1, state));
+      }
+      if (value.length > shown.length) {
+        recordOmission(state, `${path}[${shown.length}]`, `${value.length - shown.length} identity rows omitted`, value.length - shown.length);
+      }
+      return projected;
+    }
+
+    const entries = Object.entries(value as Record<string, unknown>);
+    const chosen = entries.filter(([key]) => IDENTITY_FIELDS.has(key) || IDENTITY_ENVELOPES.has(key));
+    if (chosen.length === 0) {
+      recordOmission(state, path, 'nested value omitted at projection depth limit');
+      return '[omitted: depth limit]';
+    }
+
+    const projected: Record<string, unknown> = {};
+    for (const [key, child] of chosen) {
+      const keyCost = jsonLen(key) + 2;
+      if (state.remaining < keyCost + 128) {
+        recordOmission(state, `${path}.${key}`, 'remaining identity fields omitted to fit projection budget', chosen.length - Object.keys(projected).length);
+        break;
+      }
+      state.remaining -= keyCost;
+      projected[key] = projectIdentityPreview(child, `${path}.${key}`, depth + 1, state);
+    }
+    const dropped = entries.length - chosen.length;
+    if (dropped > 0) {
+      recordOmission(state, `${path}.*`, `${dropped} non-identity fields omitted at projection depth limit`, dropped);
+    }
+    return projected;
+  } finally {
+    state.active.delete(value);
+  }
+}
+
 function projectValue(value: unknown, path: string, depth: number, state: ProjectionState): unknown {
   if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
     return takePrimitive(state, value, path);
@@ -183,8 +275,8 @@ function projectValue(value: unknown, path: string, depth: number, state: Projec
     return '[circular]';
   }
   if (depth >= state.limits.maxDepth) {
-    recordOmission(state, path, 'nested value omitted at projection depth limit');
-    return '[omitted: depth limit]';
+    recordOmission(state, path, 'nested value compacted at projection depth limit');
+    return projectIdentityPreview(value, path, 0, state);
   }
 
   state.active.add(value);
@@ -235,7 +327,7 @@ function projectValue(value: unknown, path: string, depth: number, state: Projec
  */
 export function projectBoundedPayload(
   data: unknown,
-  opts: { toolName: string; tier: PayloadTier; forced?: boolean; originalChars?: number },
+  opts: { toolName: string; tier: PayloadTier; forced?: boolean; originalChars?: number; args?: unknown },
 ): BoundedPayloadProjection {
   const projectionTier = opts.tier === 'standard' ? 'standard' : 'trimmed';
   const target = GENERIC_PROJECTION_TARGET_CHARS[projectionTier];
@@ -258,8 +350,17 @@ export function projectBoundedPayload(
     returnedChars: 0,
     omittedCount: Math.max(1, state.omittedCount),
     omitted: state.omitted,
-    cursor: { kind: 'full-detail', payloadTier: 'full' },
-    next: `Re-call ${opts.toolName} with payloadTier:"full" and narrower filters/ids for exact detail.`,
+    cursor: {
+      kind: 'full-detail',
+      tool: opts.toolName,
+      args: {
+        ...(opts.args && typeof opts.args === 'object' && !Array.isArray(opts.args)
+          ? opts.args as Record<string, unknown>
+          : {}),
+        payloadTier: 'full',
+      },
+    },
+    next: `Call ${opts.toolName} with the exact args in _projection.cursor.args for full detail.`,
   };
   let result: BoundedPayloadProjection = Array.isArray(preview)
     ? { items: preview, _projection: metadata }
@@ -348,7 +449,7 @@ export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
           `[payload-tier] ${toolName} bounded a ${size}-char unshaped payload for a '${tier}' session — add shape.${tier} for a domain-specific projection (context-trimming-tiers P-011)`,
         );
       }
-      out = { ...response, data: projectBoundedPayload(response.data, { toolName, tier, originalChars: size }) };
+      out = { ...response, data: projectBoundedPayload(response.data, { toolName, tier, originalChars: size, args }) };
     }
   }
 
@@ -380,7 +481,7 @@ export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
     );
     return {
       ...response,
-      data: projectBoundedPayload(out.data, { toolName, tier, forced: true, originalChars: size }),
+      data: projectBoundedPayload(out.data, { toolName, tier, forced: true, originalChars: size, args }),
     };
   }
   return out;
