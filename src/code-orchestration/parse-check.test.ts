@@ -134,6 +134,28 @@ describe('checkScript (B-CX-PARSE — AST: computed / aliased / destructured)', 
     expect(r.refs).not.toContain('call.plans'); // the colon-name, not a member
   });
 
+  it('projects literal call arguments while marking dynamic leaves incomplete', () => {
+    const r = checkScript(
+      `const runtime = 'WI-runtime';
+       await tools.workItems.get({ id: 'WI-1', harness: 'papercusp', runtime });
+       await tools.call('plans:set-status', { slug: 'release-plan', item: 'P-008', status: 'wip' });`,
+      tools,
+    );
+
+    expect(r.calls).toEqual([
+      {
+        tool: 'work_items:get',
+        args: { id: 'WI-1', harness: 'papercusp' },
+        dynamicArgs: true,
+      },
+      {
+        tool: 'plans:set-status',
+        args: { slug: 'release-plan', item: 'P-008', status: 'wip' },
+        dynamicArgs: false,
+      },
+    ]);
+  });
+
   it('leaves genuinely dynamic access to the runtime whitelist (does not flag, does not crash)', () => {
     // A fully dynamic key (a variable, not a literal) is unresolvable statically. By design the
     // parse-check does not constant-fold — the runtime facade whitelist is the real boundary, so

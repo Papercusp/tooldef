@@ -62,6 +62,24 @@ export interface ParseCheckResult {
   unknownRefs: string[];
   /** All tool references the static scan resolved (for logging/telemetry). */
   refs: string[];
+  /**
+   * Statically resolved tool CALLS, including the literal portion of their
+   * argument object. This is deliberately inspection-only: dynamic values are
+   * omitted and set `dynamicArgs:true`; the runtime whitelist remains the
+   * security boundary. Consumers use this to decide whether a saved script is
+   * safe to recommend in a different entity context.
+   */
+  calls: StaticToolCall[];
+}
+
+export interface StaticToolCall {
+  /** Canonical `ns:verb` when the projected catalog knows it, otherwise the
+   * statically resolved facade member (`ns.verb`). */
+  tool: string;
+  /** Literal/partially-literal argument value, or null when no value resolved. */
+  args: unknown | null;
+  /** True when any part of the argument expression was dynamic/unresolved. */
+  dynamicArgs: boolean;
 }
 
 export function checkScript(
@@ -83,6 +101,7 @@ export function checkScript(
 
   const refs = new Set<string>();
   const unknown = new Set<string>();
+  const calls: StaticToolCall[] = [];
   // Accept the snake_case OR camelCase spelling of a `ns.verb` member: the
   // facade exposes BOTH (the canonical MCP name is snake_case), so normalize to
   // the camel key before deciding "unknown". Deterministic, not fuzzy — mirrors
@@ -101,6 +120,72 @@ export function checkScript(
     refs.add(name);
     if (!fullNames.has(name)) unknown.add(name);
   };
+
+  type StaticValue = { value: unknown; complete: boolean };
+
+  /** Preserve every literal leaf we can prove while marking the aggregate
+   * incomplete when a computed/spread/runtime value appears. */
+  const readStaticValue = (node: Expression): StaticValue => {
+    if (ts.isParenthesizedExpression(node) || ts.isNonNullExpression(node)) {
+      return readStaticValue(node.expression);
+    }
+    if (ts.isStringLiteralLike(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+      return { value: node.text, complete: true };
+    }
+    if (ts.isNumericLiteral(node)) return { value: Number(node.text), complete: true };
+    if (node.kind === ts.SyntaxKind.TrueKeyword) return { value: true, complete: true };
+    if (node.kind === ts.SyntaxKind.FalseKeyword) return { value: false, complete: true };
+    if (node.kind === ts.SyntaxKind.NullKeyword) return { value: null, complete: true };
+    if (
+      ts.isPrefixUnaryExpression(node) &&
+      (node.operator === ts.SyntaxKind.MinusToken || node.operator === ts.SyntaxKind.PlusToken) &&
+      ts.isNumericLiteral(node.operand)
+    ) {
+      const n = Number(node.operand.text);
+      return { value: node.operator === ts.SyntaxKind.MinusToken ? -n : n, complete: true };
+    }
+    if (ts.isArrayLiteralExpression(node)) {
+      const out: unknown[] = [];
+      let complete = true;
+      for (const element of node.elements) {
+        if (ts.isSpreadElement(element) || ts.isOmittedExpression(element)) {
+          complete = false;
+          continue;
+        }
+        const part = readStaticValue(element as Expression);
+        complete = complete && part.complete;
+        if (part.value !== undefined) out.push(part.value);
+      }
+      return { value: out, complete };
+    }
+    if (ts.isObjectLiteralExpression(node)) {
+      const out: Record<string, unknown> = {};
+      let complete = true;
+      for (const property of node.properties) {
+        if (!ts.isPropertyAssignment(property)) {
+          complete = false;
+          continue;
+        }
+        const key = ts.isIdentifier(property.name) || ts.isStringLiteralLike(property.name)
+          ? property.name.text
+          : ts.isNumericLiteral(property.name)
+            ? property.name.text
+            : null;
+        if (key == null) {
+          complete = false;
+          continue;
+        }
+        const part = readStaticValue(property.initializer);
+        complete = complete && part.complete;
+        if (part.value !== undefined) out[key] = part.value;
+      }
+      return { value: out, complete };
+    }
+    return { value: undefined, complete: false };
+  };
+
+  const canonicalMemberName = (member: string): string =>
+    memberToName.get(member) ?? memberToName.get(canonMember(member)) ?? member;
 
   let source: SourceFile;
   try {
@@ -203,9 +288,23 @@ export function checkScript(
       const r = resolve(node.expression);
       if (r?.kind === 'callHatch') {
         const name = node.arguments[0] ? literalKey(node.arguments[0]) : null;
-        if (name != null) recordFull(name); // dynamic arg → runtime boundary
+        if (name != null) {
+          recordFull(name); // dynamic arg → runtime boundary
+          const parsed = node.arguments[1]
+            ? readStaticValue(node.arguments[1])
+            : { value: null, complete: node.arguments.length < 2 };
+          calls.push({ tool: name, args: parsed.value ?? null, dynamicArgs: !parsed.complete });
+        }
       } else if (r?.kind === 'member') {
         recordMember(r.member);
+        const parsed = node.arguments[0]
+          ? readStaticValue(node.arguments[0])
+          : { value: null, complete: true };
+        calls.push({
+          tool: canonicalMemberName(r.member),
+          args: parsed.value ?? null,
+          dynamicArgs: !parsed.complete,
+        });
       }
     } else if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
       const r = resolve(node);
@@ -216,7 +315,7 @@ export function checkScript(
   };
   visit(source);
 
-  return { ok: unknown.size === 0, unknownRefs: [...unknown].sort(), refs: [...refs].sort() };
+  return { ok: unknown.size === 0, unknownRefs: [...unknown].sort(), refs: [...refs].sort(), calls };
 }
 
 /** Degrade gracefully if AST parsing ever throws: the original regex scan (dotted + call only). */
@@ -238,5 +337,5 @@ function regexFallback(
     refs.add(m[1]);
     if (!fullNames.has(m[1])) unknown.add(m[1]);
   }
-  return { ok: unknown.size === 0, unknownRefs: [...unknown].sort(), refs: [...refs].sort() };
+  return { ok: unknown.size === 0, unknownRefs: [...unknown].sort(), refs: [...refs].sort(), calls: [] };
 }
