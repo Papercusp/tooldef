@@ -385,6 +385,47 @@ function applyPositionalWriteShim(name: string, argsJsonSchema: Record<string, u
 }
 
 /**
+ * EI-11621 — unwrap a client `__unparsedToolInput` envelope BEFORE validation.
+ *
+ * Some MCP clients (Claude Code) that cannot parse the model-emitted tool
+ * arguments into structured JSON send `{ __unparsedToolInput: "<raw string>" }`
+ * as the tool's arguments instead of the intended object — the raw string is the
+ * JSON the model actually tried to emit. This hits tools with anyOf/nullable or
+ * nested-object schemas (work_items:complete, session:request-compaction, …) the
+ * hardest. Left as-is, the EI-10883 closed-shape gate rejects the reserved key
+ * with a confusing "unrecognized key __unparsedToolInput", making those tools
+ * unusable from that client without the code_run workaround (the reported bug).
+ *
+ * This transparently recovers the intended args: when the input object carries
+ * `__unparsedToolInput`, JSON-parse its string value (or use it directly when the
+ * client already handed us an object) and merge it UNDER any sibling keys the
+ * client did parse (real sibling keys win — they are the caller's explicit
+ * intent). A non-object / non-JSON payload is dropped so the real validation error
+ * is about the actual args, not the framework envelope key. Never throws.
+ */
+export function unwrapUnparsedToolInput(input: unknown): unknown {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
+  const rec = input as Record<string, unknown>;
+  if (!('__unparsedToolInput' in rec)) return input;
+  const { __unparsedToolInput: raw, ...rest } = rec;
+  let recovered: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      recovered = JSON.parse(raw);
+    } catch {
+      // Not JSON — nothing to recover. Drop the reserved key so the failure is
+      // reported against the real (remaining) args, not the envelope.
+      return rest;
+    }
+  }
+  if (recovered && typeof recovered === 'object' && !Array.isArray(recovered)) {
+    return { ...(recovered as Record<string, unknown>), ...rest };
+  }
+  // Recovered a scalar / array — cannot be a tool-args object; strip the key.
+  return rest;
+}
+
+/**
  * The unified endpoint primitive (Phase E6, endpoint-unification-2026-05-21).
  *
  * `defineTool` accepts THREE shapes, discriminated structurally:
@@ -942,9 +983,11 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
           `Scope the session to a workspace, or pass a per-call workspace where the host/tool supports one.`,
       );
     }
-    // Framework-reserved per-call tier override — stripped BEFORE validation
-    // (context-trimming-tiers D-004; not part of any tool's schema).
-    const { input: tierlessInput, callTier } = extractPayloadTier(input);
+    // EI-11621: recover a client `__unparsedToolInput` envelope FIRST, so the
+    // per-call tier extraction + closed-shape validation see the intended args.
+    // Framework-reserved per-call tier override is stripped next — BEFORE
+    // validation (context-trimming-tiers D-004; not part of any tool's schema).
+    const { input: tierlessInput, callTier } = extractPayloadTier(unwrapUnparsedToolInput(input));
     const legacyCtx: ToolContext & { contextTier?: string; telemetrySurface?: string } = {
       principal: ctx.principal as unknown as ToolContext['principal'],
       tx: ctx.tx,
@@ -1094,9 +1137,11 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
   const schemaHintCache: { hint?: string } = {};
 
   const projectedFn: ToolFn = async (input, ctx) => {
-    // Framework-reserved per-call tier override — stripped BEFORE validation
-    // (context-trimming-tiers D-004; not part of any tool's schema).
-    const { input: tierlessInput, callTier } = extractPayloadTier(input);
+    // EI-11621: recover a client `__unparsedToolInput` envelope FIRST, so the
+    // per-call tier extraction + closed-shape validation see the intended args.
+    // Framework-reserved per-call tier override is stripped next — BEFORE
+    // validation (context-trimming-tiers D-004; not part of any tool's schema).
+    const { input: tierlessInput, callTier } = extractPayloadTier(unwrapUnparsedToolInput(input));
     const shimmed = applyPositionalWriteShim(def.name, rawSchema, tierlessInput);
     const parsed = await standardValidate(def.args, shimmed);
     if (!parsed.ok) {
