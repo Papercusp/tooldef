@@ -90,6 +90,16 @@ describe('suggestArgName', () => {
     expect(suggestArgName('found_during', ['id', 'foundDuring'])).toBe('foundDuring');
   });
 
+  it('teaches the canonical alpha-stage vocabulary without accepting aliases', () => {
+    expect(suggestArgName('rubricId', ['rubricRef', 'rubricRefs'])).toBe('rubricRef');
+    expect(suggestArgName('rubricIds', ['rubricRef', 'rubricRefs'])).toBe('rubricRefs');
+    expect(suggestArgName('itemId', ['slug', 'item', 'itemIds'])).toBe('item');
+    expect(suggestArgName('body', ['slug', 'content', 'ownerEmail'])).toBe('content');
+    expect(suggestArgName('description', ['slug', 'content'])).toBe('content');
+    expect(suggestArgName('owner', ['slug', 'ownerEmail'])).toBe('ownerEmail');
+    expect(suggestArgName('code', ['script', 'timeout_ms'])).toBe('script');
+  });
+
   it('does not invent a correction for an unrelated field', () => {
     expect(suggestArgName('completelyDifferent', ['id', 'state', 'harness'])).toBeNull();
   });
