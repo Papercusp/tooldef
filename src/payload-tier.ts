@@ -395,6 +395,22 @@ export interface ApplyPayloadTierOpts {
   shape: PayloadShapers | undefined;
   response: ToolResponse;
   tier: PayloadTier;
+  /**
+   * True when the CALLER explicitly passed `payloadTier: 'full'` on this call
+   * (as opposed to 'full' merely being the resolved default). An explicit full
+   * request is the documented escape hatch out of shaping (every shaper `hint`
+   * points at it — e.g. plans:attention's attention-shape.ts) and is how
+   * capped-transport-exempt consumers (the in-process sync-resolver / admin-UI
+   * dispatch, which feed the operator UI) read the unshaped payload. It SKIPS
+   * the hard-ceiling force-shape below: before this flag the ceiling re-trimmed
+   * even explicit-full reads, which silently emptied every plans.attention UI
+   * surface (Queue / Overview needs-you / sidebar Inbox — WI-5078: the UI's
+   * normalizeAttentionGroups drops the item-less summary rows the forced
+   * shaper emits). An MCP agent that explicitly asks for full and overflows
+   * its client cap gets the client's own result-door (file + paged reads) —
+   * a deliberate choice, not a silent failure.
+   */
+  explicitFullRequest?: boolean;
   args: unknown;
   log?: (msg: string) => void;
 }
@@ -407,12 +423,15 @@ export interface ApplyPayloadTierOpts {
  * payload fires the once-per-tool ratchet warning and returns the generic
  * projection instead of flooding the model context.
  *
- * FINALLY, regardless of tier, a HARD CEILING guard force-applies the smallest
- * available shaper if the result is still oversized — so a shaper-tool can never
- * emit a result the transport rejects (WI-2859).
+ * FINALLY, regardless of RESOLVED tier, a HARD CEILING guard force-applies the
+ * smallest available shaper if the result is still oversized — so a shaper-tool
+ * can never emit a result the transport rejects (WI-2859). The ONE exit is an
+ * EXPLICIT per-call `payloadTier: 'full'` (`explicitFullRequest`) — the escape
+ * hatch every shaper hint documents, and the contract the UI's in-process
+ * dispatch relies on (WI-5078).
  */
 export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
-  const { toolName, shape, response, tier, args, log } = opts;
+  const { toolName, shape, response, tier, explicitFullRequest, args, log } = opts;
   if (!response || typeof response !== 'object' || response.data === undefined) return response;
 
   // 1. Normal tier shaping (full ⇒ no tier shaper; keeps prior behavior).
@@ -455,6 +474,9 @@ export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
 
   // 2. Hard ceiling: never emit an over-cap result. Prefer the tool's smallest
   //    domain-specific shaper, then fall back to the generic bounded projection.
+  //    An EXPLICIT payloadTier:'full' call opts out (see explicitFullRequest) —
+  //    that is the documented escape hatch, and the UI/sync in-process path.
+  if (explicitFullRequest) return out;
   const size = jsonLen(out.data);
   if (size > PAYLOAD_TIER_HARD_CEILING_CHARS) {
     const smallest = shape?.trimmed ?? shape?.standard;
