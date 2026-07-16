@@ -90,6 +90,29 @@ describe('applyPayloadTier', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('hard ceiling'));
   });
 
+  it('hard ceiling: an EXPLICIT payloadTier:full call skips the ceiling (the documented escape hatch, WI-5078)', () => {
+    const log = vi.fn();
+    const fat: ToolResponse = { data: { rows: [1, 2, 3], blob: 'x'.repeat(PAYLOAD_TIER_HARD_CEILING_CHARS + 500) } };
+    // Same over-ceiling payload as the WI-2859 case above, but the caller
+    // EXPLICITLY asked for full (payloadTier:'full' arg → explicitFullRequest).
+    // This is the escape hatch every shaper hint and the bounded projection's
+    // own `cursor.args.payloadTier:'full'` retry pointer document — and the
+    // contract the UI's in-process dispatch (callPlansReadRaw) relies on:
+    // without it, plans:attention force-trimmed to item-less summaries and the
+    // Queue/Overview/Inbox surfaces rendered empty.
+    const out = applyPayloadTier({
+      toolName: 'orient',
+      shape,
+      response: fat,
+      tier: 'full',
+      explicitFullRequest: true,
+      args: {},
+      log,
+    });
+    expect(out).toBe(fat); // unshaped, byte-identical
+    expect(log).not.toHaveBeenCalled();
+  });
+
   it('hard ceiling: an over-ceiling payload with NO shaper gets a loud bounded projection', () => {
     const fat: ToolResponse = { data: { blob: 'y'.repeat(PAYLOAD_TIER_HARD_CEILING_CHARS + 500) } };
     const out = applyPayloadTier({ toolName: 't', shape: undefined, response: fat, tier: 'full', args: {} });

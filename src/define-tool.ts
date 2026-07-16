@@ -1064,6 +1064,10 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       shape: def.shape,
       response: response as ToolResponse,
       tier: resolvePayloadTier(callTier, ctx.contextTier),
+      // An explicit per-call payloadTier:'full' is the documented escape hatch
+      // out of shaping AND the hard ceiling (WI-5078) — only the arg counts,
+      // never a defaulted/session 'full'.
+      explicitFullRequest: callTier === 'full',
       args: parsed.value,
       log: (m) => ctx.log(m),
     });
@@ -1185,6 +1189,10 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
       shape: def.shape,
       response: out as ToolResponse,
       tier: resolvePayloadTier(callTier, ctx.contextTier),
+      // An explicit per-call payloadTier:'full' is the documented escape hatch
+      // out of shaping AND the hard ceiling (WI-5078) — only the arg counts,
+      // never a defaulted/session 'full'.
+      explicitFullRequest: callTier === 'full',
       args: parsed.value,
       log: (m) => ctx.log(m),
     });
