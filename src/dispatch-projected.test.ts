@@ -451,7 +451,7 @@ describe('dispatchProjectedTool', () => {
     });
     const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS());
     expect(r.ok).toBe(true);
-    expect(r.result?.content?.[0]?.text).toBe('fresh-read');
+    expect((r.result?.content?.[0] as { text?: string })?.text).toBe('fresh-read');
   }, 10_000);
 
   it('ok-on-abort (idempotent MUTATION opt-in): a completed non-low-tier write SURFACES its success despite the abort (W6/P-007 — the 280 set-status false-timeout fix)', async () => {

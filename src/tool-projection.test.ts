@@ -273,8 +273,8 @@ describe('listMcpProjections', () => {
       inputSchema: { type: 'object', properties: { foo: { type: 'string' } } },
     });
     // capabilities, roles, etc. NOT exposed in listing — agents see only the contract.
-    expect((list[0] as Record<string, unknown>).capabilities).toBeUndefined();
-    expect((list[0] as Record<string, unknown>).events).toBeUndefined();
+    expect((list[0] as unknown as Record<string, unknown>).capabilities).toBeUndefined();
+    expect((list[0] as unknown as Record<string, unknown>).events).toBeUndefined();
   });
 
   it('surfaces events schemas as JSON-Schema when the tool declares them', () => {

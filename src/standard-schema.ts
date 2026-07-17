@@ -125,10 +125,11 @@ export function formatIssues(issues: ReadonlyArray<StandardSchemaV1.Issue>, inpu
       if (extras.code === 'too_big' && extras.origin === 'string' && typeof extras.maximum === 'number') {
         const max = extras.maximum;
         const actual = input !== undefined ? valueAtIssuePath(input, i) : undefined;
-        const over = typeof actual === 'string' ? actual.length - max : null;
+        const actualLen = typeof actual === 'string' ? actual.length : null;
+        const over = actualLen !== null ? actualLen - max : null;
         const detail =
           over !== null && over > 0
-            ? `too long — ${actual!.length} chars, ${over} over the ${max}-char limit; trim to ${max}.`
+            ? `too long — ${actualLen} chars, ${over} over the ${max}-char limit; trim to ${max}.`
             : `too long — over the ${max}-char limit; trim to ${max}.`;
         return path ? `${path}: ${detail}` : detail;
       }
