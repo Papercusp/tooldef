@@ -100,6 +100,18 @@ describe('suggestArgName', () => {
     expect(suggestArgName('code', ['script', 'timeout_ms'])).toBe('script');
   });
 
+  it('maps the EI-13475 semantic near-synonyms distance alone cannot reach', () => {
+    // The 2026-07-17 live incidents, verbatim: plans:new { summary } and
+    // improvements:capture { harness } both got a bare key list because the
+    // alias map lacked these entries (edit distance 7 is over threshold).
+    expect(suggestArgName('summary', ['harness', 'slug', 'title', 'status', 'rationale', 'content', 'force'])).toBe('content');
+    expect(suggestArgName('harness', ['title', 'kind', 'body', 'severity', 'scope', 'foundDuring'])).toBe('scope');
+    expect(suggestArgName('scope', ['slug', 'harness', 'title'])).toBe('harness');
+    // Appending `content` to summary's aliases must NOT shift tools where an
+    // earlier alias already matches (body outranks content by list order).
+    expect(suggestArgName('summary', ['id', 'body', 'content'])).toBe('body');
+  });
+
   it('does not invent a correction for an unrelated field', () => {
     expect(suggestArgName('completelyDifferent', ['id', 'state', 'harness'])).toBeNull();
   });

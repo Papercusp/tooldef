@@ -825,6 +825,7 @@ const COMMON_ARG_ALIASES: Readonly<Record<string, readonly string[]>> = {
   completionref: ['completionRef', 'completion_ref', 'completion'],
   description: ['content', 'summary', 'body', 'text'],
   foundduring: ['foundDuring', 'found_during'],
+  harness: ['scope', 'harnessSlug', 'harness_slug'],
   itemid: ['item'],
   linkedfeatureid: ['linkedFeatureId', 'linked_feature_id'],
   owner: ['ownerEmail', 'ownerId', 'assignee', 'assign_to'],
@@ -832,8 +833,9 @@ const COMMON_ARG_ALIASES: Readonly<Record<string, readonly string[]>> = {
   planitem: ['plan_item', 'itemId', 'item'],
   rubricid: ['rubricRef'],
   rubricids: ['rubricRefs'],
+  scope: ['harness'],
   script: ['code'],
-  summary: ['body', 'comment', 'text'],
+  summary: ['body', 'comment', 'text', 'content'],
 };
 
 function compactArgName(value: string): string {
