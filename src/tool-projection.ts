@@ -316,32 +316,6 @@ export interface RequestOriginMetadata {
   headers?: Record<string, string>;
 }
 
-/**
- * The default `Tx` shape for `ToolContext<Tx>` (types.ts) and the concrete
- * type of `UnifiedToolContext.tx`, when a host doesn't override it (EI-10968).
- *
- * Every real caller in the tree uses `ctx.tx` as a tagged-template SQL call —
- * `ctx.tx<Row[]>\`SELECT ...\`` — never dot-access (`ctx.tx.begin(...)` etc.,
- * confirmed empty repo-wide by the EI-10968 audit), so a bound callable
- * default makes that near-universal idiom actually type-check instead of
- * silently discarding the type argument the way a bare `any` did.
- *
- * `...values: any[]` (not `unknown[]`) is deliberate: it keeps this type
- * structurally assignable FROM a real host SQL client whose own call
- * signature is narrower than `unknown` (e.g. postgres-js's `Sql`, whose
- * parameters are typed `ParameterOrFragment<T>`, not `unknown`) — TS's
- * contravariant parameter check for function-typed properties would reject
- * that assignment if this were `unknown[]`. A host with a genuinely different
- * (non-callable) storage handle still overrides by binding `Tx` explicitly
- * (`ToolContext<MyClient>`) — this default only changes what an UNBOUND `Tx`
- * resolves to.
- */
-export type TaggedSqlTx = <R = Record<string, unknown>>(
-  strings: TemplateStringsArray,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- see doc comment above
-  ...values: any[]
-) => Promise<R[]>;
-
 export interface UnifiedToolContext {
   /** Tool-bound logger. Always populated. */
   log: (msg: string) => void;
@@ -432,16 +406,11 @@ export interface UnifiedToolContext {
   principal?: { slug: string; workspaceId: string; capabilities: Set<string>; roles?: ReadonlySet<string> } | null;
   /**
    * Transaction-bound Sql client with `app.workspace_id` GUC set. Built-in
-   * tools rely on this; plugin tools may use it. Null/undefined when call
-   * wasn't wrapped in `withWorkspace`.
-   *
-   * Typed `TaggedSqlTx` (EI-10968), not `any` — see that type's doc comment.
-   * `any` here made every `ctx.tx<Row[]>\`...\`` call site silently discard
-   * its type argument (TS lets you call an `any`-typed value with ANY type
-   * argument and hands back `any`), so the row shape every tool author wrote
-   * out was checked against nothing.
+   * tools rely on this; plugin tools may use it. Null when call wasn't
+   * wrapped in `withWorkspace`.
    */
-  tx?: TaggedSqlTx;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  tx?: any;
 
   /**
    * Per-gate bypass signals — the engine's neutral "this caller is

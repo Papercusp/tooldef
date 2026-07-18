@@ -6,7 +6,7 @@ import type { RolesQuota, ToolResult } from './wire';
 import type { AgentRole } from './host-types';
 import type { z, ZodTypeAny } from 'zod';
 import type { StandardSchemaV1 } from './standard-schema';
-import type { EventsSchema, TaggedSqlTx, UnifiedToolContext, UserEvents } from './tool-projection';
+import type { EventsSchema, UnifiedToolContext, UserEvents } from './tool-projection';
 import type { Authorizer } from './authz';
 import type { ToolRequireSpec } from './requires';
 import type { DeltaCapability } from './delta-protocol';
@@ -222,20 +222,19 @@ export interface RouteDefinition<TInputSchema extends ZodTypeAny | undefined = u
  * Per-call request context.
  *
  * Generic over `Tx`, the host-supplied transaction/storage handle (plan
- * P-010 / D-009). Defaults to `TaggedSqlTx` (EI-10968) so the near-universal
- * `ctx.tx<Row[]>\`...\`` idiom actually binds its type argument instead of
- * silently discarding it the way a bare `Tx = any` default did — the
- * framework still stays storage-agnostic (a host with a non-SQL / non-callable
- * transaction handle overrides via `ToolContext<MyClient>`).
+ * P-010 / D-009). Defaults to `any` so the framework stays storage-agnostic
+ * and existing consumers that read `ctx.tx.<whatever>()` keep compiling; a
+ * host that wants type-safe storage re-exports `ToolContext<MyClient>` (e.g.
+ * a workspace-scoped SQL client) and gets a checked `ctx.tx`.
  */
-export interface ToolContext<Tx = TaggedSqlTx> {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export interface ToolContext<Tx = any> {
   principal: Principal;
   /**
    * Host-supplied transaction handle. In Papercusp this is a workspace-scoped
-   * SQL client with the `app.workspace_id` GUC set — a tagged-template
-   * callable, which is what the `TaggedSqlTx` default types it as (EI-10968).
-   * A host with a different storage shape narrows/replaces it by binding the
-   * `Tx` type parameter explicitly (`ToolContext<MyClient>`).
+   * SQL client with the `app.workspace_id` GUC set. The framework never
+   * touches it — `Tx` defaults to `any` (storage-agnostic) and the host
+   * narrows it by binding the type parameter.
    */
   tx: Tx;
   /** Logger bound to the tool name + principal. */
