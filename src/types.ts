@@ -219,22 +219,46 @@ export interface RouteDefinition<TInputSchema extends ZodTypeAny | undefined = u
 }
 
 /**
+ * EI-10968: the default `Tx` shape for `ToolContext<Tx>` when a host doesn't
+ * override it. Every real caller in the tree uses `ctx.tx` as a
+ * tagged-template SQL call — `ctx.tx<Row[]>\`SELECT ...\`` — never dot-access
+ * (`ctx.tx.begin(...)` etc. — confirmed empty repo-wide, EI-10968 audit), so a
+ * bound callable default makes that near-universal idiom actually type-check
+ * instead of silently discarding the type argument the way `Tx = any` did.
+ * `...values: any[]` (not `unknown[]`) is deliberate: it keeps this default
+ * structurally assignable FROM a real host SQL client whose own call
+ * signature is narrower than `unknown` (e.g. postgres-js's `Sql`, whose
+ * parameters are typed `ParameterOrFragment<T>`, not `unknown`) — TS's
+ * contravariant parameter check for function-typed properties would reject
+ * that assignment if this were `unknown[]`. A host with a genuinely different
+ * storage handle (not a tagged-template callable) still overrides via
+ * `ToolContext<MyClient>` — this default only changes what an UNBOUND `Tx`
+ * resolves to.
+ */
+export type TaggedSqlTx = <R = Record<string, unknown>>(
+  strings: TemplateStringsArray,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- see doc comment above
+  ...values: any[]
+) => Promise<R[]>;
+
+/**
  * Per-call request context.
  *
  * Generic over `Tx`, the host-supplied transaction/storage handle (plan
- * P-010 / D-009). Defaults to `any` so the framework stays storage-agnostic
- * and existing consumers that read `ctx.tx.<whatever>()` keep compiling; a
- * host that wants type-safe storage re-exports `ToolContext<MyClient>` (e.g.
- * a workspace-scoped SQL client) and gets a checked `ctx.tx`.
+ * P-010 / D-009). Defaults to `TaggedSqlTx` (EI-10968) so the near-universal
+ * `ctx.tx<Row[]>\`...\`` idiom actually binds its type argument instead of
+ * silently discarding it the way a bare `Tx = any` default did — the
+ * framework still stays storage-agnostic (a host with a non-SQL / non-callable
+ * transaction handle overrides via `ToolContext<MyClient>`).
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export interface ToolContext<Tx = any> {
+export interface ToolContext<Tx = TaggedSqlTx> {
   principal: Principal;
   /**
    * Host-supplied transaction handle. In Papercusp this is a workspace-scoped
-   * SQL client with the `app.workspace_id` GUC set. The framework never
-   * touches it — `Tx` defaults to `any` (storage-agnostic) and the host
-   * narrows it by binding the type parameter.
+   * SQL client with the `app.workspace_id` GUC set — a tagged-template
+   * callable, which is what the `TaggedSqlTx` default types it as (EI-10968).
+   * A host with a different storage shape narrows/replaces it by binding the
+   * `Tx` type parameter explicitly (`ToolContext<MyClient>`).
    */
   tx: Tx;
   /** Logger bound to the tool name + principal. */
