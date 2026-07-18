@@ -6,7 +6,7 @@ import type { RolesQuota, ToolResult } from './wire';
 import type { AgentRole } from './host-types';
 import type { z, ZodTypeAny } from 'zod';
 import type { StandardSchemaV1 } from './standard-schema';
-import type { EventsSchema, UnifiedToolContext, UserEvents } from './tool-projection';
+import type { EventsSchema, TaggedSqlTx, UnifiedToolContext, UserEvents } from './tool-projection';
 import type { Authorizer } from './authz';
 import type { ToolRequireSpec } from './requires';
 import type { DeltaCapability } from './delta-protocol';
@@ -217,29 +217,6 @@ export interface RouteDefinition<TInputSchema extends ZodTypeAny | undefined = u
     ctx: RouteContext<TInputSchema extends ZodTypeAny ? z.infer<TInputSchema> : undefined>,
   ) => Response | Promise<Response>;
 }
-
-/**
- * EI-10968: the default `Tx` shape for `ToolContext<Tx>` when a host doesn't
- * override it. Every real caller in the tree uses `ctx.tx` as a
- * tagged-template SQL call — `ctx.tx<Row[]>\`SELECT ...\`` — never dot-access
- * (`ctx.tx.begin(...)` etc. — confirmed empty repo-wide, EI-10968 audit), so a
- * bound callable default makes that near-universal idiom actually type-check
- * instead of silently discarding the type argument the way `Tx = any` did.
- * `...values: any[]` (not `unknown[]`) is deliberate: it keeps this default
- * structurally assignable FROM a real host SQL client whose own call
- * signature is narrower than `unknown` (e.g. postgres-js's `Sql`, whose
- * parameters are typed `ParameterOrFragment<T>`, not `unknown`) — TS's
- * contravariant parameter check for function-typed properties would reject
- * that assignment if this were `unknown[]`. A host with a genuinely different
- * storage handle (not a tagged-template callable) still overrides via
- * `ToolContext<MyClient>` — this default only changes what an UNBOUND `Tx`
- * resolves to.
- */
-export type TaggedSqlTx = <R = Record<string, unknown>>(
-  strings: TemplateStringsArray,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- see doc comment above
-  ...values: any[]
-) => Promise<R[]>;
 
 /**
  * Per-call request context.
