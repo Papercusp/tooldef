@@ -167,12 +167,35 @@ export function collectEntityRefs(schema: unknown, path = '', depth = 0): Entity
     return out;
   }
 
+  // Union / discriminated union: recurse into every branch, marking WHICH one
+  // with a `#<i>` segment (mirrors the `anyOf[i]` the converted schema emits).
+  //
+  // Without this, an args schema built as `z.discriminatedUnion('op', [...])` —
+  // the standard shape for a multi-op tool here — reports NO entity refs at all,
+  // so both the dispatch check and the published enum silently skip it. That was
+  // the state of every `op`-union tool until this branch existed.
+  const options = def?.options;
+  if (Array.isArray(options)) {
+    options.forEach((opt, i) => {
+      if (!isSchema(opt)) return;
+      out.push(...collectEntityRefs(opt, path ? `${path}.#${i}` : `#${i}`, depth + 1));
+    });
+    return out;
+  }
+
   // Array: recurse into the element type, marking the index position.
   const element = def?.element ?? def?.valueType;
   if (isSchema(element) && element !== target) {
     out.push(...collectEntityRefs(element, path ? `${path}.*` : '*', depth + 1));
   }
   return out;
+}
+
+/** True for a union-branch path segment produced by {@link collectEntityRefs}. */
+function unionBranchIndex(part: string): number | null {
+  if (!part.startsWith('#')) return null;
+  const n = Number(part.slice(1));
+  return Number.isInteger(n) && n >= 0 ? n : null;
 }
 
 /**
@@ -233,7 +256,12 @@ function valuesAtPath(args: unknown, path: string): Array<{ path: string; value:
     const next: Array<{ path: string; node: unknown }> = [];
     for (const { path: p, node } of frontier) {
       if (node == null) continue;
-      if (part === '*') {
+      if (unionBranchIndex(part) !== null) {
+        // A VALUE has no branch: only one union arm matched it, and which one
+        // is the validator's business. Pass through so every arm's refs are
+        // read against the same object; duplicate hits are deduped below.
+        next.push({ path: p, node });
+      } else if (part === '*') {
         if (!Array.isArray(node)) continue;
         node.forEach((el, i) => next.push({ path: p ? `${p}.${i}` : String(i), node: el }));
       } else if (typeof node === 'object') {
@@ -271,7 +299,12 @@ export async function resolveEntityRefs(
     const hits = valuesAtPath(args, site.path);
     if (!hits.length) continue;
     const bucket = byKind.get(site.meta.kind) ?? { meta: site.meta, hits: [] };
-    bucket.hits.push(...hits);
+    // Sibling union arms declaring the same arg collapse to the same
+    // (path, value) — report it once, not once per arm.
+    for (const hit of hits) {
+      if (bucket.hits.some((h) => h.path === hit.path && h.value === hit.value)) continue;
+      bucket.hits.push(hit);
+    }
     byKind.set(site.meta.kind, bucket);
   }
 
@@ -438,7 +471,11 @@ function jsonSchemaNodeAt(root: unknown, path: string): Record<string, unknown> 
   if (!node) return null;
   if (path === '') return node;
   for (const part of path.split('.')) {
-    if (part === '*') {
+    const branch = unionBranchIndex(part);
+    if (branch !== null) {
+      const arms = node.anyOf ?? node.oneOf;
+      node = Array.isArray(arms) ? asObject(arms[branch]) : null;
+    } else if (part === '*') {
       node = asObject(node.items);
     } else {
       const props = asObject(node.properties);

@@ -9,17 +9,25 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import {
+  applyEntityRefEnums,
+  clearEntityEnums,
   clearEntityResolvers,
   collectEntityRefs,
+  entityEnumRevision,
   entityRef,
   entityRefMeta,
   formatEntityRefViolations,
   hasEntityResolver,
   resolveEntityRefs,
+  setEntityEnum,
   setEntityResolver,
 } from './entity-ref';
+import { toJsonSchema } from './schema-adapter';
 
-afterEach(() => clearEntityResolvers());
+afterEach(() => {
+  clearEntityResolvers();
+  clearEntityEnums();
+});
 
 describe('entityRef marker', () => {
   it('marks a bare ref and leaves a plain string unmarked', () => {
@@ -206,5 +214,98 @@ describe('formatEntityRefViolations', () => {
       await resolveEntityRefs(collectEntityRefs(schema), { p: 'zz' }),
     );
     expect(msg).toContain('unknown pot slug');
+  });
+});
+
+/**
+ * The tools/list overlay (P-004b). The property that matters most here is the
+ * CAP: `tools/list` bytes are prompt-prefix bytes, so an over-cap vocabulary
+ * must publish nothing at all rather than "most of it".
+ */
+describe('applyEntityRefEnums', () => {
+  const json = (schema: unknown) => toJsonSchema(schema as never) as Record<string, unknown>;
+
+  it('publishes a small vocabulary as an enum at the arg it marks', async () => {
+    setEntityEnum('pot', async () => ['b', 'a']);
+    const schema = z.object({ pot: entityRef('pot'), note: z.string() });
+    const out = await applyEntityRefEnums(schema, json(schema));
+    const props = out.properties as Record<string, Record<string, unknown>>;
+    // Sorted, so the published bytes do not churn on load order alone.
+    expect(props.pot.enum).toEqual(['a', 'b']);
+    expect(props.note.enum).toBeUndefined();
+  });
+
+  it('publishes NOTHING when the vocabulary exceeds the cap', async () => {
+    setEntityEnum('pot', async () => ['a', 'b', 'c'], { maxValues: 2 });
+    const schema = z.object({ pot: entityRef('pot') });
+    const out = await applyEntityRefEnums(schema, json(schema));
+    expect((out.properties as Record<string, Record<string, unknown>>).pot.enum).toBeUndefined();
+  });
+
+  it('pairs the enum with a pattern for an open vocabulary, dropping the scalar type', async () => {
+    setEntityEnum('role', async () => ['worker'], { openPattern: '^[a-z]+:[a-z]+$' });
+    const schema = z.object({ role: entityRef('role') });
+    const out = await applyEntityRefEnums(schema, json(schema));
+    const node = (out.properties as Record<string, Record<string, unknown>>).role;
+    expect(node.anyOf).toEqual([
+      { enum: ['worker'] },
+      { type: 'string', pattern: '^[a-z]+:[a-z]+$' },
+    ]);
+    expect(node.type).toBeUndefined();
+  });
+
+  it('reaches a ref nested in an array of objects', async () => {
+    setEntityEnum('pot', async () => ['a']);
+    const schema = z.object({ members: z.array(z.object({ pot: entityRef('pot') })) });
+    const out = await applyEntityRefEnums(schema, json(schema));
+    const members = (out.properties as Record<string, Record<string, unknown>>).members;
+    const item = members.items as Record<string, Record<string, Record<string, unknown>>>;
+    expect(item.properties.pot.enum).toEqual(['a']);
+  });
+
+  it('fails open when an enumerator throws — discovery must never break', async () => {
+    setEntityEnum('pot', async () => {
+      throw new Error('db down');
+    });
+    const schema = z.object({ pot: entityRef('pot') });
+    const out = await applyEntityRefEnums(schema, json(schema));
+    expect((out.properties as Record<string, Record<string, unknown>>).pot.enum).toBeUndefined();
+  });
+
+  it('leaves the schema untouched when the marked arg is not in the advertised surface', async () => {
+    setEntityEnum('pot', async () => ['a']);
+    const schema = z.object({ pot: entityRef('pot') });
+    // A tool whose advertised surface was rewritten (registry positional `row`).
+    const rewritten = { type: 'object', properties: { row: { type: 'string' } } };
+    const out = await applyEntityRefEnums(schema, rewritten);
+    expect(out).toEqual(rewritten);
+  });
+
+  it('registering a resolver alone publishes nothing — the two are separate acts', async () => {
+    setEntityResolver('pot', async () => ({ unknown: [] }));
+    const schema = z.object({ pot: entityRef('pot') });
+    const out = await applyEntityRefEnums(schema, json(schema));
+    expect((out.properties as Record<string, Record<string, unknown>>).pot.enum).toBeUndefined();
+  });
+});
+
+describe('entityEnumRevision', () => {
+  it('moves only when the PUBLISHED values change', async () => {
+    let values = ['a', 'b'];
+    setEntityEnum('pot', async () => [...values]);
+    const first = await entityEnumRevision();
+    values = ['b', 'a']; // reordering is not a change
+    expect(await entityEnumRevision()).toBe(first);
+    values = ['a', 'b', 'c'];
+    expect(await entityEnumRevision()).not.toBe(first);
+  });
+
+  it('stays put when an over-cap set changes — no cache-busting re-fetch for bytes nobody sees', async () => {
+    let values = ['a', 'b', 'c'];
+    setEntityEnum('pot', async () => [...values], { maxValues: 2 });
+    const first = await entityEnumRevision();
+    expect(first).toBe('empty');
+    values = ['x', 'y', 'z'];
+    expect(await entityEnumRevision()).toBe(first);
   });
 });
