@@ -256,3 +256,62 @@ describe('applyPayloadTier', () => {
     expect(projected._projection.next).not.toContain('narrower filters/ids');
   });
 });
+
+describe('payloadProjection meta (EI-13918)', () => {
+  // A downstream consumer that only reads `_meta` (the per-result door,
+  // result-door.ts) must be able to tell `data` was already replaced by a
+  // lossy projection WITHOUT parsing the serialized body — see
+  // serialize-result.ts which copies `response.payloadProjection` into
+  // `_meta.payloadProjection`.
+
+  it('is stamped on the ratchet path, mirroring the inline `_projection` metadata', () => {
+    const fat: ToolResponse = { data: { blob: 'x'.repeat(PAYLOAD_TIER_RATCHET_CHARS + 100) } };
+    const out = applyPayloadTier({ toolName: 'fat:tool', shape: undefined, response: fat, tier: 'trimmed', args: {} });
+    const projected = out.data as ReturnType<typeof projectBoundedPayload>;
+    expect(out.payloadProjection).toEqual({
+      truncated: true,
+      tier: projected._projection.tier,
+      forced: projected._projection.forced,
+      originalChars: projected._projection.originalChars,
+      returnedChars: projected._projection.returnedChars,
+      omittedCount: projected._projection.omittedCount,
+    });
+  });
+
+  it('is stamped on the hard-ceiling generic-projection path', () => {
+    const fat: ToolResponse = { data: { blob: 'y'.repeat(PAYLOAD_TIER_HARD_CEILING_CHARS + 500) } };
+    const out = applyPayloadTier({ toolName: 't', shape: undefined, response: fat, tier: 'full', args: {} });
+    expect(out.payloadProjection).toMatchObject({ truncated: true, forced: true });
+    expect(out.payloadProjection?.omittedCount).toBeGreaterThan(0);
+  });
+
+  it('is stamped on the hard-ceiling forced-custom-shaper path (WI-2859), even though no inline `_projection` rides the shaped data', () => {
+    const shape = { trimmed: (d: unknown) => ({ tierMark: 'trimmed', rows: (d as { rows: number[] }).rows }) };
+    const fat: ToolResponse = { data: { rows: [1, 2, 3], blob: 'x'.repeat(PAYLOAD_TIER_HARD_CEILING_CHARS + 500) } };
+    const out = applyPayloadTier({ toolName: 'orient', shape, response: fat, tier: 'full', args: {}, log: vi.fn() });
+    // No `_projection` key rides the custom-shaped data…
+    expect(out.data).not.toHaveProperty('_projection');
+    // …but the door-facing meta marker is present anyway, so a caller can't
+    // mistake this forced-small result for the tool's true full output.
+    expect(out.payloadProjection).toEqual({
+      truncated: true,
+      tier: 'trimmed',
+      forced: true,
+      originalChars: expect.any(Number),
+      returnedChars: expect.any(Number),
+      omittedCount: 0,
+    });
+  });
+
+  it('is ABSENT for a normal-size / unshaped / explicit-full response (no false positives)', () => {
+    const data = { rows: [1, 2, 3] };
+    const response: ToolResponse = { data };
+    expect(applyPayloadTier({ toolName: 't', shape: undefined, response, tier: 'full', args: {} }).payloadProjection).toBeUndefined();
+    expect(applyPayloadTier({ toolName: 't', shape: undefined, response, tier: 'trimmed', args: {} }).payloadProjection).toBeUndefined();
+    const fat: ToolResponse = { data: { blob: 'x'.repeat(PAYLOAD_TIER_HARD_CEILING_CHARS + 500) } };
+    expect(
+      applyPayloadTier({ toolName: 't', shape: undefined, response: fat, tier: 'full', explicitFullRequest: true, args: {} })
+        .payloadProjection,
+    ).toBeUndefined();
+  });
+});

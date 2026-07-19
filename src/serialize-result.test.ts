@@ -126,6 +126,29 @@ describe('serializeToolResponse — envelope routing', () => {
     expect((r.content[0] as { text: string }).text).not.toContain('CUR');
   });
 
+  it('routes payloadProjection into _meta (EI-13918: the door-facing "already-truncated" marker)', () => {
+    const ctx = { transport: 'mcp' } as UnifiedToolContext;
+    const response: ToolResponse = {
+      data: flatRows,
+      payloadProjection: {
+        truncated: true,
+        tier: 'trimmed',
+        forced: true,
+        originalChars: 37343,
+        returnedChars: 7058,
+        omittedCount: 39,
+      },
+    };
+    const r = serializeToolResponse(response, formatOptsFromCtx(ctx, undefined));
+    expect(r._meta.payloadProjection).toEqual(response.payloadProjection);
+  });
+
+  it('leaves _meta.payloadProjection absent when the response was not projected', () => {
+    const ctx = { transport: 'mcp' } as UnifiedToolContext;
+    const r = serializeToolResponse({ data: flatRows }, formatOptsFromCtx(ctx, undefined));
+    expect(r._meta.payloadProjection).toBeUndefined();
+  });
+
   it('records the chosen format in _meta', () => {
     const ctx = { transport: 'mcp' } as UnifiedToolContext;
     const r = serializeToolResponse({ data: flatRows }, formatOptsFromCtx(ctx, undefined));

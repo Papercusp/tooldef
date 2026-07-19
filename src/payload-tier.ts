@@ -502,7 +502,24 @@ export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
           (log ?? console.warn)(
             `[payload-tier] ${toolName} '${tier}' result ${size} chars > hard ceiling ${PAYLOAD_TIER_HARD_CEILING_CHARS}; force-applied the trimmed shaper (${forcedSize} chars) to fit the transport cap (WI-2859)`,
           );
-          return { ...response, data: markForced(forced) };
+          return {
+            ...response,
+            data: markForced(forced),
+            // No `_projection` marker rides a custom shaper's own output, but
+            // it is exactly as lossy from the door's point of view: `data` was
+            // swapped for a smaller representation than the tool's true full
+            // result. Flag it the same way (EI-13918) — omittedCount is
+            // unknown here (the shaper owns its own omission bookkeeping), so
+            // report it as unspecified (0) rather than fabricate a count.
+            payloadProjection: {
+              truncated: true,
+              tier: 'trimmed',
+              forced: true,
+              originalChars: size,
+              returnedChars: forcedSize,
+              omittedCount: 0,
+            },
+          };
         }
       } catch (err) {
         (log ?? console.warn)(
@@ -513,10 +530,21 @@ export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
     (log ?? console.warn)(
       `[payload-tier] ${toolName} '${tier}' result ${size} chars > hard ceiling ${PAYLOAD_TIER_HARD_CEILING_CHARS}; used the generic bounded projection to fit the transport cap`,
     );
-    return {
-      ...response,
-      data: projectBoundedPayload(out.data, { toolName, tier, forced: true, originalChars: size, args }),
-    };
+    {
+      const projected = projectBoundedPayload(out.data, { toolName, tier, forced: true, originalChars: size, args });
+      return {
+        ...response,
+        data: projected,
+        payloadProjection: {
+          truncated: true,
+          tier: projected._projection.tier,
+          forced: projected._projection.forced,
+          originalChars: projected._projection.originalChars,
+          returnedChars: projected._projection.returnedChars,
+          omittedCount: projected._projection.omittedCount,
+        },
+      };
+    }
   }
   return out;
 }

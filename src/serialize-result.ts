@@ -229,6 +229,11 @@ export function serializeToolResponse(
     if (response.nextCursor !== undefined) _meta.nextCursor = response.nextCursor;
     if (response.degraded !== undefined) _meta.degraded = response.degraded;
     if (response.degradedReasons !== undefined) _meta.degradedReasons = response.degradedReasons;
+    // EI-13918: surface payload-tier truncation in `_meta` (not just inline in
+    // the serialized body) so a downstream consumer that reads only `_meta`
+    // (the per-result door, result-door.ts) can tell `data` is already a lossy
+    // projection without parsing the body.
+    if (response.payloadProjection !== undefined) _meta.payloadProjection = response.payloadProjection;
   }
   const data = response.data ?? response;
 
