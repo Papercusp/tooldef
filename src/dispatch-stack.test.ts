@@ -11,6 +11,8 @@ import {
   runDispatchStack,
   type DispatchStepName,
 } from './dispatch-stack';
+import { z } from 'zod';
+import { clearEntityResolvers, entityRef, setEntityResolver } from './entity-ref';
 import {
   _resetProjectionRegistryForTests,
   type ProjectedTool,
@@ -57,6 +59,7 @@ describe('DEFAULT_DISPATCH_STACK — enumeration', () => {
       'quota',
       'authorize',
       'preconditions',
+      'entity-check',
       'timeout',
       'idle-watchdog',
       'replay-buffer',
@@ -344,5 +347,78 @@ describe('runDispatchStack — custom stack', () => {
       }),
     });
     expect(capturedMeta?.deltaServed).toBe(false);
+  });
+});
+
+/**
+ * entity-check step (tool-arg-referential-integrity-2026-07-19 P-002).
+ * The gate that stops an agent inventing an entity id that never existed.
+ */
+describe('entity-check step — referential integrity for entityRef args', () => {
+  afterEach(() => clearEntityResolvers());
+
+  const potTool = (over: Partial<ProjectedTool> = {}) =>
+    makeTool({ args: z.object({ pot: entityRef('pot') }), ...over } as Partial<ProjectedTool>);
+
+  it('rejects an unknown entity BEFORE the handler runs', async () => {
+    setEntityResolver('pot', async (v) => ({ unknown: v.filter((x) => x !== 'papercusp') }));
+    let invoked = false;
+    const tool = potTool({
+      fn: async () => {
+        invoked = true;
+        return { content: [{ type: 'text', text: 'ok' }] };
+      },
+    });
+    const r = await runDispatchStack(tool, 'fix.tool', { pot: 'made-up' }, MAKE_CTX(), {});
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe('invalid_input');
+    expect(r.error?.message).toContain('unknown pot "made-up"');
+    // The whole point: a bad reference never reaches a handler that would persist it.
+    expect(invoked).toBe(false);
+  });
+
+  it('lets a value that exists through to the handler', async () => {
+    setEntityResolver('pot', async (v) => ({ unknown: v.filter((x) => x !== 'papercusp') }));
+    const r = await runDispatchStack(potTool(), 'fix.tool', { pot: 'papercusp' }, MAKE_CTX(), {});
+    expect(r.ok).toBe(true);
+  });
+
+  it('surfaces the nearest match in the denial (the --model UX, generalized)', async () => {
+    setEntityResolver('pot', async (v) => ({ unknown: v, suggestions: { papercsp: ['papercusp'] } }));
+    const r = await runDispatchStack(potTool(), 'fix.tool', { pot: 'papercsp' }, MAKE_CTX(), {});
+    expect(r.error?.message).toContain('did you mean `papercusp`');
+  });
+
+  // Fail-open contract — the DB's foreign keys are the authoritative backstop,
+  // so a lookup outage must never take down every tool that names an entity.
+  it('FAILS OPEN when the resolver throws', async () => {
+    setEntityResolver('pot', async () => {
+      throw new Error('pg down');
+    });
+    const r = await runDispatchStack(potTool(), 'fix.tool', { pot: 'anything' }, MAKE_CTX(), {});
+    expect(r.ok).toBe(true);
+  });
+
+  it('FAILS OPEN when the kind has no registered resolver', async () => {
+    const r = await runDispatchStack(potTool(), 'fix.tool', { pot: 'anything' }, MAKE_CTX(), {});
+    expect(r.ok).toBe(true);
+  });
+
+  it('a soft ref warns rather than rejecting (staged rollout)', async () => {
+    setEntityResolver('pot', async (v) => ({ unknown: v }));
+    const tool = makeTool({
+      args: z.object({ pot: entityRef('pot', { soft: true }) }),
+    } as Partial<ProjectedTool>);
+    const r = await runDispatchStack(tool, 'fix.tool', { pot: 'nope' }, MAKE_CTX(), {});
+    expect(r.ok).toBe(true);
+  });
+
+  it('is a no-op for a tool with no entity refs', async () => {
+    const fn = vi.fn(async (v: readonly string[]) => ({ unknown: [...v] }));
+    setEntityResolver('pot', fn);
+    const tool = makeTool({ args: z.object({ n: z.number() }) } as Partial<ProjectedTool>);
+    const r = await runDispatchStack(tool, 'fix.tool', { n: 1 }, MAKE_CTX(), {});
+    expect(r.ok).toBe(true);
+    expect(fn).not.toHaveBeenCalled();
   });
 });

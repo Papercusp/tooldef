@@ -38,6 +38,11 @@ import type { CardResponse, CardSpec } from './types';
 import { validateSync, formatIssues, type StandardSchemaV1 } from './standard-schema';
 import { tierFor } from './capability-tiers';
 import {
+  collectEntityRefs,
+  formatEntityRefViolations,
+  resolveEntityRefs,
+} from './entity-ref';
+import {
   PASS_THROUGH,
   HarnessRequiredError,
   InvalidInputError,
