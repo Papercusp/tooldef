@@ -63,6 +63,7 @@ export type DispatchStepName =
   | 'quota'
   | 'authorize'
   | 'preconditions'
+  | 'entity-check'
   | 'timeout'
   | 'idle-watchdog'
   | 'replay-buffer'
@@ -870,6 +871,84 @@ const preconditionsStep: DispatchStep = {
   },
 };
 
+/**
+ * Per-tool cache of the entity-reference SITES in its args schema. The walk is
+ * structural (schema-shaped, not value-shaped), so it is computed once on the
+ * first call for a tool and reused for every later one — the per-call cost is
+ * then just the resolver lookups, which are themselves batched per kind.
+ */
+const ENTITY_SITES = new WeakMap<object, ReturnType<typeof collectEntityRefs>>();
+
+function entitySitesFor(tool: { args?: unknown }): ReturnType<typeof collectEntityRefs> {
+  const key = (tool.args ?? tool) as object;
+  const cached = ENTITY_SITES.get(key);
+  if (cached) return cached;
+  let sites: ReturnType<typeof collectEntityRefs> = [];
+  try {
+    sites = tool.args ? collectEntityRefs(tool.args) : [];
+  } catch {
+    sites = []; // a schema shape we cannot walk is simply unvalidated
+  }
+  ENTITY_SITES.set(key, sites);
+  return sites;
+}
+
+/**
+ * Referential-integrity gate for args that NAME A DURABLE ENTITY
+ * (tool-arg-referential-integrity-2026-07-19 P-002 / D-001).
+ *
+ * An arg declared with `entityRef(kind)` must identify something that EXISTS.
+ * JSON Schema cannot express that (it is deliberately I/O-free), so the check
+ * lives here, where a host resolver is reachable. Values are grouped by kind
+ * and each resolver is consulted ONCE per call (DataLoader-style), so the
+ * common case — a host answering from a process-local `Set` — costs no queries
+ * at all.
+ *
+ * Placement: after `preconditions`, before `timeout`. It must not run before
+ * the auth gates, because the corrective message names near-matches and can
+ * name the valid set — telling an UNAUTHORIZED caller which pots exist would
+ * leak the entity namespace. It runs before `invoke` so a bad reference never
+ * reaches a handler that would persist it.
+ *
+ * FAILS OPEN by construction (see resolveEntityRefs): an unregistered kind or a
+ * throwing resolver yields no violations. This layer improves diagnostics and
+ * catches agent-invented values; the DATABASE's foreign keys remain the
+ * authoritative backstop, and an outage in the lookup path must never take down
+ * every tool that happens to name an entity. `soft: true` refs warn rather than
+ * reject, so a host can adopt the type broadly before its data is clean.
+ */
+const entityCheckStep: DispatchStep = {
+  name: 'entity-check',
+  async run(exec) {
+    const { tool, toolName, input } = exec;
+    const sites = entitySitesFor(tool as { args?: unknown });
+    if (!sites.length) return null;
+
+    let violations: Awaited<ReturnType<typeof resolveEntityRefs>>;
+    try {
+      violations = await resolveEntityRefs(sites, input);
+    } catch {
+      return null; // fail open — never the reason a tool dies
+    }
+    if (!violations.length) return null;
+
+    const hard = violations.filter((v) => !v.soft);
+    if (!hard.length) return null; // soft-only ⇒ proceed (staged rollout)
+
+    return {
+      ok: false,
+      error: {
+        code: 'invalid_input' as DispatchProjectedErrorCode,
+        message: `${toolName}: ${formatEntityRefViolations(hard)}`,
+        meta: {
+          tool: toolName,
+          violations: hard.map((v) => ({ path: v.path, kind: v.kind, value: v.value })),
+        },
+      },
+    };
+  },
+};
+
 /* ─── Default stack ──────────────────────────────────────────────────── */
 
 /**
@@ -885,6 +964,11 @@ const preconditionsStep: DispatchStep = {
  *     `authorize` and before `timeout`: a corrective auto-fire must only
  *     happen for an authorized caller, and a functional precondition should
  *     not mask an auth denial.
+ *   - `entity-check` (referential integrity for `entityRef` args) runs
+ *     after `preconditions` and before `timeout`: its corrective message can
+ *     name near-matches and the valid set, so it must never run for an
+ *     unauthorized caller (that would leak the entity namespace), and it must
+ *     run before `invoke` so a bad reference never reaches a handler.
  *   - `timeout` arms the AbortController; every subsequent step that
  *     races against it depends on this having run.
  *   - `idle-watchdog` runs after `timeout` so it composes with the same
@@ -905,6 +989,7 @@ export const DEFAULT_DISPATCH_STACK: ReadonlyArray<DispatchStep> = Object.freeze
   quotaStep,
   authorizeStep,
   preconditionsStep,
+  entityCheckStep,
   timeoutStep,
   idleWatchdogStep,
   replayBufferStep,
