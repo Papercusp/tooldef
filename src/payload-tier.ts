@@ -468,7 +468,19 @@ export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
           `[payload-tier] ${toolName} bounded a ${size}-char unshaped payload for a '${tier}' session — add shape.${tier} for a domain-specific projection (context-trimming-tiers P-011)`,
         );
       }
-      out = { ...response, data: projectBoundedPayload(response.data, { toolName, tier, originalChars: size, args }) };
+      const projected = projectBoundedPayload(response.data, { toolName, tier, originalChars: size, args });
+      out = {
+        ...response,
+        data: projected,
+        payloadProjection: {
+          truncated: true,
+          tier: projected._projection.tier,
+          forced: projected._projection.forced,
+          originalChars: projected._projection.originalChars,
+          returnedChars: projected._projection.returnedChars,
+          omittedCount: projected._projection.omittedCount,
+        },
+      };
     }
   }
 

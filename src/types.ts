@@ -283,6 +283,24 @@ export interface ToolResponse<T = unknown> {
   /** True when one or more sources were unavailable; partial result still useful. */
   degraded?: boolean;
   degradedReasons?: string[];
+  /**
+   * Set by payload-tier shaping (payload-tier.ts) when `data` was REPLACED by a
+   * bounded/forced projection — i.e. `data` is NOT the tool's full original
+   * output; some content was omitted upstream, before this response ever
+   * reaches serialization. Mirrors (a subset of) the `_projection` metadata
+   * embedded in `data` itself so a downstream consumer that only sees `_meta`
+   * (the per-result door, result-door.ts) can tell — WITHOUT parsing the
+   * serialized body — that whatever it captures is already-lossy, so it must
+   * not claim to hold/spill the "full" result (EI-13918).
+   */
+  payloadProjection?: {
+    truncated: true;
+    tier: 'trimmed' | 'standard' | 'full';
+    forced: boolean;
+    originalChars: number;
+    returnedChars: number;
+    omittedCount: number;
+  };
   /** Pagination cursor (for list tools that support it). */
   nextCursor?: string;
   /**
