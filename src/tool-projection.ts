@@ -1044,6 +1044,16 @@ export interface ProjectedTool {
     when?: string;
     notWhen?: string;
     chaining?: string;
+    /**
+     * Free-text description of the tool's RESPONSE shape (EI-10882), e.g.
+     * "{ results: [{ id, title }], count }". Surfaced by `tools:find` and — since
+     * EI-13298 — by `code:tools` / `code:run`'s facade signatures, so a script author
+     * sees the real response shape instead of guessing keys. Was already plumbed
+     * through at runtime via `defineTool({ guidance })` before this field existed on
+     * this type (callers used to `as { returns?: string }` cast it); declared here now
+     * so every consumer gets it typed, not just the one that cast around the gap.
+     */
+    returns?: string;
     seeAlso?: import('./see-also').SeeAlso;
     byRole?: Record<string, { when?: string; notWhen?: string; chaining?: string }>;
   };
