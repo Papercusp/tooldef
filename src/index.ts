@@ -223,11 +223,18 @@ export {
   hasEntityResolver,
   resolveEntityRefs,
   formatEntityRefViolations,
+  setEntityEnum,
+  clearEntityEnums,
+  applyEntityRefEnums,
+  entityEnumRevision,
+  DEFAULT_MAX_ENUM_VALUES,
   type EntityKind,
   type EntityRefMeta,
   type EntityRefSite,
   type EntityResolver,
   type EntityRefViolation,
+  type EntityEnumerator,
+  type EntityEnumOptions,
 } from './entity-ref';
 
 /* ─── Schema → JSON-Schema adapter (pluggable; default Zod) ───────────── */

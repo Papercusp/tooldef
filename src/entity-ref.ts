@@ -306,6 +306,205 @@ export async function resolveEntityRefs(
   return violations;
 }
 
+/* ── Published enums (P-004b) ────────────────────────────────────────── */
+
+/**
+ * A kind's PUBLISHABLE vocabulary — the set worth advertising in `tools/list`
+ * so a model cannot EMIT an invalid value, rather than being corrected after
+ * the fact by {@link resolveEntityRefs}.
+ *
+ * Returning `null` means "not publishable right now" (unknown, unavailable, or
+ * the host would rather not say) and is treated exactly like an absent
+ * registration: no enum, no error.
+ */
+export type EntityEnumerator = () => Promise<readonly string[] | null>;
+
+export interface EntityEnumOptions {
+  /**
+   * Publish the enum only when the set is at most this large. Above it, the
+   * overlay emits NOTHING and the arg stays a plain string.
+   *
+   * ⚠ THIS CAP IS A TOKEN BUDGET, NOT A STYLE PREFERENCE. `tools/list` bytes
+   * are PROMPT-PREFIX bytes: an enum is re-serialized into every session's
+   * catalog, once per arg site, in every tool that names the kind. Measured on
+   * this host (2026-07-19): pots=142, harness slugs=428, fleets=161 — a single
+   * one of those inlined across its arg sites costs more prompt weight than the
+   * whole tool catalog's descriptions. The dispatch-time check with
+   * nearest-match suggestions is the enforcement path for a set that big; the
+   * enum is a bonus for genuinely small, mostly-static vocabularies.
+   */
+  maxValues?: number;
+  /**
+   * Regex source for values that are VALID BUT UNENUMERABLE — an open
+   * vocabulary with a closed core. Emitted as `anyOf: [{enum}, {pattern}]` so
+   * the model gets the concrete list without the schema rejecting the tail.
+   *
+   * The motivating case: agent roles are a fixed built-in list PLUS
+   * plugin-contributed `<plugin>:<role>` ids that no startup-time enumeration
+   * can see. A bare `enum` there would advertise a closed set that is a lie,
+   * and a strict client would reject a legitimate plugin role.
+   */
+  openPattern?: string;
+}
+
+interface EnumEntry {
+  load: EntityEnumerator;
+  maxValues: number;
+  openPattern?: string;
+}
+
+/** Default cap — see the token-budget note on {@link EntityEnumOptions.maxValues}. */
+export const DEFAULT_MAX_ENUM_VALUES = 60;
+
+const ENUMS = new Map<EntityKind, EnumEntry>();
+
+/**
+ * Register the publishable vocabulary for a kind. Independent of
+ * {@link setEntityResolver} on purpose: a kind can be ENFORCED without being
+ * publishable (too large — the common case here) and, in principle,
+ * publishable without being enforced.
+ */
+export function setEntityEnum(
+  kind: EntityKind,
+  load: EntityEnumerator,
+  opts: EntityEnumOptions = {},
+): void {
+  ENUMS.set(kind, {
+    load,
+    maxValues: opts.maxValues ?? DEFAULT_MAX_ENUM_VALUES,
+    ...(opts.openPattern ? { openPattern: opts.openPattern } : {}),
+  });
+}
+
+/** Drop registered enums (tests, teardown). */
+export function clearEntityEnums(): void {
+  ENUMS.clear();
+}
+
+/** The JSON-Schema fragment published for one kind, or null when nothing is. */
+interface EnumFragment {
+  kind: EntityKind;
+  fragment: Record<string, unknown>;
+  /** The sorted values behind it — the revision hash's input. */
+  values: readonly string[];
+}
+
+/**
+ * Ask every registered kind for its fragment. Failures and over-cap sets both
+ * yield nothing, so this never throws into a `tools/list` handler: a broken
+ * enumerator must not take down tool discovery (the same fail-open contract as
+ * {@link resolveEntityRefs}).
+ */
+async function loadFragments(kinds: Iterable<EntityKind>): Promise<Map<EntityKind, EnumFragment>> {
+  const out = new Map<EntityKind, EnumFragment>();
+  await Promise.all(
+    [...new Set(kinds)].map(async (kind) => {
+      const entry = ENUMS.get(kind);
+      if (!entry) return;
+      let raw: readonly string[] | null;
+      try {
+        raw = await entry.load();
+      } catch {
+        return; // enumerator unavailable → publish nothing
+      }
+      if (!raw) return;
+      const values = [...new Set(raw.filter((v) => typeof v === 'string' && v !== ''))].sort();
+      if (!values.length || values.length > entry.maxValues) return;
+      const fragment = entry.openPattern
+        ? { anyOf: [{ enum: values }, { type: 'string', pattern: entry.openPattern }] }
+        : { enum: values };
+      out.set(kind, { kind, fragment, values });
+    }),
+  );
+  return out;
+}
+
+function asObject(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+}
+
+/**
+ * Walk a JSON Schema to the node an {@link EntityRefSite} path names — the
+ * mirror of {@link collectEntityRefs}'s walk, in the converted document:
+ * a key step follows `properties.<key>`, and `*` follows `items`.
+ *
+ * Returns null when the path does not exist in the converted schema (the tool
+ * advertises a rewritten surface — see `advertisedArgsSchema` — or the arg was
+ * stripped), which the caller treats as "publish nothing here" rather than an
+ * error: a mismatch must never break tool discovery.
+ */
+function jsonSchemaNodeAt(root: unknown, path: string): Record<string, unknown> | null {
+  let node = asObject(root);
+  if (!node) return null;
+  if (path === '') return node;
+  for (const part of path.split('.')) {
+    if (part === '*') {
+      node = asObject(node.items);
+    } else {
+      const props = asObject(node.properties);
+      node = props ? asObject(props[part]) : null;
+    }
+    if (!node) return null;
+  }
+  return node;
+}
+
+/**
+ * Overlay published vocabularies onto a tool's already-converted JSON Schema.
+ *
+ * MUTATES AND RETURNS `jsonSchema` — it is called on the freshly-built schema
+ * inside a `tools/list` handler, which owns that object.
+ *
+ * Deliberately a SEPARATE step from `toArgsJsonSchema` rather than something
+ * `entityRef` bakes into the schema: the marker is a WeakMap entry precisely so
+ * that declaring an arg as an entity ref cannot silently change the published
+ * wire contract. Publishing is an explicit, host-controlled, capped act.
+ */
+export async function applyEntityRefEnums(
+  argsSchema: unknown,
+  jsonSchema: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const sites = collectEntityRefs(argsSchema);
+  if (!sites.length || !ENUMS.size) return jsonSchema;
+  const fragments = await loadFragments(sites.map((s) => s.meta.kind));
+  if (!fragments.size) return jsonSchema;
+  for (const site of sites) {
+    const frag = fragments.get(site.meta.kind);
+    if (!frag) continue;
+    const node = jsonSchemaNodeAt(jsonSchema, site.path);
+    if (!node) continue;
+    // An `anyOf` fragment replaces the scalar `type`; a bare enum rides beside
+    // it (an enum of strings is redundant with `type: 'string'`, but harmless
+    // and clearer to strict consumers).
+    if ('anyOf' in frag.fragment) delete node.type;
+    Object.assign(node, frag.fragment);
+  }
+  return jsonSchema;
+}
+
+/**
+ * A stable fingerprint of everything currently publishable. A host polls this
+ * and fires `notifications/tools/list_changed` when it moves, so a live client
+ * re-fetches a catalog whose enums actually changed — and, just as importantly,
+ * does NOT re-fetch (busting its prompt cache) when they did not.
+ */
+export async function entityEnumRevision(): Promise<string> {
+  const fragments = await loadFragments(ENUMS.keys());
+  const parts = [...fragments.values()]
+    .sort((a, b) => (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0))
+    .map((f) => `${f.kind}:${f.values.join(',')}`);
+  if (!parts.length) return 'empty';
+  // FNV-1a — no crypto import in a hot list path, and collision risk here only
+  // costs a missed re-fetch of an advisory enum.
+  let h = 0x811c9dc5;
+  const text = parts.join('|');
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16);
+}
+
 /**
  * Render violations as one corrective message — the `--model` UX generalized:
  * name what was wrong, the nearest match, and the allowed set when it is small
