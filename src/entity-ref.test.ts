@@ -95,6 +95,20 @@ describe('collectEntityRefs', () => {
     expect(sites).toEqual([{ path: 'members.*.pot', meta: { kind: 'pot' } }]);
   });
 
+  // Multi-op tools here are built as `z.discriminatedUnion('op', [...])`. Before
+  // the union branch existed, every one of them reported ZERO refs — the check
+  // and the published enum both skipped them entirely.
+  it('finds refs inside a discriminated union, tagged by branch', () => {
+    const sites = collectEntityRefs(
+      z.discriminatedUnion('op', [
+        z.object({ op: z.literal('set'), role: entityRef('role') }),
+        z.object({ op: z.literal('list') }),
+        z.object({ op: z.literal('clear'), role: entityRef('role').optional() }),
+      ]),
+    );
+    expect(sites.map((s) => s.path)).toEqual(['#0.role', '#2.role']);
+  });
+
   it('returns nothing for a schema with no refs', () => {
     expect(collectEntityRefs(z.object({ n: z.number(), s: z.string() }))).toEqual([]);
   });
@@ -307,5 +321,35 @@ describe('entityEnumRevision', () => {
     expect(first).toBe('empty');
     values = ['x', 'y', 'z'];
     expect(await entityEnumRevision()).toBe(first);
+  });
+});
+
+/**
+ * Discriminated-union args — the standard shape for a multi-op tool in this
+ * host, and the shape the walker used to skip entirely.
+ */
+describe('discriminated-union args', () => {
+  const opUnion = z.discriminatedUnion('op', [
+    z.object({ op: z.literal('set'), role: entityRef('role') }),
+    z.object({ op: z.literal('list') }),
+    z.object({ op: z.literal('clear'), role: entityRef('role').optional() }),
+  ]);
+
+  it('checks the value once, not once per arm that declares the arg', async () => {
+    const fn = vi.fn(async (values: readonly string[]) => ({ unknown: values }));
+    setEntityResolver('role', fn);
+    const v = await resolveEntityRefs(collectEntityRefs(opUnion), { op: 'set', role: 'made-up' });
+    expect(v).toHaveLength(1);
+    expect(v[0]).toMatchObject({ path: 'role', value: 'made-up' });
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it('publishes the enum into every arm that declares the arg', async () => {
+    setEntityEnum('role', async () => ['worker']);
+    const out = await applyEntityRefEnums(opUnion, toJsonSchema(opUnion as never) as Record<string, unknown>);
+    const arms = (out.anyOf ?? out.oneOf) as Array<Record<string, Record<string, Record<string, unknown>>>>;
+    expect(arms[0].properties.role.enum).toEqual(['worker']);
+    expect(arms[2].properties.role.enum).toEqual(['worker']);
+    expect(arms[1].properties.role).toBeUndefined();
   });
 });

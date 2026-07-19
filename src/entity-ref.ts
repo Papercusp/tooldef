@@ -473,7 +473,7 @@ function jsonSchemaNodeAt(root: unknown, path: string): Record<string, unknown> 
   for (const part of path.split('.')) {
     const branch = unionBranchIndex(part);
     if (branch !== null) {
-      const arms = node.anyOf ?? node.oneOf;
+      const arms: unknown = node.anyOf ?? node.oneOf;
       node = Array.isArray(arms) ? asObject(arms[branch]) : null;
     } else if (part === '*') {
       node = asObject(node.items);
