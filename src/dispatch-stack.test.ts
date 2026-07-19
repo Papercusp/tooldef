@@ -409,8 +409,13 @@ describe('entity-check step — referential integrity for entityRef args', () =>
     const tool = makeTool({
       args: z.object({ pot: entityRef('pot', { soft: true }) }),
     } as Partial<ProjectedTool>);
-    const r = await runDispatchStack(tool, 'fix.tool', { pot: 'nope' }, MAKE_CTX(), {});
+    const log = vi.fn();
+    const r = await runDispatchStack(tool, 'fix.tool', { pot: 'nope' }, MAKE_CTX({ log }), {});
     expect(r.ok).toBe(true);
+    // A soft violation nobody can SEE makes the staged rollout unmeasurable —
+    // it must be observable, otherwise flipping the ref hard is a guess.
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('unknown pot "nope"'));
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('soft'));
   });
 
   it('is a no-op for a tool with no entity refs', async () => {

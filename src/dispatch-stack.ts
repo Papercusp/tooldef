@@ -938,7 +938,17 @@ const entityCheckStep: DispatchStep = {
     if (!violations.length) return null;
 
     const hard = violations.filter((v) => !v.soft);
-    if (!hard.length) return null; // soft-only ⇒ proceed (staged rollout)
+    if (!hard.length) {
+      // Soft-only ⇒ the call PROCEEDS, but it must not proceed SILENTLY: the
+      // entire point of `soft` is to observe how much real traffic a kind would
+      // reject before flipping it hard. A soft violation nobody can see makes
+      // the staged rollout unmeasurable and the flip a guess.
+      exec.ctx.log?.(
+        `[entity-check] ${toolName}: ${formatEntityRefViolations(violations)} ` +
+          `(soft — allowed through; this WOULD be rejected once the ref is hard)`,
+      );
+      return null;
+    }
 
     return {
       ok: false,
