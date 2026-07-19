@@ -234,3 +234,35 @@ describe('serializeToolResponse — Tier-3 prompt-declared columns (read, P-004)
     expect((r.content[0] as { text: string }).text).toBe('format: csv\n[0]');
   });
 });
+
+describe('serializeToolResponse — structuredContent opt-in (EI-13245)', () => {
+  // A strict MCP client (the official SDK's Client.callTool) enforces
+  // structuredContent presence purely from whether the tool advertised an
+  // outputSchema in tools/list — it never inspects content[]. So a caller
+  // that opted in via `_meta.structured` (requestedStructured: true) must
+  // ALWAYS get structuredContent back, even when the naturally-chosen text
+  // format happens to already be plain JSON — otherwise a tool like
+  // work_items:burn_down (an object-rooted result with no flat-array win)
+  // throws "has an output schema but did not return structured content" on
+  // every call, defeating the whole point of opting in.
+  it('is honored even when the chosen text format is already JSON', () => {
+    const ctx = { transport: 'mcp', requestedStructured: true } as UnifiedToolContext;
+    // A scalar-only object (no array field) always resolves to 'json' —
+    // isObjectWithArrayField is false, so autoBest/chooseFormat never tries
+    // TOON/CSV for it.
+    const data = { ok: true, harness: 'papercusp', count: 2 };
+    const r = serializeToolResponse({ data }, formatOptsFromCtx(ctx, undefined));
+    expect(r.format).toBe('json');
+    expect(r.structuredContent).toEqual(data);
+    expect(r._meta.structured).toBe(true);
+  });
+
+  it('is omitted when the caller did not opt in, regardless of format', () => {
+    const ctx = { transport: 'mcp' } as UnifiedToolContext;
+    const data = { ok: true, harness: 'papercusp', count: 2 };
+    const r = serializeToolResponse({ data }, formatOptsFromCtx(ctx, undefined));
+    expect(r.format).toBe('json');
+    expect(r.structuredContent).toBeUndefined();
+    expect(r._meta.structured).toBeUndefined();
+  });
+});
