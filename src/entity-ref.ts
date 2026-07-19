@@ -52,6 +52,17 @@ export interface EntityRefMeta {
   soft?: boolean;
 }
 
+/** Options for {@link entityRef}. */
+export interface EntityRefOptions extends Omit<EntityRefMeta, 'kind'> {
+  /**
+   * The arg description. MUST be passed here rather than chained as
+   * `.describe(...)` — see the note on {@link entityRef} about clone-orphaning.
+   */
+  describe?: string;
+  /** Max length, for the same reason `describe` lives here. */
+  max?: number;
+}
+
 /**
  * Schema → meta. A WeakMap (not a schema property) so the marker cannot leak
  * into `z.toJSONSchema` output and change the published wire contract: adding
@@ -62,19 +73,36 @@ const REGISTRY = new WeakMap<object, EntityRefMeta>();
 /**
  * Declare an arg as a reference to an entity of `kind`.
  *
- * Use it exactly where `z.string()` would go:
- *
  * ```ts
- * args: z.object({ pot: entityRef('pot').describe('the pot to report on') })
+ * args: z.object({
+ *   pot: entityRef('pot', { describe: 'the pot to report on', max: 120 }),
+ * })
  * ```
  *
- * Returns a normal Zod string, so `.optional()`, `.describe()`, `.default()`
- * and array wrapping all work as usual — {@link collectEntityRefs} unwraps
- * those to find the marker.
+ * ⚠ PASS `describe` / `max` AS OPTIONS — DO NOT CHAIN THEM.
+ *
+ * Zod 4's `.describe()` and `.max()` return a CLONE of the schema, not the same
+ * object. The marker lives in a WeakMap keyed on schema identity (so it cannot
+ * leak into published JSON Schema), so anything chained AFTER `entityRef()`
+ * produces a new object the registry does not know about — and the arg silently
+ * becomes an ordinary string that is never checked. This is not hypothetical: a
+ * first conversion pass wrote `entityRef('pot').describe(…)` across seven tools
+ * and every one of them was inert, caught only because the conformance ratchet
+ * reported `converted=0`. Taking these as options means the marker is always
+ * applied LAST, so there is nothing to chain and nothing to get wrong.
+ *
+ * Wrapping is still fine: `.optional()`, `.nullable()`, `.default()` and array
+ * wrapping all produce WRAPPERS with an inner type, which
+ * {@link collectEntityRefs} unwraps to find the marker.
  */
-export function entityRef(kind: EntityKind, opts: Omit<EntityRefMeta, 'kind'> = {}) {
-  const schema = z.string().min(1);
-  REGISTRY.set(schema as unknown as object, { kind, ...opts });
+export function entityRef(kind: EntityKind, opts: EntityRefOptions = {}) {
+  const { describe, max, ...meta } = opts;
+  let schema = z.string().min(1);
+  if (typeof max === 'number') schema = schema.max(max);
+  if (describe) schema = schema.describe(describe);
+  // Register LAST: every clone-producing call is already done, so this key is
+  // the object the caller actually hands to `z.object({...})`.
+  REGISTRY.set(schema as unknown as object, { kind, ...meta });
   return schema;
 }
 

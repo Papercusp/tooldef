@@ -27,6 +27,29 @@ describe('entityRef marker', () => {
     expect(entityRefMeta(z.string())).toBeUndefined();
   });
 
+  // The regression that made an entire conversion pass inert: Zod 4 CLONES on
+  // .describe()/.max(), orphaning a marker keyed on schema identity. These pin
+  // that the options form works and stay a warning about the chained form.
+  it('keeps the marker when describe/max are passed as OPTIONS', () => {
+    const s = entityRef('pot', { describe: 'the pot', max: 120 });
+    expect(entityRefMeta(s)?.kind).toBe('pot');
+    expect(collectEntityRefs(z.object({ pot: s }))).toHaveLength(1);
+  });
+
+  it('carries describe/max through to the published schema', () => {
+    const js = z.toJSONSchema(z.object({ pot: entityRef('pot', { describe: 'the pot', max: 120 }) })) as any;
+    expect(js.properties.pot.description).toBe('the pot');
+    expect(js.properties.pot.maxLength).toBe(120);
+  });
+
+  it('DOCUMENTS the footgun: chaining .describe() after entityRef orphans the marker', () => {
+    // Not desired behaviour — a property of Zod cloning. Pinned so the options
+    // form above is never "simplified" back into a chain.
+    const chained = entityRef('pot').describe('the pot');
+    expect(entityRefMeta(chained)).toBeUndefined();
+    expect(collectEntityRefs(z.object({ pot: chained }))).toHaveLength(0);
+  });
+
   it('does NOT leak the marker into the published JSON Schema', () => {
     // Adding validation must not change what tools/list advertises.
     const withRef = z.toJSONSchema(z.object({ pot: entityRef('pot') }));
