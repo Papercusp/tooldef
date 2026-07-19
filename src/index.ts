@@ -213,6 +213,23 @@ export {
   type CapabilityTierResolver,
 } from './capability-tiers';
 
+/* ─── Entity-reference args (referential integrity at dispatch) ───────── */
+export {
+  entityRef,
+  entityRefMeta,
+  collectEntityRefs,
+  setEntityResolver,
+  clearEntityResolvers,
+  hasEntityResolver,
+  resolveEntityRefs,
+  formatEntityRefViolations,
+  type EntityKind,
+  type EntityRefMeta,
+  type EntityRefSite,
+  type EntityResolver,
+  type EntityRefViolation,
+} from './entity-ref';
+
 /* ─── Schema → JSON-Schema adapter (pluggable; default Zod) ───────────── */
 export {
   toJsonSchema,
