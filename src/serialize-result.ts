@@ -296,8 +296,25 @@ export function serializeToolResponse(
   if (opts.delta) _meta.delta = deltaMeta(opts.delta);
   const result: SerializedToolResult = { content, _meta, format: chosen.format, fallback: chosen.fallback };
   // Opt-in lossless structured payload for UI/programmatic consumers (P-010).
-  // Only meaningful when the body itself isn't already the lossless JSON.
-  if (opts.includeStructured && hasData && chosen.format !== 'json') {
+  //
+  // EI-13245: this used to also require `chosen.format !== 'json'`, on the
+  // theory that when the compact TEXT body already IS the lossless JSON,
+  // structuredContent would just duplicate it. That reasoning doesn't hold:
+  // `structuredContent` is a distinct MCP response field, and the official
+  // MCP SDK's `Client.callTool()` enforces its presence purely from whether
+  // the tool advertised an `outputSchema` in `tools/list` — it never looks at
+  // `content[]`. Any tool with an object-rooted `result` schema (which is
+  // EVERY tool whose chosen text format resolves to plain JSON, i.e. most
+  // non-tabular tools) unconditionally advertises `outputSchema`
+  // (tool-projection.ts), so a caller that opts in via `_meta.structured`
+  // must always get `structuredContent` back — never conditioned on which
+  // text format happened to be chosen — or a strict client throws
+  // `"has an output schema but did not return structured content"` even
+  // though the caller asked for exactly that. (Scoped to the full-body path:
+  // no registered tool today combines an object-rooted `result` with a
+  // `delta` capability, so the not_modified/delta early-returns above are
+  // unaffected — see their branches if that combination is ever added.)
+  if (opts.includeStructured && hasData) {
     result.structuredContent = data;
     _meta.structured = true;
   }
