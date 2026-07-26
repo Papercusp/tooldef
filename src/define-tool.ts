@@ -385,6 +385,39 @@ function applyPositionalWriteShim(name: string, argsJsonSchema: Record<string, u
 }
 
 /**
+ * EI-18729688357283797 — `harness` -> `harness_slug` arg alias, applied BEFORE validation.
+ *
+ * The catalog's dominant harness-scoping spelling is `harness` (work_items:*, docs:*,
+ * plans:*, features:*, issues:*, harness:*, coord:orient, …) and the su persona
+ * explicitly teaches it as THE way to scope a per-call ("name the harness on the
+ * call: harness: '<slug>'"). A minority of tools (the search:* family — search:fulltext,
+ * search:semantic) instead declare `harness_slug`. Because arg validation is STRICT
+ * (EI-10883), the taught reflex produces a guaranteed-failing call against those
+ * tools — a wasted round-trip every time, never a silent partial. Worse, the shared
+ * did-you-mean hint (COMMON_ARG_ALIASES) can suggest the WRONG fix when the tool
+ * separately declares an unrelated `scope` arg that happens to share a semantic-alias
+ * slot with `harness` (search:fulltext's `scope` is the search-source list, not a
+ * harness — confirmed live: the hint says "Did you mean `scope` for `harness`?", which
+ * is actively misleading there).
+ *
+ * Rather than merely teach a better error, ACCEPT the call: when the tool's declared
+ * shape has `harness_slug` but not `harness`, and the caller supplied `harness` without
+ * `harness_slug`, transparently rename the key before validation. A caller who
+ * (unusually) supplied BOTH keeps their explicit `harness_slug` untouched — this never
+ * overrides an explicit value, and it is a no-op for every tool that already declares
+ * `harness` itself (the common case).
+ */
+function applyHarnessArgAlias(argsJsonSchema: Record<string, unknown>, input: unknown): unknown {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
+  const rec = input as Record<string, unknown>;
+  if (!('harness' in rec) || 'harness_slug' in rec) return input;
+  const props = (argsJsonSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
+  if (!props || !('harness_slug' in props) || 'harness' in props) return input;
+  const { harness, ...rest } = rec;
+  return { ...rest, harness_slug: harness };
+}
+
+/**
  * EI-11621 — unwrap a client `__unparsedToolInput` envelope BEFORE validation.
  *
  * Some MCP clients (Claude Code) that cannot parse the model-emitted tool
