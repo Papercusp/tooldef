@@ -55,15 +55,24 @@ const fatRows = () => ({
   })),
 });
 
-/** Parse the tool result back to the data the CALLER (or an in-script read) sees. */
-const readBack = (res: unknown): { count?: number; facts?: { key: string }[]; _projection?: { truncated?: boolean } } => {
-  const content = (res as { content?: { type: string; text?: string }[] }).content;
-  const text = content?.find((c) => c.type === 'text')?.text ?? '{}';
-  try {
-    return JSON.parse(text);
-  } catch {
-    return {};
-  }
+/**
+ * What the CALLER (or an in-script read) can actually see, asserted over the
+ * serialized body rather than a parsed object: results are format-negotiated on
+ * the MCP transport (TOON when it shrinks the shape), so `JSON.parse` is not a
+ * valid reader here. Counting row keys in the emitted bytes is encoding-agnostic
+ * and is exactly the question the bug is about — how many rows survived.
+ */
+const readBack = (res: unknown) => {
+  // dispatchProjectedTool wraps the ToolResult in an `{ ok, result }` envelope.
+  const envelope = res as { result?: { content?: { type: string; text?: string }[] } };
+  const content = (envelope.result ?? (res as { content?: { type: string; text?: string }[] })).content;
+  const text = content?.map((c) => c.text ?? '').join('\n') ?? '';
+  return {
+    text,
+    visibleRows: (text.match(/\bfact-\d+/g) ?? []).length + (text.includes(NEEDLE) ? 1 : 0),
+    hasNeedle: text.includes(NEEDLE),
+    truncated: /bounded-payload|"?truncated"?\s*[:=]\s*true/.test(text),
+  };
 };
 
 afterEach(() => _resetProjectionRegistryForTests());
@@ -93,9 +102,9 @@ describe('transportCapExempt — the hard-ceiling exit for in-process consumers 
       const data = readBack(res);
       // This is the exact failure the bug report measured: fewer rows than the
       // tool returned, and the searched-for key simply absent.
-      expect(data.facts?.length ?? 0).toBeLessThan(ROW_COUNT);
-      expect(data.facts?.some((f) => f.key === NEEDLE) ?? false).toBe(false);
-      expect(data._projection?.truncated).toBe(true);
+      expect(data.visibleRows).toBeLessThan(ROW_COUNT);
+      expect(data.hasNeedle).toBe(false);
+      expect(data.truncated).toBe(true);
     });
 
     it('WITH the flag the script sees every row — including the one the projection dropped', async () => {
@@ -108,9 +117,9 @@ describe('transportCapExempt — the hard-ceiling exit for in-process consumers 
         DEPS,
       );
       const data = readBack(res);
-      expect(data.facts?.length).toBe(ROW_COUNT);
-      expect(data.facts?.some((f) => f.key === NEEDLE)).toBe(true);
-      expect(data._projection).toBeUndefined();
+      expect(data.visibleRows).toBe(ROW_COUNT);
+      expect(data.hasNeedle).toBe(true);
+      expect(data.truncated).toBe(false);
     });
   });
 
@@ -137,8 +146,8 @@ describe('transportCapExempt — the hard-ceiling exit for in-process consumers 
         DEPS,
       );
       const data = readBack(res);
-      expect(data.facts?.length ?? 0).toBeLessThan(ROW_COUNT);
-      expect(data._projection?.truncated).toBe(true);
+      expect(data.visibleRows).toBeLessThan(ROW_COUNT);
+      expect(data.truncated).toBe(true);
     });
 
     it('WITH the flag the full payload survives', async () => {
@@ -151,8 +160,8 @@ describe('transportCapExempt — the hard-ceiling exit for in-process consumers 
         DEPS,
       );
       const data = readBack(res);
-      expect(data.facts?.length).toBe(ROW_COUNT);
-      expect(data.facts?.some((f) => f.key === NEEDLE)).toBe(true);
+      expect(data.visibleRows).toBe(ROW_COUNT);
+      expect(data.hasNeedle).toBe(true);
     });
   });
 
@@ -181,7 +190,7 @@ describe('transportCapExempt — the hard-ceiling exit for in-process consumers 
       DEPS,
     );
     const data = readBack(res);
-    expect(data.facts?.length ?? 0).toBeLessThan(ROW_COUNT);
-    expect(data._projection?.truncated).toBe(true);
+    expect(data.visibleRows).toBeLessThan(ROW_COUNT);
+    expect(data.truncated).toBe(true);
   });
 });
