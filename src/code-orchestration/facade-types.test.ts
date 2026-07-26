@@ -179,6 +179,40 @@ describe('facade-types (B-CX-API)', () => {
     expect(out.trimEnd().endsWith('};')).toBe(true);
   });
 
+  // EI-18683272396981279: a plugin-namespaced tool projects its MCP name with a DOT
+  // (`gitnexus.query`), not the canonical colon (`ns:verb`) — the compile-time signature
+  // generator used the same colon-only shape check the runtime facade did, so a plugin tool
+  // never got a rendered signature at all even when `allowed` already included it.
+  describe('dot-form (plugin-namespaced) tool names (EI-18683272396981279)', () => {
+    const gitnexusQuery = mkTool(
+      'gitnexus.query',
+      { type: 'object', properties: { pattern: { type: 'string' } }, required: ['pattern'] },
+      'Query the code call graph.',
+    );
+
+    it('renders a typed signature for a dot-form tool under tools.<ns>.<verb>', () => {
+      const out = generateToolFacadeTypes([gitnexusQuery]);
+      expect(out).toContain('gitnexus: {');
+      expect(out).toMatch(/query\(args: \{ pattern: string \}\): Promise<unknown>;/);
+      expect(out).toContain('/** Query the code call graph. */');
+    });
+
+    it('scopes to the allowed set for dot-form names too (no bypass)', () => {
+      const out = generateToolFacadeTypes([gitnexusQuery, workItemsList], {
+        allowed: new Set(['work_items:list']),
+      });
+      expect(out).not.toContain('gitnexus:');
+      expect(out).toContain('workItems: {');
+    });
+
+    it('lists a dot-form tool in the namespace index', () => {
+      const idx = listFacadeNamespaces([gitnexusQuery], new Set(['gitnexus.query']));
+      const byNs = Object.fromEntries(idx.map((e) => [e.ns, e]));
+      expect(byNs.gitnexus.verbs).toEqual(['query']);
+      expect(byNs.gitnexus.toolNames).toEqual(['gitnexus.query']);
+    });
+  });
+
   // EI-13298: render the RETURN shape, not just the args — a code:run script author who
   // never sees a return type guesses response keys, and a wrong-key guess fails silently
   // (an empty/undefined result that reads as a true negative, not the mapping bug it is).

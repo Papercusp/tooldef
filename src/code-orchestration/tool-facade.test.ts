@@ -80,6 +80,68 @@ describe('buildToolFacade (B-CX-1A)', () => {
   });
 });
 
+/**
+ * EI-18683272396981279 — plugin-namespaced (dot-form) tools were absent from the facade.
+ *
+ * A plugin tool projects its MCP name with a DOT, not a colon (`gitnexus.query`,
+ * `firecrawl.scrape` — see `registerPluginTools` in `@papercusp/plugin-loader`, which mounts
+ * every plugin tool as `<shortPluginName>.<tool.name>` by default). The facade's colon-only
+ * shape check (`name.indexOf(':') <= 0`) silently skipped every such tool — even one already
+ * present in the agent's `allowed` envelope — so a batched `code:run` script could not reach
+ * gitnexus at all, with no error naming why.
+ */
+describe('buildToolFacade: plugin-namespaced (dot-form) tool names (EI-18683272396981279)', () => {
+  it('exposes a dot-form plugin tool as tools.<ns>.<verb>()', async () => {
+    const dispatch = vi.fn(async () => ({ hits: [] }));
+    const f = buildToolFacade([mkTool('gitnexus.query')], dispatch);
+    await f.gitnexus.query({ pattern: 'foo' });
+    expect(dispatch).toHaveBeenCalledWith(expect.anything(), 'gitnexus.query', { pattern: 'foo' });
+  });
+
+  it('exposes the call() escape hatch for a dot-form name too', async () => {
+    const dispatch = vi.fn(async () => 'ok');
+    const f = buildToolFacade([mkTool('gitnexus.query')], dispatch);
+    expect(await f.call('gitnexus.query', { pattern: 'bar' })).toBe('ok');
+    expect(dispatch).toHaveBeenCalledWith(expect.anything(), 'gitnexus.query', { pattern: 'bar' });
+  });
+
+  it('a hyphenated plugin namespace camelCases the same as a colon-form one', async () => {
+    const dispatch = vi.fn(async () => ({ ok: true }));
+    const f = buildToolFacade([mkTool('fetch-plus.scrape')], dispatch);
+    await f.fetchPlus.scrape({ url: 'https://x' });
+    expect(dispatch).toHaveBeenCalledWith(expect.anything(), 'fetch-plus.scrape', { url: 'https://x' });
+    // raw snake spelling also resolves (same ergonomics as colon-form namespaces)
+    await f.fetch_plus.scrape({ url: 'https://y' });
+    expect(dispatch).toHaveBeenCalledWith(expect.anything(), 'fetch-plus.scrape', { url: 'https://y' });
+  });
+
+  it('respects the allowed-set whitelist for dot-form names (no bypass)', () => {
+    const f = buildToolFacade(
+      [mkTool('gitnexus.query'), mkTool('firecrawl.scrape')],
+      vi.fn(),
+      new Set(['gitnexus.query']),
+    );
+    expect(typeof f.gitnexus.query).toBe('function');
+    expect(f.firecrawl).toBeUndefined();
+  });
+
+  it('facadeToolNames includes dot-form plugin tool names alongside colon-form ones', () => {
+    const tools = [mkTool('plans:list'), mkTool('gitnexus.query'), mkTool('malformed-no-separator')];
+    expect(facadeToolNames(tools)).toEqual(['gitnexus.query', 'plans:list']);
+  });
+
+  it('a colon-form name is never mis-split on an incidental dot (colon wins)', async () => {
+    const dispatch = vi.fn(async () => ({ ok: true }));
+    // Namespace containing a dot would be unusual for a colon-form tool, but the
+    // separator choice must stay deterministic: colon wins whenever present.
+    const f = buildToolFacade([mkTool('a.b:verb')], dispatch);
+    await f.call('a.b:verb', {});
+    expect(dispatch).toHaveBeenCalledWith(expect.anything(), 'a.b:verb', {});
+    // and the ns bucket is keyed off the colon split, not the dot
+    expect(typeof f['a.b']?.verb).toBe('function');
+  });
+});
+
 describe('roleScopedToolNames (code:run / code:tools facade scoping)', () => {
   const TOOLS = [
     mkRoleTool('plans:list', ['worker', 'operator']),

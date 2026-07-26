@@ -23,7 +23,7 @@
  */
 import type { SourceFile, Expression, ObjectBindingPattern, Node } from 'typescript';
 import type { ProjectedTool } from '../tool-projection';
-import { camelNamespace, camelVerb } from './tool-facade';
+import { camelNamespace, camelVerb, splitToolName } from './tool-facade';
 
 // PERF (FCP): `typescript` (the compiler) is ~3.4MB minified. This module is
 // re-exported through the `@papercusp/tooldef` + `@papercusp/agent-mcp` barrels,
@@ -92,10 +92,15 @@ export function checkScript(
   const fullNames = new Set<string>();
   for (const t of tools) {
     const name = t.expose?.mcp?.name;
-    if (!name || name.indexOf(':') <= 0) continue;
+    if (!name) continue;
+    // EI-18683272396981279: a plugin-namespaced tool projects with a DOT (`gitnexus.query`),
+    // not the canonical colon — recognize both shapes here the same way buildToolFacade does,
+    // or a plugin tool that IS reachable at runtime gets falsely flagged as an "unknown ref" by
+    // this static pre-check.
+    const split = splitToolName(name);
+    if (!split) continue;
     if (allowed && !allowed.has(name)) continue;
-    const ci = name.indexOf(':');
-    memberToName.set(`${camelNamespace(name.slice(0, ci))}.${camelVerb(name.slice(ci + 1))}`, name);
+    memberToName.set(`${camelNamespace(split.rawNs)}.${camelVerb(split.rawVerb)}`, name);
     fullNames.add(name);
   }
 
