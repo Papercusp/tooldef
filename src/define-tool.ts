@@ -815,58 +815,68 @@ function flattenForOpenAi(schema: Record<string, unknown>): Record<string, unkno
  * `additionalProperties: false` at every level and the model can SEE the shape
  * is closed instead of discovering it by accident.
  */
-function deepStrictifyInPlace(schema: unknown, seen: WeakSet<object>): unknown {
+function deepStrictifyInPlace(schema: unknown, active: Set<object>): unknown {
   if (!schema || typeof schema !== 'object') return schema;
-  if (seen.has(schema as object)) return schema; // guards a cyclic/lazy schema
-  seen.add(schema as object);
+  // Stack-based (enter/exit) cycle guard, NOT a permanent "ever visited" set:
+  // a sub-schema legitimately gets reused BY REFERENCE across multiple sibling
+  // fields (e.g. the same row schema wrapped by both .optional() and
+  // .nullable()) — that must be processed on each path it's reached from, so
+  // only a schema currently on the ACTIVE recursion stack (a true cycle, e.g. a
+  // self-referential z.lazy()) short-circuits; a shared reference already
+  // popped off the stack by the time a sibling field reaches it recurses fine.
+  if (active.has(schema as object)) return schema;
+  active.add(schema as object);
+  try {
+    const s = schema as { strict?: () => unknown; _zod?: { def?: Record<string, unknown> } };
+    const def = s._zod?.def;
+    if (!def || typeof def.type !== 'string') return schema;
 
-  const s = schema as { strict?: () => unknown; _zod?: { def?: Record<string, unknown> } };
-  const def = s._zod?.def;
-  if (!def || typeof def.type !== 'string') return schema;
-
-  switch (def.type) {
-    case 'object': {
-      const shape = def.shape as Record<string, unknown> | undefined;
-      if (shape) {
-        for (const key of Object.keys(shape)) {
-          shape[key] = deepStrictifyInPlace(shape[key], seen);
+    switch (def.type) {
+      case 'object': {
+        const shape = def.shape as Record<string, unknown> | undefined;
+        if (shape) {
+          for (const key of Object.keys(shape)) {
+            shape[key] = deepStrictifyInPlace(shape[key], active);
+          }
         }
+        return typeof s.strict === 'function' ? s.strict() : schema;
       }
-      return typeof s.strict === 'function' ? s.strict() : schema;
+      case 'array':
+        def.element = deepStrictifyInPlace(def.element, active);
+        return schema;
+      case 'optional':
+      case 'nullable':
+      case 'default':
+      case 'readonly':
+      case 'catch':
+      case 'prefault':
+        def.innerType = deepStrictifyInPlace(def.innerType, active);
+        return schema;
+      case 'record':
+        def.valueType = deepStrictifyInPlace(def.valueType, active);
+        return schema;
+      case 'union':
+        // Covers z.union AND z.discriminatedUnion (same def.type in Zod 4) — each
+        // variant gets strictified too, closing the same class one level further
+        // than the pre-existing top-level-union pass-through did.
+        def.options = (def.options as unknown[]).map((o) => deepStrictifyInPlace(o, active));
+        return schema;
+      case 'pipe':
+        // z.preprocess(fn, target) compiles to a pipe { in: <transform>, out: <target> };
+        // `out` is what actually gets validated post-transform.
+        def.out = deepStrictifyInPlace(def.out, active);
+        return schema;
+      default:
+        return schema;
     }
-    case 'array':
-      def.element = deepStrictifyInPlace(def.element, seen);
-      return schema;
-    case 'optional':
-    case 'nullable':
-    case 'default':
-    case 'readonly':
-    case 'catch':
-    case 'prefault':
-      def.innerType = deepStrictifyInPlace(def.innerType, seen);
-      return schema;
-    case 'record':
-      def.valueType = deepStrictifyInPlace(def.valueType, seen);
-      return schema;
-    case 'union':
-      // Covers z.union AND z.discriminatedUnion (same def.type in Zod 4) — each
-      // variant gets strictified too, closing the same class one level further
-      // than the pre-existing top-level-union pass-through did.
-      def.options = (def.options as unknown[]).map((o) => deepStrictifyInPlace(o, seen));
-      return schema;
-    case 'pipe':
-      // z.preprocess(fn, target) compiles to a pipe { in: <transform>, out: <target> };
-      // `out` is what actually gets validated post-transform.
-      def.out = deepStrictifyInPlace(def.out, seen);
-      return schema;
-    default:
-      return schema;
+  } finally {
+    active.delete(schema as object);
   }
 }
 
 export function strictArgs<T>(schema: T): T {
   try {
-    return deepStrictifyInPlace(schema, new WeakSet()) as unknown as T;
+    return deepStrictifyInPlace(schema, new Set()) as unknown as T;
   } catch {
     return schema;
   }

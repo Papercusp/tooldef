@@ -162,6 +162,11 @@ describe('strictArgs deep nesting (EI-18723223344390510)', () => {
     expect(parse(schema, { byId: { k1: { claim: 'x', extra: 1 } } }).ok).toBe(false);
   });
 
+  it('never crashes on a self-referential z.lazy field (left untouched, fail-open)', () => {
+    const Node: z.ZodTypeAny = z.lazy(() => z.object({ id: z.string(), children: z.array(Node).optional() }));
+    expect(() => strictArgs(z.object({ tree: Node }))).not.toThrow();
+  });
+
   it('still passes a bare top-level union through unchanged (no crash, same referential identity)', () => {
     const union = z.discriminatedUnion('op', [
       z.object({ op: z.literal('a'), a: z.string() }),
