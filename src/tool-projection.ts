@@ -327,6 +327,26 @@ export interface UnifiedToolContext {
    * `payloadTier` arg outranks it.
    */
   contextTier?: import('./payload-tier').PayloadTier;
+  /**
+   * True when this call's result does NOT cross the agent-facing transport and
+   * therefore must not be force-shaped by `applyPayloadTier`'s hard ceiling
+   * (EI-18719561823587590). Set by an IN-PROCESS consumer that reads the data
+   * programmatically — today, `code:run`'s inner dispatch, whose intermediate
+   * results exist only for the script's own control flow (`.length`,
+   * `.filter()`, a completeness check) and never enter anyone's context.
+   *
+   * ⚠ The hard ceiling ignores the resolved tier entirely, so clearing
+   * `contextTier` (or resolving to 'full') is NOT sufficient to get the true
+   * full payload — that only skips STEP 1 tier shaping. This flag is what skips
+   * STEP 2. Losing that distinction is the whole bug: a `code:run` script's
+   * `.find()` searched a silently row-truncated subset, and its "not found" was
+   * indistinguishable from real absence.
+   *
+   * Only ever set it for a consumer that genuinely does not serialize the result
+   * to an agent — an over-cap payload on the MCP transport is a hard failure,
+   * not a large message.
+   */
+  transportCapExempt?: boolean;
   /** Aborts on per-tool timeout, parent cancellation, or shutdown. */
   signal: AbortSignal;
   /**

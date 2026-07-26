@@ -1072,8 +1072,10 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       tier: resolvePayloadTier(callTier, ctx.contextTier),
       // An explicit per-call payloadTier:'full' is the documented escape hatch
       // out of shaping AND the hard ceiling (WI-5078) — only the arg counts,
-      // never a defaulted/session 'full'.
-      explicitFullRequest: callTier === 'full',
+      // never a defaulted/session 'full'. A ctx-borne `transportCapExempt`
+      // consumer (code:run's inner dispatch — the result never reaches an
+      // agent's context) gets the same exemption (EI-18719561823587590).
+      explicitFullRequest: callTier === 'full' || ctx.transportCapExempt === true,
       args: parsed.value,
       log: (m) => ctx.log(m),
     });
@@ -1200,8 +1202,10 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
       tier: resolvePayloadTier(callTier, ctx.contextTier),
       // An explicit per-call payloadTier:'full' is the documented escape hatch
       // out of shaping AND the hard ceiling (WI-5078) — only the arg counts,
-      // never a defaulted/session 'full'.
-      explicitFullRequest: callTier === 'full',
+      // never a defaulted/session 'full'. A ctx-borne `transportCapExempt`
+      // consumer (code:run's inner dispatch — the result never reaches an
+      // agent's context) gets the same exemption (EI-18719561823587590).
+      explicitFullRequest: callTier === 'full' || ctx.transportCapExempt === true,
       args: parsed.value,
       log: (m) => ctx.log(m),
     });
