@@ -127,6 +127,45 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     ]);
   });
 
+  // EI-18664105352441219: the house bulk-envelope contract (_bulk.ts's runBulk/bulkContent)
+  // ALWAYS returns a top-level `ok: true` ("the batch ran") even when every individual item
+  // failed — `counts.failed` is where per-item truth lives. plans:add-item against a
+  // non-existent plan is the reported case: `{ ok:true, results:[{ ok:false, error:'not_found' }],
+  // counts:{ ok:0, failed:1 } }`. Without bulk-envelope awareness, isOkFalseResult (top-level
+  // `ok` only) never sees this as a failure, so a batched write that failed for every item reads
+  // as a clean, fully-landed mutation.
+  it('a write-effect call returning a bulk envelope with a per-item failure is tallied in okFalseMutations, even though the envelope\'s own top-level ok is true', async () => {
+    const addItem = mkTool('plans:add-item', 'write', async () =>
+      json({ ok: true, results: [{ ok: false, slug: 'missing-plan', error: 'not_found' }], counts: { ok: 0, failed: 1 } }),
+    );
+    const r = await runToolOrchestration(
+      `const res = await tools.plans.addItem({ slug: 'missing-plan', phase: 'Phase 1', text: 't', importance: 'normal' });
+       return { addItemOk: res.ok };`, // the script's own (misleadingly-true) top-level ok check
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [addItem] },
+    );
+    expect(r.ok).toBe(true);
+    expect((r.summary as { addItemOk: boolean }).addItemOk).toBe(true); // the script's own wrong read
+    const okFalseMutations = r.okFalseMutations ?? [];
+    expect(okFalseMutations).toHaveLength(1);
+    expect(okFalseMutations[0]?.tool).toBe('plans:add-item');
+    expect(r.partial).toBe(true); // EI-7784: the structural signal a top-level-ok check misses
+    expect(r.childFailures).toEqual([
+      expect.objectContaining({ tool: 'plans:add-item', kind: 'semantic' }),
+    ]);
+  });
+
+  it('a bulk envelope with zero per-item failures is NOT tallied as a semantic failure', async () => {
+    const addItem = mkTool('plans:add-item', 'write', async () =>
+      json({ ok: true, results: [{ ok: true, slug: 's', itemId: 'P-001' }], counts: { ok: 1, failed: 0 } }),
+    );
+    const r = await runToolOrchestration(
+      `await tools.plans.addItem({ slug: 's', phase: 'Phase 1', text: 't', importance: 'normal' }); return 'done';`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [addItem] },
+    );
+    expect(r.okFalseMutations).toEqual([]);
+    expect(r.partial).toBe(false);
+  });
+
   it('dryRun never populates okFalseMutations — write-effect calls are not executed', async () => {
     const setState = mkTool('wi:set-state', 'write', async () => json({ ok: false, error: 'nope' }));
     const r = await runToolOrchestration(

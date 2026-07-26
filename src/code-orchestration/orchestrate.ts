@@ -155,6 +155,30 @@ function isOkFalseResult(value: unknown): value is { ok: false; [key: string]: u
   );
 }
 
+/**
+ * True when `value` is a house BULK envelope (`{ ok: true, results: [...], counts: { failed } }`
+ * — the keyed-array bulk contract, `_bulk.ts`'s `runBulk`/`bulkContent`) reporting at least one
+ * per-item failure. By that contract's OWN design the top-level `ok` is ALWAYS `true` ("the batch
+ * ran"; `counts.failed` is where per-item truth lives), so `isOkFalseResult` alone never catches a
+ * partial bulk failure (EI-18664105352441219: `plans:add-item` against a non-existent plan
+ * returned `{ ok:true, results:[{ ok:false, error:'not_found' }], counts:{ ok:0, failed:1 } }`,
+ * and a batched script's own mutation tally read it as a landed write — `code:run` reported
+ * `mutations:{ count:1 }` for a write that never happened). Detecting this here, once, covers
+ * every one of the ~64 existing bulk-contract tools (and any future one) without each having to
+ * special-case its own top-level `ok`.
+ */
+function isBulkPartialFailure(
+  value: unknown,
+): value is { ok: true; results: Array<{ ok: boolean; [k: string]: unknown }>; counts: { failed: number } } {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  if (v.ok !== true || !Array.isArray(v.results)) return false;
+  const counts = v.counts;
+  if (typeof counts !== 'object' || counts === null) return false;
+  const failed = (counts as Record<string, unknown>).failed;
+  return typeof failed === 'number' && failed > 0;
+}
+
 export async function runToolOrchestration(
   script: string,
   opts: OrchestrateOptions,
@@ -194,7 +218,7 @@ export async function runToolOrchestration(
       // but reports its OWN semantic rejection (ok: false in its result body, e.g. a completion-
       // integrity check) resolves normally here. Tally those so a batched script that doesn't check
       // every result still gets visibility instead of silently counting the write as executed.
-      if (isOkFalseResult(result)) {
+      if (isOkFalseResult(result) || isBulkPartialFailure(result)) {
         childFailures.push({ tool: name, kind: 'semantic', result });
         if (tool.effect === 'write') {
           okFalseMutations.push({ tool: name, args, result });

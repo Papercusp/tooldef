@@ -42,7 +42,9 @@ const FORMAT_MARKER_RE = /^format: (\S+)\n/;
  */
 export function unwrapToolResult(result: ToolResult | undefined): unknown {
   if (!result) return undefined;
-  if (result.structuredContent !== undefined) return result.structuredContent;
+  if (result.structuredContent !== undefined) {
+    return withIsErrorOk(result.structuredContent, result.isError);
+  }
   // Narrow on the `type` discriminant — the prior `c is { text: string }` predicate was not a
   // subtype of the content union (TS2677) so it failed to narrow, leaving `.text` unreadable on
   // the image/resource variants (TS2339). Extracting the 'text' member fixes both.
@@ -52,17 +54,44 @@ export function unwrapToolResult(result: ToolResult | undefined): unknown {
   const marker = FORMAT_MARKER_RE.exec(text);
   if (marker && isResultFormat(marker[1]) && marker[1] !== 'md') {
     try {
-      return decode(text.slice(marker[0].length), marker[1]);
+      return withIsErrorOk(decode(text.slice(marker[0].length), marker[1]), result.isError);
     } catch {
       // Fall through to the JSON/raw-text attempts below — never let a decode
       // edge case throw here where the old behavior returned SOMETHING.
     }
   }
   try {
-    return JSON.parse(text);
+    return withIsErrorOk(JSON.parse(text), result.isError);
   } catch {
     return text;
   }
+}
+
+/**
+ * EI-18664105352441219: the MCP protocol's own `isError` flag is the AUTHORITATIVE
+ * "this call failed" signal (set by a tool returning `isError: true` alongside its
+ * content) — independent of whatever shape the handler's own JSON body happens to
+ * use. Several handlers signal failure via a bare `{ error: '<code>', ... }` body
+ * with NO `ok: false` field (plans:new's `similar_exists` refusal is the reported
+ * case: `{ error: 'similar_exists', slug, similar, hint }`, isError: true) — every
+ * sibling refusal in the same file has the identical shape (`busy`, `slug_exists`).
+ * Downstream, `isOkFalseResult` (orchestrate.ts) and a script's own idiomatic
+ * `res?.ok !== false` guard both only recognize a top-level `ok === false`, so the
+ * bare-`error` shape reads as a SUCCESS — no plan is written, but the caller (and
+ * the orchestrator's own semantic-failure tally) never finds out. Stamping
+ * `ok: false` onto the unwrapped value whenever the protocol says `isError` closes
+ * the gap for every existing and future handler using this shape, without
+ * requiring each one to remember to add `ok: false` explicitly. A handler that
+ * already sets `ok: false` (or anything other than a plain object, e.g. a raw-text
+ * fallback) is left untouched.
+ */
+function withIsErrorOk(value: unknown, isError: boolean | undefined): unknown {
+  if (!isError) return value;
+  if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+    const v = value as Record<string, unknown>;
+    if (v.ok !== false) return { ...v, ok: false };
+  }
+  return value;
 }
 
 /**
