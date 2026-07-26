@@ -769,7 +769,8 @@ function flattenForOpenAi(schema: Record<string, unknown>): Record<string, unkno
 }
 
 /**
- * EI-10883 — an unknown arg must be a HARD ERROR, never a silent drop.
+ * EI-10883 / EI-18723223344390510 — an unknown arg must be a HARD ERROR, never
+ * a silent drop, AT ANY DEPTH.
  *
  * Zod object schemas STRIP unknown keys by default. So a caller who passes an
  * arg the tool does not declare (`sessions:read { order:'asc' }`) gets back
@@ -783,19 +784,89 @@ function flattenForOpenAi(schema: Record<string, unknown>): Record<string, unkno
  * accepted and ignored by sessions:read; the agent concluded the tool had no head
  * read, burned two more calls, and drew a wrong conclusion about the data.
  *
- * Strictifying HERE — once, at registration — closes the class for the whole
- * catalog rather than tool-by-tool. It also runs BEFORE `toJsonSchema`, so the
- * published input schema now advertises `additionalProperties: false` and the
- * model can SEE that the shape is closed instead of discovering it by accident.
+ * EI-18723223344390510 — the ORIGINAL fix above only ever called `.strict()` on
+ * the OUTERMOST object schema. `.strict()` does NOT cascade: a row schema
+ * nested inside an array/optional/record/union field (e.g. `loop:checkpoint`'s
+ * `checks: z.array(z.object({ claim, recheck, verified }))`) stayed in Zod's
+ * default STRIP mode, so `{ claim, status:'verified', evidence:'Y' }` silently
+ * dropped `status`/`evidence` and returned `ok:true` — the exact EI-10883 failure
+ * mode, one level down, still live. Confirmed live: a verified external-state
+ * check with real evidence degraded to an unverified `PREDICTED` row on the next
+ * wake, with the evidence destroyed and no signal it had guessed the field names
+ * wrong (`verified` reads like a boolean; `status`+`evidence` is the natural,
+ * wrong guess).
  *
- * Only object schemas can be strictified (a union/discriminatedUnion has no
- * `.strict()`); anything else passes through untouched.
+ * Fix: walk the WHOLE schema tree — object/array/optional/nullable/default/
+ * readonly/catch/prefault/record/union/pipe (the pipe case covers
+ * `z.preprocess`, which is exactly how `checks` is wired) — and `.strict()`
+ * every object schema found, not just the root. The walk mutates each wrapper's
+ * inner-schema slot (`def.element`/`def.innerType`/`def.shape[k]`/`def.options`/
+ * `def.out`) IN PLACE before the schema is ever parsed; Zod 4 reads `_zod.def`
+ * fresh at parse time rather than baking a closure over the original reference
+ * at construction time, so the mutation takes effect for every subsequent call
+ * (verified directly, including for `z.discriminatedUnion`'s per-variant
+ * dispatch). Any `def.type` this walker doesn't recognize (tuple, intersection,
+ * lazy, …) is left completely untouched — fail-open, exactly like the original
+ * "no `.strict()` ⇒ pass through" behavior for unions.
+ *
+ * Runs HERE, once, at registration — closing the class for the whole catalog
+ * rather than tool-by-tool or field-by-field. It also runs BEFORE
+ * `toJsonSchema`, so the published input schema now advertises
+ * `additionalProperties: false` at every level and the model can SEE the shape
+ * is closed instead of discovering it by accident.
  */
+function deepStrictifyInPlace(schema: unknown, seen: WeakSet<object>): unknown {
+  if (!schema || typeof schema !== 'object') return schema;
+  if (seen.has(schema as object)) return schema; // guards a cyclic/lazy schema
+  seen.add(schema as object);
+
+  const s = schema as { strict?: () => unknown; _zod?: { def?: Record<string, unknown> } };
+  const def = s._zod?.def;
+  if (!def || typeof def.type !== 'string') return schema;
+
+  switch (def.type) {
+    case 'object': {
+      const shape = def.shape as Record<string, unknown> | undefined;
+      if (shape) {
+        for (const key of Object.keys(shape)) {
+          shape[key] = deepStrictifyInPlace(shape[key], seen);
+        }
+      }
+      return typeof s.strict === 'function' ? s.strict() : schema;
+    }
+    case 'array':
+      def.element = deepStrictifyInPlace(def.element, seen);
+      return schema;
+    case 'optional':
+    case 'nullable':
+    case 'default':
+    case 'readonly':
+    case 'catch':
+    case 'prefault':
+      def.innerType = deepStrictifyInPlace(def.innerType, seen);
+      return schema;
+    case 'record':
+      def.valueType = deepStrictifyInPlace(def.valueType, seen);
+      return schema;
+    case 'union':
+      // Covers z.union AND z.discriminatedUnion (same def.type in Zod 4) — each
+      // variant gets strictified too, closing the same class one level further
+      // than the pre-existing top-level-union pass-through did.
+      def.options = (def.options as unknown[]).map((o) => deepStrictifyInPlace(o, seen));
+      return schema;
+    case 'pipe':
+      // z.preprocess(fn, target) compiles to a pipe { in: <transform>, out: <target> };
+      // `out` is what actually gets validated post-transform.
+      def.out = deepStrictifyInPlace(def.out, seen);
+      return schema;
+    default:
+      return schema;
+  }
+}
+
 export function strictArgs<T>(schema: T): T {
-  const s = schema as unknown as { strict?: () => unknown };
-  if (typeof s?.strict !== 'function') return schema;
   try {
-    return s.strict() as unknown as T;
+    return deepStrictifyInPlace(schema, new WeakSet()) as unknown as T;
   } catch {
     return schema;
   }

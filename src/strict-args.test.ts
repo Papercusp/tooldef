@@ -79,6 +79,100 @@ describe('strictArgs (EI-10883)', () => {
   });
 });
 
+describe('strictArgs deep nesting (EI-18723223344390510)', () => {
+  // The reported bug: loop:checkpoint's `checks: z.array(z.object({ claim,
+  // recheck, verified }))` accepted `{ claim, status:'verified', evidence:'Y' }`
+  // silently — the row object was never strictified, only the top-level args
+  // object was. `.strict()` on the outer schema does not cascade into nested
+  // object schemas; the whole tree must be walked and strictified.
+
+  it('rejects an unknown key on an object nested inside an array field', () => {
+    const schema = strictArgs(
+      z.object({
+        checks: z
+          .array(
+            z.object({
+              claim: z.string(),
+              recheck: z.string().optional(),
+              verified: z.string().optional(),
+            }),
+          )
+          .max(12)
+          .optional(),
+      }),
+    );
+    expect(parse(schema, { checks: [{ claim: 'x', verified: 'evidence' }] }).ok).toBe(true);
+    const bad = parse(schema, { checks: [{ claim: 'x', status: 'verified', evidence: 'Y' }] });
+    expect(bad.ok).toBe(false);
+    expect(bad.message.toLowerCase()).toContain('unrecognized');
+  });
+
+  it('preserves array constraints (e.g. .max()) while strictifying the element', () => {
+    const schema = strictArgs(z.object({ checks: z.array(z.object({ claim: z.string() })).max(2) }));
+    expect(parse(schema, { checks: [{ claim: 'a' }, { claim: 'b' }] }).ok).toBe(true);
+    expect(parse(schema, { checks: [{ claim: 'a' }, { claim: 'b' }, { claim: 'c' }] }).ok).toBe(false);
+  });
+
+  it('rejects an unknown key on the exact loop:checkpoint `checks` shape (z.preprocess wrapping the array)', () => {
+    // Mirrors packages/operator-core/lib/agent-tools/loop/checkpoint.ts's real `checks` field.
+    const checksField = z
+      .preprocess((v) => {
+        if (typeof v !== 'string') return v;
+        try {
+          const parsed = JSON.parse(v);
+          return Array.isArray(parsed) ? parsed : v;
+        } catch {
+          return v;
+        }
+      }, z.array(z.object({ claim: z.string().min(1), recheck: z.string().optional(), verified: z.string().optional() })).max(12))
+      .optional();
+    const schema = strictArgs(z.object({ checks: checksField }));
+    expect(parse(schema, { checks: [{ claim: 'x', verified: 'ev' }] }).ok).toBe(true);
+    expect(parse(schema, { checks: [{ claim: 'x', status: 'verified', evidence: 'ev' }] }).ok).toBe(false);
+  });
+
+  it('rejects an unknown key on an object nested inside optional/nullable/default wrappers', () => {
+    const row = z.object({ claim: z.string() });
+    const schema = strictArgs(
+      z.object({
+        opt: row.optional(),
+        nul: row.nullable(),
+        def: row.default({ claim: 'x' }),
+      }),
+    );
+    expect(parse(schema, { opt: { claim: 'a' }, nul: { claim: 'b' } }).ok).toBe(true);
+    expect(parse(schema, { opt: { claim: 'a', extra: 1 } }).ok).toBe(false);
+    expect(parse(schema, { nul: { claim: 'b', extra: 1 } }).ok).toBe(false);
+  });
+
+  it('rejects an unknown key on an object nested inside a union variant, without breaking discriminatedUnion dispatch', () => {
+    const union = z.discriminatedUnion('op', [
+      z.object({ op: z.literal('a'), a: z.string() }),
+      z.object({ op: z.literal('b'), b: z.string() }),
+    ]);
+    const schema = strictArgs(z.object({ variant: union }));
+    expect(parse(schema, { variant: { op: 'a', a: 'x' } }).ok).toBe(true);
+    expect(parse(schema, { variant: { op: 'b', b: 'y' } }).ok).toBe(true);
+    expect(parse(schema, { variant: { op: 'a', a: 'x', extra: 1 } }).ok).toBe(false);
+  });
+
+  it('rejects an unknown key on an object nested inside a record value type', () => {
+    const schema = strictArgs(z.object({ byId: z.record(z.string(), z.object({ claim: z.string() })) }));
+    expect(parse(schema, { byId: { k1: { claim: 'x' } } }).ok).toBe(true);
+    expect(parse(schema, { byId: { k1: { claim: 'x', extra: 1 } } }).ok).toBe(false);
+  });
+
+  it('still passes a bare top-level union through unchanged (no crash, same referential identity)', () => {
+    const union = z.discriminatedUnion('op', [
+      z.object({ op: z.literal('a'), a: z.string() }),
+      z.object({ op: z.literal('b'), b: z.string() }),
+    ]);
+    const out = strictArgs(union);
+    expect(out).toBe(union);
+    expect(parse(out, { op: 'a', a: 'x' }).ok).toBe(true);
+  });
+});
+
 describe('suggestArgName', () => {
   it('corrects a typo to the nearest declared field', () => {
     expect(suggestArgName('summry', ['id', 'summary', 'harness'])).toBe('summary');
