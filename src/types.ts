@@ -569,6 +569,8 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
    * `registerLegacyAsProjected` and read by the host dispatch's crossWorkspace branch.
    */
   crossWorkspace?: boolean;
+  /** See `RoleToolDefinitionInput.skipWorkspaceTx` — same opt-out, principal-gated side. */
+  skipWorkspaceTx?: boolean;
 }
 
 /** Input shape for `defineTool` — same as ToolDefinition minus derived fields. */
@@ -693,6 +695,8 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
    * legitimately spans workspaces (e.g. the user-/harness-scoped memory store)
    * so it runs from an unscoped superuser session instead of `workspace_required`. */
   crossWorkspace?: boolean;
+  /** See `RoleToolDefinitionInput.skipWorkspaceTx` — same opt-out, principal-gated side. */
+  skipWorkspaceTx?: boolean;
 }
 
 /**
@@ -777,6 +781,30 @@ export interface RoleToolDefinition<
    * that tool. Read by the host's `runScoped` seam off `ProjectedTool`.
    */
   crossWorkspace?: boolean;
+  /**
+   * EI-18666279107998059: opt out of holding the ambient workspace transaction
+   * open for this tool's ENTIRE handler execution. By default the HTTP host wraps
+   * a workspace-scoped call's whole `tool.handler(...)` inside one `withWorkspace`
+   * Postgres transaction (`dispatchNeedsTx` is true for essentially every scoped
+   * call) — fine for the overwhelming majority of tools, which return quickly, but
+   * a tool whose handler legitimately BLOCKS for a long time doing NO `ctx.tx`
+   * queries of its own (e.g. `capability:bash` awaiting a multi-minute child
+   * process) leaves that transaction sitting IDLE for the whole wait. Once the
+   * idle time exceeds Postgres's `idle_in_transaction_session_timeout` (60s on
+   * this deployment), the server kills the connection, and the tool call fails
+   * with a bare `write CONNECTION_CLOSED 127.0.0.1:6432` — a PgBouncer-port error
+   * that looks like an infra outage but is really "this specific call's ambient
+   * tx went idle too long." The correlation is with wall-clock call DURATION, not
+   * the command run, which is what makes it look intermittent/mysterious.
+   *
+   * Set `skipWorkspaceTx: true` on a tool whose handler never reads `ctx.tx` (a
+   * quick grep for `ctx.tx` in the handler is the check) and may run long. The
+   * host still synthesizes `ctx.principal` correctly (a SEPARATE short-lived
+   * transaction, committed in milliseconds) so capability/role gating is
+   * completely unaffected — only the long-lived ambient tx around the handler
+   * body itself is skipped. Absent/false ⇒ today's behavior, byte-identical.
+   */
+  skipWorkspaceTx?: boolean;
   /**
    * Surfaces this tool is meaningful from. Phase 4 T3.1. The prompt-
    * assembly catalog renderer filters by the caller's modality so voice
@@ -876,6 +904,8 @@ export interface RoleToolDefinitionInput<
   replayBufferSize?: number;
   /** See RoleToolDefinition.crossWorkspace. */
   crossWorkspace?: boolean;
+  /** See RoleToolDefinition.skipWorkspaceTx (EI-18666279107998059). */
+  skipWorkspaceTx?: boolean;
   /** See RoleToolDefinition.modality. */
   modality?: ReadonlyArray<'text' | 'voice'>;
   /** See RoleToolDefinition.state. */

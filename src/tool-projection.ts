@@ -902,6 +902,15 @@ export interface ProjectedTool {
    */
   crossWorkspace?: boolean;
   /**
+   * EI-18666279107998059: read by the HTTP host's `dispatchWithSynthesizedTx`
+   * seam — when true, the ambient workspace transaction is committed right
+   * after principal synthesis instead of being held open for this tool's whole
+   * handler execution. See `RoleToolDefinition.skipWorkspaceTx` for the full
+   * rationale (a long-blocking, no-`ctx.tx` handler otherwise sits idle in a
+   * transaction until Postgres's `idle_in_transaction_session_timeout` kills it).
+   */
+  skipWorkspaceTx?: boolean;
+  /**
    * Surfaces this tool is meaningful from. Phase 4 T3.1. The prompt-
    * assembly catalog renderer filters by the caller's modality so
    * voice surfaces only see voice-capable tools. Absent → callers
