@@ -407,7 +407,7 @@ function applyPositionalWriteShim(name: string, argsJsonSchema: Record<string, u
  * overrides an explicit value, and it is a no-op for every tool that already declares
  * `harness` itself (the common case).
  */
-function applyHarnessArgAlias(argsJsonSchema: Record<string, unknown>, input: unknown): unknown {
+export function applyHarnessArgAlias(argsJsonSchema: Record<string, unknown>, input: unknown): unknown {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
   const rec = input as Record<string, unknown>;
   if (!('harness' in rec) || 'harness_slug' in rec) return input;
@@ -1147,7 +1147,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       // exactly why this shipped green.
       ...(ctx.telemetrySurface ? { telemetrySurface: ctx.telemetrySurface } : {}),
     };
-    const shimmed = applyPositionalWriteShim(def.name, rawSchema, tierlessInput);
+    const shimmed = applyHarnessArgAlias(rawSchema, applyPositionalWriteShim(def.name, rawSchema, tierlessInput));
     const parsed = await standardValidate(def.args, shimmed);
     if (!parsed.ok) {
       throw new InvalidInputError(
@@ -1271,7 +1271,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     // Framework-reserved per-call tier override is stripped next — BEFORE
     // validation (context-trimming-tiers D-004; not part of any tool's schema).
     const { input: tierlessInput, callTier } = extractPayloadTier(unwrapUnparsedToolInput(input));
-    const shimmed = applyPositionalWriteShim(def.name, rawSchema, tierlessInput);
+    const shimmed = applyHarnessArgAlias(rawSchema, applyPositionalWriteShim(def.name, rawSchema, tierlessInput));
     const parsed = await standardValidate(def.args, shimmed);
     if (!parsed.ok) {
       throw new InvalidInputError(
