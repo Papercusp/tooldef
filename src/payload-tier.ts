@@ -297,21 +297,39 @@ function projectValue(value: unknown, path: string, depth: number, state: Projec
       return projected;
     }
 
+    // EI-18683546971375407: project IDENTITY_FIELDS (id/ok/kind/title/status/…)
+    // BEFORE any other key, regardless of the object's own insertion order. Without
+    // this, a bulk `results[i]` element whose non-identity fields (workItem,
+    // checkpoint, summary, …) are large can exhaust `state.remaining` partway
+    // through the key loop — and since the budget check below breaks the loop the
+    // MOMENT it trips, whichever keys hadn't been reached yet (often `id` itself,
+    // since handlers conventionally return `{ ok, id, ...detail }` but detail is
+    // what's bulky) are silently dropped, producing a bare `{ok:true}` or even `{}`
+    // stub that has lost its correlation key entirely. That reads exactly like a
+    // dropped row (a bulk caller sees fewer usable results than ids requested,
+    // `ok:true`, no error) when the row was actually present, just stripped bare by
+    // projection. Same failure CLASS as EI-11404's depth-limit case (which already
+    // fixed the analogous problem at the nesting-depth boundary via
+    // projectIdentityPreview) — this fixes the budget-exhaustion boundary in the
+    // NORMAL (non-depth-limited) path with the same IDENTITY_FIELDS priority.
     const entries = Object.entries(value as Record<string, unknown>);
+    const prioritized = entries.length > 1
+      ? [...entries].sort((a, b) => Number(IDENTITY_FIELDS.has(b[0])) - Number(IDENTITY_FIELDS.has(a[0])))
+      : entries;
     const projected: Record<string, unknown> = {};
-    const shown = entries.slice(0, state.limits.maxKeys);
+    const shown = prioritized.slice(0, state.limits.maxKeys);
     for (let i = 0; i < shown.length; i += 1) {
       const [key, child] = shown[i];
       const keyCost = jsonLen(key) + 2;
       if (state.remaining < keyCost + 128) {
-        recordOmission(state, `${path}.${key}`, 'remaining fields omitted to fit projection budget', entries.length - i);
+        recordOmission(state, `${path}.${key}`, 'remaining fields omitted to fit projection budget', shown.length - i);
         break;
       }
       state.remaining -= keyCost;
       projected[key] = projectValue(child, `${path}.${key}`, depth + 1, state);
     }
-    if (entries.length > shown.length) {
-      recordOmission(state, `${path}.*`, `${entries.length - shown.length} object fields omitted`, entries.length - shown.length);
+    if (prioritized.length > shown.length) {
+      recordOmission(state, `${path}.*`, `${prioritized.length - shown.length} object fields omitted`, prioritized.length - shown.length);
     }
     return projected;
   } finally {

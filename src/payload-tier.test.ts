@@ -255,6 +255,39 @@ describe('applyPayloadTier', () => {
     });
     expect(projected._projection.next).not.toContain('narrower filters/ids');
   });
+
+  it('retains `id`/`ok` for every bulk results[] row even when per-key BUDGET (not depth) runs out mid-object (EI-18683546971375407)', () => {
+    // Each row's bulky fields (workItem.summary, checkpoint) come AFTER id/ok in
+    // insertion order — exactly the shape work_items:get returns — so a naive
+    // insertion-order key loop starves `id` out once the budget trips partway
+    // through a row, well before the generic depth limit (maxDepth) is ever hit.
+    const bigBlob = 'x'.repeat(1_500);
+    const results = Array.from({ length: 8 }, (_, i) => ({
+      ok: true,
+      id: `EI-${1000 + i}`,
+      workItem: { id: `EI-${1000 + i}`, title: `row ${i}`, summary: bigBlob },
+      checkpoint: bigBlob,
+    }));
+    const envelope = { ok: true, results, counts: { ok: results.length, failed: 0 } };
+
+    const projected = projectBoundedPayload(envelope, { toolName: 'work_items:get', tier: 'trimmed' });
+    const rows = projected.results as Array<Record<string, unknown>>;
+
+    expect(rows.length).toBeGreaterThan(0);
+    // The real regression: BEFORE the fix, a row whose budget ran out mid-object
+    // could come back as a bare `{ok:true}` (or even `{}`) — no `id` at all, so a
+    // bulk caller cannot tell which requested id that row even corresponds to.
+    // Every row actually present in the projection must still carry its `id`,
+    // however aggressively its OTHER fields got trimmed/omitted.
+    for (const row of rows) {
+      expect(row.id).toBeDefined();
+      expect(typeof row.id).toBe('string');
+    }
+    // The budget genuinely was exhausted (this is what made the old code drop
+    // ids in the first place) — confirm we actually exercised that path, not a
+    // no-op fast path where nothing needed trimming.
+    expect(projected._projection.omittedCount).toBeGreaterThan(0);
+  });
 });
 
 describe('payloadProjection meta (EI-13918)', () => {
