@@ -55,6 +55,29 @@ export function camelVerb(verb: string): string {
 }
 
 /**
+ * Split a projected tool's full MCP name into its namespace + verb, tolerating BOTH the
+ * canonical colon shape (`ns:verb`) and the DOT shape a plugin-namespaced tool projects as
+ * (`plugin.verb`, e.g. `gitnexus.query` — see `registerPluginTools` in `@papercusp/plugin-loader`,
+ * which mounts each plugin tool as `<shortPluginName>.<tool.name>` by default). Colon wins when
+ * both are present (deterministic; a colon-form name is never mis-split on an incidental dot in
+ * its verb). Returns `null` for a name with neither separator — nothing recognizable to expose.
+ *
+ * EI-18683272396981279: before this, every dot-form (plugin) tool name failed the colon-only
+ * check every facade builder ran and was silently absent from `code:run`/`code:tools` — a plugin
+ * tool the agent's `allowed` envelope already includes (role/capability scoping is unaffected by
+ * this — see `roleScopedToolNames`) was simply never reachable through the facade at all, with no
+ * error naming why, silently pushing agents back to a worse tool (e.g. raw grep instead of
+ * `gitnexus.query`) whenever they followed the batching (`code:run`) nudge.
+ */
+export function splitToolName(name: string): { rawNs: string; rawVerb: string } | null {
+  const ci = name.indexOf(':');
+  if (ci > 0) return { rawNs: name.slice(0, ci), rawVerb: name.slice(ci + 1) };
+  const di = name.indexOf('.');
+  if (di > 0) return { rawNs: name.slice(0, di), rawVerb: name.slice(di + 1) };
+  return null;
+}
+
+/**
  * The ergonomic spellings an agent might write for ONE identifier (a namespace
  * or a verb), so any of them resolves against the facade:
  *   - the camel form            — `workItems`, `wakeQueue`
@@ -100,13 +123,12 @@ export function buildToolFacade(
   for (const tool of tools) {
     const name = tool.expose?.mcp?.name;
     if (!name) continue;
-    const ci = name.indexOf(':');
-    if (ci <= 0) continue; // skip names without a `ns:verb` shape
+    const split = splitToolName(name);
+    if (!split) continue; // skip names without a `ns:verb` / `ns.verb` shape
     if (allowed && !allowed.has(name)) continue;
 
     byName.set(name, tool);
-    const rawNs = name.slice(0, ci);
-    const rawVerb = name.slice(ci + 1);
+    const { rawNs, rawVerb } = split;
     const ns = camelNamespace(rawNs);
     const verb = camelVerb(rawVerb);
     if (rawNs === 'call' || ns === 'call') continue; // never shadow the escape hatch
@@ -163,7 +185,7 @@ export function facadeToolNames(
   const out: string[] = [];
   for (const tool of tools) {
     const name = tool.expose?.mcp?.name;
-    if (!name || name.indexOf(':') <= 0) continue;
+    if (!name || !splitToolName(name)) continue;
     if (allowed && !allowed.has(name)) continue;
     out.push(name);
   }

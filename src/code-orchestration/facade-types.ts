@@ -31,7 +31,7 @@
  * the model never sees a signature for a tool it cannot call.
  */
 import type { ProjectedTool } from '../tool-projection';
-import { camelNamespace, camelVerb } from './tool-facade';
+import { camelNamespace, camelVerb, splitToolName } from './tool-facade';
 
 /** A JSON Schema node (we only read well-known keywords; everything else degrades to `unknown`). */
 type JsonSchema = Record<string, unknown>;
@@ -299,10 +299,10 @@ function facadeEntries(
   for (const tool of tools) {
     const name = tool.expose?.mcp?.name;
     if (!name) continue;
-    const ci = name.indexOf(':');
-    if (ci <= 0) continue;
+    const split = splitToolName(name);
+    if (!split) continue;
     if (opts.allowed && !opts.allowed.has(name)) continue;
-    const rawNs = name.slice(0, ci);
+    const { rawNs, rawVerb } = split;
     const ns = camelNamespace(rawNs);
     if (rawNs === 'call' || ns === 'call') continue; // never shadow the escape hatch
     // When a subset is requested, include a tool if its ns OR its full name matches.
@@ -312,7 +312,7 @@ function facadeEntries(
     }
     entries.push({
       ns,
-      verb: camelVerb(name.slice(ci + 1)),
+      verb: camelVerb(rawVerb),
       name,
       desc: shortDesc(tool.description),
       args: toolArgsType(tool, opts.maxDepth),
