@@ -531,7 +531,7 @@ function defineRouteShaped<TInputSchema extends ZodTypeAny | undefined>(
  * `:manage`/`:execute`) ⇒ 'write'; everything else ⇒ 'read'. An explicit `effect` always
  * wins. Consumed by the code-execution sandbox's dry-run/confirm gate (read-only ⇒ no gate).
  */
-const WRITE_CAPABILITY_SUFFIXES = [':write', ':admin', ':delete', ':manage', ':execute'] as const;
+export const WRITE_CAPABILITY_SUFFIXES = [':write', ':admin', ':delete', ':manage', ':execute'] as const;
 /**
  * Known-mutating capabilities whose names don't end in a write-suffix — the
  * `capability:*` host-capability family (bash/fs-write/edit/write/git/computer/net) plus
@@ -546,7 +546,7 @@ const WRITE_CAPABILITY_SUFFIXES = [':write', ':admin', ':delete', ':manage', ':e
  * files under a `*:read` cap) sets `effect: 'write'` on its own def instead of polluting
  * this set (which would wrongly flip its read siblings). B-CX-EFFECT audit (2026-06-20).
  */
-const WRITE_CAPABILITIES = new Set<string>([
+export const WRITE_CAPABILITIES = new Set<string>([
   'capability:bash',
   'capability:fs-write',
   'capability:edit',
@@ -562,7 +562,19 @@ const WRITE_CAPABILITIES = new Set<string>([
   'operator:converse', // brain turn: spawns agents, records spend, mem0.add, dispatches <spawn>
   'activity:report', // inserts an agent-activity row
 ]);
-function inferEffect(capability: string, explicit?: 'read' | 'write'): 'read' | 'write' {
+/**
+ * THE effect oracle. Exported (not merely used here) because it is the only
+ * authoritative answer to "does this capability mutate?" in the tree, and callers
+ * outside `defineTool` need it: a static scanner that cannot execute `defineTool`
+ * — e.g. `scripts/check-no-bespoke-state-read.mjs`, whose whole bug class was
+ * inferring effect from a tool's NAME while this function sat one lib away
+ * (WI-6464: `processes:control` read as a state READ, so `processes:freeze` and
+ * `processes:limit` were reported as undeclared state reads for hours).
+ *
+ * Anything re-deriving effect from naming is a second, drifting answer to a
+ * question this owns. Consult it instead.
+ */
+export function inferCapabilityEffect(capability: string, explicit?: 'read' | 'write'): 'read' | 'write' {
   if (explicit) return explicit;
   const cap = capability.toLowerCase();
   if (WRITE_CAPABILITIES.has(cap)) return 'write';
@@ -590,7 +602,7 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
     description,
     capability: input.capability,
     tier,
-    effect: inferEffect(input.capability, input.effect),
+    effect: inferCapabilityEffect(input.capability, input.effect),
     idempotent: input.idempotent,
     replaces: input.replaces,
     composition: (input.replaces?.length ?? 0) > 0 ? 'composite' : 'primitive',
@@ -672,7 +684,7 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
     description,
     capability: input.capability,
     tier,
-    effect: inferEffect(input.capability, input.effect),
+    effect: inferCapabilityEffect(input.capability, input.effect),
     idempotent: input.idempotent,
     replaces: input.replaces,
     composition: (input.replaces?.length ?? 0) > 0 ? 'composite' : 'primitive',

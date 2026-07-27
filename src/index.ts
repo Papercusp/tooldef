@@ -45,7 +45,14 @@ export type {
 } from './host-types';
 
 /* ─── defineTool + sibling authoring primitives ──────────────────────── */
-export { defineTool, toArgsJsonSchema } from './define-tool';
+export {
+  defineTool,
+  toArgsJsonSchema,
+  // The effect oracle — for static scanners that cannot execute defineTool (WI-6464).
+  inferCapabilityEffect,
+  WRITE_CAPABILITIES,
+  WRITE_CAPABILITY_SUFFIXES,
+} from './define-tool';
 export {
   applyPayloadTier,
   extractPayloadTier,
