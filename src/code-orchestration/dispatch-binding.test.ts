@@ -97,6 +97,30 @@ describe('unwrapToolResult (B-CX-1A dispatch binding)', () => {
     expect(result).toEqual({ error: 'similar_exists', slug: 's' });
   });
 
+  // WI-6458: a PROXIED upstream MCP server (gitnexus) appends a chat affordance after its
+  // JSON — `\n\n---\n**Next:** READ gitnexus://repo/{name}/context …`. JSON.parse throws on
+  // the trailer, so the script used to receive the whole raw STRING; its first natural line
+  // of consumption then failed with "Unexpected non-whitespace character after JSON at
+  // position 1040", which reads as a broken tool and sends the agent back to grep.
+  it('recovers the JSON value when a proxied tool appends a markdown footer to it', () => {
+    const value = [{ name: 'papercusp', nodes: 235033 }];
+    const text =
+      JSON.stringify(value) +
+      '\n\n---\n**Next:** READ gitnexus://repo/{name}/context for any repo above to get its overview and check staleness.';
+    expect(unwrapToolResult(tr({ content: [{ type: 'text', text }] as never }))).toEqual(value);
+  });
+
+  it('still stamps ok:false on a footer-suffixed payload when isError is set', () => {
+    const text = JSON.stringify({ error: 'not_indexed' }) + '\n\nRun `gitnexus analyze` first.';
+    const result = unwrapToolResult(tr({ content: [{ type: 'text', text }] as never, isError: true }));
+    expect(result).toMatchObject({ ok: false, error: 'not_indexed' });
+  });
+
+  it('leaves genuinely non-JSON text alone — the footer recovery never fires on prose', () => {
+    const text = 'No repos indexed yet. Run `gitnexus analyze` to build the graph.';
+    expect(unwrapToolResult(tr({ content: [{ type: 'text', text }] as never }))).toBe(text);
+  });
+
   it('isError:true on a non-object payload (raw text fallback) is left untouched', () => {
     const result = unwrapToolResult(tr({ content: [{ type: 'text', text: 'plain failure text' }] as never, isError: true }));
     expect(result).toBe('plain failure text');

@@ -25,6 +25,7 @@ export {
   type StaticToolCall,
 } from './parse-check';
 export { realDispatch, unwrapToolResult } from './dispatch-binding';
+export { parseJsonWithTrailer, type JsonWithTrailer } from './json-prefix';
 export {
   runToolOrchestration,
   type OrchestrateOptions,

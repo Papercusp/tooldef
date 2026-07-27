@@ -15,6 +15,7 @@ import type { DispatchProjectedDeps } from '../dispatch-types';
 import type { ToolResult } from '../wire';
 import { dispatchProjectedTool } from '../dispatch-projected';
 import type { FacadeDispatch } from './tool-facade';
+import { parseJsonWithTrailer } from './json-prefix';
 import { decode, isResultFormat } from '@papercusp/result-encoding';
 
 /** The `text` variant of a ToolResult content item, narrowed from the content union. */
@@ -39,6 +40,13 @@ const FORMAT_MARKER_RE = /^format: (\S+)\n/;
  * string, and the script's `result.ok` check passed, reporting a phantom plan creation.
  * Parse the marker first and DECODE with the matching format (the lossless inverse of
  * the encoder that produced it) so the script always sees the real structured value.
+ *
+ * WI-6458 is the same failure from the other direction: a PROXIED upstream MCP server
+ * (gitnexus) ends its text with a chat affordance — `\n\n---\n**Next:** READ gitnexus://…`
+ * — after otherwise-valid JSON, so `JSON.parse` throws and the script got the raw string.
+ * `parseJsonWithTrailer` recovers the leading value; the trailing prose is DROPPED for the
+ * script (it addresses a human/model reading the raw text, and the direct MCP path still
+ * returns it verbatim — only the code-mode facade unwraps).
  */
 export function unwrapToolResult(result: ToolResult | undefined): unknown {
   if (!result) return undefined;
@@ -63,6 +71,8 @@ export function unwrapToolResult(result: ToolResult | undefined): unknown {
   try {
     return withIsErrorOk(JSON.parse(text), result.isError);
   } catch {
+    const withTrailer = parseJsonWithTrailer(text);
+    if (withTrailer) return withIsErrorOk(withTrailer.value, result.isError);
     return text;
   }
 }
