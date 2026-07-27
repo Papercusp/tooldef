@@ -555,6 +555,7 @@ const WRITE_CAPABILITIES = new Set<string>([
   'capability:computer',
   'capability:net', // outbound HTTP (capability:fetch) — can POST/PUT/DELETE → external mutation
   'processes:kill',
+  'processes:control', // freezes/thaws or re-budgets a live task's cgroup
   'turn:interrupt', // ends a peer agent's current turn
   'ui:dispatch', // performs a UI intent (click/navigate/submit) in a browser tab
   'tui:dispatch', // performs a control intent against a running pui workbench
