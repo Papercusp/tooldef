@@ -1100,6 +1100,22 @@ export type { UIResourceContent as UIResource };
 export type CardPresentation =
   | { kind: 'radio'; options: CardOption[]; voiceAnswerable?: boolean }
   | { kind: 'checkbox'; options: CardOption[] }
+  /**
+   * Single-choice, rendered COMPACT (a dropdown) rather than one row per
+   * option. Same answer shape as `radio` — the difference is purely how much
+   * room the option set is allowed to take.
+   *
+   * Exists because `radio` is the only single-choice kind and it renders every
+   * option as a full-width row: a picker with a dozen options consumes its
+   * whole surface. Reported by the owner 2026-07-27 against the chat action
+   * bar's rubric picker, which filled the entire chat popup. Prefer this
+   * whenever the option set is open-ended or large enough that the caller
+   * cannot promise it stays short; keep `radio` for a handful of options that
+   * benefit from being visible at a glance.
+   *
+   * `placeholder` is the trigger's resting text before a choice is made.
+   */
+  | { kind: 'select'; options: CardOption[]; placeholder?: string }
   | { kind: 'text'; placeholder?: string; multiline?: boolean }
   | { kind: 'date'; min?: string; max?: string }
   | { kind: 'slider'; min: number; max: number; step?: number };
