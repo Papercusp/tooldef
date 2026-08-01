@@ -188,8 +188,16 @@ export function detectStrandedWrites(
   tools: readonly ProjectedTool[],
   dispatchedToolNames: readonly string[],
 ): string[] {
+  // `expose.mcp.name` is the canonical projected name — the SAME accessor buildToolFacade and
+  // facadeToolNames use, and the one `checkScript` resolves its `calls` against. A ProjectedTool
+  // has no top-level `.name`; reading one yields `undefined` for every tool, which silently
+  // empties this set and makes the whole detector a no-op that still passes any unit test whose
+  // fixture invents the field. (It did exactly that until an end-to-end run caught it.)
   const writeEffect = new Set(
-    tools.filter((t) => t.effect === 'write').map((t) => t.name),
+    tools
+      .filter((t) => t.effect === 'write')
+      .map((t) => t.expose?.mcp?.name)
+      .filter((n): n is string => typeof n === 'string'),
   );
   const dispatched = new Set(dispatchedToolNames);
   const stranded: string[] = [];

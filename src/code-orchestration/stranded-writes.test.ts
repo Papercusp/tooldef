@@ -12,13 +12,21 @@
  *
  * PURE — no vm, no PG, no dispatcher.
  */
-import { describe, expect, it } from 'vitest';
-import { detectStrandedWrites } from './orchestrate';
+import { describe, expect, it, vi } from 'vitest';
+import { detectStrandedWrites, runToolOrchestration } from './orchestrate';
 import type { StaticToolCall } from './parse-check';
-import type { ProjectedTool } from '../tool-projection';
+import type { ProjectedTool, UnifiedToolContext } from '../tool-projection';
+import type { DispatchProjectedDeps } from '../dispatch-types';
+import type { ToolResult } from '../wire';
 
+const DEPS: DispatchProjectedDeps = {};
+
+// Uses the REAL ProjectedTool shape (`expose.mcp.name`) — deliberately, not a `{ name }`
+// convenience fixture. The first version of this file invented a top-level `name`, so the unit
+// tests passed against a tool shape that does not exist while the detector was a no-op in
+// production. A fixture that is easier to write than the real thing is how that ships green.
 const tool = (name: string, effect: 'read' | 'write'): ProjectedTool =>
-  ({ name, effect }) as unknown as ProjectedTool;
+  ({ expose: { mcp: { name } }, effect }) as unknown as ProjectedTool;
 
 const TOOLS: ProjectedTool[] = [
   tool('sessions:read', 'read'),
@@ -91,5 +99,96 @@ describe('detectStrandedWrites (P-020)', () => {
 
   it('returns empty for an empty script', () => {
     expect(detectStrandedWrites([], TOOLS, [])).toEqual([]);
+  });
+});
+
+/**
+ * The detector being correct proves nothing about the RESULT carrying it. These drive the real
+ * `runToolOrchestration` path (parse-check → vm → dispatch → result), because a pure-unit pass
+ * plus dead wiring is precisely how a fix ships green and does nothing — the failure mode
+ * called out in define-tool.ts's ctx-threading warning.
+ */
+const MAKE_CTX = (): UnifiedToolContext =>
+  ({
+    log: vi.fn(),
+    signal: new AbortController().signal,
+    progress: vi.fn(),
+    emit: vi.fn(),
+    workspaceId: 'default',
+    harnessSlug: 'h',
+    role: 'worker',
+    runId: 'run_X',
+  }) as unknown as UnifiedToolContext;
+
+const json = (data: unknown): ToolResult => ({
+  content: [{ type: 'text', text: JSON.stringify(data) }],
+});
+
+const mkTool = (name: string, effect: 'read' | 'write', fn: ProjectedTool['fn']): ProjectedTool =>
+  ({
+    pluginName: 'fix',
+    description: name,
+    inputSchema: { type: 'object' },
+    capabilities: [],
+    effect,
+    expose: { mcp: { name } },
+    fn,
+  }) as unknown as ProjectedTool;
+
+describe('P-020 end-to-end: a real aborted run reports its stranded writes', () => {
+  it('surfaces the checkpoint that never dispatched when an earlier READ throws', async () => {
+    const readFn = vi.fn(async () => {
+      throw new Error('invalid_args: Unrecognized key(s) in object: "oops"');
+    });
+    const writeFn = vi.fn(async () => json({ ok: true }));
+    const read = mkTool('wi:list', 'read', readFn);
+    const checkpoint = mkTool('wi:checkpoint', 'write', writeFn);
+
+    const r = await runToolOrchestration(
+      `const l = await tools.wi.list({ oops: 1 });
+       await tools.wi.checkpoint({ id: 'WI-1', checkpoint: 'state I believed was saved' });
+       return { done: true };`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [read, checkpoint] },
+    );
+
+    expect(r.ok).toBe(false);
+    // The write genuinely never ran...
+    expect(writeFn).not.toHaveBeenCalled();
+    // ...and every dispatch-recorded surface is therefore silent about it.
+    expect(r.plannedMutations).toEqual([]);
+    expect(r.rejectedMutations ?? []).toEqual([]);
+    expect(r.uncertainMutations ?? []).toEqual([]);
+    // Which is exactly why this field has to exist.
+    expect(r.strandedWrites).toEqual(['wi:checkpoint']);
+  });
+
+  it('reports nothing when the script completes (an untaken branch is not a stranding)', async () => {
+    const read = mkTool('wi:list', 'read', async () => json({ items: [] }));
+    const write = mkTool('wi:checkpoint', 'write', async () => json({ ok: true }));
+    const r = await runToolOrchestration(
+      `const l = await tools.wi.list({});
+       if (l.items.length > 0) await tools.wi.checkpoint({ id: 'WI-1' });
+       return { done: true };`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [read, write] },
+    );
+    expect(r.ok).toBe(true);
+    expect(r.strandedWrites).toBeUndefined();
+  });
+
+  it('does not claim a write that already dispatched before the failure', async () => {
+    const write = mkTool('wi:checkpoint', 'write', async () => json({ ok: true }));
+    const boom = mkTool('wi:list', 'read', async () => {
+      throw new Error('nope');
+    });
+    const r = await runToolOrchestration(
+      `await tools.wi.checkpoint({ id: 'WI-1' });
+       await tools.wi.list({});
+       return { done: true };`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [write, boom] },
+    );
+    expect(r.ok).toBe(false);
+    expect(r.plannedMutations.map((m) => m.tool)).toEqual(['wi:checkpoint']);
+    // It landed — reporting it as stranded would be the cry-wolf failure EI-10951 fixed.
+    expect(r.strandedWrites).toBeUndefined();
   });
 });
