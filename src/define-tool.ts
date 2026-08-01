@@ -358,6 +358,96 @@ function reencodableJsonPayload(out: ToolResult, ctx: UnifiedToolContext): unkno
 }
 
 /**
+ * P-019 (fleet-leadership-continuity-and-actuation-2026-08-01) — an
+ * explicitly-`undefined` value means NOT PROVIDED, at every depth.
+ *
+ * `{ harness: undefined }` is idiomatic JS for "I have no value for this" — it is
+ * what every spread of an optional (`{ ...(x ? { k: x } : {}) }` written the short
+ * way as `{ k: x }`), every destructured passthrough, and every `obj[k] = maybe`
+ * produces. But the key IS present in `Object.keys()`, so the EI-10883 closed-shape
+ * gate rejects it as an unrecognized key — a hard `invalid_args` failure for a call
+ * that supplied nothing at all. JSON has no `undefined`, so this is unreachable over
+ * the MCP wire and hits ONLY in-process callers: `code:run` scripts (whose whole
+ * point is writing ordinary JS against the catalog) and `tools:invoke`. Under
+ * `code:run` it is worse than a wasted round-trip: a read's arg typo aborts the
+ * WHOLE script, so already-ordered writes never execute (P-020).
+ *
+ * The strip is DEEP because the strictness it compensates for is deep:
+ * `deepStrictifyInPlace` closes every nested object in the tree, so a top-level-only
+ * strip would leave the nested case — `work_items:checkpoint { items: [{ id,
+ * checkpoint, harness: undefined }] }`, exactly the row shape agents build in a loop
+ * — still failing, for the same reason, one level down. That asymmetry is the bug
+ * EI-18723223344390510 already had to fix once for strictness itself; fixing only
+ * the level that happened to bite is what leaves it live.
+ *
+ * Runs FIRST, innermost of the pre-validation shim chain, so every downstream shim
+ * sees a clean object: `applyHarnessArgAlias` keys off `'harness' in rec`, which
+ * would otherwise rename `{ harness: undefined }` to `{ harness_slug: undefined }`
+ * and fail validation just the same, one key over.
+ *
+ * Deliberately narrow so it can only ever REMOVE a no-op key:
+ *  • object KEYS only — an `undefined` ARRAY ELEMENT is a positional value, and
+ *    dropping it would silently reindex the array (a different, worse bug);
+ *  • plain objects only (`Object.prototype`/null-prototype) — never a Date, Map,
+ *    Buffer, or class instance, whose internals are not ours to rebuild;
+ *  • returns the input BY REFERENCE when there is nothing to strip, so the common
+ *    case allocates nothing and callers keep identity;
+ *  • never mutates the caller's object — a rebuilt copy is returned instead, since
+ *    the same args object may be retained/reused by the caller.
+ */
+export function stripUndefinedArgKeys(input: unknown): unknown {
+  return stripUndefinedDeep(input, new Set());
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
+  const proto = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === null;
+}
+
+function stripUndefinedDeep(input: unknown, active: Set<object>): unknown {
+  if (!input || typeof input !== 'object') return input;
+  // Cycle guard: an args object built by a script can legitimately self-reference.
+  if (active.has(input as object)) return input;
+
+  if (Array.isArray(input)) {
+    active.add(input as object);
+    try {
+      let changed = false;
+      const out = input.map((el) => {
+        const next = stripUndefinedDeep(el, active);
+        if (next !== el) changed = true;
+        return next;
+      });
+      return changed ? out : input;
+    } finally {
+      active.delete(input as object);
+    }
+  }
+
+  if (!isPlainObject(input)) return input;
+
+  active.add(input as object);
+  try {
+    let changed = false;
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(input)) {
+      const value = input[key];
+      if (value === undefined) {
+        changed = true; // drop it: an undefined value is an absent key
+        continue;
+      }
+      const next = stripUndefinedDeep(value, active);
+      if (next !== value) changed = true;
+      out[key] = next;
+    }
+    return changed ? out : input;
+  } finally {
+    active.delete(input as object);
+  }
+}
+
+/**
  * Write-side positional shim (token-efficient-agent-io P-008/D-006/D-007). When
  * the tool is registry write-positional and the model sent a single `row`
  * string, reconstruct the typed args from the prompt-declared column order and
@@ -1160,7 +1250,10 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       // exactly why this shipped green.
       ...(ctx.telemetrySurface ? { telemetrySurface: ctx.telemetrySurface } : {}),
     };
-    const shimmed = applyHarnessArgAlias(rawSchema, applyPositionalWriteShim(def.name, rawSchema, tierlessInput));
+    const shimmed = applyHarnessArgAlias(
+      rawSchema,
+      applyPositionalWriteShim(def.name, rawSchema, stripUndefinedArgKeys(tierlessInput)),
+    );
     const parsed = await standardValidate(def.args, shimmed);
     if (!parsed.ok) {
       throw new InvalidInputError(
@@ -1284,7 +1377,10 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     // Framework-reserved per-call tier override is stripped next — BEFORE
     // validation (context-trimming-tiers D-004; not part of any tool's schema).
     const { input: tierlessInput, callTier } = extractPayloadTier(unwrapUnparsedToolInput(input));
-    const shimmed = applyHarnessArgAlias(rawSchema, applyPositionalWriteShim(def.name, rawSchema, tierlessInput));
+    const shimmed = applyHarnessArgAlias(
+      rawSchema,
+      applyPositionalWriteShim(def.name, rawSchema, stripUndefinedArgKeys(tierlessInput)),
+    );
     const parsed = await standardValidate(def.args, shimmed);
     if (!parsed.ok) {
       throw new InvalidInputError(
