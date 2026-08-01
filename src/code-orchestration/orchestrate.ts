@@ -22,7 +22,7 @@ import type { DispatchProjectedDeps } from '../dispatch-types';
 import { buildToolFacade, type FacadeDispatch } from './tool-facade';
 import { realDispatch, isPreExecutionFailure } from './dispatch-binding';
 import { runOrchestrationScript } from './run-script';
-import { checkScript, ensureParseCheckReady } from './parse-check';
+import { checkScript, ensureParseCheckReady, type StaticToolCall } from './parse-check';
 
 /**
  * Per-inner-call context-rebinding hook (WI-1411). By default every call the
@@ -141,6 +141,68 @@ export interface OrchestrateResult {
    * (defaults absent/false-ish) so pre-existing hand-built fixture results are unaffected;
    * runToolOrchestration's own return always populates it. */
   partial?: boolean;
+  /**
+   * P-020: write-effect tools the script ORDERED but that never dispatched at all, because
+   * an earlier throw unwound the vm before reaching them. Present only on a failed run, and
+   * only when non-empty. Distinct from every other mutation array here: those are recorded
+   * at dispatch, so a call that never dispatched appears in NONE of them — this is the only
+   * surface that can tell an author their trailing `work_items:checkpoint` never happened.
+   * Provable set only (see `detectStrandedWrites`): a tool that ran at least once is omitted.
+   */
+  strandedWrites?: string[];
+}
+
+/**
+ * P-020 (fleet-leadership-continuity-and-actuation-2026-08-01) — name the writes that
+ * NEVER RAN, not just the ones that failed.
+ *
+ * A thrown call aborts the vm script, so every `tools.ns.verb(...)` written AFTER it in
+ * source order never dispatches at all. Those calls are invisible to every existing
+ * recovery surface — `plannedMutations`/`rejected`/`uncertain` are all recorded AT
+ * DISPATCH, and an unreached line never dispatched. So the result could say "1 call was
+ * rejected, nothing was written" while silently omitting that the script had also ordered
+ * a `work_items:checkpoint` that never happened. The agent reads "nothing written, safe to
+ * re-run", fixes the typo'd read... and the continuity write it thought it had made is gone.
+ *
+ * EI-18717906460509995 already recognised this shape and added ORDERING_HINT — but that is a
+ * MITIGATION ("write your durable calls first"), not a report: it tells the author how to
+ * avoid the trap next time and still never says which write was stranded THIS time. This is
+ * the missing read-side half.
+ *
+ * Sound by construction — it reports only the provable set. `checkScript` already resolves
+ * every statically-visible facade reference to its canonical `ns:verb` (it runs anyway, for
+ * `unknownRefs`), so this reuses that parse rather than adding a second, drifting one. A
+ * write-effect tool named in the script with ZERO dispatches provably never ran. A tool that
+ * dispatched at least once is deliberately NOT reported: inside a loop or a branch it may
+ * have run some iterations and not others, and no static count can tell which — claiming
+ * otherwise would be the same cry-wolf failure EI-10951 fixed in the warning next door.
+ * Dynamic dispatch (`tools.call(someVar)`) is likewise invisible to the static parse and
+ * simply not claimed.
+ *
+ * Source order is preserved so the report reads as the script does.
+ *
+ * PURE — unit-tested without a vm, PG, or a live dispatcher.
+ */
+export function detectStrandedWrites(
+  staticCalls: readonly StaticToolCall[],
+  tools: readonly ProjectedTool[],
+  dispatchedToolNames: readonly string[],
+): string[] {
+  const writeEffect = new Set(
+    tools.filter((t) => t.effect === 'write').map((t) => t.name),
+  );
+  const dispatched = new Set(dispatchedToolNames);
+  const stranded: string[] = [];
+  const seen = new Set<string>();
+  for (const call of staticCalls) {
+    const name = call.tool;
+    if (!writeEffect.has(name)) continue; // reads are re-runnable; only writes strand
+    if (dispatched.has(name)) continue; // ran at least once — cannot prove anything about the rest
+    if (seen.has(name)) continue;
+    seen.add(name);
+    stranded.push(name);
+  }
+  return stranded;
 }
 
 /** True when `value` is a plain object carrying a top-level `ok: false` — the tool's own
@@ -250,6 +312,11 @@ export async function runToolOrchestration(
 
   const facade = buildToolFacade(tools, dispatch, allowed, unknownRefs);
   const run = await runOrchestrationScript(script, facade, timeoutMs ? { timeoutMs } : {});
+  // P-020: only meaningful when the script ABORTED — a run that completed reached every line
+  // it was going to, so an undispatched write there was a branch not taken, not a stranding.
+  const strandedWrites = run.ok
+    ? []
+    : detectStrandedWrites(check.calls, tools, plannedMutations.map((m) => m.tool));
   return {
     ok: run.ok,
     summary: run.result,
@@ -262,6 +329,7 @@ export async function runToolOrchestration(
     childFailures,
     ...(rejectedMutations.length ? { rejectedMutations } : {}),
     ...(uncertainMutations.length ? { uncertainMutations } : {}),
+    ...(strandedWrites.length ? { strandedWrites } : {}),
     // EI-7784: surfaced independent of `ok` — see the field doc above.
     partial: run.ok && childFailures.length > 0,
   };

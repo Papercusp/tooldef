@@ -28,6 +28,7 @@ export { realDispatch, unwrapToolResult } from './dispatch-binding';
 export { parseJsonWithTrailer, type JsonWithTrailer } from './json-prefix';
 export {
   runToolOrchestration,
+  detectStrandedWrites,
   type OrchestrateOptions,
   type OrchestrateResult,
   type PlannedMutation,
