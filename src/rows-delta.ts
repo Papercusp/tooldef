@@ -37,6 +37,17 @@ export interface RowsDeltaResult {
   cursor: string;
   /** The itemKey FIELD NAME, so an out-of-process client merges generically (`row[itemKeyField]`). */
   itemKeyField?: string;
+  /**
+   * Present iff `mode==='full'` — WHY this call could not delta. Without it a client sees an
+   * unexplained full and cannot tell a one-off miss from a view that will never delta, which
+   * is the diagnosability half of P-024 (a `full` that says nothing is what hid the original
+   * ~822 KB/poll regression for so long).
+   *
+   * `digest_expired` is the only RECOVERABLE one — the next call re-parks and wins. The rest
+   * are either expected-once (`cold`, `schema_changed`) or structural (`no_digest`: the view
+   * is over the embed cap and no `viewKey` was supplied, so it can never delta as wired).
+   */
+  fullReason?: 'cold' | 'malformed_cursor' | 'schema_changed' | 'digest_expired' | 'no_digest';
 }
 
 /**
@@ -82,17 +93,27 @@ export function negotiateRowsDelta(input: {
     ...(digest ? { dg: digest } : {}),
     ...(digestId ? { di: digestId } : {}),
   });
-  const full = (): RowsDeltaResult => ({ mode: 'full', rows, checksum, cursor: freshCursor, itemKeyField });
+  const full = (fullReason: RowsDeltaResult['fullReason']): RowsDeltaResult => ({
+    mode: 'full',
+    rows,
+    checksum,
+    cursor: freshCursor,
+    itemKeyField,
+    fullReason,
+  });
 
-  if (!cursor) return full();
+  if (!cursor) return full('cold');
   const decoded = decodeDeltaCursor(cursor);
   // Malformed or a schema bump → can't diff → full.
-  if (!decoded || (decoded.sv ?? '') !== (schemaVersion ?? '')) return full();
+  if (!decoded) return full('malformed_cursor');
+  if ((decoded.sv ?? '') !== (schemaVersion ?? '')) return full('schema_changed');
   // The prior state is either embedded (`dg`, small views) or parked server-side (`di`,
   // large views — P-024). A `di` miss (eviction, restart, or a viewKey mismatch) is an
   // ordinary miss: degrade to `full`, never to a wrong delta.
   const priorDigest = decoded.dg ?? (decoded.di && viewKey ? getRowDigest(decoded.di, viewKey) : undefined);
-  if (!priorDigest) return full();
+  // A cursor that CARRIED a `di` but missed is recoverable (we just re-parked a fresh digest
+  // above, so the next call deltas); one that carried neither `dg` nor `di` is structural.
+  if (!priorDigest) return full(decoded.di ? 'digest_expired' : 'no_digest');
   // Unchanged view → an empty delta (the client keeps its base; the whole point).
   if (decoded.rev === checksum) {
     return { mode: 'delta', changes: [], checksum, cursor: freshCursor, itemKeyField };
