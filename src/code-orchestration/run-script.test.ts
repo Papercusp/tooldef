@@ -225,6 +225,25 @@ describe('EI-19301148486657755: reading a field the tool result does not have', 
     expect(r.fieldMisses).toBeUndefined();
   });
 
+  it('supports for...of over a NESTED array (symbol keys must never reach the path builder)', async () => {
+    // Regression: the tracker built its dotted path with `path + '.' + key`. `for (const w of
+    // l.items)` reads Symbol.iterator on the array at path 'items', and concatenating a Symbol
+    // throws "Cannot convert a Symbol value to a string" — which failed 10 orchestrate tests
+    // while every top-level-only test still passed.
+    const list = async () => ({ items: [{ id: 1 }, { id: 2 }, { id: 3 }] });
+    const r = await runOrchestrationScript(
+      `const l = await tools.wi.list({});
+       const ids = [];
+       for (const w of l.items) { ids.push(w.id); }
+       return { ids, count: [...l.items].length };`,
+      facade({ wi: { list } }),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.error).toBeUndefined();
+    expect(r.result).toEqual({ ids: [1, 2, 3], count: 3 });
+    expect(r.fieldMisses).toBeUndefined();
+  });
+
   it('keeps object identity stable across repeated reads (the tracker must not re-wrap)', async () => {
     const get = async () => ({ nested: { a: 1 } });
     const r = await runOrchestrationScript(
@@ -247,6 +266,25 @@ describe('EI-19301148486657755: reading a field the tool result does not have', 
     expect(r.ok).toBe(true);
     expect(r.error).toBeUndefined();
     expect(r.result).toEqual({ ok: true, deep: { list: [{ x: 1 }] } });
+  });
+
+  it('serialises a tool result nested inside a SCRIPT-BUILT wrapper object (cross-realm unwrap)', async () => {
+    // Regression: the script runs under vm.runInNewContext, so `{ viaCall }` carries the VM
+    // realm's Object.prototype. A strict `proto === Object.prototype` check is false for it, so
+    // unwrap skipped the wrapper and the proxy inside reached postMessage as
+    // "result_not_serializable: #<Object> could not be cloned".
+    const get = async () => ({ ok: true, echoed: { slug: 's' } });
+    const r = await runOrchestrationScript(
+      `const viaCall = await tools.plans.get({});
+       return { viaCall, list: [await tools.plans.get({})] };`,
+      facade({ plans: { get } }),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.error).toBeUndefined();
+    expect(r.result).toEqual({
+      viaCall: { ok: true, echoed: { slug: 's' } },
+      list: [{ ok: true, echoed: { slug: 's' } }],
+    });
   });
 
   it('bounds the report so a miss inside a hot loop cannot flood the result', async () => {

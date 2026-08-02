@@ -175,12 +175,20 @@ const WORKER_SRC = `(() => {
   const missSeen = new Set();
   const proxyToRaw = new WeakMap();
   const rawToProxy = new WeakMap();
-  const PROBE_KEYS = new Set(['then', 'toJSON', 'constructor', 'inspect', 'nodeType', '$$typeof', 'Symbol(nodejs.util.inspect.custom)']);
+  const PROBE_KEYS = new Set(['then', 'toJSON', 'constructor', 'inspect', 'nodeType', '$$typeof']);
+  // Plain data (object/array) test that works ACROSS REALMS. The script runs under
+  // vm.runInNewContext, so an object it builds itself (\`return { viaCall };\`) has the VM
+  // context's Object.prototype — a strict \`proto === Object.prototype\` identity check is false
+  // for it, which made unwrap() skip the wrapper and let a Proxy escape into postMessage
+  // (result_not_serializable). Compare structurally instead: any realm's Object.prototype is the
+  // object whose own prototype is null. A Date/Map/class instance has a deeper chain, so it is
+  // correctly excluded and passes through untouched.
   const isContainer = (v) => {
-    if (Array.isArray(v)) return true;
+    if (Array.isArray(v)) return true; // realm-agnostic by spec
     if (typeof v !== 'object' || v === null) return false;
     const proto = Object.getPrototypeOf(v);
-    return proto === Object.prototype || proto === null;
+    if (proto === null) return true; // Object.create(null)
+    return Object.getPrototypeOf(proto) === null;
   };
   const track = (value, tool, path) => {
     if (!isContainer(value)) return value;
@@ -189,8 +197,13 @@ const WORKER_SRC = `(() => {
     const isArr = Array.isArray(value);
     const proxy = new Proxy(value, {
       get(target, key) {
-        if (typeof key === 'string'
-          && !(key in target)
+        // Symbol keys pass straight through, UNTRACKED and UNWRAPPED. They are protocol lookups
+        // (Symbol.iterator for for...of, Symbol.toPrimitive, util.inspect.custom), never an
+        // authored field read — and a Symbol cannot be concatenated into the dotted path below:
+        // \`'items' + '.' + Symbol.iterator\` throws "Cannot convert a Symbol value to a string",
+        // which is exactly how a for...of over a NESTED array (l.items) broke before this guard.
+        if (typeof key === 'symbol') return Reflect.get(target, key);
+        if (!(key in target)
           && !PROBE_KEYS.has(key)
           && !(isArr && /^\\d+$/.test(key))
           && fieldMisses.length < MISS_LIMIT) {
