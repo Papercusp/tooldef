@@ -67,6 +67,27 @@ describe('runOrchestrationScript (B-CX-1A)', () => {
     expect(r.result).toBe('undefined,undefined');
   });
 
+  // EI-19294786663902075: the vm context has no importModuleDynamically callback, so a script's
+  // `await import(...)` throws the V8-internal "A dynamic import callback was not specified."
+  // before the specifier is even looked at -- which reads like a bad path, not a sandbox limit.
+  // Rewritten into a named, actionable error instead of leaking the vm implementation detail.
+  it('rewrites a dynamic import attempt into a named, actionable error (not the raw vm message)', async () => {
+    const r = await runOrchestrationScript(`return await import('node:fs');`, facade({}));
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/^dynamic_import_unsupported:/);
+    expect(r.error).not.toMatch(/dynamic import callback/i);
+    expect(r.error).toMatch(/tools\.ns\.verb/);
+  });
+
+  it('same rewrite applies to importing an arbitrary repo path, not just node builtins', async () => {
+    const r = await runOrchestrationScript(
+      `return await import('/some/repo/path/module.ts');`,
+      facade({}),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/^dynamic_import_unsupported:/);
+  });
+
   // B-CX-SANDBOX: the reason the executor moved to a worker thread — a SYNCHRONOUS infinite loop
   // must be killable. The old in-host vm executor's wall-clock race only bounded async-yielding
   // work, so `while (true) {}` froze the whole process. Now the worker is terminated at the bound.

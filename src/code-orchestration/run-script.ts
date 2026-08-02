@@ -278,7 +278,16 @@ const WORKER_SRC = `(() => {
       try { parentPort.postMessage({ t: 'done', result: plain, fieldMisses }); }
       catch (cloneErr) { parentPort.postMessage({ t: 'error', error: 'result_not_serializable: ' + ((cloneErr && cloneErr.message) || String(cloneErr)) }); }
     } catch (err) {
-      parentPort.postMessage({ t: 'error', error: (err && err.message) || String(err) });
+      const msg = (err && err.message) || String(err);
+      // EI-19294786663902075: vm.runInNewContext is built with no importModuleDynamically
+      // callback, so a script's await import(...) throws this exact V8-level message before
+      // the specifier is ever looked at -- indistinguishable, on first read, from a bad path.
+      // Rewritten here so the constraint (tools.* only -- the whitelist IS the security boundary,
+      // same reason require/process are absent) costs one read instead of a wasted retry.
+      const friendly = /dynamic import callback/i.test(msg)
+        ? 'dynamic_import_unsupported: code:run cannot import()/require() repo modules or node builtins -- only tools.ns.verb(args) is exposed (the role tool whitelist IS the sandbox security boundary, same reason require/process are absent). Use capability:bash + npx tsx for direct module/DB access outside that whitelist.'
+        : msg;
+      parentPort.postMessage({ t: 'error', error: friendly });
     }
   })();
 })();`;
