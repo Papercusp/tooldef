@@ -19,6 +19,7 @@ import {
   applySemanticDelta,
   setSemanticDeltaEnabledResolver,
   resetSemanticDeltaEnabledResolver,
+  DELTA_MAX_DIGEST_ENTRIES,
   type DeltaChange,
 } from './delta-protocol';
 
@@ -341,6 +342,52 @@ describe('semantic deltas end-to-end (Lane E)', () => {
     const second = await call('sem:toolarge', { transport: 'mcp', requestedDelta: `auto~${first.meta.delta.cursor}` });
     expect(second.meta.delta.mode).toBe('full');
     expect(second.meta.delta.reason).toBe('delta_too_large');
+  });
+});
+
+// no-http-anywhere-2026-07-28 P-024. A view over DELTA_MAX_DIGEST_ENTRIES mints no
+// digest, so it can never serve a semantic delta — but it used to answer a bare
+// `mode:'full'`, byte-indistinguishable from "nothing changed enough to delta". That
+// silence is why `plans.list` (933 rows) re-shipped ~822 KB on every warm poll for
+// weeks while `plans.attention` (165 rows) got 83x on the identical code path.
+describe('un-deltaable view declares itself (P-024)', () => {
+  it('over the cap → semanticUnavailable in the envelope, and no digest in the cursor', async () => {
+    const state = { rows: makeSemRows(DELTA_MAX_DIGEST_ENTRIES + 1) };
+    defineSemanticTool('sem:toobig', state);
+    const { meta } = await call('sem:toobig', { transport: 'mcp', requestedDelta: 'auto' });
+
+    expect(meta.delta.semanticUnavailable).toEqual({
+      reason: 'digest_too_large',
+      rows: DELTA_MAX_DIGEST_ENTRIES + 1,
+      max: DELTA_MAX_DIGEST_ENTRIES,
+    });
+    // The capability is NOT retracted — the same view deltas again once it shrinks.
+    expect(meta.delta.supported).toBe(true);
+    expect(decodeDeltaCursor(meta.delta.cursor)?.dg).toBeUndefined();
+  });
+
+  it('a bounded view stays silent — the field is a signal, not noise on every response', async () => {
+    const state = { rows: makeSemRows(DELTA_MAX_DIGEST_ENTRIES) }; // exactly at the cap: still fine
+    defineSemanticTool('sem:atcap', state);
+    const { meta } = await call('sem:atcap', { transport: 'mcp', requestedDelta: 'auto' });
+    expect(meta.delta.semanticUnavailable).toBeUndefined();
+    expect(Object.keys(decodeDeltaCursor(meta.delta.cursor)?.dg ?? {})).toHaveLength(DELTA_MAX_DIGEST_ENTRIES);
+  });
+
+  it('reports digest_too_large, NOT the ambiguous no_digest, when the view itself is the cause', async () => {
+    const state = { rows: makeSemRows(DELTA_MAX_DIGEST_ENTRIES + 1) };
+    defineSemanticTool('sem:toobig2', state);
+    const first = await call('sem:toobig2', { transport: 'mcp', requestedDelta: 'auto' });
+    // Change the view so negotiation reaches the semantic-upgrade branch (reason 'changed').
+    state.rows = [...state.rows.slice(1), { id: 'brand-new', name: 'n-with-padding-text', rev: 1 }];
+    const second = await call('sem:toobig2', {
+      transport: 'mcp',
+      requestedDelta: `auto~${first.meta.delta.cursor}`,
+    });
+    expect(second.meta.delta.mode).toBe('full');
+    // 'no_digest' would also describe an ordinary first call; this one is structural.
+    expect(second.meta.delta.reason).toBe('digest_too_large');
+    expect(second.meta.delta.semanticUnavailable?.reason).toBe('digest_too_large');
   });
 });
 

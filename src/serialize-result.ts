@@ -85,6 +85,11 @@ function deltaMeta(delta: DeltaNegotiation): Record<string, unknown> {
     ...(delta.counts ? { counts: delta.counts } : {}),
     // itemKey FIELD NAME for out-of-process generic merge (the MCP proxy) — P-004.
     ...(delta.itemKeyField ? { itemKeyField: delta.itemKeyField } : {}),
+    // P-024: this view is structurally un-deltaable right now (over
+    // DELTA_MAX_DIGEST_ENTRIES). Without it on the wire the response is an ordinary
+    // `full` and the caller cannot tell "nothing changed" from "this will NEVER delta",
+    // so it keeps paying for `_delta` round-trips that can never pay off.
+    ...(delta.semanticUnavailable ? { semanticUnavailable: delta.semanticUnavailable } : {}),
   };
 }
 
