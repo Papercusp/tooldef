@@ -223,7 +223,22 @@ export interface DispatchProjectedDeps {
     ctx: UnifiedToolContext;
     windowKey: string;
     durationMs: number;
-    status: 'ok' | 'error' | 'quota-exceeded' | 'role-not-allowed' | 'timeout' | 'invalid-input';
+    /**
+     * `replayed` is the one member the dispatch stack never writes itself: it is
+     * for a host that answers a call from an idempotency/result cache and so
+     * returns BEFORE dispatch. Such a call would otherwise be recorded nowhere at
+     * all — indistinguishable from a call that never happened, which makes a
+     * retry storm read as a gap in the record. It is deliberately distinct from
+     * `ok` because quota is counted off `ok` rows and a replay performs no work.
+     */
+    status:
+      | 'ok'
+      | 'error'
+      | 'quota-exceeded'
+      | 'role-not-allowed'
+      | 'timeout'
+      | 'invalid-input'
+      | 'replayed';
     outputRef?: string | null;
     outputSize?: number | null;
     errorMessage?: string | null;
