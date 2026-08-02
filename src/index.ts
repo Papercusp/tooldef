@@ -89,6 +89,7 @@ export {
   resetSemanticDeltaEnabledResolver,
   isSemanticDeltaEnabled,
   computeRowDigest,
+  computeRowDigestUncapped,
   computeViewChecksum,
   diffFromDigest,
   applySemanticDelta,
@@ -104,6 +105,16 @@ export {
   type NegotiatedDeltaMode,
   type DeltaFullReason,
 } from './delta-protocol';
+
+/* ─── Server-held row digests for large views (P-024) ─────────────────── */
+export {
+  putRowDigest,
+  getRowDigest,
+  resetRowDigestStore,
+  rowDigestStoreStats,
+  DIGEST_STORE_MAX_ROWS,
+  type RowDigest,
+} from './delta-digest-store';
 
 /* ─── Registries ─────────────────────────────────────────────────────── */
 export { getCatalog, lookup, _resetCatalogForTests } from './registry';

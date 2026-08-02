@@ -37,10 +37,11 @@ import {
   deltaCounts,
   isSemanticDeltaEnabled,
   DELTA_SMALL_RESPONSE_BYTES,
-  DELTA_MAX_DIGEST_ENTRIES,
+  computeRowDigestUncapped,
   type DeltaCapability,
   type DeltaNegotiation,
 } from './delta-protocol';
+import { putRowDigest, getRowDigest } from './delta-digest-store';
 import {
   analyzeSchema,
   projectReadColumns,
@@ -213,7 +214,24 @@ async function negotiateToolDelta(
   }
 
   const nowMs = Date.now();
-  const cursorExtra = digest ? { dg: digest, ts: nowMs } : undefined;
+  // P-024: a view over DELTA_MAX_DIGEST_ENTRIES used to mint no digest at all, so it
+  // could never delta — `plans.list` (933 rows) re-shipped ~822 KB per warm poll. The
+  // cap is about what fits in a URL cursor, not about what can be diffed, so park the
+  // full digest server-side and carry only an opaque id. Bound to the view fingerprint
+  // (the cursor is client-supplied; see delta-digest-store safety property 2).
+  let digestId: string | undefined;
+  if (rows && itemKey && digest === null) {
+    digestId = putRowDigest(
+      computeRowDigestUncapped(rows, itemKey, cap.rowRevision),
+      fingerprint,
+      rows.length,
+    );
+  }
+  const cursorExtra = digest
+    ? { dg: digest, ts: nowMs }
+    : digestId
+      ? { di: digestId, ts: nowMs }
+      : undefined;
 
   const base = negotiateDelta({
     request,
@@ -227,18 +245,13 @@ async function negotiateToolDelta(
   // can verify a later merge (and store it with the base).
   if (checksum && base.mode !== 'delta') base.checksum = checksum;
 
-  // P-024: SAY that this view cannot delta, rather than answering a bare `full` that
-  // is indistinguishable from "nothing changed". `digest === null` here means exactly
-  // one thing — computeRowDigest refused because the view exceeds the cap — so the
-  // cursor ships without `dg` and the NEXT call can only degrade. Declaring it lets a
-  // caller stop paying for `_delta` round-trips that can never pay off, and makes the
-  // affected views visible in telemetry instead of silently expensive.
-  if (rows && itemKey && digest === null) {
-    base.semanticUnavailable = {
-      reason: 'digest_too_large',
-      rows: rows.length,
-      max: DELTA_MAX_DIGEST_ENTRIES,
-    };
+  // P-024: SAY that this endpoint can never serve a row-level delta, rather than
+  // answering a bare `full` that is indistinguishable from "nothing changed" and
+  // leaving the caller to pay for `_delta` round-trips forever. Size is no longer a
+  // reason (large views park their digest server-side above) — only a missing semantic
+  // surface is permanent.
+  if (!rows || !itemKey) {
+    base.semanticUnavailable = { reason: 'no_semantic_surface', needs: itemKey ? 'rows' : 'itemKey' };
   }
 
   // Convey the itemKey FIELD NAME so an OUT-OF-PROCESS client (the MCP proxy) can merge
@@ -261,20 +274,23 @@ async function negotiateToolDelta(
     }
     // reason 'changed' ⇒ the request cursor decoded and its fp+sv matched.
     const decoded = decodeDeltaCursor(request!.cursor);
-    if (!decoded?.dg) {
-      // Distinguish the CAUSE from the SYMPTOM (P-024). `no_digest` says only "the prior
-      // cursor carried none", which is also what a first delta-capable call looks like.
-      // When the CURRENT view is itself over the cap, the prior cursor was never going to
-      // carry a digest and never will — report that instead, so telemetry separates a
-      // transient cursor gap from a view that is structurally un-deltaable.
-      base.reason = digest === null ? 'digest_too_large' : 'no_digest';
+    // The prior state is either embedded (`dg`, small views) or parked server-side
+    // (`di`, large views — P-024). A `di` miss (evicted, restarted, or a fingerprint
+    // mismatch) is an ordinary miss: degrade to full, never to a wrong delta.
+    const priorDigest = decoded?.dg ?? (decoded?.di ? getRowDigest(decoded.di, fingerprint) : undefined);
+    if (!priorDigest) {
+      // Distinguish CAUSE from SYMPTOM (P-024). `no_digest` says only "the prior cursor
+      // carried none", which is also what a first delta-capable call looks like.
+      // `digest_expired` is the large-view path losing its parked digest — recoverable,
+      // and the very next response re-parks one, unlike the old permanent degradation.
+      base.reason = decoded?.di ? 'digest_expired' : 'no_digest';
     } else if (cap.maxDeltaAge !== undefined && decoded.ts !== undefined && nowMs - decoded.ts > cap.maxDeltaAge) {
       base.reason = 'max_age';
     } else {
       try {
         const changes = cap.changesSince
           ? await cap.changesSince(args, decoded, ctx)
-          : diffFromDigest(decoded.dg, rows, itemKey, { rowRevision: cap.rowRevision, rowType: cap.rowType });
+          : diffFromDigest(priorDigest, rows, itemKey, { rowRevision: cap.rowRevision, rowType: cap.rowType });
         // The delta must actually be smaller than a full resend, else just send full.
         if (JSON.stringify(changes).length >= fullJsonLen) {
           base.reason = 'delta_too_large';

@@ -22,6 +22,13 @@ import {
   DELTA_MAX_DIGEST_ENTRIES,
   type DeltaChange,
 } from './delta-protocol';
+import {
+  resetRowDigestStore,
+  rowDigestStoreStats,
+  getRowDigest,
+  putRowDigest,
+  DIGEST_STORE_MAX_ROWS,
+} from './delta-digest-store';
 
 interface SemRow {
   id: string;
@@ -345,49 +352,105 @@ describe('semantic deltas end-to-end (Lane E)', () => {
   });
 });
 
-// no-http-anywhere-2026-07-28 P-024. A view over DELTA_MAX_DIGEST_ENTRIES mints no
-// digest, so it can never serve a semantic delta — but it used to answer a bare
-// `mode:'full'`, byte-indistinguishable from "nothing changed enough to delta". That
-// silence is why `plans.list` (933 rows) re-shipped ~822 KB on every warm poll for
-// weeks while `plans.attention` (165 rows) got 83x on the identical code path.
-describe('un-deltaable view declares itself (P-024)', () => {
-  it('over the cap → semanticUnavailable in the envelope, and no digest in the cursor', async () => {
-    const state = { rows: makeSemRows(DELTA_MAX_DIGEST_ENTRIES + 1) };
-    defineSemanticTool('sem:toobig', state);
-    const { meta } = await call('sem:toobig', { transport: 'mcp', requestedDelta: 'auto' });
+// no-http-anywhere-2026-07-28 P-024. A view over DELTA_MAX_DIGEST_ENTRIES used to mint
+// no digest at all, so it could NEVER serve a semantic delta — it just answered a bare
+// `mode:'full'` forever, byte-indistinguishable from "nothing changed enough to delta".
+// Measured cost: `plans.list` (933 rows) re-shipping ~822 KB on every warm poll,
+// ~52 MB/hour per open window, while `plans.attention` (165 rows) got 83x on the
+// identical code path. The digest now lives server-side and only an id rides the cursor.
+describe('large views still delta via a server-held digest (P-024)', () => {
+  afterEach(() => resetRowDigestStore());
 
-    expect(meta.delta.semanticUnavailable).toEqual({
-      reason: 'digest_too_large',
-      rows: DELTA_MAX_DIGEST_ENTRIES + 1,
-      max: DELTA_MAX_DIGEST_ENTRIES,
-    });
-    // The capability is NOT retracted — the same view deltas again once it shrinks.
-    expect(meta.delta.supported).toBe(true);
-    expect(decodeDeltaCursor(meta.delta.cursor)?.dg).toBeUndefined();
+  it('over the cap → cursor carries an id, NOT an inline digest', async () => {
+    const state = { rows: makeSemRows(DELTA_MAX_DIGEST_ENTRIES + 1) };
+    defineSemanticTool('sem:big1', state);
+    const { meta } = await call('sem:big1', { transport: 'mcp', requestedDelta: 'auto' });
+    const decoded = decodeDeltaCursor(meta.delta.cursor)!;
+    expect(decoded.dg).toBeUndefined(); // not embedded — that was the whole problem
+    expect(typeof decoded.di).toBe('string');
+    expect(rowDigestStoreStats().rows).toBe(DELTA_MAX_DIGEST_ENTRIES + 1);
   });
 
-  it('a bounded view stays silent — the field is a signal, not noise on every response', async () => {
-    const state = { rows: makeSemRows(DELTA_MAX_DIGEST_ENTRIES) }; // exactly at the cap: still fine
-    defineSemanticTool('sem:atcap', state);
-    const { meta } = await call('sem:atcap', { transport: 'mcp', requestedDelta: 'auto' });
-    expect(meta.delta.semanticUnavailable).toBeUndefined();
-    expect(Object.keys(decodeDeltaCursor(meta.delta.cursor)?.dg ?? {})).toHaveLength(DELTA_MAX_DIGEST_ENTRIES);
-  });
+  it('THE FIX: a changed 900+ row view serves mode:delta with only the changed rows', async () => {
+    const state = { rows: makeSemRows(933) }; // the measured plans.list size
+    defineSemanticTool('sem:big2', state);
+    const first = await call('sem:big2', { transport: 'mcp', requestedDelta: 'auto' });
+    expect(first.meta.delta.mode).toBe('full');
 
-  it('reports digest_too_large, NOT the ambiguous no_digest, when the view itself is the cause', async () => {
-    const state = { rows: makeSemRows(DELTA_MAX_DIGEST_ENTRIES + 1) };
-    defineSemanticTool('sem:toobig2', state);
-    const first = await call('sem:toobig2', { transport: 'mcp', requestedDelta: 'auto' });
-    // Change the view so negotiation reaches the semantic-upgrade branch (reason 'changed').
-    state.rows = [...state.rows.slice(1), { id: 'brand-new', name: 'n-with-padding-text', rev: 1 }];
-    const second = await call('sem:toobig2', {
+    state.rows = [
+      { ...state.rows[0], name: 'row-0-EDITED-with-padding-text', rev: 2 },
+      ...state.rows.slice(2), // drop r1
+      { id: 'brand-new', name: 'brand-new-with-padding-text', rev: 1 },
+    ];
+    const second = await call('sem:big2', {
       transport: 'mcp',
       requestedDelta: `auto~${first.meta.delta.cursor}`,
     });
+
+    expect([second.meta.delta.mode, second.meta.delta.reason]).toEqual(['delta', undefined]);
+    expect(second.meta.delta.counts).toEqual({ added: 1, updated: 1, removed: 1 });
+    // And the merge reconstructs the true view — the safety net that makes it usable.
+    const merged = applySemanticDelta(
+      parseBody(first.text) as SemRow[],
+      second.meta.delta.changes as DeltaChange[],
+      semItemKey,
+    );
+    expect(sortById(merged as SemRow[])).toEqual(sortById(state.rows));
+    expect(second.meta.delta.checksum).toBe(computeViewChecksum(state.rows, semItemKey, semRowRevision));
+  });
+
+  it('a store miss degrades to full and RE-PARKS — recoverable, not the old permanent cliff', async () => {
+    const state = { rows: makeSemRows(DELTA_MAX_DIGEST_ENTRIES + 1) };
+    defineSemanticTool('sem:big3', state);
+    const first = await call('sem:big3', { transport: 'mcp', requestedDelta: 'auto' });
+    resetRowDigestStore(); // simulate eviction / process restart
+    state.rows = [...state.rows, { id: 'extra', name: 'extra-with-padding-text', rev: 1 }];
+
+    const second = await call('sem:big3', { transport: 'mcp', requestedDelta: `auto~${first.meta.delta.cursor}` });
     expect(second.meta.delta.mode).toBe('full');
-    // 'no_digest' would also describe an ordinary first call; this one is structural.
-    expect(second.meta.delta.reason).toBe('digest_too_large');
-    expect(second.meta.delta.semanticUnavailable?.reason).toBe('digest_too_large');
+    expect(second.meta.delta.reason).toBe('digest_expired');
+    // Crucially it re-parks, so the NEXT call deltas again.
+    state.rows = [...state.rows, { id: 'extra2', name: 'extra2-with-padding-text', rev: 1 }];
+    const third = await call('sem:big3', { transport: 'mcp', requestedDelta: `auto~${second.meta.delta.cursor}` });
+    expect(third.meta.delta.mode).toBe('delta');
+  });
+
+  it('a digest id is bound to its view fingerprint — a foreign id is a miss, not a leak', async () => {
+    const stateA = { rows: makeSemRows(DELTA_MAX_DIGEST_ENTRIES + 1) };
+    defineSemanticTool('sem:vA', stateA);
+    const a = await call('sem:vA', { transport: 'mcp', requestedDelta: 'auto' });
+    const foreignId = decodeDeltaCursor(a.meta.delta.cursor)!.di!;
+    // Same id, a DIFFERENT view's fingerprint → refused. diffFromDigest would otherwise
+    // report the other view's ids as `removed`.
+    expect(getRowDigest(foreignId, 'some-other-view-fingerprint')).toBeUndefined();
+    expect(getRowDigest(foreignId, 'nope')).toBeUndefined();
+  });
+
+  it('the row budget bounds retention (oldest evicted first)', async () => {
+    const digest = { a: '1', b: '2' };
+    const first = putRowDigest(digest, 'fp1', DIGEST_STORE_MAX_ROWS);
+    expect(getRowDigest(first, 'fp1')).toEqual(digest);
+    putRowDigest(digest, 'fp2', DIGEST_STORE_MAX_ROWS); // pushes total over budget
+    expect(getRowDigest(first, 'fp1')).toBeUndefined(); // oldest evicted
+    expect(rowDigestStoreStats().rows).toBeLessThanOrEqual(DIGEST_STORE_MAX_ROWS);
+  });
+});
+
+// The signal P-024 asked for survives, retargeted: size is no longer a permanent
+// incapability, but a tool that declared no semantic surface can NEVER delta.
+describe('permanently un-deltaable endpoint declares itself (P-024)', () => {
+  it('a Lane-B tool (no itemKey) says so instead of answering a bare full', async () => {
+    defineDeltaTool('delta:laneb', { v: 'r1' });
+    const { meta } = await call('delta:laneb', { transport: 'mcp', requestedDelta: 'auto' });
+    expect(meta.delta.semanticUnavailable).toEqual({ reason: 'no_semantic_surface', needs: 'itemKey' });
+    expect(meta.delta.supported).toBe(true); // freshness still works
+  });
+
+  it('a semantic tool stays silent — the field is a signal, not noise on every response', async () => {
+    const state = { rows: makeSemRows(12) };
+    defineSemanticTool('sem:quiet', state);
+    const { meta } = await call('sem:quiet', { transport: 'mcp', requestedDelta: 'auto' });
+    expect(meta.delta.semanticUnavailable).toBeUndefined();
   });
 });
 

@@ -114,6 +114,14 @@ export interface DeltaCursorPayload {
    * tool degrades to `not_modified`/`full` only.
    */
   dg?: Record<string, string>;
+  /**
+   * Server-held digest id (P-024) — the large-view counterpart of `dg`. When the view
+   * exceeds `DELTA_MAX_DIGEST_ENTRIES` the digest is parked in `delta-digest-store`
+   * and only this opaque id rides the cursor, so a 933-row view still deltas without a
+   * multi-KB cursor. Mutually exclusive with `dg`; a lookup miss (eviction, restart,
+   * or a fingerprint mismatch) degrades to `full`, never to a wrong delta.
+   */
+  di?: string;
   /** Issued-at epoch ms — drives the `maxDeltaAge` periodic-forced-full (Lane E). */
   ts?: number;
 }
@@ -173,6 +181,10 @@ export function decodeDeltaCursor(token: string | null | undefined): DeltaCursor
     rev: p.rev,
     ...(typeof p.sv === 'string' ? { sv: p.sv } : {}),
     ...(dg ? { dg } : {}),
+    // P-024 large-view path: the server-held digest id. Like every other field here
+    // this is an explicit allowlist — a DeltaCursorPayload field not named here is
+    // silently dropped on decode, which reads downstream as "the cursor never had one".
+    ...(typeof p.di === 'string' && p.di ? { di: p.di } : {}),
     ...(ts !== undefined ? { ts } : {}),
   };
 }
@@ -389,7 +401,7 @@ export type DeltaFullReason =
   | 'not_capable' // endpoint declared no delta capability
   | 'bypass' // small-response bypass
   | 'no_digest' // semantic delta wanted but the prior cursor carried no row digest
-  | 'digest_too_large' // THIS view exceeds DELTA_MAX_DIGEST_ENTRIES, so no digest is minted at all
+  | 'digest_expired' // large-view path (P-024): the server-held digest was evicted/restarted — recoverable, the next call re-parks one
   | 'max_age' // cursor older than maxDeltaAge — periodic forced-full
   | 'delta_too_large' // the computed delta wasn't smaller than a full resend
   | 'changesSince_error' // the endpoint's changesSince() threw — degrade to full
@@ -420,29 +432,30 @@ export interface DeltaNegotiation {
   /** `mode==='delta'` only: `{ added, updated, removed }` counts for the harness/telemetry. */
   counts?: { added: number; updated: number; removed: number };
   /**
-   * Present when this view is STRUCTURALLY incapable of a semantic delta right now,
-   * even though the endpoint declares the capability and the client asked for one —
-   * today, only because the row count exceeds `DELTA_MAX_DIGEST_ENTRIES`, so no digest
-   * is minted and the cursor ships without `dg`.
+   * Present when this endpoint can NEVER serve a semantic (row-level) delta, however
+   * many times the client asks — because it declared no semantic surface: no `itemKey`,
+   * or a body that is not a row array and no `rows` selector. Such a tool is Lane B
+   * (`full` | `not_modified`) by construction.
    *
-   * WHY THIS EXISTS (no-http-anywhere-2026-07-28 P-024). Without it the response is an
-   * ordinary `mode:'full'` and the caller cannot distinguish "nothing changed enough to
-   * delta" from "this view will NEVER delta at its current size". `plans.list` (933 rows)
-   * sat in the second state indefinitely — every warm poll re-shipping ~822 KB while
-   * `plans.attention` (165 rows) got 83x on the identical code path — and the silence is
-   * precisely why that shipped win sat inert and unnoticed. A caller seeing this field
-   * knows to stop paying for `_delta` round-trips, and an operator seeing it in telemetry
-   * knows which views to bound or move to a server-held digest.
+   * WHY THIS EXISTS (no-http-anywhere-2026-07-28 P-024). A caller asking for `auto` gets
+   * back an ordinary `mode:'full'` and cannot distinguish "nothing changed enough to
+   * delta" from "this will NEVER delta", so it keeps paying for `_delta` round-trips
+   * forever. That silence is exactly why a shipped delta win sat inert and unnoticed:
+   * `plans.list` (933 rows) re-shipped ~822 KB on every warm poll — ~52 MB/hour per open
+   * window — while `plans.attention` (165 rows) got 83x on the identical code path, and
+   * nothing in either response said which was which.
    *
-   * NOT an error and NOT a capability retraction: `supported` stays true, because the same
-   * view delivers deltas again the moment it drops back under the cap.
+   * NOTE the size cliff is NO LONGER a reason to appear here. A view over
+   * `DELTA_MAX_DIGEST_ENTRIES` now parks its digest server-side (`delta-digest-store`)
+   * and deltas normally; only a missing semantic surface is permanent.
+   *
+   * NOT an error: `supported` stays true for the freshness (`not_modified`) surface,
+   * which a Lane-B tool still provides.
    */
   semanticUnavailable?: {
-    reason: 'digest_too_large';
-    /** Row count of the current view. */
-    rows: number;
-    /** The cap it exceeded (`DELTA_MAX_DIGEST_ENTRIES`). */
-    max: number;
+    reason: 'no_semantic_surface';
+    /** What the endpoint would need to declare to become delta-capable. */
+    needs: 'itemKey' | 'rows';
   };
 }
 
@@ -478,7 +491,7 @@ export function negotiateDelta(input: {
    * digest (`dg`) + issued-at (`ts`) for a Lane-E tool, so the NEXT call can diff
    * from this cursor. Omitted for a Lane-B (`revision`-only) tool.
    */
-  cursorExtra?: Pick<DeltaCursorPayload, 'dg' | 'ts'>;
+  cursorExtra?: Pick<DeltaCursorPayload, 'dg' | 'di' | 'ts'>;
 }): DeltaNegotiation {
   const { request, capabilityDeclared, currentRevision, currentFingerprint, schemaVersion, bypass, cursorExtra } = input;
 
@@ -496,6 +509,10 @@ export function negotiateDelta(input: {
     rev: currentRevision ?? '',
     ...(schemaVersion ? { sv: schemaVersion } : {}),
     ...(cursorExtra?.dg ? { dg: cursorExtra.dg } : {}),
+    // P-024 large-view path: the server-held digest id, carried INSTEAD of `dg`.
+    // (This object is an explicit allowlist — a new DeltaCursorPayload field is
+    // silently dropped from the minted cursor unless it is added here too.)
+    ...(cursorExtra?.di ? { di: cursorExtra.di } : {}),
     ...(cursorExtra?.ts !== undefined ? { ts: cursorExtra.ts } : {}),
   });
 
@@ -600,6 +617,22 @@ export function computeRowDigest(
   rowRevision?: (row: unknown) => string | number,
 ): Record<string, string> | null {
   if (rows.length > DELTA_MAX_DIGEST_ENTRIES) return null;
+  return computeRowDigestUncapped(rows, itemKey, rowRevision);
+}
+
+/**
+ * `computeRowDigest` without the embed cap — the digest for a view of ANY size.
+ *
+ * The cap on `computeRowDigest` is about what fits in a URL CURSOR, not about what can
+ * be diffed: `diffFromDigest` is happy with any size. So a large view parks its digest
+ * server-side (`delta-digest-store`) and carries only an id in the cursor (P-024).
+ * Callers embedding a digest must keep using the capped `computeRowDigest`.
+ */
+export function computeRowDigestUncapped(
+  rows: readonly unknown[],
+  itemKey: (row: unknown) => string,
+  rowRevision?: (row: unknown) => string | number,
+): Record<string, string> {
   const out: Record<string, string> = {};
   for (const row of rows) out[itemKey(row)] = rowRev(row, rowRevision);
   return out;
