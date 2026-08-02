@@ -18,6 +18,7 @@ export {
   type RunScriptResult,
   type RunScriptOptions,
   type FieldMiss,
+  type SleepCap,
 } from './run-script';
 export {
   checkScript,
