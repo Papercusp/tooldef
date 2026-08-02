@@ -37,6 +37,7 @@ import {
   deltaCounts,
   isSemanticDeltaEnabled,
   DELTA_SMALL_RESPONSE_BYTES,
+  DELTA_MAX_DIGEST_ENTRIES,
   type DeltaCapability,
   type DeltaNegotiation,
 } from './delta-protocol';
@@ -226,6 +227,20 @@ async function negotiateToolDelta(
   // can verify a later merge (and store it with the base).
   if (checksum && base.mode !== 'delta') base.checksum = checksum;
 
+  // P-024: SAY that this view cannot delta, rather than answering a bare `full` that
+  // is indistinguishable from "nothing changed". `digest === null` here means exactly
+  // one thing — computeRowDigest refused because the view exceeds the cap — so the
+  // cursor ships without `dg` and the NEXT call can only degrade. Declaring it lets a
+  // caller stop paying for `_delta` round-trips that can never pay off, and makes the
+  // affected views visible in telemetry instead of silently expensive.
+  if (rows && itemKey && digest === null) {
+    base.semanticUnavailable = {
+      reason: 'digest_too_large',
+      rows: rows.length,
+      max: DELTA_MAX_DIGEST_ENTRIES,
+    };
+  }
+
   // Convey the itemKey FIELD NAME so an OUT-OF-PROCESS client (the MCP proxy) can merge
   // a delta generically (`row[itemKeyField]`); in-process clients read `itemKey` from the
   // registry and ignore it. Only meaningful for a semantic (itemKey-declared) tool.
@@ -247,7 +262,12 @@ async function negotiateToolDelta(
     // reason 'changed' ⇒ the request cursor decoded and its fp+sv matched.
     const decoded = decodeDeltaCursor(request!.cursor);
     if (!decoded?.dg) {
-      base.reason = 'no_digest';
+      // Distinguish the CAUSE from the SYMPTOM (P-024). `no_digest` says only "the prior
+      // cursor carried none", which is also what a first delta-capable call looks like.
+      // When the CURRENT view is itself over the cap, the prior cursor was never going to
+      // carry a digest and never will — report that instead, so telemetry separates a
+      // transient cursor gap from a view that is structurally un-deltaable.
+      base.reason = digest === null ? 'digest_too_large' : 'no_digest';
     } else if (cap.maxDeltaAge !== undefined && decoded.ts !== undefined && nowMs - decoded.ts > cap.maxDeltaAge) {
       base.reason = 'max_age';
     } else {

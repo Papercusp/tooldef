@@ -389,6 +389,7 @@ export type DeltaFullReason =
   | 'not_capable' // endpoint declared no delta capability
   | 'bypass' // small-response bypass
   | 'no_digest' // semantic delta wanted but the prior cursor carried no row digest
+  | 'digest_too_large' // THIS view exceeds DELTA_MAX_DIGEST_ENTRIES, so no digest is minted at all
   | 'max_age' // cursor older than maxDeltaAge — periodic forced-full
   | 'delta_too_large' // the computed delta wasn't smaller than a full resend
   | 'changesSince_error' // the endpoint's changesSince() threw — degrade to full
@@ -418,6 +419,31 @@ export interface DeltaNegotiation {
   checksum?: string;
   /** `mode==='delta'` only: `{ added, updated, removed }` counts for the harness/telemetry. */
   counts?: { added: number; updated: number; removed: number };
+  /**
+   * Present when this view is STRUCTURALLY incapable of a semantic delta right now,
+   * even though the endpoint declares the capability and the client asked for one —
+   * today, only because the row count exceeds `DELTA_MAX_DIGEST_ENTRIES`, so no digest
+   * is minted and the cursor ships without `dg`.
+   *
+   * WHY THIS EXISTS (no-http-anywhere-2026-07-28 P-024). Without it the response is an
+   * ordinary `mode:'full'` and the caller cannot distinguish "nothing changed enough to
+   * delta" from "this view will NEVER delta at its current size". `plans.list` (933 rows)
+   * sat in the second state indefinitely — every warm poll re-shipping ~822 KB while
+   * `plans.attention` (165 rows) got 83x on the identical code path — and the silence is
+   * precisely why that shipped win sat inert and unnoticed. A caller seeing this field
+   * knows to stop paying for `_delta` round-trips, and an operator seeing it in telemetry
+   * knows which views to bound or move to a server-held digest.
+   *
+   * NOT an error and NOT a capability retraction: `supported` stays true, because the same
+   * view delivers deltas again the moment it drops back under the cap.
+   */
+  semanticUnavailable?: {
+    reason: 'digest_too_large';
+    /** Row count of the current view. */
+    rows: number;
+    /** The cap it exceeded (`DELTA_MAX_DIGEST_ENTRIES`). */
+    max: number;
+  };
 }
 
 /**
