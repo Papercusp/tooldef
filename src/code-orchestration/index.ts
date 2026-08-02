@@ -17,6 +17,7 @@ export {
   runOrchestrationScript,
   type RunScriptResult,
   type RunScriptOptions,
+  type FieldMiss,
 } from './run-script';
 export {
   checkScript,

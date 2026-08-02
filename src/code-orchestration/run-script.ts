@@ -57,6 +57,30 @@
 import type { Worker as NodeWorker } from 'node:worker_threads';
 import type { ToolFacade } from './tool-facade';
 
+/**
+ * EI-19301148486657755 — one recorded read of a field the tool result does NOT have.
+ *
+ * A wrong TOOL name has always been caught (typed signatures come back inline); a wrong FIELD
+ * name was silent, because `undefined` from a property access is indistinguishable from a
+ * legitimately-absent value — and the `?? null` / `?? 0` fallbacks agents write to keep summaries
+ * bounded then convert that into a confident number. Live case: a monitor script read
+ * `claimable.count` (the real key is `claimableCount`), summarised `count: null`, and the leader
+ * read it as "0 claimable" against a queue of 1,397 — one step from standing down a 10-agent fleet.
+ *
+ * Same bug class as WI-6674's always-NULL accessor: a value meaning "I could not see it" sharing a
+ * representation with a value meaning "there is none".
+ */
+export interface FieldMiss {
+  /** The tool whose result was read, in colon form (e.g. `work_items:claimable`). */
+  tool: string;
+  /** Dotted path of the container that was read, or `(root)` for the result object itself. */
+  path: string;
+  /** The field name the script asked for and did not find. */
+  read: string;
+  /** The keys that ARE present on that container — i.e. what the author probably meant. */
+  available: string[];
+}
+
 export interface RunScriptResult {
   ok: boolean;
   /** The script's returned value — the summary that re-enters the model's context. */
@@ -65,6 +89,12 @@ export interface RunScriptResult {
   logs: string[];
   /** Present when ok=false: 'compile_error: …', 'script_timeout …', or the thrown message. */
   error?: string;
+  /**
+   * Reads of fields that did not exist on a tool result (see {@link FieldMiss}). Present only when
+   * non-empty, so a correct script pays nothing and sees nothing — this fires exactly when the
+   * author was already wrong, which is what makes it safe to surface unconditionally.
+   */
+  fieldMisses?: FieldMiss[];
 }
 
 export interface RunScriptOptions {
@@ -125,17 +155,80 @@ const WORKER_SRC = `(() => {
     parentPort.postMessage(Object.assign({ t: 'call', id }, payload));
   });
 
+  // --- EI-19301148486657755: detect reads of fields the tool result does not have ---
+  // Every tool result handed to the script is wrapped in a Proxy that records a read of a key
+  // that is not present. A wrong FIELD name was previously silent (undefined is indistinguishable
+  // from a legitimately-absent value), which is how "count: null" got read as a real 0.
+  //
+  // Membership is tested with \`key in target\`, which walks the prototype chain — so Array.prototype
+  // methods (.map/.filter), Object.prototype members (.toString) and the like resolve normally and
+  // record nothing. Only PROBE_KEYS (runtime lookups performed on arbitrary values, never authored
+  // field reads) and numeric array indices need explicit exclusion.
+  //
+  // Proxies are memoized per raw object so identity is stable (\`r.a === r.a\` stays true), and the
+  // script's returned value is deep-unwrapped before postMessage — a Proxy is NOT structured-
+  // cloneable, so letting one escape would turn every \`return someToolResult\` into
+  // result_not_serializable.
+  const MISS_LIMIT = 12;
+  const AVAIL_LIMIT = 30;
+  const fieldMisses = [];
+  const missSeen = new Set();
+  const proxyToRaw = new WeakMap();
+  const rawToProxy = new WeakMap();
+  const PROBE_KEYS = new Set(['then', 'toJSON', 'constructor', 'inspect', 'nodeType', '$$typeof', 'Symbol(nodejs.util.inspect.custom)']);
+  const isContainer = (v) => {
+    if (Array.isArray(v)) return true;
+    if (typeof v !== 'object' || v === null) return false;
+    const proto = Object.getPrototypeOf(v);
+    return proto === Object.prototype || proto === null;
+  };
+  const track = (value, tool, path) => {
+    if (!isContainer(value)) return value;
+    const cached = rawToProxy.get(value);
+    if (cached) return cached;
+    const isArr = Array.isArray(value);
+    const proxy = new Proxy(value, {
+      get(target, key) {
+        if (typeof key === 'string'
+          && !(key in target)
+          && !PROBE_KEYS.has(key)
+          && !(isArr && /^\\d+$/.test(key))
+          && fieldMisses.length < MISS_LIMIT) {
+          const sig = tool + '|' + path + '|' + key;
+          if (!missSeen.has(sig)) {
+            missSeen.add(sig);
+            fieldMisses.push({ tool, path: path || '(root)', read: key, available: Object.keys(target).slice(0, AVAIL_LIMIT) });
+          }
+        }
+        return track(Reflect.get(target, key), tool, path ? path + '.' + key : key);
+      },
+    });
+    proxyToRaw.set(proxy, value);
+    rawToProxy.set(value, proxy);
+    return proxy;
+  };
+  const unwrap = (v, seen) => {
+    if (!v || typeof v !== 'object') return v;
+    const raw = proxyToRaw.get(v) || v;
+    if (!isContainer(raw)) return raw;
+    if (seen.has(raw)) return seen.get(raw);
+    const out = Array.isArray(raw) ? [] : {};
+    seen.set(raw, out);
+    for (const k of Object.keys(raw)) out[k] = unwrap(raw[k], seen);
+    return out;
+  };
+
   // --- the Proxy facade injected as \`tools\` (mirrors tool-facade.ts: tools.ns.verb + tools.call) ---
   const nsProxy = (ns) => new Proxy({}, {
     get(_t, verb) {
       if (typeof verb !== 'string' || verb === 'then') return undefined;
-      return (...a) => rpc({ ns, verb, args: a[0] });
+      return (...a) => rpc({ ns, verb, args: a[0] }).then((v) => track(v, ns + ':' + verb, ''));
     },
   });
   const tools = new Proxy({}, {
     get(_t, prop) {
       if (typeof prop !== 'string' || prop === 'then') return undefined;
-      if (prop === 'call') return (name, args) => rpc({ callName: name, args });
+      if (prop === 'call') return (name, args) => rpc({ callName: name, args }).then((v) => track(v, String(name), ''));
       return nsProxy(prop);
     },
   });
@@ -166,7 +259,10 @@ const WORKER_SRC = `(() => {
   (async () => {
     try {
       const result = await factory(tools, log);
-      try { parentPort.postMessage({ t: 'done', result }); }
+      // Deep-unwrap first: a tracking Proxy is not structured-cloneable, so returning a tool
+      // result verbatim (\`return pp;\`) would otherwise become result_not_serializable.
+      const plain = unwrap(result, new Map());
+      try { parentPort.postMessage({ t: 'done', result: plain, fieldMisses }); }
       catch (cloneErr) { parentPort.postMessage({ t: 'error', error: 'result_not_serializable: ' + ((cloneErr && cloneErr.message) || String(cloneErr)) }); }
     } catch (err) {
       parentPort.postMessage({ t: 'error', error: (err && err.message) || String(err) });
@@ -216,7 +312,13 @@ export async function runOrchestrationScript(
         if (logs.length < maxLogLines) logs.push(m.text);
         return;
       }
-      if (m.t === 'done') return finish({ ok: true, result: m.result });
+      if (m.t === 'done') {
+        return finish({
+          ok: true,
+          result: m.result,
+          ...(m.fieldMisses && m.fieldMisses.length ? { fieldMisses: m.fieldMisses } : {}),
+        });
+      }
       if (m.t === 'error') return finish({ ok: false, error: m.error });
       if (m.t === 'call') void handleCall(worker, facade, m, () => settled);
     });
@@ -270,7 +372,7 @@ interface CallMessage {
 }
 type WorkerMessage =
   | { t: 'log'; text: string }
-  | { t: 'done'; result: unknown }
+  | { t: 'done'; result: unknown; fieldMisses?: FieldMiss[] }
   | { t: 'error'; error: string }
   | CallMessage;
 

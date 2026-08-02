@@ -138,3 +138,132 @@ describe('runOrchestrationScript (B-CX-1A)', () => {
     expect(r.error).toMatch(/script_timeout/);
   });
 });
+
+describe('EI-19301148486657755: reading a field the tool result does not have', () => {
+  // The incident: a fleet-leader monitor script summarised work_items:claimable with
+  // `count: c?.count ?? c?.total ?? null`. The real key is `claimableCount`, so BOTH guesses
+  // were undefined, `?? null` made it a confident `null`, and the leader read that as
+  // "0 claimable" against a queue of 1,397 — one step from standing down a 10-agent fleet.
+  const claimable = async () => ({
+    ok: true,
+    harness: 'papercusp',
+    claimableCount: 1397,
+    matchedByFilter: 13649,
+    claimable: [{ id: 'WI-1' }],
+  });
+
+  it('reports the miss AND the real keys for the exact shape that caused the incident', async () => {
+    const r = await runOrchestrationScript(
+      `const c = await tools.work_items.claimable({});
+       return { count: c?.count ?? c?.total ?? null };`,
+      facade({ work_items: { claimable } }),
+    );
+    expect(r.ok).toBe(true);
+    // The summary is still the (wrong) value the script computed — we do not silently rewrite it.
+    expect(r.result).toEqual({ count: null });
+    // ...but the null is no longer indistinguishable from a real zero.
+    const misses = r.fieldMisses ?? [];
+    expect(misses.map((m) => m.read).sort()).toEqual(['count', 'total']);
+    expect(misses[0]?.tool).toBe('work_items:claimable');
+    expect(misses[0]?.path).toBe('(root)');
+    expect(misses[0]?.available).toContain('claimableCount');
+  });
+
+  it('stays SILENT for a correct script — the signal only fires when the author was already wrong', async () => {
+    const r = await runOrchestrationScript(
+      `const c = await tools.work_items.claimable({});
+       return { count: c.claimableCount, matched: c.matchedByFilter, first: c.claimable[0].id };`,
+      facade({ work_items: { claimable } }),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.result).toEqual({ count: 1397, matched: 13649, first: 'WI-1' });
+    expect(r.fieldMisses).toBeUndefined();
+  });
+
+  it('catches a NESTED miss inside an array element, with the dotted path', async () => {
+    // The coord:send case: `r.woken` read on each row of `results[]`, where the rows carry
+    // different keys entirely. A top-level-only check would miss this.
+    const send = async () => ({ ok: true, results: [{ ok: true, to: ['a'], msg_id: 'm1' }] });
+    const r = await runOrchestrationScript(
+      `const s = await tools.coord.send({});
+       return s.results.map((row) => ({ woken: row.woken ?? 0 }));`,
+      facade({ coord: { send } }),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.result).toEqual([{ woken: 0 }]);
+    const miss = (r.fieldMisses ?? []).find((m) => m.read === 'woken');
+    expect(miss).toBeDefined();
+    expect(miss?.path).toBe('results.0');
+    expect(miss?.available).toEqual(['ok', 'to', 'msg_id']);
+  });
+
+  it('does NOT flag prototype members, array indices, or the await `then` probe', async () => {
+    const get = async () => ({ rows: [1, 2, 3], nested: { a: 1 } });
+    const r = await runOrchestrationScript(
+      `const g = await tools.db.get({});
+       const doubled = g.rows.map((n) => n * 2);
+       const missing = g.rows[99];
+       return {
+         len: g.rows.length,
+         doubled,
+         missing: missing ?? 'none',
+         str: typeof g.nested.toString,
+         keys: Object.keys(g).length,
+       };`,
+      facade({ db: { get } }),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.result).toEqual({
+      len: 3,
+      doubled: [2, 4, 6],
+      missing: 'none',
+      str: 'function',
+      keys: 2,
+    });
+    // .map/.length/.toString resolve via the prototype chain; rows[99] is a legitimate
+    // out-of-bounds index; `then` is the runtime's own thenable probe on every await.
+    expect(r.fieldMisses).toBeUndefined();
+  });
+
+  it('keeps object identity stable across repeated reads (the tracker must not re-wrap)', async () => {
+    const get = async () => ({ nested: { a: 1 } });
+    const r = await runOrchestrationScript(
+      `const g = await tools.db.get({});
+       return { same: g.nested === g.nested, spreadOk: { ...g.nested }.a };`,
+      facade({ db: { get } }),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.result).toEqual({ same: true, spreadOk: 1 });
+  });
+
+  it('still serialises a tool result returned VERBATIM (a tracking proxy must never escape)', async () => {
+    // Regression guard: a Proxy is not structured-cloneable, so without the deep-unwrap this
+    // turns every `return someToolResult` into result_not_serializable.
+    const get = async () => ({ ok: true, deep: { list: [{ x: 1 }] } });
+    const r = await runOrchestrationScript(
+      `return await tools.db.get({});`,
+      facade({ db: { get } }),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.error).toBeUndefined();
+    expect(r.result).toEqual({ ok: true, deep: { list: [{ x: 1 }] } });
+  });
+
+  it('bounds the report so a miss inside a hot loop cannot flood the result', async () => {
+    const get = async (a: { id: number }) => ({ id: a.id });
+    const r = await runOrchestrationScript(
+      `const out = [];
+       for (let i = 0; i < 50; i++) {
+         const d = await tools.db.get({ id: i });
+         out.push(d.nope ?? null);
+       }
+       return out.length;`,
+      facade({ db: { get } }),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.result).toBe(50);
+    // Distinct (tool, path, key) signatures dedupe to one; the hard cap bounds the rest.
+    expect((r.fieldMisses ?? []).length).toBeGreaterThan(0);
+    expect((r.fieldMisses ?? []).length).toBeLessThanOrEqual(12);
+  });
+});

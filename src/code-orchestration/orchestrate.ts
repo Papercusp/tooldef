@@ -21,7 +21,7 @@ import type { ProjectedTool, UnifiedToolContext } from '../tool-projection';
 import type { DispatchProjectedDeps } from '../dispatch-types';
 import { buildToolFacade, type FacadeDispatch } from './tool-facade';
 import { realDispatch, isPreExecutionFailure } from './dispatch-binding';
-import { runOrchestrationScript } from './run-script';
+import { runOrchestrationScript, type FieldMiss } from './run-script';
 import { checkScript, ensureParseCheckReady, type StaticToolCall } from './parse-check';
 
 /**
@@ -150,6 +150,16 @@ export interface OrchestrateResult {
    * Provable set only (see `detectStrandedWrites`): a tool that ran at least once is omitted.
    */
   strandedWrites?: string[];
+  /**
+   * EI-19301148486657755: reads of fields that do not exist on a tool result — the author asked
+   * for `count` on a result whose key is `claimableCount`. Present only when non-empty.
+   *
+   * This is the FIELD-name counterpart of `unknownRefs` (wrong TOOL name). Both exist for the same
+   * reason: the protection has to fire without the agent having predicted the mistake, because the
+   * failure is silent — `undefined` reads as a legitimate absence, and the `?? null` fallbacks that
+   * keep summaries bounded then launder it into a confident value.
+   */
+  fieldMisses?: FieldMiss[];
 }
 
 /**
@@ -338,6 +348,7 @@ export async function runToolOrchestration(
     ...(rejectedMutations.length ? { rejectedMutations } : {}),
     ...(uncertainMutations.length ? { uncertainMutations } : {}),
     ...(strandedWrites.length ? { strandedWrites } : {}),
+    ...(run.fieldMisses?.length ? { fieldMisses: run.fieldMisses } : {}),
     // EI-7784: surfaced independent of `ok` — see the field doc above.
     partial: run.ok && childFailures.length > 0,
   };
