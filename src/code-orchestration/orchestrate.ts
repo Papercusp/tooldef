@@ -21,7 +21,7 @@ import type { ProjectedTool, UnifiedToolContext } from '../tool-projection';
 import type { DispatchProjectedDeps } from '../dispatch-types';
 import { buildToolFacade, type FacadeDispatch } from './tool-facade';
 import { realDispatch, isPreExecutionFailure } from './dispatch-binding';
-import { runOrchestrationScript, type FieldMiss } from './run-script';
+import { runOrchestrationScript, type FieldMiss, type SleepCap } from './run-script';
 import { checkScript, ensureParseCheckReady, type StaticToolCall } from './parse-check';
 
 /**
@@ -160,6 +160,11 @@ export interface OrchestrateResult {
    * keep summaries bounded then launder it into a confident value.
    */
   fieldMisses?: FieldMiss[];
+  /**
+   * EI-19324793244855883: `sleep(ms)` calls the script made that asked for longer than the
+   * sandbox's cap and were silently clamped. Present only when non-empty — see {@link SleepCap}.
+   */
+  sleepCaps?: SleepCap[];
 }
 
 /**
@@ -349,6 +354,7 @@ export async function runToolOrchestration(
     ...(uncertainMutations.length ? { uncertainMutations } : {}),
     ...(strandedWrites.length ? { strandedWrites } : {}),
     ...(run.fieldMisses?.length ? { fieldMisses: run.fieldMisses } : {}),
+    ...(run.sleepCaps?.length ? { sleepCaps: run.sleepCaps } : {}),
     // EI-7784: surfaced independent of `ok` — see the field doc above.
     partial: run.ok && childFailures.length > 0,
   };

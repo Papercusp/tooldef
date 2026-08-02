@@ -160,6 +160,67 @@ describe('runOrchestrationScript (B-CX-1A)', () => {
   });
 });
 
+describe('EI-19324793244855883: sleep(ms) clamp is no longer silent', () => {
+  // The incident: a script measured a rate over a requested window (`await sleep(30000)` to
+  // sample a 30s DB-time delta), got back ~10.1s because the clamp silently shortened it, and
+  // divided by the REQUESTED window — a confidently wrong, well-formed number with no error.
+  //
+  // `sleepMaxMs` is a TEST-ONLY override (production leaves it at the 10s default) so these
+  // exercise the real clamp path without a real multi-second wait.
+
+  it('reports a clamped call in sleepCaps, with both the requested and actual ms', async () => {
+    const r = await runOrchestrationScript(`await sleep(300); return 'done';`, facade({}), {
+      sleepMaxMs: 30,
+    });
+    expect(r.ok).toBe(true);
+    expect(r.result).toBe('done');
+    expect(r.sleepCaps).toEqual([{ requestedMs: 300, actualMs: 30 }]);
+  });
+
+  it('resolves with the ACTUAL ms waited, so a careful script can self-correct', async () => {
+    const r = await runOrchestrationScript(
+      `const actual = await sleep(300); return { actual };`,
+      facade({}),
+      { sleepMaxMs: 30 },
+    );
+    expect(r.ok).toBe(true);
+    expect(r.result).toEqual({ actual: 30 });
+  });
+
+  it('stays SILENT (no sleepCaps field) for a request within the cap', async () => {
+    const r = await runOrchestrationScript(`await sleep(10); return 'done';`, facade({}), {
+      sleepMaxMs: 30,
+    });
+    expect(r.ok).toBe(true);
+    expect(r.sleepCaps).toBeUndefined();
+  });
+
+  it('records one entry per clamped call, in a multi-sleep script', async () => {
+    const r = await runOrchestrationScript(
+      `await sleep(10); await sleep(200); await sleep(150); return 'done';`,
+      facade({}),
+      { sleepMaxMs: 30 },
+    );
+    expect(r.ok).toBe(true);
+    expect(r.sleepCaps).toEqual([
+      { requestedMs: 200, actualMs: 30 },
+      { requestedMs: 150, actualMs: 30 },
+    ]);
+  });
+
+  it('the default cap is still 10_000ms (production behavior unchanged)', async () => {
+    const r = await runOrchestrationScript(
+      `const actual = await sleep(60_000); return { actual };`,
+      facade({}),
+      { timeoutMs: 200 },
+    );
+    // Same assertion as the pre-existing "runaway wait degrades to script_timeout" test above —
+    // 200ms budget can't reach the real 10s clamp, so this just re-confirms the default didn't move.
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/script_timeout/);
+  });
+});
+
 describe('EI-19301148486657755: reading a field the tool result does not have', () => {
   // The incident: a fleet-leader monitor script summarised work_items:claimable with
   // `count: c?.count ?? c?.total ?? null`. The real key is `claimableCount`, so BOTH guesses

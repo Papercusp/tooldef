@@ -38,7 +38,11 @@
  * `sleep(ms)` — an `await`-able helper capped at `SLEEP_MAX_MS` per call, so a runaway wait
  * degrades to the existing overall `script_timeout` kill rather than an unbounded hang. It is the
  * ONLY timer primitive exposed; raw `setTimeout`/`setInterval` stay absent so a script can't spin
- * up an open-ended polling loop instead of using `tools.*` calls directly.
+ * up an open-ended polling loop instead of using `tools.*` calls directly. A clamped call is never
+ * silent (EI-19324793244855883): it resolves with the ACTUAL ms waited (not the requested ms), and
+ * is reported back in {@link RunScriptResult.sleepCaps} so a script measuring a rate/share over a
+ * requested window can tell its window was shortened instead of silently dividing by the wrong
+ * denominator.
  *
  * The facade is NOT cloneable into a worker (its members are live host functions that dispatch
  * through the real tool pipeline — DB, ctx, capability envelope), so each `tools.ns.verb(args)`
@@ -81,6 +85,25 @@ export interface FieldMiss {
   available: string[];
 }
 
+/**
+ * EI-19324793244855883 — one recorded read of a WINDOW that was silently shorter than requested.
+ *
+ * `sleep(ms)` is capped at `SLEEP_MAX_MS` per call so a runaway wait degrades to the script's
+ * overall timeout instead of hanging. Before this, the clamp was silent: no throw, no log line,
+ * no field anywhere saying the delay was shortened — so a script measuring a rate/share over a
+ * requested window (e.g. `await sleep(30000)` to sample a 30s DB-time delta) got back a window
+ * 3x+ shorter than it asked for and divided by the number it *requested*, not the number it
+ * *got*. The derived rate/share then looks perfectly well-formed and is wrong. Same bug shape as
+ * {@link FieldMiss}: a value meaning "this was cut short" sharing a representation (silent
+ * success) with a value meaning "this ran to completion".
+ */
+export interface SleepCap {
+  /** The ms the script asked `sleep()` to wait. */
+  requestedMs: number;
+  /** The ms it actually waited (== SLEEP_MAX_MS whenever requestedMs exceeds the cap). */
+  actualMs: number;
+}
+
 export interface RunScriptResult {
   ok: boolean;
   /** The script's returned value — the summary that re-enters the model's context. */
@@ -95,6 +118,11 @@ export interface RunScriptResult {
    * author was already wrong, which is what makes it safe to surface unconditionally.
    */
   fieldMisses?: FieldMiss[];
+  /**
+   * `sleep(ms)` calls that asked for longer than `SLEEP_MAX_MS` and were silently clamped (see
+   * {@link SleepCap}). Present only when non-empty.
+   */
+  sleepCaps?: SleepCap[];
 }
 
 export interface RunScriptOptions {
@@ -108,6 +136,12 @@ export interface RunScriptOptions {
    * no explicit cap (the Node default). Very small values (<16) can make the worker fail to boot.
    */
   maxOldGenerationSizeMb?: number;
+  /**
+   * Per-call cap (ms) for the sandbox's `sleep(ms)` helper. Default 10_000 (see the header note on
+   * `sleep`). Exposed mainly so tests can exercise the clamp path without a real multi-second wait;
+   * production callers should leave this at the default.
+   */
+  sleepMaxMs?: number;
 }
 
 /**
@@ -127,7 +161,7 @@ export interface RunScriptOptions {
 const WORKER_SRC = `(() => {
   const { parentPort, workerData } = require('node:worker_threads');
   const vm = require('node:vm');
-  const { script, maxLogLines } = workerData;
+  const { script, maxLogLines, sleepMaxMs } = workerData;
 
   const stringify = (v) => {
     if (typeof v === 'string') return v;
@@ -254,10 +288,24 @@ const WORKER_SRC = `(() => {
   // sleep(huge) degrades to the existing overall script_timeout kill rather than a surprising
   // multi-minute hang; built on the WORKER's own (real, Node) setTimeout — this scope is outside
   // the sandboxed vm context, so it is not itself exposed to the script.
-  const SLEEP_MAX_MS = 10000;
+  //
+  // EI-19324793244855883: the clamp used to be silent — no throw, no log, no field anywhere
+  // saying the delay was shortened. A script measuring a rate/share over a requested window
+  // (e.g. sleep(30000) to sample a 30s delta) got a window 3x+ shorter than requested and divided
+  // by the number it ASKED for, producing a confidently wrong result. Now every clamped call is
+  // recorded (bounded by SLEEP_CAP_LIMIT, same pattern as fieldMisses above) and returned in the
+  // \`done\` message as \`sleepCaps\`, AND sleep() resolves with the ACTUAL ms waited so a careful
+  // script can self-correct with \`const actual = await sleep(n)\`.
+  const SLEEP_MAX_MS = Number(sleepMaxMs) > 0 ? Number(sleepMaxMs) : 10000;
+  const SLEEP_CAP_LIMIT = 20;
+  const sleepCaps = [];
   const sleep = (ms) => new Promise((resolve) => {
-    const bounded = Math.max(0, Math.min(Number(ms) || 0, SLEEP_MAX_MS));
-    setTimeout(resolve, bounded);
+    const requested = Number(ms) || 0;
+    const bounded = Math.max(0, Math.min(requested, SLEEP_MAX_MS));
+    if (bounded < requested && sleepCaps.length < SLEEP_CAP_LIMIT) {
+      sleepCaps.push({ requestedMs: requested, actualMs: bounded });
+    }
+    setTimeout(() => resolve(bounded), bounded);
   });
 
   // --- compile + run the body under vm (globals-scoped); a leading newline guards a trailing // comment ---
@@ -275,7 +323,7 @@ const WORKER_SRC = `(() => {
       // Deep-unwrap first: a tracking Proxy is not structured-cloneable, so returning a tool
       // result verbatim (\`return pp;\`) would otherwise become result_not_serializable.
       const plain = unwrap(result, new Map());
-      try { parentPort.postMessage({ t: 'done', result: plain, fieldMisses }); }
+      try { parentPort.postMessage({ t: 'done', result: plain, fieldMisses, sleepCaps }); }
       catch (cloneErr) { parentPort.postMessage({ t: 'error', error: 'result_not_serializable: ' + ((cloneErr && cloneErr.message) || String(cloneErr)) }); }
     } catch (err) {
       const msg = (err && err.message) || String(err);
@@ -309,7 +357,7 @@ export async function runOrchestrationScript(
     const worker: NodeWorker = new Worker(WORKER_SRC, {
       eval: true,
       name: 'code-orchestration',
-      workerData: { script, maxLogLines },
+      workerData: { script, maxLogLines, sleepMaxMs: opts.sleepMaxMs },
       ...(opts.maxOldGenerationSizeMb
         ? { resourceLimits: { maxOldGenerationSizeMb: opts.maxOldGenerationSizeMb } }
         : {}),
@@ -339,6 +387,7 @@ export async function runOrchestrationScript(
           ok: true,
           result: m.result,
           ...(m.fieldMisses && m.fieldMisses.length ? { fieldMisses: m.fieldMisses } : {}),
+          ...(m.sleepCaps && m.sleepCaps.length ? { sleepCaps: m.sleepCaps } : {}),
         });
       }
       if (m.t === 'error') return finish({ ok: false, error: m.error });
@@ -394,7 +443,7 @@ interface CallMessage {
 }
 type WorkerMessage =
   | { t: 'log'; text: string }
-  | { t: 'done'; result: unknown; fieldMisses?: FieldMiss[] }
+  | { t: 'done'; result: unknown; fieldMisses?: FieldMiss[]; sleepCaps?: SleepCap[] }
   | { t: 'error'; error: string }
   | CallMessage;
 
