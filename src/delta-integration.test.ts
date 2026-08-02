@@ -371,8 +371,14 @@ describe('large views still delta via a server-held digest (P-024)', () => {
     expect(rowDigestStoreStats().rows).toBe(DELTA_MAX_DIGEST_ENTRIES + 1);
   });
 
-  it('THE FIX: a changed 900+ row view serves mode:delta with only the changed rows', async () => {
-    const state = { rows: makeSemRows(933) }; // the measured plans.list size
+  // NB row count is kept just over the digest cap and UNDER
+  // PAYLOAD_TIER_HARD_CEILING_CHARS (30k). Past that ceiling applyPayloadTier reshapes
+  // the body BEFORE delta negotiation sees it, so `rows` is null and no tool-path delta
+  // is possible at any digest size — a real constraint on this path, and the reason the
+  // sync path (negotiateRowsDelta, no such ceiling) is where the measured plans.list
+  // win actually lives. See rows-delta.test.ts.
+  it('THE FIX: a changed over-cap view serves mode:delta with only the changed rows', async () => {
+    const state = { rows: makeSemRows(DELTA_MAX_DIGEST_ENTRIES + 1) };
     defineSemanticTool('sem:big2', state);
     const first = await call('sem:big2', { transport: 'mcp', requestedDelta: 'auto' });
     expect(first.meta.delta.mode).toBe('full');
@@ -389,12 +395,11 @@ describe('large views still delta via a server-held digest (P-024)', () => {
 
     expect([second.meta.delta.mode, second.meta.delta.reason]).toEqual(['delta', undefined]);
     expect(second.meta.delta.counts).toEqual({ added: 1, updated: 1, removed: 1 });
-    // And the merge reconstructs the true view — the safety net that makes it usable.
-    const merged = applySemanticDelta(
-      parseBody(first.text) as SemRow[],
-      second.meta.delta.changes as DeltaChange[],
-      semItemKey,
-    );
+    // The body carries ONLY the changed rows (that is the win), and the merge
+    // reconstructs the true view — the safety net that makes it usable.
+    const changes = parseBody(second.text) as DeltaChange<SemRow>[];
+    expect(changes).toHaveLength(3); // not 501 rows
+    const merged = applySemanticDelta(parseBody(first.text) as SemRow[], changes, semItemKey);
     expect(sortById(merged as SemRow[])).toEqual(sortById(state.rows));
     expect(second.meta.delta.checksum).toBe(computeViewChecksum(state.rows, semItemKey, semRowRevision));
   });

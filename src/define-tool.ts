@@ -278,7 +278,7 @@ async function negotiateToolDelta(
     // (`di`, large views — P-024). A `di` miss (evicted, restarted, or a fingerprint
     // mismatch) is an ordinary miss: degrade to full, never to a wrong delta.
     const priorDigest = decoded?.dg ?? (decoded?.di ? getRowDigest(decoded.di, fingerprint) : undefined);
-    if (!priorDigest) {
+    if (!decoded || !priorDigest) {
       // Distinguish CAUSE from SYMPTOM (P-024). `no_digest` says only "the prior cursor
       // carried none", which is also what a first delta-capable call looks like.
       // `digest_expired` is the large-view path losing its parked digest — recoverable,
