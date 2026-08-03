@@ -348,3 +348,90 @@ describe('payloadProjection meta (EI-13918)', () => {
     ).toBeUndefined();
   });
 });
+
+/**
+ * EI-19447969329510166 — a clipped string must announce its own clipping IN BAND.
+ *
+ * The reported harm was not that a value was truncated (that is the tier's job)
+ * but that the truncation was INVISIBLE: the marker was a bare `…`, a character
+ * that occurs constantly inside real content, and the only other evidence was a
+ * sibling `_projection.omitted` entry. A ~13,000-char work_items:get checkpoint
+ * came back as its first 800 chars, ending mid-sentence, reading as complete.
+ */
+describe('projectBoundedPayload — truncation is announced in band', () => {
+  const markerRe = /…\[TRUNCATED \+(\d+) chars — see _projection\.cursor\]$/;
+
+  it('marks a maxString-clipped string with a LOUD marker naming the omitted count', () => {
+    const original = 'A'.repeat(5_000);
+    const out = projectBoundedPayload({ note: original }, { toolName: 't', tier: 'trimmed' });
+    const got = (out as { note: string }).note;
+
+    expect(got).toMatch(markerRe);
+    // The count is not decorative: head + omitted must reconstruct the original.
+    const omitted = Number(markerRe.exec(got)![1]);
+    const head = got.replace(markerRe, '');
+    expect(head.length + omitted).toBe(original.length);
+    // And the sibling evidence still exists for a reader who does correlate.
+    expect(out._projection.omitted.some((o) => o.path === '$.note')).toBe(true);
+  });
+
+  it('leaves a string that FITS byte-identical — the marker must not become noise', () => {
+    const short = 'a complete, untruncated value';
+    const out = projectBoundedPayload({ note: short }, { toolName: 't', tier: 'trimmed' });
+    expect((out as { note: string }).note).toBe(short);
+    expect((out as { note: string }).note).not.toMatch(/TRUNCATED/);
+  });
+
+  it('marks AND records the BUDGET-pressure clip, which was previously silent in both channels', () => {
+    // Sized to pass the per-string maxString gate (800 at trimmed) on every row
+    // while collectively exhausting the running budget, so the halving loop —
+    // not the maxString branch — is what does the clipping. That loop used to
+    // append a bare `…` and never call recordOmission at all.
+    const rows = Object.fromEntries(
+      Array.from({ length: 40 }, (_, i) => [`f${i}`, 'B'.repeat(700)]),
+    );
+    const out = projectBoundedPayload(rows, { toolName: 't', tier: 'trimmed' });
+
+    const clipped = Object.entries(out as Record<string, unknown>).filter(
+      ([k, v]) => k !== '_projection' && typeof v === 'string' && /TRUNCATED/.test(v),
+    );
+    expect(clipped.length).toBeGreaterThan(0);
+    // Every in-band marker has a matching `_projection.omitted` entry: the two
+    // channels must agree, so neither alone can silently under-report.
+    for (const [key] of clipped.slice(0, 5)) {
+      expect(out._projection.omitted.some((o) => o.path === `$.${key}`)).toBe(true);
+    }
+    expect(out._projection.omittedCount).toBeGreaterThan(0);
+  });
+
+  it('REGRESSION: a checkpoint-sized string never comes back looking complete', () => {
+    // The exact reported shape: work_items:get { detail:true } on an item whose
+    // checkpoint is ~13k chars, served to a trimmed session with no shaper.
+    const checkpoint = `SUPERSEDED root cause: the loop disarmed itself.\n${'x'.repeat(12_000)}\nRETRACTION: it did not — stalled-loops-guard disarmed it.`;
+    const out = projectBoundedPayload(
+      { ok: true, results: [{ ok: true, id: 'WI-6638', checkpoint }] },
+      { toolName: 'work_items:get', tier: 'trimmed', args: { id: 'WI-6638', detail: true } },
+    );
+
+    const got = (out as { results: Array<{ checkpoint: string }> }).results[0].checkpoint;
+    expect(got.length).toBeLessThan(checkpoint.length);
+    // The whole point: a reader can tell, from the value ALONE, that the
+    // retraction they cannot see might exist.
+    expect(got).toMatch(/TRUNCATED/);
+  });
+
+  it("cursor advice states that payloadTier is framework-reserved, not schema-passable", () => {
+    const out = projectBoundedPayload(
+      { blob: 'z'.repeat(20_000) },
+      { toolName: 'work_items:get', tier: 'trimmed', args: { id: 'WI-1' } },
+    );
+    // The args remain correct for a raw-args dispatch path…
+    expect(out._projection.cursor.args).toMatchObject({ id: 'WI-1', payloadTier: 'full' });
+    // …but the prose no longer tells the caller to pass them somewhere that
+    // rejects them. Following the OLD text ("call with the exact args") failed
+    // schema validation at the exact moment the caller was recovering a dropped
+    // field.
+    expect(out._projection.next).toMatch(/FRAMEWORK-RESERVED/);
+    expect(out._projection.next).toMatch(/additionalProperties:false/);
+  });
+});
