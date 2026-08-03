@@ -28,6 +28,7 @@ import {
   isObjectWithArrayField,
   parseFormatRequest,
   readPrePromptFormat,
+  isPositionalReadEncoding,
   type ColumnSpec,
   type EligibilityResult,
   type FormatRequest,
@@ -206,7 +207,9 @@ function tryTier3Read(
 ): { format: ResultFormat; text: string } | null {
   if (!opts.toolName || !opts.readColumns || opts.readColumns.length === 0) return null;
   const fmt = readPrePromptFormat(opts.toolName);
-  if (fmt !== 'csv' && fmt !== 'tsv') return null; // 'toon' / 'off' → normal path
+  // 'toon' / 'off' → normal path. Shared with the legend generator so the two
+  // ends of the positional protocol cannot drift (see isPositionalReadEncoding).
+  if (!isPositionalReadEncoding(fmt)) return null;
   if (opts.includeStructured) return null; // structured consumer wants the lossless body
   const req: FormatRequest = opts.requested ?? (opts.defaultCompact ? 'compact' : 'json');
   if (req !== 'compact' && req !== fmt) return null; // honor an explicit different/lossless ask
