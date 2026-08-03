@@ -931,6 +931,17 @@ export interface ProjectedTool {
    */
   skipWorkspaceTx?: boolean;
   /**
+   * EI-19386201256023240: read by the HTTP host's `tools/call` result path —
+   * when true, this tool's result SKIPS the per-result "door" (`result-door.ts`'s
+   * `applyResultDoor`) entirely, even when the serialized text exceeds the
+   * budget. See `RoleToolDefinition.skipResultDoor` for the full rationale (a
+   * programmatic/hook consumer that `json.loads`s the raw result silently fails
+   * on a door-truncated body, since truncated JSON + a prose footer isn't valid
+   * JSON — turning a context-protection mechanism into a correctness bug for a
+   * consumer that was never paying context rent in the first place).
+   */
+  skipResultDoor?: boolean;
+  /**
    * Surfaces this tool is meaningful from. Phase 4 T3.1. The prompt-
    * assembly catalog renderer filters by the caller's modality so
    * voice surfaces only see voice-capable tools. Absent → callers

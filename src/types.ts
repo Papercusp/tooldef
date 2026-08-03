@@ -571,6 +571,8 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
   crossWorkspace?: boolean;
   /** See `RoleToolDefinitionInput.skipWorkspaceTx` — same opt-out, principal-gated side. */
   skipWorkspaceTx?: boolean;
+  /** See `RoleToolDefinition.skipResultDoor` (EI-19386201256023240) — same opt-out, principal-gated side. */
+  skipResultDoor?: boolean;
 }
 
 /** Input shape for `defineTool` — same as ToolDefinition minus derived fields. */
@@ -697,6 +699,8 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
   crossWorkspace?: boolean;
   /** See `RoleToolDefinitionInput.skipWorkspaceTx` — same opt-out, principal-gated side. */
   skipWorkspaceTx?: boolean;
+  /** See `RoleToolDefinitionInput.skipResultDoor` (EI-19386201256023240) — same opt-out, principal-gated side. */
+  skipResultDoor?: boolean;
 }
 
 /**
@@ -806,6 +810,33 @@ export interface RoleToolDefinition<
    */
   skipWorkspaceTx?: boolean;
   /**
+   * EI-19386201256023240: opt this tool's result out of the per-result "door"
+   * (`result-door.ts`'s `applyResultDoor`, P-006 leg C) — the cap that truncates
+   * an oversized `content[0].text` and spills the full text to scratch behind a
+   * pointer line. The door's OWN header already states the intended rule:
+   * "machine-consumed dispatches … are deliberately NOT doored: their consumers
+   * parse programmatically and pay no context rent" — but that rule is enforced
+   * only STRUCTURALLY, by which dispatch path a call takes (capabilities/invoke,
+   * the tools:invoke inner re-dispatch, and TUI plan-item routes never reach the
+   * one choke point that calls `applyResultDoor`). A tool reached over the
+   * ORDINARY `tools/call` MCP path — as every per-CLI PostToolUse hook calls
+   * `activity:report` — hits that choke point exactly like a model-facing call,
+   * even though its consumer is a shell hook doing `json.loads(item['text'])`,
+   * not a model. A truncated body plus the door's prose footer is invalid JSON,
+   * so `json.loads` throws and the hook fails open SILENTLY — converting a
+   * context-protection mechanism into a correctness bug for the one tool on the
+   * box calling it (measured: 64,326 truncated `activity:report` responses/24h,
+   * 87% of all door fires, each dropping that call's coordination fold with no
+   * error anywhere).
+   *
+   * Set `skipResultDoor: true` on a tool whose documented/near-exclusive caller
+   * is a programmatic client that json-parses the raw result body (not a model
+   * reading it as context) — never set it merely to avoid a large response; the
+   * door's spill-to-scratch + pointer is still the correct behavior for anything
+   * a model actually reads. Absent/false ⇒ today's behavior, byte-identical.
+   */
+  skipResultDoor?: boolean;
+  /**
    * Surfaces this tool is meaningful from. Phase 4 T3.1. The prompt-
    * assembly catalog renderer filters by the caller's modality so voice
    * surfaces only see voice-capable tools. Default — when absent — is
@@ -906,6 +937,8 @@ export interface RoleToolDefinitionInput<
   crossWorkspace?: boolean;
   /** See RoleToolDefinition.skipWorkspaceTx (EI-18666279107998059). */
   skipWorkspaceTx?: boolean;
+  /** See RoleToolDefinition.skipResultDoor (EI-19386201256023240). */
+  skipResultDoor?: boolean;
   /** See RoleToolDefinition.modality. */
   modality?: ReadonlyArray<'text' | 'voice'>;
   /** See RoleToolDefinition.state. */

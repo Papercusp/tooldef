@@ -753,6 +753,8 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
     crossWorkspace: input.crossWorkspace,
     // EI-18666279107998059: see ToolDefinition.skipWorkspaceTx.
     skipWorkspaceTx: input.skipWorkspaceTx,
+    // EI-19386201256023240: see ToolDefinition.skipResultDoor.
+    skipResultDoor: input.skipResultDoor,
   };
 
   // ORDER IS LOAD-BEARING: project FIRST (its first act is the guarded
@@ -826,6 +828,8 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
     crossWorkspace: input.crossWorkspace,
     // EI-18666279107998059: see RoleToolDefinition.skipWorkspaceTx.
     skipWorkspaceTx: input.skipWorkspaceTx,
+    // EI-19386201256023240: see RoleToolDefinition.skipResultDoor.
+    skipResultDoor: input.skipResultDoor,
     modality: input.modality,
     // EI-10883: closed shape — an undeclared arg errors instead of being silently dropped.
     args: strictArgs(input.args),
@@ -1365,6 +1369,9 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     // EI-18666279107998059: thread skipWorkspaceTx the same way — read by the
     // host's dispatchWithSynthesizedTx seam. See ProjectedTool.skipWorkspaceTx.
     skipWorkspaceTx: def.skipWorkspaceTx,
+    // EI-19386201256023240: thread skipResultDoor the same way — read by the
+    // host's result-door choke point. See ProjectedTool.skipResultDoor.
+    skipResultDoor: def.skipResultDoor,
     outputSchema: def.result,
     outputJsonSchema,
     resultEligibility: eligibility,
@@ -1499,6 +1506,8 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     crossWorkspace: def.crossWorkspace,
     // EI-18666279107998059: see ProjectedTool.skipWorkspaceTx.
     skipWorkspaceTx: def.skipWorkspaceTx,
+    // EI-19386201256023240: see ProjectedTool.skipResultDoor.
+    skipResultDoor: def.skipResultDoor,
     modality: def.modality,
     events: def.events,
     state: def.state,
