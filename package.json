@@ -24,11 +24,13 @@
     }
   },
   "dependencies": {
-    "@papercusp/chat-protocol": "*",
-    "@papercusp/result-encoding": "*",
-    "@papercusp/rules": "*",
     "@standard-schema/spec": "^1.0.0",
     "typescript": "~6.0.0"
+  },
+  "peerDependencies": {
+    "@papercusp/chat-protocol": "*",
+    "@papercusp/result-encoding": "*",
+    "@papercusp/rules": "*"
   },
   "scripts": {
     "test": "vitest",
