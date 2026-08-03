@@ -61,6 +61,11 @@ export {
   resetPayloadTierRatchet,
   PAYLOAD_TIERS,
   PAYLOAD_TIER_RATCHET_CHARS,
+  // EI-19408488769901676: the HARD ceiling was defined but never re-exported, while its
+  // softer sibling (the ratchet) was — so a shaper wanting to hit the budget ITSELF, and
+  // thereby avoid the blind generic fall-through, had no way to reference the number it
+  // must stay under except by copying it. Export it so that check can be a real assertion.
+  PAYLOAD_TIER_HARD_CEILING_CHARS,
   type PayloadTier,
   type PayloadShapers,
   type PayloadShaperCtx,
