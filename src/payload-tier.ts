@@ -149,16 +149,63 @@ function recordOmission(state: ProjectionState, path: string, reason: string, co
   }
 }
 
+/**
+ * A clipped string must ANNOUNCE ITS OWN CLIPPING, IN BAND.
+ *
+ * EI-19447969329510166. The previous marker was a bare `…` — a character that
+ * occurs constantly inside real content (checkpoints, prose, tool guidance,
+ * this very file's comments), so a truncated value was INDISTINGUISHABLE from a
+ * complete one. The only evidence lived in a sibling `_projection.omitted` entry
+ * the reader has to think to correlate.
+ *
+ * Measured cost: a `work_items:get` checkpoint clipped from ~13,000 chars to 800
+ * read as a complete (if terse) note — the visible head ended mid-sentence at a
+ * `-` and the reader nearly acted on a SUPERSEDED root-cause block whose
+ * retraction sat in the dropped 85%. On the designated continuity surface a
+ * silent clip does not merely lose information, it MANUFACTURES confident wrong
+ * state, which is strictly worse than returning nothing.
+ *
+ * The marker is charged to the same projection budget as the content, so keep it
+ * cheap — but never confusable with content. The square-bracket form matches
+ * this file's existing `[circular]` / `[omitted: projection budget]` convention,
+ * and `TRUNCATED` is greppable in a transcript.
+ */
+function truncationMarker(omittedChars: number): string {
+  return `…[TRUNCATED +${omittedChars} chars — see _projection.cursor]`;
+}
+
+function clipString(value: string, keep: number): string {
+  const head = value.slice(0, Math.max(0, keep));
+  return `${head}${truncationMarker(value.length - head.length)}`;
+}
+
 function takePrimitive(state: ProjectionState, value: unknown, path: string): unknown {
-  let candidate = value;
-  if (typeof value === 'string' && value.length > state.limits.maxString) {
-    candidate = `${value.slice(0, state.limits.maxString)}…`;
-    recordOmission(state, path, `${value.length - state.limits.maxString} string characters omitted`);
+  if (typeof value !== 'string') {
+    const size = jsonLen(value);
+    if (size > state.remaining) {
+      recordOmission(state, path, 'value omitted to fit projection budget');
+      return '[omitted: projection budget]';
+    }
+    state.remaining -= size;
+    return value;
   }
+
+  // Two independent clip pressures — the per-tier `maxString` cap and the
+  // running budget. The SECOND one used to be entirely silent: the old halving
+  // loop appended a bare `…` and never called recordOmission at all, so a string
+  // clipped by budget alone produced NO in-band marker AND no `_projection`
+  // entry — nothing anywhere said it had been cut. Both paths now converge on
+  // one clip + exactly one omission record carrying the FINAL char count.
+  let keep = value.length > state.limits.maxString ? state.limits.maxString : value.length;
+  let candidate = keep < value.length ? clipString(value, keep) : value;
   let size = jsonLen(candidate);
-  while (typeof candidate === 'string' && size > state.remaining && candidate.length > 32) {
-    candidate = `${candidate.slice(0, Math.max(32, Math.floor(candidate.length / 2) - 1))}…`;
+  while (size > state.remaining && keep > 32) {
+    keep = Math.max(32, Math.floor(keep / 2) - 1);
+    candidate = clipString(value, keep);
     size = jsonLen(candidate);
+  }
+  if (keep < value.length) {
+    recordOmission(state, path, `${value.length - keep} string characters omitted`);
   }
   if (size > state.remaining) {
     recordOmission(state, path, 'value omitted to fit projection budget');
@@ -378,7 +425,20 @@ export function projectBoundedPayload(
         payloadTier: 'full',
       },
     },
-    next: `Call ${opts.toolName} with the exact args in _projection.cursor.args for full detail.`,
+    // EI-19447969329510166: this used to read "Call <tool> with the EXACT args in
+    // _projection.cursor.args" — advice that is literally un-executable from a
+    // schema-validating client. `payloadTier` is framework-reserved: it is pulled
+    // off the raw input by extractPayloadTier BEFORE schema validation, so it is
+    // deliberately absent from every published input schema, and
+    // deepStrictifyInPlace stamps those schemas additionalProperties:false. The
+    // caller therefore gets a validation rejection while following the tool's own
+    // printed recovery instruction — at exactly the moment they are trying to
+    // recover a field they have just been told was dropped. Say what is true.
+    next:
+      `Call ${opts.toolName} again with _projection.cursor.args for full detail. ` +
+      `NOTE: 'payloadTier' is FRAMEWORK-RESERVED — stripped before schema validation and absent from ` +
+      `${opts.toolName}'s published schema (additionalProperties:false), so a schema-validating client ` +
+      `REJECTS it on a direct call; route these args through your host's raw-args dispatch path instead.`,
   };
   let result: BoundedPayloadProjection = Array.isArray(preview)
     ? { items: preview, _projection: metadata }
