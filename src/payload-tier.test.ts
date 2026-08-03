@@ -364,7 +364,7 @@ describe('projectBoundedPayload — truncation is announced in band', () => {
   it('marks a maxString-clipped string with a LOUD marker naming the omitted count', () => {
     const original = 'A'.repeat(5_000);
     const out = projectBoundedPayload({ note: original }, { toolName: 't', tier: 'trimmed' });
-    const got = (out as { note: string }).note;
+    const got = out.note as string;
 
     expect(got).toMatch(markerRe);
     // The count is not decorative: head + omitted must reconstruct the original.
@@ -378,8 +378,8 @@ describe('projectBoundedPayload — truncation is announced in band', () => {
   it('leaves a string that FITS byte-identical — the marker must not become noise', () => {
     const short = 'a complete, untruncated value';
     const out = projectBoundedPayload({ note: short }, { toolName: 't', tier: 'trimmed' });
-    expect((out as { note: string }).note).toBe(short);
-    expect((out as { note: string }).note).not.toMatch(/TRUNCATED/);
+    expect(out.note as string).toBe(short);
+    expect(out.note as string).not.toMatch(/TRUNCATED/);
   });
 
   it('marks AND records the BUDGET-pressure clip, which was previously silent in both channels', () => {
@@ -413,7 +413,7 @@ describe('projectBoundedPayload — truncation is announced in band', () => {
       { toolName: 'work_items:get', tier: 'trimmed', args: { id: 'WI-6638', detail: true } },
     );
 
-    const got = (out as { results: Array<{ checkpoint: string }> }).results[0].checkpoint;
+    const got = (out.results as Array<{ checkpoint: string }>)[0].checkpoint;
     expect(got.length).toBeLessThan(checkpoint.length);
     // The whole point: a reader can tell, from the value ALONE, that the
     // retraction they cannot see might exist.
