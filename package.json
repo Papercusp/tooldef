@@ -24,6 +24,7 @@
     }
   },
   "dependencies": {
+    "@papercusp/module-singleton": "*",
     "@standard-schema/spec": "^1.0.0",
     "typescript": "~6.0.0"
   },
