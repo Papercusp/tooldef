@@ -550,9 +550,14 @@ export function negotiateDelta(input: {
  * silent-wrong-merge risk the owner BUILD decision retires by test (D-007/D-008).
  *
  * Defaults to ALWAYS-ON so the generic lib + its tests exercise the real path; the
- * Papercusp host overrides it at boot to read the dark `TOOL_DELTA_PROTOCOL` flag
- * (default OFF), so semantic deltas are dormant in production until the P-016
- * flip-gate (recorded Lane-C scenario verdicts) clears.
+ * Papercusp host overrides it at boot to read the `TOOL_DELTA_PROTOCOL` flag.
+ *
+ * ⚠ This paragraph used to call that flag "dark" with "(default OFF)" and describe
+ * semantic deltas as "dormant in production until the P-016 flip-gate clears". All
+ * three were wrong (WI-3153, measured 2026-08-04): the flag is DEFAULT ON, is NOT in
+ * KNOWN_DARK_FLAGS, and semantic deltas are LIVE over the MCP transport, whose delta
+ * proxy reconstructs full rows before the model sees them. The model never merges,
+ * which is why the flip never needed the Lane-C scenario verdicts to clear.
  */
 let semanticDeltaEnabledResolver: (ctx: unknown) => boolean | Promise<boolean> = () => true;
 
