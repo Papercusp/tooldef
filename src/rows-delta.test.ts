@@ -6,7 +6,7 @@
  * bump invalidates the cursor → full.
  */
 import { afterEach, describe, it, expect } from 'vitest';
-import { negotiateRowsDelta } from './rows-delta';
+import { negotiateRowsDelta, DELTA_MAX_EMBEDDED_CURSOR_CHARS } from './rows-delta';
 import { applySemanticDelta, computeViewChecksum, decodeDeltaCursor } from './delta-protocol';
 import { resetRowDigestStore } from './delta-digest-store';
 import { DeltaToolClient } from './delta-client';
@@ -142,5 +142,62 @@ describe('negotiateRowsDelta', () => {
     ing = c.ingest('plans.attention', { mode: 'delta', cursor: warm.cursor, checksum: warm.checksum, changes: warm.changes! }, id);
     expect(ing.refetchFull).toBe(false);
     expect(new Set(ing.rows.map(id))).toEqual(new Set(['b', 'c', 'd']));
+  });
+
+  /**
+   * D-091 dead band. The cursor rides back as a `?delta=` QUERY PARAM, so what breaks is
+   * CURSOR BYTES, not the `DELTA_MAX_DIGEST_ENTRIES` row count. Measured live on :3170:
+   * 300 rows → 14,591 chars → 200 OK, but 450 rows → 22,207 chars → **HTTP 431**. Views in
+   * ~320-500 rows were small enough to embed and too big to send, so the warm poll FAILED
+   * outright — worse than the full re-send delta replaces, and invisible to every test here
+   * because it fails in the transport, not in this function.
+   *
+   * The guard: given a viewKey, an over-budget view parks (`di`) instead of embedding (`dg`).
+   */
+  it('D-091: an over-budget digest PARKS instead of embedding a cursor too large to send', () => {
+    const rows = Array.from({ length: 450 }, (_, i) => ({ id: `WI-${i}`, title: 'x'.repeat(40) }));
+    const r = negotiateRowsDelta({
+      cursor: undefined,
+      rows,
+      itemKey: id,
+      itemKeyField: 'id',
+      schemaVersion: 'v1',
+      viewKey: 'workItems.byHarness:{"harnessSlug":"papercusp"}',
+    });
+    expect(r.mode).toBe('full');
+    expect(r.cursor.length).toBeLessThanOrEqual(DELTA_MAX_EMBEDDED_CURSOR_CHARS);
+
+    const decoded = decodeDeltaCursor(r.cursor);
+    expect(decoded?.dg, 'the digest must NOT be embedded at this size').toBeUndefined();
+    expect(decoded?.di, 'it must be parked server-side instead').toBeTruthy();
+
+    // …and the parked digest still deltas correctly — the fix moves WHERE the digest lives,
+    // never whether it works. Without this the test would pass on a cursor that simply lost
+    // its digest and degraded to full-forever (the P-024 bug, reintroduced).
+    const warm = negotiateRowsDelta({
+      cursor: r.cursor,
+      rows: [...rows.slice(1), { id: 'WI-NEW', title: 'y' }],
+      itemKey: id,
+      itemKeyField: 'id',
+      schemaVersion: 'v1',
+      viewKey: 'workItems.byHarness:{"harnessSlug":"papercusp"}',
+    });
+    expect(warm.mode, `expected a delta, got full (${warm.fullReason})`).toBe('delta');
+    expect(warm.changes?.length).toBe(2); // one removed, one added
+  });
+
+  /** CONTROL: a genuinely small view still embeds — the fix must not park everything. */
+  it('D-091 CONTROL: a small view still embeds its digest in the cursor', () => {
+    const rows = [{ id: 'a' }, { id: 'b' }];
+    const r = negotiateRowsDelta({
+      cursor: undefined,
+      rows,
+      itemKey: id,
+      itemKeyField: 'id',
+      schemaVersion: 'v1',
+      viewKey: 'tiny:{}',
+    });
+    expect(decodeDeltaCursor(r.cursor)?.dg).toBeTruthy();
+    expect(decodeDeltaCursor(r.cursor)?.di).toBeUndefined();
   });
 });
