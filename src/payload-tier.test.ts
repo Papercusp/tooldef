@@ -435,3 +435,64 @@ describe('projectBoundedPayload — truncation is announced in band', () => {
     expect(out._projection.next).toMatch(/additionalProperties:false/);
   });
 });
+
+// WI-36048 — borrow item 1 of the opencode/OMP token-reduction research.
+// The sibling of the block above, for values dropped WHOLE rather than clipped.
+// Both channels answer "what was here, and can I get it back?"; until this
+// landed, only the clip path did — a dropped value produced a bare
+// `[omitted: projection budget]` carrying neither size nor recovery path, which
+// is opencode's `[Old tool result content cleared]` shape and strictly dominated
+// by OMP's `[shaken ~N tokens — recover: artifact://<id>]`.
+describe('projectBoundedPayload — a value dropped WHOLE says how much and how to recover it', () => {
+  it('EVERY omission marker it emits names the recovery knob', () => {
+    // Deliberately shape-agnostic: it asserts the CONTRACT over whatever markers
+    // the projector actually produces, rather than pinning one fixture to one
+    // branch. A new omission site that forgets the pointer fails here.
+    const payload = {
+      deep: { a: { b: { c: { d: { e: { noIdentityHere: 'x', more: 'y' } } } } } },
+      rows: Array.from({ length: 30 }, (_, i) => ({
+        id: `WI-${i}`,
+        nested: { plan_item: { slug: 's', item: 'P-1' } },
+        summary: 'S'.repeat(400),
+      })),
+    };
+    const text = JSON.stringify(projectBoundedPayload(payload, { toolName: 't', tier: 'trimmed' }));
+    const markers = [...new Set(text.match(/\[omitted:[^\]"]*\]/g) ?? [])];
+
+    expect(markers.length).toBeGreaterThan(0);
+    for (const m of markers) {
+      // The pointer that actually resolves — an EXPLICIT payloadTier:'full' sets
+      // explicitFullRequest, the one documented exit from the hard-ceiling
+      // force-shape. Deliberately NOT the result-door spill: these values were
+      // never serialized, so they are not in the spill either, and advertising
+      // it would be a lie the model trusts.
+      expect(m).toContain("payloadTier:'full'");
+      expect(m).not.toContain('scratch');
+    }
+  });
+
+  it('CONTROL: a payload that FITS carries no omission marker — it must not become noise', () => {
+    // Without this, the assertions above would also pass against a projector
+    // that stamped the marker unconditionally.
+    const out = projectBoundedPayload({ note: 'small' }, { toolName: 't', tier: 'trimmed' });
+    expect(out.note as string).toBe('small');
+    expect(JSON.stringify(out)).not.toContain('[omitted:');
+  });
+
+  it('the depth-boundary markers carry the recovery knob too, and pay no stringify for a size', () => {
+    // A deeply nested object with no identity fields hits the depth limit.
+    const deep = { a: { b: { c: { d: { e: { noIdentityHere: 'x', more: 'y' } } } } } };
+    const text = JSON.stringify(projectBoundedPayload(deep, { toolName: 't', tier: 'trimmed' }));
+
+    // If a depth/preview marker fired at all, it must name the recovery path.
+    const markers = text.match(/\[omitted: (?:depth limit|compact preview depth)[^\]]*\]/g) ?? [];
+    expect(markers.length).toBeGreaterThan(0);
+    for (const m of markers) {
+      expect(m).toContain("payloadTier:'full'");
+      // Deliberately size-free: computing one would cost a JSON.stringify per
+      // dropped node, and this marker is charged to the same budget it is
+      // trying to save.
+      expect(m).not.toMatch(/~\d+ chars/);
+    }
+  });
+});
