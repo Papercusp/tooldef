@@ -179,12 +179,46 @@ function clipString(value: string, keep: number): string {
   return `${head}${truncationMarker(value.length - head.length)}`;
 }
 
+/**
+ * WI-36048 (borrow item 1 of the opencode/OMP token-reduction research).
+ *
+ * The sibling of `truncationMarker` above, for values dropped WHOLE rather than
+ * clipped. Both answer the same question — "what was here, and can I get it
+ * back?" — and until now only the clip path did.
+ *
+ * The comparison that motivated it: OMP replaces evicted content with
+ * `[shaken ~N tokens — recover: artifact://<id> (region N)]`; opencode uses a
+ * fixed `[Old tool result content cleared]`. The first tells the model how much
+ * went and how to get it back, so it can decide whether recovery is worth a
+ * call; the second tells it neither, so the only rational move is to re-run the
+ * whole tool or silently proceed on partial data. Our bare
+ * `[omitted: projection budget]` was the second kind.
+ *
+ * ⚠ The research is equally explicit that a self-describing placeholder is WORSE
+ * than nothing if the recovery pointer it advertises does not resolve — it
+ * becomes a lie the model trusts. So the pointer here is deliberately NOT the
+ * result-door spill, which provably cannot recover these (the omitted values are
+ * never serialized, so they are not in the spill either). It is the re-call with
+ * an EXPLICIT `payloadTier:'full'`, which sets `explicitFullRequest` — the one
+ * documented exit from the hard-ceiling force-shape (see applyPayloadTier
+ * below). That path resolves; the spill path does not.
+ *
+ * Size is included only where the caller ALREADY computed it. The depth-boundary
+ * sites deliberately omit it rather than pay a `JSON.stringify` per dropped node
+ * — this marker is charged to the same projection budget as the content it
+ * replaces, so it stays cheap.
+ */
+function omissionMarker(reason: string, omittedChars?: number): string {
+  const size = omittedChars != null && omittedChars > 0 ? `, ~${omittedChars} chars` : '';
+  return `[omitted: ${reason}${size} — recover: re-call with payloadTier:'full']`;
+}
+
 function takePrimitive(state: ProjectionState, value: unknown, path: string): unknown {
   if (typeof value !== 'string') {
     const size = jsonLen(value);
     if (size > state.remaining) {
       recordOmission(state, path, 'value omitted to fit projection budget');
-      return '[omitted: projection budget]';
+      return omissionMarker('projection budget', size);
     }
     state.remaining -= size;
     return value;
@@ -209,7 +243,9 @@ function takePrimitive(state: ProjectionState, value: unknown, path: string): un
   }
   if (size > state.remaining) {
     recordOmission(state, path, 'value omitted to fit projection budget');
-    return '[omitted: projection budget]';
+    // The WHOLE string is dropped here, not the clipped candidate — so the
+    // omitted amount is the original length, which we already have for free.
+    return omissionMarker('projection budget', value.length);
   }
   state.remaining -= size;
   return candidate;
@@ -255,7 +291,7 @@ function projectIdentityPreview(
   }
   if (depth >= IDENTITY_PREVIEW_DEPTH) {
     recordOmission(state, path, 'non-identity detail omitted at compact preview depth');
-    return '[omitted: compact preview depth]';
+    return omissionMarker('compact preview depth');
   }
 
   state.active.add(value);
@@ -280,7 +316,7 @@ function projectIdentityPreview(
     const chosen = entries.filter(([key]) => IDENTITY_FIELDS.has(key) || IDENTITY_ENVELOPES.has(key));
     if (chosen.length === 0) {
       recordOmission(state, path, 'nested value omitted at projection depth limit');
-      return '[omitted: depth limit]';
+      return omissionMarker('depth limit');
     }
 
     const projected: Record<string, unknown> = {};
