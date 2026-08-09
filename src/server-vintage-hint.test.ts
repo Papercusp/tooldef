@@ -12,7 +12,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { defineTool } from './define-tool';
-import { InvalidInputError } from './dispatch-projected';
 import { dispatchProjectedTool, type DispatchProjectedDeps } from './dispatch-projected';
 import { _resetProjectionRegistryForTests, lookupByMcpName, type UnifiedToolContext } from './tool-projection';
 import { resetServerVintageResolver, setServerVintageResolver } from './server-vintage';
@@ -33,19 +32,19 @@ const ctx = (over: Partial<UnifiedToolContext> = {}): UnifiedToolContext => ({
 });
 
 async function callWithUnknownKey(toolName: string): Promise<string> {
-  try {
-    await dispatchProjectedTool(
-      lookupByMcpName(toolName)!,
-      toolName,
-      { known: 'x', totallyUnknownArg: 'y' },
-      ctx(),
-      DEPS,
-    );
-    throw new Error('expected the call to reject');
-  } catch (err) {
-    if (err instanceof InvalidInputError) return err.message;
-    throw err;
-  }
+  // dispatchProjectedTool does NOT throw on a validation failure — dispatch-stack's
+  // invoke step catches the handler-thrown InvalidInputError internally and returns
+  // a discriminated { ok: false, error } result (dispatch-stack.ts ~L677-679).
+  const outcome = await dispatchProjectedTool(
+    lookupByMcpName(toolName)!,
+    toolName,
+    { known: 'x', totallyUnknownArg: 'y' },
+    ctx(),
+    DEPS,
+  );
+  if (outcome.ok) throw new Error('expected the call to fail with invalid_input');
+  expect(outcome.error?.code).toBe('invalid_input');
+  return outcome.error?.message ?? '';
 }
 
 afterEach(() => {
@@ -101,13 +100,14 @@ describe('unknownArgHint + server-vintage wiring', () => {
       },
     });
 
-    const result = await dispatchProjectedTool(
+    const outcome = await dispatchProjectedTool(
       lookupByMcpName('test:vintage-hint-clean-call')!,
       'test:vintage-hint-clean-call',
       { known: 'x' },
       ctx(),
       DEPS,
     );
-    expect((result as { content: { text: string }[] }).content[0]!.text).toBe('{"known":"x"}');
+    expect(outcome.ok).toBe(true);
+    expect((outcome.result as { content: { text: string }[] }).content[0]!.text).toBe('{"known":"x"}');
   });
 });
