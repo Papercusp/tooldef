@@ -64,12 +64,52 @@ export function validateSync<S extends StandardSchemaV1>(
  * and that is what every validator in this repo actually produces. Read them
  * defensively (all optional): a host plugging in a non-Zod validator simply loses the
  * enrichment and falls back to the plain `path: message` rendering.
+ *
+ * `errors` is Zod v4's per-branch sub-issues on an `invalid_union` issue — one array
+ * per union member, each holding that branch's own issues. See `bestUnionBranch` below
+ * for why this needs to be read.
  */
 interface IssueExtras {
   code?: string;
   origin?: string;
   maximum?: number;
   minimum?: number;
+  errors?: ReadonlyArray<ReadonlyArray<StandardSchemaV1.Issue>>;
+}
+
+/**
+ * EI-19968462161677390: an `invalid_union` issue's own top-level message is Zod's
+ * generic "Invalid input" — it never names which field was wrong, because the union
+ * itself has no field. The USEFUL diagnosis lives in `issue.errors`: one sub-issue
+ * array per union branch, each carrying the field-level issues THAT branch produced
+ * trying to match the input. A caller who sends a well-shaped ARRAY into
+ * `z.union([z.string(), z.array(section)])` gets a deep, specific issue from the
+ * array branch (e.g. `body[1].forYouBecause.note: Required`) and a shallow
+ * "expected string, received array" from the string branch — the deep one is the
+ * branch the caller actually meant, so its issues are the ones worth surfacing.
+ *
+ * Picks the branch reaching the greatest PATH DEPTH (ties keep the first). A branch
+ * with depth 0 (e.g. the string branch's bare type mismatch) never wins once any
+ * other branch located a specific field — reproduced live: reporting the deepest
+ * branch turns "body: Invalid input" into
+ * "body[1].forYouBecause.note: forYouBecause.relation:'other' REQUIRES a `note`".
+ */
+function bestUnionBranch(
+  issue: StandardSchemaV1.Issue,
+): ReadonlyArray<StandardSchemaV1.Issue> | null {
+  const branches = (issue as IssueExtras).errors;
+  if (!Array.isArray(branches) || branches.length === 0) return null;
+  let best: ReadonlyArray<StandardSchemaV1.Issue> | null = null;
+  let bestDepth = 0;
+  for (const branch of branches) {
+    if (!Array.isArray(branch) || branch.length === 0) continue;
+    const depth = Math.max(...branch.map((i) => (i.path ?? []).length));
+    if (depth > bestDepth) {
+      bestDepth = depth;
+      best = branch;
+    }
+  }
+  return best;
 }
 
 /**
@@ -118,33 +158,49 @@ export function issuesAreValueLevel(issues: ReadonlyArray<StandardSchemaV1.Issue
  * without it the message degrades gracefully to the target-only form.
  */
 export function formatIssues(issues: ReadonlyArray<StandardSchemaV1.Issue>, input?: unknown): string {
-  return issues
-    .map((i) => {
-      const path = issuePath(i);
-      const extras = i as IssueExtras;
-      if (extras.code === 'too_big' && extras.origin === 'string' && typeof extras.maximum === 'number') {
-        const max = extras.maximum;
-        const actual = input !== undefined ? valueAtIssuePath(input, i) : undefined;
-        const actualLen = typeof actual === 'string' ? actual.length : null;
-        const over = actualLen !== null ? actualLen - max : null;
-        const detail =
-          over !== null && over > 0
-            ? `too long — ${actualLen} chars, ${over} over the ${max}-char limit; trim to ${max}.`
-            : `too long — over the ${max}-char limit; trim to ${max}.`;
-        return path ? `${path}: ${detail}` : detail;
-      }
-      return path ? `${path}: ${i.message}` : i.message;
-    })
-    .join('; ');
+  const render = (
+    issue: StandardSchemaV1.Issue,
+    prefix: ReadonlyArray<PropertyKey>,
+    depth: number,
+  ): string[] => {
+    const segs = [
+      ...prefix,
+      ...(issue.path ?? []).map((seg) =>
+        typeof seg === 'object' && seg !== null ? (seg as { key: PropertyKey }).key : (seg as PropertyKey),
+      ),
+    ];
+    // An `invalid_union` issue's real diagnosis lives in its per-branch sub-issues
+    // (see `bestUnionBranch`) — surface the branch that located an actual field
+    // instead of the union's own generic "Invalid input". Bounded recursion so a
+    // union of unions cannot spin.
+    if (depth < 4) {
+      const branch = bestUnionBranch(issue);
+      if (branch) return branch.flatMap((sub) => render(sub, segs, depth + 1));
+    }
+    const path = segs.map((s) => String(s)).join('.');
+    const extras = issue as IssueExtras;
+    if (extras.code === 'too_big' && extras.origin === 'string' && typeof extras.maximum === 'number') {
+      const max = extras.maximum;
+      const actual = input !== undefined ? valueAtPath(input, segs) : undefined;
+      const actualLen = typeof actual === 'string' ? actual.length : null;
+      const over = actualLen !== null ? actualLen - max : null;
+      const detail =
+        over !== null && over > 0
+          ? `too long — ${actualLen} chars, ${over} over the ${max}-char limit; trim to ${max}.`
+          : `too long — over the ${max}-char limit; trim to ${max}.`;
+      return [path ? `${path}: ${detail}` : detail];
+    }
+    return [path ? `${path}: ${issue.message}` : issue.message];
+  };
+  return issues.flatMap((issue) => render(issue, [], 0)).join('; ');
 }
 
-/** Walk `input` to the value an issue points at (undefined if the path does not resolve). */
-function valueAtIssuePath(input: unknown, issue: StandardSchemaV1.Issue): unknown {
+/** Walk `input` to the value at a resolved (already-flattened) segment path. */
+function valueAtPath(input: unknown, segs: ReadonlyArray<PropertyKey>): unknown {
   let cur: unknown = input;
-  for (const seg of issue.path ?? []) {
-    const key = typeof seg === 'object' && seg !== null ? (seg as { key: PropertyKey }).key : (seg as PropertyKey);
+  for (const seg of segs) {
     if (cur === null || typeof cur !== 'object') return undefined;
-    cur = (cur as Record<PropertyKey, unknown>)[key];
+    cur = (cur as Record<PropertyKey, unknown>)[seg];
   }
   return cur;
 }
