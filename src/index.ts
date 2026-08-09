@@ -35,6 +35,15 @@ export {
   resetResultAnnotator,
   applyResultAnnotator,
 } from './result-annotator';
+// Host-registered "how stale is this process" resolver, surfaced as an extra
+// sentence on an `Unrecognized key` invalid_args error (EI-19953470656367880).
+export type { ServerVintage } from './server-vintage';
+export {
+  setServerVintageResolver,
+  resetServerVintageResolver,
+  readServerVintage,
+  formatVintageAge,
+} from './server-vintage';
 export type {
   AgentRole,
   RoleRegistry,

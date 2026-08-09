@@ -23,6 +23,7 @@ import { register } from './registry';
 import { collectToolEmits } from './emits-registry';
 import { registerProjectedTool, type ToolFn, type ToolExposure, type UnifiedToolContext } from './tool-projection';
 import { UnauthorizedToolError, InvalidInputError } from './dispatch-projected';
+import { serverVintageHint } from './server-vintage';
 import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
 import { applyPayloadTier, extractPayloadTier, resolvePayloadTier } from './payload-tier';
 import {
@@ -1166,7 +1167,14 @@ function unknownArgHint(
   return (
     ` — this tool accepts ONLY: ${keys.join(', ')}.${correctionText}` +
     ' An undeclared arg is REJECTED, not silently ignored (EI-10883): passing an arg a tool does not declare used to return ok:true' +
-    ' while quietly doing something else, which is indistinguishable from success. Re-send using only the keys above.'
+    ' while quietly doing something else, which is indistinguishable from success. Re-send using only the keys above.' +
+    // EI-19953470656367880: an unrecognized-key rejection is ALSO the exact shape a
+    // caller sees when it (or the UI sending on its behalf) is newer than the server
+    // it's talking to — a long-lived process (e.g. a Tauri desktop's own spawned
+    // operator) has no file-watch and serves whatever code it booted with. When the
+    // host has registered a vintage resolver, say so, so that reads as "restart the
+    // app" instead of "I typo'd an arg".
+    serverVintageHint()
   );
 }
 
