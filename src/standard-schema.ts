@@ -120,6 +120,13 @@ function bestUnionBranch(
  */
 const VALUE_LEVEL_CODES = new Set(['too_big', 'too_small', 'invalid_format', 'invalid_value', 'not_multiple_of']);
 
+/**
+ * Codes whose verdict is about a value's SIZE. These are the only ones suppressed
+ * when the same path also failed its type check (see `formatIssues`) — a length
+ * verdict on a value of the wrong type describes nothing the caller can act on.
+ */
+const SIZE_CODES = new Set(['too_big', 'too_small']);
+
 export function issuePath(issue: StandardSchemaV1.Issue): string {
   return (issue.path ?? [])
     .map((seg) => (typeof seg === 'object' && seg !== null ? String((seg as { key: PropertyKey }).key) : String(seg)))
@@ -162,7 +169,7 @@ export function formatIssues(issues: ReadonlyArray<StandardSchemaV1.Issue>, inpu
     issue: StandardSchemaV1.Issue,
     prefix: ReadonlyArray<PropertyKey>,
     depth: number,
-  ): string[] => {
+  ): Array<{ path: string; code: string | undefined; text: string }> => {
     const segs = [
       ...prefix,
       ...(issue.path ?? []).map((seg) =>
@@ -188,11 +195,39 @@ export function formatIssues(issues: ReadonlyArray<StandardSchemaV1.Issue>, inpu
         over !== null && over > 0
           ? `too long — ${actualLen} chars, ${over} over the ${max}-char limit; trim to ${max}.`
           : `too long — over the ${max}-char limit; trim to ${max}.`;
-      return [path ? `${path}: ${detail}` : detail];
+      return [{ path, code: extras.code, text: path ? `${path}: ${detail}` : detail }];
     }
-    return [path ? `${path}: ${issue.message}` : issue.message];
+    return [
+      {
+        path,
+        code: extras.code,
+        text: path ? `${path}: ${issue.message}` : issue.message,
+      },
+    ];
   };
-  return issues.flatMap((issue) => render(issue, [], 0)).join('; ');
+
+  const rows = issues.flatMap((issue) => render(issue, [], 0));
+
+  // A SIZE verdict on a value that failed its TYPE check is meaningless, and worse
+  // than meaningless when rendered actionably. Zod's `.max(n)` on an array is a
+  // size check that reads `.length` off whatever it is handed — so a prose STRING
+  // passed to an array field reports `too_big { origin: 'string', maximum: n }`
+  // ALONGSIDE the invalid_type, and the branch above dutifully renders it as
+  // "too long — 312 chars, 292 over the 20-char limit; trim to 20." The 20 bounds
+  // ITEMS, not characters, and trimming the prose is the opposite of the fix
+  // (pass an array). Being the more specific-sounding of the two messages, it
+  // out-competes the correct one.
+  //
+  // EI-20018883577474576: six independent agents hit this on coord:send's
+  // `youMayNotKnow` / `couldNotDetermine`, and every report ends the same way —
+  // they shipped by DELETING the structured field. The renderer taught agents to
+  // strip the epistemic-honesty fields the protocol exists to carry.
+  const typeFailedPaths = new Set(rows.filter((r) => r.code === 'invalid_type').map((r) => r.path));
+  const kept = rows.filter((r) => !(r.code && SIZE_CODES.has(r.code) && typeFailedPaths.has(r.path)));
+
+  // Never return an empty string: if suppression somehow removed everything, the
+  // caller is better served by the raw issues than by a silent success-shaped "".
+  return (kept.length > 0 ? kept : rows).map((r) => r.text).join('; ');
 }
 
 /** Walk `input` to the value at a resolved (already-flattened) segment path. */

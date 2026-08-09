@@ -136,6 +136,53 @@ describe('formatIssues — actionable too_big (EI-10943 / P-003)', () => {
   });
 });
 
+describe('formatIssues — a SIZE verdict on a wrong-typed value (EI-20018883577474576)', () => {
+  // Reproduces coord:send's `youMayNotKnow` / `couldNotDetermine`: an ARRAY field
+  // carrying a `.max(20)` ITEM bound, handed a prose string. Zod's size check reads
+  // `.length` off the string, so it reports `maximum: 20` with a string origin
+  // ALONGSIDE the invalid_type — and the renderer then tells the caller to "trim to
+  // 20 chars". That remedy is (a) wrong units, the 20 bounds ITEMS not characters,
+  // and (b) the opposite of the real fix, which is to pass an array. It is also the
+  // more specific-sounding of the two messages, so it out-competes the correct one.
+  //
+  // Six independent agents have filed this against coord:send, and every report ends
+  // the same way: they shipped by DELETING the structured field. A length verdict on
+  // a value of the wrong type is never meaningful — suppress it.
+  const schema = z.object({
+    couldNotDetermine: z
+      .array(z.object({ what: z.string().min(1) }))
+      .max(20)
+      .optional(),
+  });
+  const bad = { couldNotDetermine: 'x'.repeat(312) };
+
+  it('never renders a CHARACTER remedy when the same path failed its type check', () => {
+    const r = schema.safeParse(bad);
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      const msg = formatIssues(r.error.issues, bad);
+      expect(msg).toContain('expected array');
+      expect(msg).not.toMatch(/char limit/);
+      expect(msg).not.toMatch(/trim to/);
+    }
+  });
+
+  // CALIBRATION — the suppression must be narrow. A genuine string over-length on a
+  // string field keeps its actionable remedy; without this, "delete the char message"
+  // would pass by breaking the feature the char message exists for.
+  it('still renders the character remedy for a real string over-length', () => {
+    const strSchema = z.object({ label: z.string().max(10) });
+    const input = { label: 'x'.repeat(15) };
+    const r = strSchema.safeParse(input);
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      expect(formatIssues(r.error.issues, input)).toBe(
+        'label: too long — 15 chars, 5 over the 10-char limit; trim to 10.',
+      );
+    }
+  });
+});
+
 describe('formatIssues — union branch descent (EI-19968462161677390)', () => {
   // Mirrors coord:send's `body: z.union([z.string(), z.array(section)])` shape: a
   // union where one branch is a bare scalar and the other is an array of objects.
