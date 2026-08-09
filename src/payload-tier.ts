@@ -138,14 +138,32 @@ interface ProjectionState {
   remaining: number;
   omittedCount: number;
   omitted: Array<{ path: string; reason: string }>;
+  /**
+   * A second, independently-capped bucket for omissions that MUST survive into
+   * the final sample regardless of how many lower-priority (field/depth) entries
+   * arrived first. EI-19965559011729712: an array-ELEMENT drop (the count a
+   * caller reads back — `criteria[12]` vs the true 17) was being silently
+   * starved out of `omitted` by up to 20 per-field/per-depth entries recorded
+   * for the elements that DID survive, so the one omission that actually
+   * changes the apparent completeness of the result never made the sample.
+   * Merged ahead of `omitted` when the metadata is assembled.
+   */
+  priorityOmitted: Array<{ path: string; reason: string }>;
   active: WeakSet<object>;
   limits: { maxArray: number; maxDepth: number; maxKeys: number; maxString: number };
 }
 
-function recordOmission(state: ProjectionState, path: string, reason: string, count = 1): void {
+function recordOmission(
+  state: ProjectionState,
+  path: string,
+  reason: string,
+  count = 1,
+  priority = false,
+): void {
   state.omittedCount += Math.max(1, count);
-  if (state.omitted.length < GENERIC_PROJECTION_OMISSION_SAMPLES) {
-    state.omitted.push({ path, reason });
+  const bucket = priority ? state.priorityOmitted : state.omitted;
+  if (bucket.length < GENERIC_PROJECTION_OMISSION_SAMPLES) {
+    bucket.push({ path, reason });
   }
 }
 
@@ -211,6 +229,20 @@ function clipString(value: string, keep: number): string {
 function omissionMarker(reason: string, omittedChars?: number): string {
   const size = omittedChars != null && omittedChars > 0 ? `, ~${omittedChars} chars` : '';
   return `[omitted: ${reason}${size} — recover: re-call with payloadTier:'full']`;
+}
+
+/**
+ * An array whose ELEMENT COUNT was truncated must announce it the same way a
+ * clipped string does (see `truncationMarker`) — otherwise the array's own
+ * `.length` (and any header a downstream encoder derives from it, e.g. TOON's
+ * `key[N]{fields}`) silently asserts a complete count. Appended as an extra
+ * element so the signal travels WITH the array into whatever the caller does
+ * with it — a `.length` read, a completeness check, a rendered table header —
+ * rather than living only in a `_projection.omitted` entry a reader has to
+ * think to correlate (EI-19965559011729712).
+ */
+function arrayTruncationMarker(droppedCount: number): string {
+  return `[TRUNCATED +${droppedCount} more item(s) — see _projection.cursor]`;
 }
 
 function takePrimitive(state: ProjectionState, value: unknown, path: string): unknown {
@@ -300,14 +332,16 @@ function projectIdentityPreview(
       const shown = value.slice(0, state.limits.maxArray);
       const projected: unknown[] = [];
       for (let i = 0; i < shown.length; i += 1) {
-        if (state.remaining < 128) {
-          recordOmission(state, `${path}[${i}]`, 'remaining identity rows omitted to fit projection budget', value.length - i);
-          break;
-        }
+        if (state.remaining < 128) break;
         projected.push(projectIdentityPreview(shown[i], `${path}[${i}]`, depth + 1, state));
       }
-      if (value.length > shown.length) {
-        recordOmission(state, `${path}[${shown.length}]`, `${value.length - shown.length} identity rows omitted`, value.length - shown.length);
+      const droppedCount = value.length - projected.length;
+      if (droppedCount > 0) {
+        // priority: an element-count drop must survive the omitted[] sample cap
+        // even when per-row entries for the KEPT elements would otherwise fill it
+        // first (EI-19965559011729712).
+        recordOmission(state, `${path}[${projected.length}]`, `${droppedCount} identity row(s) omitted`, droppedCount, true);
+        projected.push(arrayTruncationMarker(droppedCount));
       }
       return projected;
     }
@@ -368,14 +402,20 @@ function projectValue(value: unknown, path: string, depth: number, state: Projec
       const shown = value.slice(0, state.limits.maxArray);
       const projected: unknown[] = [];
       for (let i = 0; i < shown.length; i += 1) {
-        if (state.remaining < 128) {
-          recordOmission(state, `${path}[${i}]`, 'remaining array values omitted to fit projection budget', value.length - i);
-          break;
-        }
+        if (state.remaining < 128) break;
         projected.push(projectValue(shown[i], `${path}[${i}]`, depth + 1, state));
       }
-      if (value.length > shown.length) {
-        recordOmission(state, `${path}[${shown.length}]`, `${value.length - shown.length} array items omitted`, value.length - shown.length);
+      const droppedCount = value.length - projected.length;
+      if (droppedCount > 0) {
+        // priority: an element-count drop must survive the omitted[] sample cap
+        // even when per-row entries for the KEPT elements would otherwise fill it
+        // first — this is the omission that changes the array's APPARENT
+        // completeness (a `criteria[12]` header/`.length` read over a 17-element
+        // source), so it must never be the one that gets starved out
+        // (EI-19965559011729712). The in-band marker also travels WITH the array
+        // itself, so a downstream encoder's own element count reflects the drop.
+        recordOmission(state, `${path}[${projected.length}]`, `${droppedCount} array item(s) omitted`, droppedCount, true);
+        projected.push(arrayTruncationMarker(droppedCount));
       }
       return projected;
     }
@@ -436,6 +476,7 @@ export function projectBoundedPayload(
     remaining: Math.max(1_000, target - 1_600),
     omittedCount: 0,
     omitted: [],
+    priorityOmitted: [],
     active: new WeakSet<object>(),
     limits: projectionTier === 'standard'
       ? { maxArray: 40, maxDepth: 8, maxKeys: 100, maxString: 2_500 }
@@ -450,7 +491,10 @@ export function projectBoundedPayload(
     originalChars: opts.originalChars ?? jsonLen(data),
     returnedChars: 0,
     omittedCount: Math.max(1, state.omittedCount),
-    omitted: state.omitted,
+    // priorityOmitted first: an array-element-count drop must never be starved
+    // out of the sample by lower-priority field/depth entries recorded for the
+    // elements that survived (EI-19965559011729712).
+    omitted: [...state.priorityOmitted, ...state.omitted].slice(0, GENERIC_PROJECTION_OMISSION_SAMPLES),
     cursor: {
       kind: 'full-detail',
       tool: opts.toolName,
