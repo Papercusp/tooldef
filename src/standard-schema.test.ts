@@ -136,6 +136,36 @@ describe('formatIssues — actionable too_big (EI-10943 / P-003)', () => {
   });
 });
 
+describe('formatIssues — union branch descent (EI-19968462161677390)', () => {
+  // Mirrors coord:send's `body: z.union([z.string(), z.array(section)])` shape: a
+  // union where one branch is a bare scalar and the other is an array of objects.
+  // A well-shaped array with a deep field violation should surface via the
+  // ARRAY branch's own issue, not the union's generic top-level message.
+  const section = z.object({ id: z.string(), note: z.string() });
+  const schema = z.object({ body: z.union([z.string(), z.array(section)]) });
+
+  it('surfaces the deepest branch field-level issue instead of the union generic message', () => {
+    const r = schema.safeParse({ body: [{ id: 'x' }] }); // array branch is close; note missing
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      const msg = formatIssues(r.error.issues);
+      // Must NOT collapse to the union's own shallow message.
+      expect(msg).not.toBe('body: Invalid input');
+      // Must name the deep, qualified path into the array branch.
+      expect(msg).toContain('body.0.note');
+    }
+  });
+
+  it('still renders a plain (non-union) issue unchanged', () => {
+    const plain = z.object({ id: z.string() });
+    const r = plain.safeParse({});
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      expect(formatIssues(r.error.issues)).toContain('id:');
+    }
+  });
+});
+
 describe('validateSync', () => {
   it('validates synchronously for sync validators', () => {
     expect(validateSync(numberBox, { n: 1 })).toEqual({ ok: true, value: { n: 1 } });
