@@ -271,15 +271,18 @@ describe('applyPayloadTier', () => {
     const envelope = { ok: true, results, counts: { ok: results.length, failed: 0 } };
 
     const projected = projectBoundedPayload(envelope, { toolName: 'work_items:get', tier: 'trimmed' });
-    const rows = projected.results as Array<Record<string, unknown>>;
+    const rows = projected.results as Array<Record<string, unknown> | string>;
 
     expect(rows.length).toBeGreaterThan(0);
     // The real regression: BEFORE the fix, a row whose budget ran out mid-object
     // could come back as a bare `{ok:true}` (or even `{}`) — no `id` at all, so a
     // bulk caller cannot tell which requested id that row even corresponds to.
     // Every row actually present in the projection must still carry its `id`,
-    // however aggressively its OTHER fields got trimmed/omitted.
+    // however aggressively its OTHER fields got trimmed/omitted. (A trailing
+    // string is the in-band array-truncation marker, EI-19965559011729712 — not
+    // a row, so it's excluded from this per-row check.)
     for (const row of rows) {
+      if (typeof row === 'string') continue;
       expect(row.id).toBeDefined();
       expect(typeof row.id).toBe('string');
     }
@@ -477,6 +480,39 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     const out = projectBoundedPayload({ note: 'small' }, { toolName: 't', tier: 'trimmed' });
     expect(out.note as string).toBe('small');
     expect(JSON.stringify(out)).not.toContain('[omitted:');
+  });
+
+  it('REGRESSION (EI-19965559011729712): an array truncated at the maxArray cap announces the drop IN BAND and in omitted[], never starved by field-level entries', () => {
+    // Mirrors the reported rubrics:get shape: a 17-element array of small
+    // objects, each with several nested fields — deep/wide enough that EVERY
+    // kept element also trips depth/field omissions of its own. Before the fix,
+    // those per-element omissions (2 per kept element) filled the 20-slot
+    // `omitted[]` sample before the ONE array-truncation entry (recorded last)
+    // ever got a chance — so a reader scanning `omitted[]` saw only field noise
+    // and no signal that 5 whole elements were gone.
+    const criteria = Array.from({ length: 17 }, (_, i) => ({
+      key: `c${i}`,
+      title: `criterion ${i}`,
+      model: { rubric: 'x'.repeat(50), drillSteps: ['a', 'b', 'c'] },
+      method: 'y'.repeat(50),
+      driftMarkers: ['m1', 'm2'],
+    }));
+    const out = projectBoundedPayload(
+      { rubric: { rubricId: 'goal-mode-e2e', criteria } },
+      { toolName: 'rubrics:get', tier: 'trimmed' },
+    );
+
+    const projectedCriteria = (out.rubric as { criteria: unknown[] }).criteria;
+    // The header a downstream TOON/array-length read would derive is no longer
+    // silently short — the drop is visible IN the array's own last element.
+    const marker = projectedCriteria[projectedCriteria.length - 1];
+    expect(typeof marker).toBe('string');
+    expect(marker as string).toMatch(/TRUNCATED \+\d+ more item\(s\)/);
+
+    // And the sample list actually names it — never starved out by the
+    // per-element field/depth omissions recorded for the elements that DID
+    // survive.
+    expect(out._projection.omitted.some((o) => /array item\(s\) omitted/.test(o.reason))).toBe(true);
   });
 
   it('the depth-boundary markers carry the recovery knob too, and pay no stringify for a size', () => {
