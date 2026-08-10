@@ -347,6 +347,29 @@ export interface UnifiedToolContext {
    * not a large message.
    */
   transportCapExempt?: boolean;
+  /**
+   * True when this call is an INNER dispatch from a `code:run` script, i.e. the
+   * result is consumed as a JS VALUE (`result.output`) rather than read as text
+   * by a model.
+   *
+   * EI-20066912585022608: a handler that hand-rolls a human-readable text
+   * `ToolResult` (a header line + rendered output) is correct for the agent-facing
+   * MCP transport and WRONG for code-mode — `unwrapToolResult` finds no JSON to
+   * parse and hands the script a raw STRING, so the property access the author
+   * naturally writes resolves to `undefined` in silence. `capability:bash` showed
+   * the sharpest form: its BACKGROUND branch returns JSON (a real object) while
+   * its FOREGROUND branch returns rendered text, so the same call expression
+   * changes shape with an argument.
+   *
+   * A handler in that position reads this flag and attaches `structuredContent`
+   * (which `unwrapToolResult` prefers) with the same data its text body renders.
+   * Gate on it rather than attaching unconditionally: duplicating the payload for
+   * DIRECT callers would double the wire bytes of a tool nobody asked to be
+   * machine-readable. Prefer field names that state what the value actually is —
+   * the script's own field-miss tracker (run-script.ts) corrects a wrong guess by
+   * listing the real keys, but only if the value is an object at all.
+   */
+  codeMode?: boolean;
   /** Aborts on per-tool timeout, parent cancellation, or shutdown. */
   signal: AbortSignal;
   /**
