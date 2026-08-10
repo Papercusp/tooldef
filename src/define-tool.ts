@@ -1178,6 +1178,129 @@ function unknownArgHint(
   );
 }
 
+/**
+ * EI-20087434994864624 (+7 more filings of the same friction on 2026-08-10 alone) —
+ * make a NESTED validation failure teach the shape it actually needs.
+ *
+ * `argsSchemaHint` below dumps the tool's WHOLE args schema, bounded at
+ * ARGS_SCHEMA_HINT_MAX. For a top-level shape error that is exactly right. For a failure
+ * several levels down it is simultaneously TOO LONG and TOO SHORT: long enough to crowd
+ * the result budget, yet truncated thousands of characters before reaching the field that
+ * actually failed. The caller then cannot learn the shape from the error at all.
+ *
+ * The observed dead end (coord:send, eight independent agents): a section field rejects a
+ * string, then rejects an array of strings, and the appended "full args schema" cuts off
+ * mid-way through an unrelated sibling's description. The only route left is to send a
+ * deliberate `[{}]` so the validator enumerates the required keys — a probe purely to
+ * extract a schema the error was already trying to show. Agents who did not think of the
+ * probe dropped the field and inlined the content as prose, which silently destroys the
+ * structured signal the field exists to capture.
+ *
+ * So: when an issue points at a nested path, resolve THAT node in the JSON schema and
+ * render it alone. Two details carry the value here:
+ *
+ *  - We render the deepest ancestor that has `properties`, not the failing leaf. For
+ *    `couldNotDetermine.0.what: expected string`, the leaf's schema is `{"type":"string"}`
+ *    — true and useless. The PARENT object's schema lists every accepted key, which is
+ *    precisely what the `[{}]` probe was reverse-engineering.
+ *  - We follow `anyOf`/`oneOf`/`allOf` branches, because the union is why the path was
+ *    unreachable in the flat dump to begin with (`body` is a string OR an array of
+ *    richly-described sections).
+ *
+ * Falls back to the full dump whenever a path cannot be resolved, so this can only add
+ * precision, never remove information.
+ */
+const FIELD_SCHEMA_HINT_MAX = 700;
+const FIELD_SCHEMA_HINT_MAX_FIELDS = 3;
+
+function schemaUnionBranches(node: unknown): unknown[] {
+  if (!node || typeof node !== 'object') return [];
+  const rec = node as Record<string, unknown>;
+  const out: unknown[] = [];
+  for (const key of ['anyOf', 'oneOf', 'allOf'] as const) {
+    const branch = rec[key];
+    if (Array.isArray(branch)) out.push(...branch);
+  }
+  return out;
+}
+
+function hasProperties(node: unknown): boolean {
+  if (!node || typeof node !== 'object') return false;
+  const props = (node as Record<string, unknown>).properties;
+  return !!props && typeof props === 'object' && Object.keys(props as object).length > 0;
+}
+
+/** Step one path segment, descending through any union branches. Returns every candidate. */
+function stepSchema(nodes: readonly unknown[], seg: PropertyKey): unknown[] {
+  const key = typeof seg === 'object' && seg !== null ? String((seg as { key: PropertyKey }).key) : String(seg);
+  const isIndex = /^\d+$/.test(key);
+  const next: unknown[] = [];
+  const visit = (node: unknown, depth: number): void => {
+    if (!node || typeof node !== 'object' || depth > 4) return;
+    const rec = node as Record<string, unknown>;
+    if (isIndex) {
+      const prefixItems = rec.prefixItems;
+      if (Array.isArray(prefixItems) && prefixItems[Number(key)]) next.push(prefixItems[Number(key)]);
+      else if (rec.items) next.push(rec.items);
+    } else {
+      const props = rec.properties as Record<string, unknown> | undefined;
+      if (props && Object.prototype.hasOwnProperty.call(props, key)) next.push(props[key]);
+      else if (rec.additionalProperties && typeof rec.additionalProperties === 'object') {
+        next.push(rec.additionalProperties);
+      }
+    }
+    for (const branch of schemaUnionBranches(node)) visit(branch, depth + 1);
+  };
+  for (const node of nodes) visit(node, 0);
+  return next;
+}
+
+function failingFieldSchemaHint(
+  issues: ReadonlyArray<StandardSchemaV1.Issue> | undefined,
+  rawSchema: unknown,
+): string {
+  const rendered = new Map<string, string>();
+  for (const issue of issues ?? []) {
+    const path = (issue?.path ?? []) as ReadonlyArray<PropertyKey>;
+    // Depth 1 is a plain top-level arg — the full dump already reaches it, and
+    // `unknownArgHint` already names the accepted keys. Only deeper paths are unreachable.
+    if (path.length < 2) continue;
+
+    // Walk the path, remembering the deepest prefix whose node actually lists properties.
+    let nodes: unknown[] = [rawSchema];
+    let bestNode: unknown;
+    let bestLabel = '';
+    const labelParts: string[] = [];
+    for (const seg of path) {
+      nodes = stepSchema(nodes, seg);
+      if (nodes.length === 0) break;
+      const segKey = typeof seg === 'object' && seg !== null ? String((seg as { key: PropertyKey }).key) : String(seg);
+      labelParts.push(/^\d+$/.test(segKey) ? '[]' : segKey);
+      const objectish = nodes.find((node) => hasProperties(node))
+        ?? nodes.flatMap((node) => schemaUnionBranches(node)).find((node) => hasProperties(node));
+      if (objectish) {
+        bestNode = objectish;
+        bestLabel = labelParts.join('.').replace(/\.\[\]/g, '[]');
+      }
+    }
+    if (bestNode === undefined || rendered.has(bestLabel)) continue;
+
+    let json = '';
+    try {
+      json = JSON.stringify(bestNode) ?? '';
+    } catch {
+      json = '';
+    }
+    if (json.length === 0) continue;
+    if (json.length > FIELD_SCHEMA_HINT_MAX) json = `${json.slice(0, FIELD_SCHEMA_HINT_MAX)} …(truncated)`;
+    rendered.set(bestLabel, json);
+    if (rendered.size >= FIELD_SCHEMA_HINT_MAX_FIELDS) break;
+  }
+  if (rendered.size === 0) return '';
+  const body = [...rendered.entries()].map(([label, json]) => `\`${label}\` accepts ${json}`).join(' · ');
+  return ` — the field(s) that failed, in full: ${body}`;
+}
+
 function argsSchemaHint(rawSchema: unknown, cache: { hint?: string }): string {
   if (cache.hint === undefined) {
     let json = '';
@@ -1310,7 +1433,12 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
         // knows the shape — appending 1,800 chars of schema to "too long by 3 chars" is pure
         // context burn for the agent least able to spare it.
         `invalid_args: ${formatIssues(parsed.issues, shimmed)}${unknownArgHint(parsed.issues, rawSchema)}` +
-          (issuesAreValueLevel(parsed.issues) ? '' : argsSchemaHint(rawSchema, schemaHintCache)),
+          (issuesAreValueLevel(parsed.issues)
+            ? ''
+            : // EI-20087434994864624: prefer the NESTED failing field's own schema when the
+              // path resolves — the flat dump truncates long before reaching it. Falls back
+              // to the full dump, so this only ever narrows, never hides.
+              failingFieldSchemaHint(parsed.issues, rawSchema) || argsSchemaHint(rawSchema, schemaHintCache)),
       );
     }
     const response = await def.handler(parsed.value, legacyCtx);
@@ -1440,7 +1568,12 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
         // knows the shape — appending 1,800 chars of schema to "too long by 3 chars" is pure
         // context burn for the agent least able to spare it.
         `invalid_args: ${formatIssues(parsed.issues, shimmed)}${unknownArgHint(parsed.issues, rawSchema)}` +
-          (issuesAreValueLevel(parsed.issues) ? '' : argsSchemaHint(rawSchema, schemaHintCache)),
+          (issuesAreValueLevel(parsed.issues)
+            ? ''
+            : // EI-20087434994864624: prefer the NESTED failing field's own schema when the
+              // path resolves — the flat dump truncates long before reaching it. Falls back
+              // to the full dump, so this only ever narrows, never hides.
+              failingFieldSchemaHint(parsed.issues, rawSchema) || argsSchemaHint(rawSchema, schemaHintCache)),
       );
     }
     // Thread the per-call tier override into the HANDLER's ctx too: tools that
