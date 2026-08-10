@@ -1000,6 +1000,13 @@ export interface ProjectedTool {
    */
   payloadTierCeilingChars?: number;
   /**
+   * WI-37843: this tool opts out of routine per-session tier shaping, read
+   * where `resolvePayloadTier` is invoked. Its shapers stay declared and still
+   * serve as the hard-ceiling degradation path.
+   * See `RoleToolDefinition.ignoreSessionPayloadTier`.
+   */
+  ignoreSessionPayloadTier?: boolean;
+  /**
    * Surfaces this tool is meaningful from. Phase 4 T3.1. The prompt-
    * assembly catalog renderer filters by the caller's modality so
    * voice surfaces only see voice-capable tools. Absent → callers

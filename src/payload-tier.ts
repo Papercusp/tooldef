@@ -71,7 +71,20 @@ export function extractPayloadTier(input: unknown): { input: unknown; callTier?:
 export function resolvePayloadTier(
   callTier: PayloadTier | undefined,
   ctxTier: PayloadTier | undefined,
+  opts?: {
+    /**
+     * WI-37843: this tool declared `ignoreSessionPayloadTier` — routine
+     * per-session shaping does not apply to it, so the SESSION tier is
+     * discarded and an un-overridden call resolves to 'full'.
+     *
+     * Deliberately narrow: an EXPLICIT per-call `payloadTier` still wins, so a
+     * caller that asks for 'trimmed' still gets 'trimmed'. Only the ambient
+     * session tier is ignored — the thing the caller never chose.
+     */
+    ignoreSessionTier?: boolean;
+  },
 ): PayloadTier {
+  if (opts?.ignoreSessionTier) return callTier ?? 'full';
   return callTier ?? ctxTier ?? 'full';
 }
 

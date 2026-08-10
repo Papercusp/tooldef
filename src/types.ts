@@ -575,6 +575,8 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
   skipResultDoor?: ResultDoorSkipReason;
   /** See `RoleToolDefinition.payloadTierCeilingChars` (WI-37843) — same override, principal-gated side. */
   payloadTierCeilingChars?: number;
+  /** See `RoleToolDefinition.ignoreSessionPayloadTier` (WI-37843) — same opt-out, principal-gated side. */
+  ignoreSessionPayloadTier?: boolean;
 }
 
 /** Input shape for `defineTool` — same as ToolDefinition minus derived fields. */
@@ -705,6 +707,8 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
   skipResultDoor?: ResultDoorSkipReason;
   /** See `RoleToolDefinition.payloadTierCeilingChars` (WI-37843) — same override, principal-gated side. */
   payloadTierCeilingChars?: number;
+  /** See `RoleToolDefinition.ignoreSessionPayloadTier` (WI-37843) — same opt-out, principal-gated side. */
+  ignoreSessionPayloadTier?: boolean;
 }
 
 /**
@@ -845,9 +849,20 @@ export interface RoleToolDefinition<
    * Exempting a tool from the result door is only half an uncapping: the
    * payload-tier hard ceiling runs EARLIER and is strictly worse when it fires,
    * because the omitted content is never serialized at all — the door at least
-   * spills what it cuts. `coord:orient` was pinned at that ceiling (p99 = 29,908
-   * of 30,000 chars — a clamp signature, not a distribution), so a door-only fix
-   * would have left the bootstrap read at ~7.5k of ~16.5k tokens and looked done.
+   * spills what it cuts.
+   *
+   * ⚠ CORRECTION (2026-08-10, same work-item). An earlier revision of this
+   * comment claimed `coord:orient` "was pinned at that ceiling (p99 = 29,908 of
+   * 30,000 chars — a clamp signature)". That attribution is WRONG for the
+   * sessions that actually matter, and it was inferred from the percentile shape
+   * alone rather than from the code. MCP agent sessions carry a `ctx_tier` that
+   * mostly resolves to 'trimmed', so for them the TIER SHAPER (step 1) produces
+   * the ~24k-char result and this ceiling never fires at all. Raising the
+   * ceiling is still correct — it is the safety valve for explicit-'full'
+   * callers whose payload exceeds 30k — but on its own it does NOT uncap a
+   * trimmed-tier agent. That is what `ignoreSessionPayloadTier` below is for.
+   * Kept as a correction rather than deleted: the wrong reading is re-derivable
+   * from the same percentile data, so the next agent should meet the refutation.
    *
    * Raise this only for a tool whose full payload is deliberately allowed to be
    * large, and keep the value BELOW the MCP client's own result cap: past that
@@ -856,6 +871,34 @@ export interface RoleToolDefinition<
    * was introduced to prevent. A raised ceiling is a safety valve, not a target.
    */
   payloadTierCeilingChars?: number;
+  /**
+   * Opt this tool OUT of routine per-session payload-tier shaping (WI-37843).
+   * Absent ⇒ today's behavior, byte-identical.
+   *
+   * THE PROBLEM THIS SOLVES (the structural class, EI-20109589063689342):
+   * agents read 'trimmed' while the operator UI and the test suite read 'full'.
+   * A shaped payload is therefore green in CI, correct in the UI, and degraded
+   * for every agent — with nothing failing anywhere. `coord:orient` is the
+   * worst case: it is the once-per-session bootstrap read, so the shaping lands
+   * on the one turn an agent can least afford to be missing context, and the
+   * agent cannot know what it did not receive.
+   *
+   * Set this ONLY for a tool whose whole value IS the full payload. It is not a
+   * performance knob, and a tool that merely returns a lot of rows should ship
+   * a better shaper instead.
+   *
+   * TWO THINGS IT DELIBERATELY DOES NOT DO:
+   * 1. It does not override an EXPLICIT per-call `payloadTier` — a caller that
+   *    asks for 'trimmed' still gets 'trimmed'. Only the ambient session tier
+   *    (the thing the caller never chose) is discarded.
+   * 2. It does not remove the tool's shapers, and you must NOT delete them when
+   *    setting this. They stay declared because the hard ceiling above uses the
+   *    smallest one as its degradation path — force-shaping an oversized result
+   *    instead of letting the transport reject it (P-012; the 2026-07-01 43k-token
+   *    incident). Opting out of ROUTINE shaping while keeping the CEILING valve
+   *    is the entire point of splitting these two fields.
+   */
+  ignoreSessionPayloadTier?: boolean;
   /**
    * Surfaces this tool is meaningful from. Phase 4 T3.1. The prompt-
    * assembly catalog renderer filters by the caller's modality so voice
@@ -961,6 +1004,8 @@ export interface RoleToolDefinitionInput<
   skipResultDoor?: ResultDoorSkipReason;
   /** See RoleToolDefinition.payloadTierCeilingChars (WI-37843). */
   payloadTierCeilingChars?: number;
+  /** See RoleToolDefinition.ignoreSessionPayloadTier (WI-37843). */
+  ignoreSessionPayloadTier?: boolean;
   /** See RoleToolDefinition.modality. */
   modality?: ReadonlyArray<'text' | 'voice'>;
   /** See RoleToolDefinition.state. */

@@ -758,6 +758,8 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
     skipResultDoor: input.skipResultDoor,
     // WI-37843: see ToolDefinition.payloadTierCeilingChars.
     payloadTierCeilingChars: input.payloadTierCeilingChars,
+    // WI-37843: see ToolDefinition.ignoreSessionPayloadTier.
+    ignoreSessionPayloadTier: input.ignoreSessionPayloadTier,
   };
 
   // ORDER IS LOAD-BEARING: project FIRST (its first act is the guarded
@@ -835,6 +837,8 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
     skipResultDoor: input.skipResultDoor,
     // WI-37843: see RoleToolDefinition.payloadTierCeilingChars.
     payloadTierCeilingChars: input.payloadTierCeilingChars,
+    // WI-37843: see RoleToolDefinition.ignoreSessionPayloadTier.
+    ignoreSessionPayloadTier: input.ignoreSessionPayloadTier,
     modality: input.modality,
     // EI-10883: closed shape — an undeclared arg errors instead of being silently dropped.
     args: strictArgs(input.args),
@@ -1472,7 +1476,12 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       toolName: def.name,
       shape: def.shape,
       response: response as ToolResponse,
-      tier: resolvePayloadTier(callTier, ctx.contextTier),
+      // WI-37843: a tool may opt OUT of routine per-session shaping, in which
+      // case the session tier is discarded and an un-overridden call resolves
+      // to 'full'. An explicit per-call payloadTier still wins either way.
+      tier: resolvePayloadTier(callTier, ctx.contextTier, {
+        ignoreSessionTier: def.ignoreSessionPayloadTier,
+      }),
       // An explicit per-call payloadTier:'full' is the documented escape hatch
       // out of shaping AND the hard ceiling (WI-5078) — only the arg counts,
       // never a defaulted/session 'full'. A ctx-borne `transportCapExempt`
@@ -1522,6 +1531,9 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     // WI-37843: thread the per-tool payload-tier ceiling the same way — read
     // where applyPayloadTier is invoked. See ProjectedTool.payloadTierCeilingChars.
     payloadTierCeilingChars: def.payloadTierCeilingChars,
+    // WI-37843: and the session-tier opt-out — read where resolvePayloadTier
+    // is invoked. See ProjectedTool.ignoreSessionPayloadTier.
+    ignoreSessionPayloadTier: def.ignoreSessionPayloadTier,
     outputSchema: def.result,
     outputJsonSchema,
     resultEligibility: eligibility,
@@ -1620,7 +1632,12 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
       toolName: def.name,
       shape: def.shape,
       response: out as ToolResponse,
-      tier: resolvePayloadTier(callTier, ctx.contextTier),
+      // WI-37843: a tool may opt OUT of routine per-session shaping, in which
+      // case the session tier is discarded and an un-overridden call resolves
+      // to 'full'. An explicit per-call payloadTier still wins either way.
+      tier: resolvePayloadTier(callTier, ctx.contextTier, {
+        ignoreSessionTier: def.ignoreSessionPayloadTier,
+      }),
       // An explicit per-call payloadTier:'full' is the documented escape hatch
       // out of shaping AND the hard ceiling (WI-5078) — only the arg counts,
       // never a defaulted/session 'full'. A ctx-borne `transportCapExempt`
@@ -1669,6 +1686,8 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     skipResultDoor: def.skipResultDoor,
     // WI-37843: see ProjectedTool.payloadTierCeilingChars.
     payloadTierCeilingChars: def.payloadTierCeilingChars,
+    // WI-37843: see ProjectedTool.ignoreSessionPayloadTier.
+    ignoreSessionPayloadTier: def.ignoreSessionPayloadTier,
     modality: def.modality,
     events: def.events,
     state: def.state,

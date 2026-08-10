@@ -62,6 +62,32 @@ describe('resolvePayloadTier', () => {
     expect(parsePayloadTier('huge')).toBeUndefined();
     expect(parsePayloadTier(3)).toBeUndefined();
   });
+
+  // WI-37843. The measured defect: an MCP agent session carries
+  // ctx_tier='trimmed', so coord:orient resolved to 'trimmed' and served ~24k
+  // chars of a ~66k payload on the one call that bootstraps the whole session.
+  describe('ignoreSessionTier (WI-37843)', () => {
+    it('discards the SESSION tier — a trimmed-session call resolves to full', () => {
+      // The whole point: same inputs as the passing case above, opposite answer.
+      expect(resolvePayloadTier(undefined, 'trimmed')).toBe('trimmed');
+      expect(resolvePayloadTier(undefined, 'trimmed', { ignoreSessionTier: true })).toBe('full');
+      expect(resolvePayloadTier(undefined, 'standard', { ignoreSessionTier: true })).toBe('full');
+    });
+
+    it('does NOT override an explicit per-call tier — the caller still wins', () => {
+      // A caller that deliberately asks for a small payload must still get one;
+      // only the ambient session tier (which the caller never chose) is ignored.
+      expect(resolvePayloadTier('trimmed', 'full', { ignoreSessionTier: true })).toBe('trimmed');
+      expect(resolvePayloadTier('standard', undefined, { ignoreSessionTier: true })).toBe('standard');
+      expect(resolvePayloadTier('full', 'trimmed', { ignoreSessionTier: true })).toBe('full');
+    });
+
+    it('is inert when absent or false — every other tool is byte-identical', () => {
+      expect(resolvePayloadTier(undefined, 'trimmed', {})).toBe('trimmed');
+      expect(resolvePayloadTier(undefined, 'trimmed', { ignoreSessionTier: false })).toBe('trimmed');
+      expect(resolvePayloadTier(undefined, undefined, { ignoreSessionTier: true })).toBe('full');
+    });
+  });
 });
 
 describe('applyPayloadTier', () => {
