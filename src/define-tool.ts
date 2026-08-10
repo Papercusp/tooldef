@@ -18,7 +18,7 @@
 import { type ZodTypeAny } from 'zod';
 import { tierFor } from './capability-tiers';
 import { toJsonSchema } from './schema-adapter';
-import { standardValidate, formatIssues, issuesAreValueLevel, type StandardSchemaV1 } from './standard-schema';
+import { standardValidate, formatIssues, issuesAreValueLevel, issueLeaves, type StandardSchemaV1 } from './standard-schema';
 import { register } from './registry';
 import { collectToolEmits } from './emits-registry';
 import { registerProjectedTool, type ToolFn, type ToolExposure, type UnifiedToolContext } from './tool-projection';
@@ -1260,8 +1260,11 @@ function failingFieldSchemaHint(
   rawSchema: unknown,
 ): string {
   const rendered = new Map<string, string>();
-  for (const issue of issues ?? []) {
-    const path = (issue?.path ?? []) as ReadonlyArray<PropertyKey>;
+  // Read LEAF paths, not `issue.path`. For a union the issue's own path stops at the
+  // union node (`body`) while the real diagnosis — and the path the error message
+  // prints — is several levels deeper. Reading `issue.path` here silently never fires.
+  for (const { segs } of issueLeaves(issues ?? [])) {
+    const path = segs as ReadonlyArray<PropertyKey>;
     // Depth 1 is a plain top-level arg — the full dump already reaches it, and
     // `unknownArgHint` already names the accepted keys. Only deeper paths are unreachable.
     if (path.length < 2) continue;

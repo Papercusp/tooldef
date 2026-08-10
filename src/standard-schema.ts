@@ -164,12 +164,25 @@ export function issuesAreValueLevel(issues: ReadonlyArray<StandardSchemaV1.Issue
  * characters" never says by how much). Needs the input to measure the actual length;
  * without it the message degrades gracefully to the target-only form.
  */
-export function formatIssues(issues: ReadonlyArray<StandardSchemaV1.Issue>, input?: unknown): string {
-  const render = (
-    issue: StandardSchemaV1.Issue,
-    prefix: ReadonlyArray<PropertyKey>,
-    depth: number,
-  ): Array<{ path: string; code: string | undefined; text: string }> => {
+/**
+ * Resolve issues to their LEAF diagnoses, each with its fully-qualified segment path.
+ *
+ * This is the traversal `formatIssues` renders from, extracted so other consumers can
+ * reach the same leaves. The distinction it encodes is easy to get wrong and expensive
+ * when you do: an `invalid_union` issue's own `path` stops at the UNION NODE (`body`),
+ * while its real diagnosis lives in per-branch sub-issues several levels deeper
+ * (`body.2.couldNotDetermine.0.what`). Anyone reading `issue.path` directly therefore
+ * sees a shallow path that does not match the deep one the rendered message shows —
+ * which reads as a bug in the renderer rather than a missing descent.
+ *
+ * Kept as ONE traversal deliberately: a second copy would drift from the rendered
+ * message, and a path hint that disagrees with the error beside it is worse than none.
+ */
+export function issueLeaves(
+  issues: ReadonlyArray<StandardSchemaV1.Issue>,
+): Array<{ issue: StandardSchemaV1.Issue; segs: PropertyKey[] }> {
+  const out: Array<{ issue: StandardSchemaV1.Issue; segs: PropertyKey[] }> = [];
+  const walk = (issue: StandardSchemaV1.Issue, prefix: ReadonlyArray<PropertyKey>, depth: number): void => {
     const segs = [
       ...prefix,
       ...(issue.path ?? []).map((seg) =>
@@ -182,8 +195,22 @@ export function formatIssues(issues: ReadonlyArray<StandardSchemaV1.Issue>, inpu
     // union of unions cannot spin.
     if (depth < 4) {
       const branch = bestUnionBranch(issue);
-      if (branch) return branch.flatMap((sub) => render(sub, segs, depth + 1));
+      if (branch) {
+        for (const sub of branch) walk(sub, segs, depth + 1);
+        return;
+      }
     }
+    out.push({ issue, segs });
+  };
+  for (const issue of issues) walk(issue, [], 0);
+  return out;
+}
+
+export function formatIssues(issues: ReadonlyArray<StandardSchemaV1.Issue>, input?: unknown): string {
+  const render = (
+    issue: StandardSchemaV1.Issue,
+    segs: ReadonlyArray<PropertyKey>,
+  ): { path: string; code: string | undefined; text: string } => {
     const path = segs.map((s) => String(s)).join('.');
     const extras = issue as IssueExtras;
     if (extras.code === 'too_big' && extras.origin === 'string' && typeof extras.maximum === 'number') {
@@ -195,18 +222,16 @@ export function formatIssues(issues: ReadonlyArray<StandardSchemaV1.Issue>, inpu
         over !== null && over > 0
           ? `too long — ${actualLen} chars, ${over} over the ${max}-char limit; trim to ${max}.`
           : `too long — over the ${max}-char limit; trim to ${max}.`;
-      return [{ path, code: extras.code, text: path ? `${path}: ${detail}` : detail }];
+      return { path, code: extras.code, text: path ? `${path}: ${detail}` : detail };
     }
-    return [
-      {
-        path,
-        code: extras.code,
-        text: path ? `${path}: ${issue.message}` : issue.message,
-      },
-    ];
+    return {
+      path,
+      code: extras.code,
+      text: path ? `${path}: ${issue.message}` : issue.message,
+    };
   };
 
-  const rows = issues.flatMap((issue) => render(issue, [], 0));
+  const rows = issueLeaves(issues).map(({ issue, segs }) => render(issue, segs));
 
   // A SIZE verdict on a value that failed its TYPE check is meaningless, and worse
   // than meaningless when rendered actionably. Zod's `.max(n)` on an array is a
