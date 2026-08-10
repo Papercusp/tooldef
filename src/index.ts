@@ -314,6 +314,9 @@ export {
   type MinimalEventSink,
   type PapercuspBinaryEnvelope,
   type EventWireKind,
+  // WI-37843: the host reads this to decide whether prose may be appended to a
+  // door-exempt result, so it has to cross the package boundary.
+  type ResultDoorSkipReason,
 } from './tool-projection';
 
 /* ─── Dispatcher ─────────────────────────────────────────────────────── */
