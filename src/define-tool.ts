@@ -1479,6 +1479,10 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       // consumer (code:run's inner dispatch — the result never reaches an
       // agent's context) gets the same exemption (EI-18719561823587590).
       explicitFullRequest: callTier === 'full' || ctx.transportCapExempt === true,
+      // WI-37843: a tool may raise its OWN hard ceiling (coord:orient, the
+      // session-bootstrap read, whose full payload IS the value). Absent ⇒ the
+      // shared PAYLOAD_TIER_HARD_CEILING_CHARS, unchanged for every other tool.
+      ceilingChars: def.payloadTierCeilingChars,
       args: parsed.value,
       log: (m) => ctx.log(m),
     });
@@ -1623,6 +1627,10 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
       // consumer (code:run's inner dispatch — the result never reaches an
       // agent's context) gets the same exemption (EI-18719561823587590).
       explicitFullRequest: callTier === 'full' || ctx.transportCapExempt === true,
+      // WI-37843: a tool may raise its OWN hard ceiling (coord:orient, the
+      // session-bootstrap read, whose full payload IS the value). Absent ⇒ the
+      // shared PAYLOAD_TIER_HARD_CEILING_CHARS, unchanged for every other tool.
+      ceilingChars: def.payloadTierCeilingChars,
       args: parsed.value,
       log: (m) => ctx.log(m),
     });
@@ -1659,6 +1667,8 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     skipWorkspaceTx: def.skipWorkspaceTx,
     // EI-19386201256023240: see ProjectedTool.skipResultDoor.
     skipResultDoor: def.skipResultDoor,
+    // WI-37843: see ProjectedTool.payloadTierCeilingChars.
+    payloadTierCeilingChars: def.payloadTierCeilingChars,
     modality: def.modality,
     events: def.events,
     state: def.state,

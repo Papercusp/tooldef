@@ -571,6 +571,19 @@ export interface ApplyPayloadTierOpts {
   explicitFullRequest?: boolean;
   args: unknown;
   log?: (msg: string) => void;
+  /**
+   * WI-37843: per-tool override of `PAYLOAD_TIER_HARD_CEILING_CHARS` for THIS
+   * tool, from its `payloadTierCeilingChars` declaration. Absent (or not a
+   * finite positive number) ⇒ the shared ceiling, unchanged.
+   *
+   * Exists because exempting a tool from the result door is only half an
+   * uncapping — this ceiling runs EARLIER and is strictly worse when it fires,
+   * since what it drops is never serialized (the door at least spills what it
+   * cuts). Raising it is deliberately per-tool: the shared default protects
+   * every ordinary result, and only a tool whose full payload is the point
+   * should opt out of it.
+   */
+  ceilingChars?: number;
 }
 
 /**
@@ -591,6 +604,14 @@ export interface ApplyPayloadTierOpts {
 export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
   const { toolName, shape, response, tier, explicitFullRequest, args, log } = opts;
   if (!response || typeof response !== 'object' || response.data === undefined) return response;
+  // WI-37843: a tool may raise its OWN hard ceiling. Validate rather than trust —
+  // a NaN/0/negative override must fall back to the shared ceiling, never disable
+  // the guard (a ceiling of 0 would force-shape every result; NaN would compare
+  // false against every size and silently uncap the tool).
+  const ceiling =
+    typeof opts.ceilingChars === 'number' && Number.isFinite(opts.ceilingChars) && opts.ceilingChars > 0
+      ? opts.ceilingChars
+      : PAYLOAD_TIER_HARD_CEILING_CHARS;
 
   // 1. Normal tier shaping (full ⇒ no tier shaper; keeps prior behavior).
   let out: ToolResponse = response;
@@ -648,7 +669,7 @@ export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
   //    that is the documented escape hatch, and the UI/sync in-process path.
   if (explicitFullRequest) return out;
   const size = jsonLen(out.data);
-  if (size > PAYLOAD_TIER_HARD_CEILING_CHARS) {
+  if (size > ceiling) {
     const smallest = shape?.trimmed ?? shape?.standard;
     if (smallest) {
       try {
@@ -656,9 +677,9 @@ export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
         const forcedSize = jsonLen(forced);
         // Only swap if it genuinely shrank (a trimmed tier already at this size
         // gains nothing — that shaper still needs to bound a growing field).
-        if (forcedSize < size && forcedSize <= PAYLOAD_TIER_HARD_CEILING_CHARS) {
+        if (forcedSize < size && forcedSize <= ceiling) {
           (log ?? console.warn)(
-            `[payload-tier] ${toolName} '${tier}' result ${size} chars > hard ceiling ${PAYLOAD_TIER_HARD_CEILING_CHARS}; force-applied the trimmed shaper (${forcedSize} chars) to fit the transport cap (WI-2859)`,
+            `[payload-tier] ${toolName} '${tier}' result ${size} chars > hard ceiling ${ceiling}; force-applied the trimmed shaper (${forcedSize} chars) to fit the transport cap (WI-2859)`,
           );
           return {
             ...response,
@@ -686,7 +707,7 @@ export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
       }
     }
     (log ?? console.warn)(
-      `[payload-tier] ${toolName} '${tier}' result ${size} chars > hard ceiling ${PAYLOAD_TIER_HARD_CEILING_CHARS}; used the generic bounded projection to fit the transport cap`,
+      `[payload-tier] ${toolName} '${tier}' result ${size} chars > hard ceiling ${ceiling}; used the generic bounded projection to fit the transport cap`,
     );
     {
       const projected = projectBoundedPayload(out.data, { toolName, tier, forced: true, originalChars: size, args });
