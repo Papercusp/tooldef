@@ -756,6 +756,8 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
     skipWorkspaceTx: input.skipWorkspaceTx,
     // EI-19386201256023240: see ToolDefinition.skipResultDoor.
     skipResultDoor: input.skipResultDoor,
+    // WI-37843: see ToolDefinition.payloadTierCeilingChars.
+    payloadTierCeilingChars: input.payloadTierCeilingChars,
   };
 
   // ORDER IS LOAD-BEARING: project FIRST (its first act is the guarded
@@ -831,6 +833,8 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
     skipWorkspaceTx: input.skipWorkspaceTx,
     // EI-19386201256023240: see RoleToolDefinition.skipResultDoor.
     skipResultDoor: input.skipResultDoor,
+    // WI-37843: see RoleToolDefinition.payloadTierCeilingChars.
+    payloadTierCeilingChars: input.payloadTierCeilingChars,
     modality: input.modality,
     // EI-10883: closed shape — an undeclared arg errors instead of being silently dropped.
     args: strictArgs(input.args),
@@ -1511,6 +1515,9 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     // EI-19386201256023240: thread skipResultDoor the same way — read by the
     // host's result-door choke point. See ProjectedTool.skipResultDoor.
     skipResultDoor: def.skipResultDoor,
+    // WI-37843: thread the per-tool payload-tier ceiling the same way — read
+    // where applyPayloadTier is invoked. See ProjectedTool.payloadTierCeilingChars.
+    payloadTierCeilingChars: def.payloadTierCeilingChars,
     outputSchema: def.result,
     outputJsonSchema,
     resultEligibility: eligibility,

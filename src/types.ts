@@ -6,7 +6,7 @@ import type { RolesQuota, ToolResult } from './wire';
 import type { AgentRole } from './host-types';
 import type { z, ZodTypeAny } from 'zod';
 import type { StandardSchemaV1 } from './standard-schema';
-import type { EventsSchema, UnifiedToolContext, UserEvents } from './tool-projection';
+import type { EventsSchema, ResultDoorSkipReason, UnifiedToolContext, UserEvents } from './tool-projection';
 import type { Authorizer } from './authz';
 import type { ToolRequireSpec } from './requires';
 import type { DeltaCapability } from './delta-protocol';
@@ -572,7 +572,9 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
   /** See `RoleToolDefinitionInput.skipWorkspaceTx` — same opt-out, principal-gated side. */
   skipWorkspaceTx?: boolean;
   /** See `RoleToolDefinition.skipResultDoor` (EI-19386201256023240) — same opt-out, principal-gated side. */
-  skipResultDoor?: boolean;
+  skipResultDoor?: ResultDoorSkipReason;
+  /** See `RoleToolDefinition.payloadTierCeilingChars` (WI-37843) — same override, principal-gated side. */
+  payloadTierCeilingChars?: number;
 }
 
 /** Input shape for `defineTool` — same as ToolDefinition minus derived fields. */
@@ -700,7 +702,9 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
   /** See `RoleToolDefinitionInput.skipWorkspaceTx` — same opt-out, principal-gated side. */
   skipWorkspaceTx?: boolean;
   /** See `RoleToolDefinitionInput.skipResultDoor` (EI-19386201256023240) — same opt-out, principal-gated side. */
-  skipResultDoor?: boolean;
+  skipResultDoor?: ResultDoorSkipReason;
+  /** See `RoleToolDefinition.payloadTierCeilingChars` (WI-37843) — same override, principal-gated side. */
+  payloadTierCeilingChars?: number;
 }
 
 /**
@@ -829,13 +833,29 @@ export interface RoleToolDefinition<
    * 87% of all door fires, each dropping that call's coordination fold with no
    * error anywhere).
    *
-   * Set `skipResultDoor: true` on a tool whose documented/near-exclusive caller
-   * is a programmatic client that json-parses the raw result body (not a model
-   * reading it as context) — never set it merely to avoid a large response; the
-   * door's spill-to-scratch + pointer is still the correct behavior for anything
-   * a model actually reads. Absent/false ⇒ today's behavior, byte-identical.
+   * Set this to the REASON the door does not apply — see `ResultDoorSkipReason`,
+   * which also governs whether prose may be appended to the body. Absent ⇒
+   * today's behavior, byte-identical.
    */
-  skipResultDoor?: boolean;
+  skipResultDoor?: ResultDoorSkipReason;
+  /**
+   * Per-tool override of `PAYLOAD_TIER_HARD_CEILING_CHARS` (WI-37843). Absent ⇒
+   * the shared 30,000-char ceiling, unchanged.
+   *
+   * Exempting a tool from the result door is only half an uncapping: the
+   * payload-tier hard ceiling runs EARLIER and is strictly worse when it fires,
+   * because the omitted content is never serialized at all — the door at least
+   * spills what it cuts. `coord:orient` was pinned at that ceiling (p99 = 29,908
+   * of 30,000 chars — a clamp signature, not a distribution), so a door-only fix
+   * would have left the bootstrap read at ~7.5k of ~16.5k tokens and looked done.
+   *
+   * Raise this only for a tool whose full payload is deliberately allowed to be
+   * large, and keep the value BELOW the MCP client's own result cap: past that
+   * the client rejects the result and dumps it to a file the caller has to page
+   * back in — the original coord:orient 59.8KB overflow (WI-2859) this ceiling
+   * was introduced to prevent. A raised ceiling is a safety valve, not a target.
+   */
+  payloadTierCeilingChars?: number;
   /**
    * Surfaces this tool is meaningful from. Phase 4 T3.1. The prompt-
    * assembly catalog renderer filters by the caller's modality so voice
@@ -938,7 +958,9 @@ export interface RoleToolDefinitionInput<
   /** See RoleToolDefinition.skipWorkspaceTx (EI-18666279107998059). */
   skipWorkspaceTx?: boolean;
   /** See RoleToolDefinition.skipResultDoor (EI-19386201256023240). */
-  skipResultDoor?: boolean;
+  skipResultDoor?: ResultDoorSkipReason;
+  /** See RoleToolDefinition.payloadTierCeilingChars (WI-37843). */
+  payloadTierCeilingChars?: number;
   /** See RoleToolDefinition.modality. */
   modality?: ReadonlyArray<'text' | 'voice'>;
   /** See RoleToolDefinition.state. */

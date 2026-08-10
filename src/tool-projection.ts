@@ -26,6 +26,38 @@ import type {
   ToolResult,
 } from './wire';
 import type { AgentRole, Capability, PluginSpawn } from './host-types';
+
+/**
+ * WHY a tool's result skips the per-result door (`applyResultDoor`). This is a
+ * REASON, not a boolean, because the two legitimate cases want OPPOSITE
+ * treatment of the one other thing that appends prose to a result body — the
+ * store-identity-suspect annotation (`annotateStoreIdentitySuspectResult`).
+ *
+ * It was a boolean until WI-37843, and the host read `!skipResultDoor` to decide
+ * whether prose was safe. That conflation meant the only way to exempt a large
+ * MODEL-FACING result from the door was to also silence its "this `not_found`
+ * may be a correct answer from the WRONG database" warning — on `coord:orient`,
+ * the session-bootstrap read, that is precisely the warning you least want
+ * dropped. Keying the prose decision off the reason lets each case get what it
+ * needs, and forces every future author to state which case they are in.
+ *
+ *   - `'programmatic-caller'` — the documented/near-exclusive consumer is a
+ *     program that `json.loads`s the raw body (a shell hook, not a model). A
+ *     door-truncated body plus a prose footer is invalid JSON, so that parse
+ *     throws and the caller fails open SILENTLY. Such a tool must receive NO
+ *     appended prose from anything, door or otherwise — machine-readable `_meta`
+ *     only (EI-19386201256023240).
+ *   - `'oversize-by-design'` — a MODEL-FACING tool whose full payload is
+ *     deliberately allowed to exceed the per-result budget because the payload
+ *     IS the value (a once-per-session bootstrap read, where truncation costs
+ *     more in follow-up round-trips than the bytes cost in context). Prose still
+ *     applies: a model reads this body, so warnings must reach it.
+ *
+ * Do NOT reach for `'oversize-by-design'` to dodge an ordinary large response —
+ * the door's spill-to-scratch + pointer remains correct for anything whose size
+ * is incidental rather than the point. Absent ⇒ the door applies as normal.
+ */
+export type ResultDoorSkipReason = 'programmatic-caller' | 'oversize-by-design';
 import { toJsonSchema } from './schema-adapter';
 import type { StandardSchemaV1 } from './standard-schema';
 import type { Authorizer } from './authz';
@@ -955,15 +987,18 @@ export interface ProjectedTool {
   skipWorkspaceTx?: boolean;
   /**
    * EI-19386201256023240: read by the HTTP host's `tools/call` result path —
-   * when true, this tool's result SKIPS the per-result "door" (`result-door.ts`'s
+   * when set, this tool's result SKIPS the per-result "door" (`result-door.ts`'s
    * `applyResultDoor`) entirely, even when the serialized text exceeds the
-   * budget. See `RoleToolDefinition.skipResultDoor` for the full rationale (a
-   * programmatic/hook consumer that `json.loads`s the raw result silently fails
-   * on a door-truncated body, since truncated JSON + a prose footer isn't valid
-   * JSON — turning a context-protection mechanism into a correctness bug for a
-   * consumer that was never paying context rent in the first place).
+   * budget. The value is the REASON, which additionally decides whether prose
+   * may be appended to the body at all — see `ResultDoorSkipReason` for why that
+   * must not collapse back into a boolean (WI-37843).
    */
-  skipResultDoor?: boolean;
+  skipResultDoor?: ResultDoorSkipReason;
+  /**
+   * WI-37843: per-tool override of the payload-tier hard ceiling, read where
+   * `applyPayloadTier` is invoked. See `RoleToolDefinition.payloadTierCeilingChars`.
+   */
+  payloadTierCeilingChars?: number;
   /**
    * Surfaces this tool is meaningful from. Phase 4 T3.1. The prompt-
    * assembly catalog renderer filters by the caller's modality so
