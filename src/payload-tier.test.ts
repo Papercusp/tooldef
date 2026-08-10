@@ -90,6 +90,71 @@ describe('applyPayloadTier', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('hard ceiling'));
   });
 
+  // WI-37843: a tool may raise its OWN ceiling. coord:orient was pinned at the
+  // shared 30,000-char default (p99 29,908 — a clamp signature), which meant
+  // exempting it from the result door alone would have left the bootstrap read
+  // trimmed anyway, and trimmed WORSE than doored: what this ceiling drops is
+  // never serialized, so no spill can recover it.
+  it('ceilingChars: a per-tool ceiling lets an over-DEFAULT payload through unshaped', () => {
+    const log = vi.fn();
+    const fat: ToolResponse = { data: { rows: [1, 2, 3], blob: 'x'.repeat(PAYLOAD_TIER_HARD_CEILING_CHARS + 500) } };
+    const out = applyPayloadTier({
+      toolName: 'coord:orient',
+      shape,
+      response: fat,
+      tier: 'full',
+      args: {},
+      log,
+      ceilingChars: PAYLOAD_TIER_HARD_CEILING_CHARS * 4,
+    });
+    // Unshaped: the payload is over the SHARED ceiling but under this tool's own.
+    expect(out).toBe(fat);
+    expect((out.data as { payloadTierForced?: string }).payloadTierForced).toBeUndefined();
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it('ceilingChars: a raised ceiling is a valve, not a bypass — past IT the trimmed shaper still fires', () => {
+    // The guard that keeps this from becoming "orient is uncapped forever": a
+    // payload over the RAISED ceiling must still degrade, or a runaway orient
+    // would sail past the MCP client's own cap and hit the WI-2859 file-dump.
+    const log = vi.fn();
+    const raised = PAYLOAD_TIER_HARD_CEILING_CHARS * 4;
+    const fat: ToolResponse = { data: { rows: [1, 2, 3], blob: 'x'.repeat(raised + 500) } };
+    const out = applyPayloadTier({
+      toolName: 'coord:orient',
+      shape,
+      response: fat,
+      tier: 'full',
+      args: {},
+      log,
+      ceilingChars: raised,
+    });
+    expect((out.data as { payloadTierForced?: string }).payloadTierForced).toBe('trimmed');
+    expect(JSON.stringify(out.data).length).toBeLessThan(raised);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining(String(raised)));
+  });
+
+  // A malformed override must fall back to the shared ceiling, never disable the
+  // guard. 0 would force-shape everything; NaN compares false against every size
+  // and would silently uncap the tool — the failure that looks like success.
+  it.each([
+    ['NaN', Number.NaN],
+    ['zero', 0],
+    ['negative', -1],
+    ['Infinity', Number.POSITIVE_INFINITY],
+  ])('ceilingChars: a %s override falls back to the shared ceiling', (_label, bad) => {
+    const fat: ToolResponse = { data: { rows: [1, 2, 3], blob: 'x'.repeat(PAYLOAD_TIER_HARD_CEILING_CHARS + 500) } };
+    const out = applyPayloadTier({
+      toolName: 't',
+      shape,
+      response: fat,
+      tier: 'full',
+      args: {},
+      ceilingChars: bad as number,
+    });
+    expect((out.data as { payloadTierForced?: string }).payloadTierForced).toBe('trimmed');
+  });
+
   it('hard ceiling: an EXPLICIT payloadTier:full call skips the ceiling (the documented escape hatch, WI-5078)', () => {
     const log = vi.fn();
     const fat: ToolResponse = { data: { rows: [1, 2, 3], blob: 'x'.repeat(PAYLOAD_TIER_HARD_CEILING_CHARS + 500) } };
