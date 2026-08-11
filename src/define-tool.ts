@@ -1393,7 +1393,11 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     // Framework-reserved per-call tier override is stripped next — BEFORE
     // validation (context-trimming-tiers D-004; not part of any tool's schema).
     const { input: tierlessInput, callTier } = extractPayloadTier(unwrapUnparsedToolInput(input));
-    const legacyCtx: ToolContext & { contextTier?: string; telemetrySurface?: string } = {
+    const legacyCtx: ToolContext & {
+      contextTier?: string;
+      payloadTierOverride?: string;
+      telemetrySurface?: string;
+    } = {
       principal: ctx.principal as unknown as ToolContext['principal'],
       tx: ctx.tx,
       log: (level, msg, meta) => ctx.log(`[${level}] ${msg}${meta ? ` ${JSON.stringify(meta)}` : ''}`),
@@ -1402,6 +1406,10 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       // can adapt their defaults off ctx.contextTier, same as the role-gated
       // wrapper below (context-trimming-tiers P-024).
       ...(callTier ?? ctx.contextTier ? { contextTier: callTier ?? ctx.contextTier } : {}),
+      // Keep the explicit-vs-ambient distinction available to raw ToolResult
+      // handlers. `contextTier` alone cannot tell a caller's `full` override
+      // from the default session tier.
+      ...(callTier !== undefined ? { payloadTierOverride: callTier } : {}),
       // EI-10358: thread the caller's role + per-session id through — the outer
       // `ctx` (UnifiedToolContext) already carries both (populated by the MCP
       // dispatch layer from the spawn/su URL context), but this legacy shim
@@ -1608,7 +1616,10 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     // ctx.contextTier instead of declaring `shape`, and without this overlay a
     // per-call `payloadTier:"full"` would be stripped above and silently
     // ignored by that pattern (context-trimming-tiers P-022).
-    const handlerCtx = callTier !== undefined ? { ...ctx, contextTier: callTier } : ctx;
+    const handlerCtx =
+      callTier !== undefined
+        ? { ...ctx, contextTier: callTier, payloadTierOverride: callTier }
+        : ctx;
     const out = await def.handler(parsed.value, handlerCtx);
 
     // Already a ToolResult? The handler self-serialized its content — pass it

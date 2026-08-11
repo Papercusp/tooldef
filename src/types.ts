@@ -240,6 +240,11 @@ export interface ToolContext<Tx = any> {
   /** Logger bound to the tool name + principal. */
   log: (level: 'info' | 'warn' | 'error', msg: string, meta?: Record<string, unknown>) => void;
   /**
+   * The explicit per-call `payloadTier` override, when supplied by the
+   * caller. This is distinct from any ambient/session tier.
+   */
+  payloadTierOverride?: import('./payload-tier').PayloadTier;
+  /**
    * Calling agent role, when the transport carries one (EI-10358). Threaded
    * through from the outer `UnifiedToolContext.role` by
    * `registerLegacyAsProjected`'s `legacyCtx` — NOT resolved from `principal`,

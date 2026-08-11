@@ -360,6 +360,14 @@ export interface UnifiedToolContext {
    */
   contextTier?: import('./payload-tier').PayloadTier;
   /**
+   * The per-call `payloadTier` override, when the caller supplied one.
+   * Unlike `contextTier`, absence means that no call-level override was
+   * requested. Raw `ToolResult` handlers use this distinction because the
+   * framework's generic payload shaper does not run for self-serialized
+   * results.
+   */
+  payloadTierOverride?: import('./payload-tier').PayloadTier;
+  /**
    * True when this call's result does NOT cross the agent-facing transport and
    * therefore must not be force-shaped by `applyPayloadTier`'s hard ceiling
    * (EI-18719561823587590). Set by an IN-PROCESS consumer that reads the data

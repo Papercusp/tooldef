@@ -89,6 +89,59 @@ describe('registerLegacyAsProjected — role/uiClientId threading (EI-10358)', (
   });
 });
 
+describe('payloadTier override threading for raw ToolResult handlers', () => {
+  it('keeps an explicit full override distinct in the legacy handler context', async () => {
+    let received: (ToolContext & { contextTier?: string }) | undefined;
+    defineTool({
+      name: 'test:legacy-ctx-payload-tier',
+      capability: 'test:read',
+      description: 'fixture',
+      args: z.object({}),
+      async handler(_args, handlerCtx) {
+        received = handlerCtx as typeof received;
+        return { content: [{ type: 'text', text: 'ok' }] };
+      },
+    });
+
+    await dispatchProjectedTool(
+      lookupByMcpName('test:legacy-ctx-payload-tier')!,
+      'test:legacy-ctx-payload-tier',
+      { payloadTier: 'full' },
+      ctx({ contextTier: 'trimmed' }),
+      DEPS,
+    );
+
+    expect(received?.contextTier).toBe('full');
+    expect(received?.payloadTierOverride).toBe('full');
+  });
+
+  it('keeps an explicit full override distinct in the role-gated handler context', async () => {
+    let received: UnifiedToolContext | undefined;
+    defineTool({
+      name: 'test:role-ctx-payload-tier',
+      capability: 'test:read',
+      description: 'fixture',
+      requirePrincipal: false as const,
+      args: z.object({}),
+      async handler(_args, handlerCtx) {
+        received = handlerCtx;
+        return { content: [{ type: 'text', text: 'ok' }] };
+      },
+    });
+
+    await dispatchProjectedTool(
+      lookupByMcpName('test:role-ctx-payload-tier')!,
+      'test:role-ctx-payload-tier',
+      { payloadTier: 'full' },
+      ctx({ contextTier: 'trimmed' }),
+      DEPS,
+    );
+
+    expect(received?.contextTier).toBe('full');
+    expect(received?.payloadTierOverride).toBe('full');
+  });
+});
+
 /**
  * WI-4549 — the SAME allowlist, its third victim.
  *
