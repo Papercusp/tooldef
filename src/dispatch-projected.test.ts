@@ -1046,3 +1046,59 @@ describe('default-deny gate (RFC tooldef-auth Phase 3 — opt-in fail-closed pos
     expect(r.ok).toBe(true);
   });
 });
+
+describe('self-reported refusals are recorded as refused, not ok (EI-20184794555427363)', () => {
+  // A handler can fail WITHOUT throwing, by returning `isError: true`. Dispatch
+  // status used to be derived from throw-vs-return alone, so that whole class
+  // landed in the ledger as `status='ok', error_code=NULL` — indistinguishable
+  // from a call that did the work. These pin the distinction: a refusal must be
+  // legible as a failure, and a success must not regress into one.
+  const REFUSING_TOOL = () =>
+    makeTool({
+      fn: async () => ({
+        content: [{ type: 'text', text: '{"error":"similar_exists","slug":"x"}' }],
+        isError: true,
+      }),
+    });
+
+  it('records status=refused when the handler returns isError', async () => {
+    let captured: { status?: string } | undefined;
+    const r = await dispatchProjectedTool(REFUSING_TOOL(), 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
+      recordInvocation: async (input) => { captured = input; },
+    }));
+    // Dispatch itself succeeded — which is precisely why this was invisible.
+    expect(r.ok).toBe(true);
+    expect(captured?.status).toBe('refused');
+  });
+
+  it('lifts the refusal code onto error_code so refusals group without LIKE-matching a blob', async () => {
+    let captured: { errorCode?: string | null } | undefined;
+    await dispatchProjectedTool(REFUSING_TOOL(), 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
+      recordInvocation: async (input) => { captured = input; },
+    }));
+    expect(captured?.errorCode).toBe('similar_exists');
+  });
+
+  it('still marks a non-JSON refusal as refused, with no invented code', async () => {
+    const tool = makeTool({
+      fn: async () => ({ content: [{ type: 'text', text: 'plain prose refusal' }], isError: true }),
+    });
+    let captured: { status?: string; errorCode?: string | null } | undefined;
+    await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
+      recordInvocation: async (input) => { captured = input; },
+    }));
+    expect(captured?.status).toBe('refused');
+    // A WRONG code on a first-class column groups cleanly and misleads silently —
+    // strictly worse than an absent one.
+    expect(captured?.errorCode ?? null).toBeNull();
+  });
+
+  it('leaves an ordinary success as ok with no error code (no regression)', async () => {
+    let captured: { status?: string; errorCode?: string | null } | undefined;
+    await dispatchProjectedTool(makeTool(), 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
+      recordInvocation: async (input) => { captured = input; },
+    }));
+    expect(captured?.status).toBe('ok');
+    expect(captured?.errorCode ?? null).toBeNull();
+  });
+});
