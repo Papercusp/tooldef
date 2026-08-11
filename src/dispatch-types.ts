@@ -231,6 +231,29 @@ export interface DispatchProjectedDeps {
      * retry storm read as a gap in the record. It is deliberately distinct from
      * `ok` because quota is counted off `ok` rows and a replay performs no work.
      */
+    /**
+     * `refused` is a call that DISPATCHED CLEANLY and then self-reported failure:
+     * the handler returned a ToolResult carrying `isError: true` (a business-level
+     * refusal — "that slug already exists", "a similar plan overlaps", "you must
+     * pass X first") rather than throwing.
+     *
+     * It exists because `ok` used to swallow this entire class. Dispatch status was
+     * derived purely from throw-vs-return, so a refusal was written as
+     * `status='ok', error_code=NULL` — byte-identical to a call that did the work.
+     * That is not a cosmetic gap: it is unfalsifiable from the ledger, so every
+     * consumer reading `status` (quota accounting, the failure-status set in
+     * agent-state-divergence, the invalid-args miner, and any agent auditing its own
+     * history) counted refusals as successes. It cost a real investigation:
+     * 7 of 81 `plans:new` calls in one 7-day window were dedup REFUSALS recorded as
+     * `ok`, which read as "the tool succeeded but persisted nothing" — a phantom
+     * data-loss bug that did not exist (EI-20184794555427363).
+     *
+     * ⚠ Quota is counted off `ok` rows, and a refusal DOES perform work (it ran the
+     * handler, its gates and often its dedup search). So any quota reader must count
+     * `('ok','refused')` — see readQuotaState in the operator's projected-tool-deps.
+     * Splitting the status without widening that query would silently make refusals
+     * free, which is a different bug in the same place.
+     */
     status:
       | 'ok'
       | 'error'
@@ -238,6 +261,7 @@ export interface DispatchProjectedDeps {
       | 'role-not-allowed'
       | 'timeout'
       | 'invalid-input'
+      | 'refused'
       | 'replayed';
     outputRef?: string | null;
     outputSize?: number | null;

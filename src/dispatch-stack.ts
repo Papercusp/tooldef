@@ -1046,6 +1046,34 @@ export function withReplacedStep(
 
 /* ─── Telemetry (always runs in finally) ─────────────────────────────── */
 
+/** Max chars of a refusal code persisted to the error_code column. */
+const REFUSAL_CODE_MAX = 80;
+
+/**
+ * Lift a self-reported refusal's own error code out of its payload.
+ *
+ * The house convention for `isError: true` results is a single text content whose
+ * body is JSON with a string `error` field (`{"error":"similar_exists", ...}`).
+ * This reads that and nothing else: any other shape yields null rather than a
+ * guess, because a WRONG code on a first-class column is worse than an absent one
+ * (it would group cleanly and silently mislead, which is the exact failure mode
+ * this whole change exists to remove).
+ */
+function extractRefusalCode(r: { content?: Array<{ text?: string; [k: string]: unknown }> }): string | null {
+  const text = r.content?.[0]?.text;
+  if (typeof text !== 'string' || text.length === 0) return null;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (parsed && typeof parsed === 'object') {
+      const code = (parsed as { error?: unknown }).error;
+      if (typeof code === 'string' && code.length > 0) return code.slice(0, REFUSAL_CODE_MAX);
+    }
+  } catch {
+    /* not JSON — a refusal is still a refusal; it just has no machine code */
+  }
+  return null;
+}
+
 /**
  * Record a tool-invocation row from a completed execution + its final
  * result. Called by the orchestrator after the stack settles (success,
@@ -1126,13 +1154,30 @@ async function recordTelemetry(
           metaWithFormat = { ...(metaWithFormat ?? {}), deltaServed: derivedDeltaServed };
         }
       }
+      // A handler can fail in TWO ways, and only one of them throws. Dispatch-level
+      // failure (throw / gate denial) is `!result.ok` and handled in the else branch
+      // below. The other is a SELF-REPORTED refusal: the handler returns normally with
+      // `isError: true` on the ToolResult. That path used to be recorded as a flat
+      // 'ok' with a NULL error code — indistinguishable in the ledger from a call that
+      // actually did the work, which is how a refusal reads as a phantom silent write
+      // loss (EI-20184794555427363; the doc comment on RecordInvocation['status']
+      // carries the full case). Derive the status from the result the handler actually
+      // returned, not merely from the fact that it returned.
+      const selfReportedFailure = r.isError === true;
       await deps.recordInvocation({
         toolName,
         pluginName: tool.pluginName,
         ctx,
         windowKey: windowKey ?? '',
         durationMs: Date.now() - startedAt,
-        status: 'ok',
+        status: selfReportedFailure ? 'refused' : 'ok',
+        // The refusal's OWN code (`{"error":"similar_exists"}`), lifted onto the
+        // first-class column so a consumer can group refusals by reason without
+        // LIKE-matching a payload blob — the same rationale as the dispatcher error
+        // CLASS below. Best-effort by construction: the convention is a JSON body
+        // with a string `error`, and a handler that refuses in some other shape is
+        // still correctly marked 'refused', just without a code.
+        ...(selfReportedFailure ? { errorCode: extractRefusalCode(r) } : {}),
         outputSize: r.outputSize ?? JSON.stringify(r.content).length,
         ...(r.outputRef ? { outputRef: r.outputRef } : {}),
         args: input,
