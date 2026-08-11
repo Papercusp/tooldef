@@ -552,13 +552,48 @@ const invokeStep = {
             if (err instanceof InvalidInputError || errName === 'InvalidInputError') {
                 return { ok: false, error: { code: 'invalid_input', message: err.message } };
             }
+            const postgresMeta = extractPostgresErrorMetadata(err);
             return {
                 ok: false,
-                error: { code: 'handler_error', message: err instanceof Error ? err.message : String(err) },
+                error: {
+                    code: 'handler_error',
+                    message: err instanceof Error ? err.message : String(err),
+                    ...(postgresMeta ? { meta: postgresMeta } : {}),
+                },
             };
         }
     },
 };
+const POSTGRES_SQLSTATE_RE = /^[0-9A-Z]{5}$/;
+const POSTGRES_METADATA_STRING_MAX = 256;
+/**
+ * Extract the stable, low-cardinality identity of a postgres-js error.
+ *
+ * Handler errors deliberately stay `handler_error` at the dispatch level, but
+ * postgres-js exposes SQLSTATE as `code` and the violated constraint as
+ * `constraint`. Keep those fields in structured telemetry so consumers do not
+ * have to parse the human-facing error message. Do not copy the complete error
+ * object: it may contain query text, values, or driver internals.
+ */
+function extractPostgresErrorMetadata(error) {
+    if (error === null || typeof error !== 'object')
+        return undefined;
+    const fields = error;
+    const rawCode = typeof fields.code === 'string' ? fields.code.toUpperCase() : undefined;
+    const sqlState = rawCode && POSTGRES_SQLSTATE_RE.test(rawCode) ? rawCode : undefined;
+    const rawConstraint = fields.constraint ?? fields.constraint_name;
+    const constraintName = typeof rawConstraint === 'string' && rawConstraint.length > 0
+        ? rawConstraint.slice(0, POSTGRES_METADATA_STRING_MAX)
+        : undefined;
+    if (!sqlState && !constraintName)
+        return undefined;
+    return {
+        postgres: {
+            ...(sqlState ? { sqlState } : {}),
+            ...(constraintName ? { constraintName } : {}),
+        },
+    };
+}
 /**
  * Resource-`authorize` gate (RFC tooldef-auth Phase 1b, decision D-F).
  *
@@ -962,7 +997,7 @@ async function recordTelemetry(exec, result) {
             code === 'quota_exceeded');
     if (!isGateDenial && !windowKey)
         return;
-    const metadataJson = finalizeMetadata(exec);
+    const metadataJson = mergePostgresErrorMetadata(finalizeMetadata(exec), result);
     try {
         if (result.ok && result.result) {
             const r = result.result;
@@ -1067,6 +1102,12 @@ function finalizeMetadata(exec) {
         }
     }
     return exec.metadataJson;
+}
+function mergePostgresErrorMetadata(metadataJson, result) {
+    const postgres = !result.ok ? result.error?.meta?.postgres : undefined;
+    if (!postgres || typeof postgres !== 'object' || Array.isArray(postgres))
+        return metadataJson;
+    return { ...(metadataJson ?? {}), postgres };
 }
 /* ─── Orchestrator ───────────────────────────────────────────────────── */
 /**
