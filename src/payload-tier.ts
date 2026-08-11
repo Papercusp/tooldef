@@ -252,10 +252,13 @@ function omissionMarker(reason: string, omittedChars?: number): string {
  * element so the signal travels WITH the array into whatever the caller does
  * with it — a `.length` read, a completeness check, a rendered table header —
  * rather than living only in a `_projection.omitted` entry a reader has to
- * think to correlate (EI-19965559011729712).
+ * think to correlate (EI-19965559011729712). The marker names both numbers and
+ * explains that the downstream header includes the marker itself: TOON has no
+ * lossless `N of TOTAL` header syntax, so the adjacent marker is the honest
+ * bounded-count label.
  */
-function arrayTruncationMarker(droppedCount: number): string {
-  return `[TRUNCATED +${droppedCount} more item(s) — see _projection.cursor]`;
+function arrayTruncationMarker(droppedCount: number, shownCount: number, totalCount: number): string {
+  return `[TRUNCATED +${droppedCount} more item(s) — header count includes this marker; showing ${shownCount} of ${totalCount} — see _projection.cursor]`;
 }
 
 function takePrimitive(state: ProjectionState, value: unknown, path: string): unknown {
@@ -353,8 +356,14 @@ function projectIdentityPreview(
         // priority: an element-count drop must survive the omitted[] sample cap
         // even when per-row entries for the KEPT elements would otherwise fill it
         // first (EI-19965559011729712).
-        recordOmission(state, `${path}[${projected.length}]`, `${droppedCount} identity row(s) omitted`, droppedCount, true);
-        projected.push(arrayTruncationMarker(droppedCount));
+        recordOmission(
+          state,
+          `${path}[${projected.length}]`,
+          `${droppedCount} identity row(s) omitted; showing ${projected.length} of ${value.length}`,
+          droppedCount,
+          true,
+        );
+        projected.push(arrayTruncationMarker(droppedCount, projected.length, value.length));
       }
       return projected;
     }
@@ -427,8 +436,14 @@ function projectValue(value: unknown, path: string, depth: number, state: Projec
         // source), so it must never be the one that gets starved out
         // (EI-19965559011729712). The in-band marker also travels WITH the array
         // itself, so a downstream encoder's own element count reflects the drop.
-        recordOmission(state, `${path}[${projected.length}]`, `${droppedCount} array item(s) omitted`, droppedCount, true);
-        projected.push(arrayTruncationMarker(droppedCount));
+        recordOmission(
+          state,
+          `${path}[${projected.length}]`,
+          `${droppedCount} array item(s) omitted; showing ${projected.length} of ${value.length}`,
+          droppedCount,
+          true,
+        );
+        projected.push(arrayTruncationMarker(droppedCount, projected.length, value.length));
       }
       return projected;
     }

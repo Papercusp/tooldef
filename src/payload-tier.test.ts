@@ -15,6 +15,7 @@
  * Run: cd libs/generic/tooldef && npx vitest run src/payload-tier.test.ts
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { encode as encodeResult } from '@papercusp/result-encoding';
 import {
   applyPayloadTier,
   extractPayloadTier,
@@ -599,11 +600,19 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     const marker = projectedCriteria[projectedCriteria.length - 1];
     expect(typeof marker).toBe('string');
     expect(marker as string).toMatch(/TRUNCATED \+\d+ more item\(s\)/);
+    expect(marker as string).toContain('header count includes this marker');
+    expect(marker as string).toContain('showing 12 of 17');
+
+    // The actual agent-facing TOON shape still has a projected-length header,
+    // so the adjacent marker must carry the shown/true total distinction.
+    const toon = encodeResult(out, 'toon');
+    expect(toon).toContain('criteria[13]:');
+    expect(toon).toContain('header count includes this marker; showing 12 of 17');
 
     // And the sample list actually names it — never starved out by the
     // per-element field/depth omissions recorded for the elements that DID
     // survive.
-    expect(out._projection.omitted.some((o) => /array item\(s\) omitted/.test(o.reason))).toBe(true);
+    expect(out._projection.omitted.some((o) => /array item\(s\) omitted; showing 12 of 17/.test(o.reason))).toBe(true);
   });
 
   it('the depth-boundary markers carry the recovery knob too, and pay no stringify for a size', () => {
