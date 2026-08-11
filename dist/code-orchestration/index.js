@@ -8,8 +8,9 @@
  */
 export { buildToolFacade, facadeToolNames, roleScopedToolNames, } from './tool-facade';
 export { runOrchestrationScript, } from './run-script';
-export { checkScript, ensureParseCheckReady } from './parse-check';
+export { checkScript, ensureParseCheckReady, } from './parse-check';
 export { realDispatch, unwrapToolResult } from './dispatch-binding';
-export { runToolOrchestration, } from './orchestrate';
+export { parseJsonWithTrailer } from './json-prefix';
+export { runToolOrchestration, detectStrandedWrites, } from './orchestrate';
 // B-CX-API: compile-time typed signatures for the facade + the on-demand namespace index.
 export { generateToolFacadeTypes, listFacadeNamespaces, toolArgsType, } from './facade-types';

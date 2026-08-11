@@ -125,6 +125,10 @@ export function decodeDeltaCursor(token) {
         rev: p.rev,
         ...(typeof p.sv === 'string' ? { sv: p.sv } : {}),
         ...(dg ? { dg } : {}),
+        // P-024 large-view path: the server-held digest id. Like every other field here
+        // this is an explicit allowlist — a DeltaCursorPayload field not named here is
+        // silently dropped on decode, which reads downstream as "the cursor never had one".
+        ...(typeof p.di === 'string' && p.di ? { di: p.di } : {}),
         ...(ts !== undefined ? { ts } : {}),
     };
 }
@@ -235,6 +239,10 @@ export function negotiateDelta(input) {
         rev: currentRevision ?? '',
         ...(schemaVersion ? { sv: schemaVersion } : {}),
         ...(cursorExtra?.dg ? { dg: cursorExtra.dg } : {}),
+        // P-024 large-view path: the server-held digest id, carried INSTEAD of `dg`.
+        // (This object is an explicit allowlist — a new DeltaCursorPayload field is
+        // silently dropped from the minted cursor unless it is added here too.)
+        ...(cursorExtra?.di ? { di: cursorExtra.di } : {}),
         ...(cursorExtra?.ts !== undefined ? { ts: cursorExtra.ts } : {}),
     });
     if (!request || request.mode === 'full') {
@@ -268,9 +276,14 @@ export function negotiateDelta(input) {
  * silent-wrong-merge risk the owner BUILD decision retires by test (D-007/D-008).
  *
  * Defaults to ALWAYS-ON so the generic lib + its tests exercise the real path; the
- * Papercusp host overrides it at boot to read the dark `TOOL_DELTA_PROTOCOL` flag
- * (default OFF), so semantic deltas are dormant in production until the P-016
- * flip-gate (recorded Lane-C scenario verdicts) clears.
+ * Papercusp host overrides it at boot to read the `TOOL_DELTA_PROTOCOL` flag.
+ *
+ * ⚠ This paragraph used to call that flag "dark" with "(default OFF)" and describe
+ * semantic deltas as "dormant in production until the P-016 flip-gate clears". All
+ * three were wrong (WI-3153, measured 2026-08-04): the flag is DEFAULT ON, is NOT in
+ * KNOWN_DARK_FLAGS, and semantic deltas are LIVE over the MCP transport, whose delta
+ * proxy reconstructs full rows before the model sees them. The model never merges,
+ * which is why the flip never needed the Lane-C scenario verdicts to clear.
  */
 let semanticDeltaEnabledResolver = () => true;
 /** Install the host's flag-backed resolver (Papercusp wires this at boot). */
@@ -307,6 +320,17 @@ function rowRev(row, rowRevision) {
 export function computeRowDigest(rows, itemKey, rowRevision) {
     if (rows.length > DELTA_MAX_DIGEST_ENTRIES)
         return null;
+    return computeRowDigestUncapped(rows, itemKey, rowRevision);
+}
+/**
+ * `computeRowDigest` without the embed cap — the digest for a view of ANY size.
+ *
+ * The cap on `computeRowDigest` is about what fits in a URL CURSOR, not about what can
+ * be diffed: `diffFromDigest` is happy with any size. So a large view parks its digest
+ * server-side (`delta-digest-store`) and carries only an id in the cursor (P-024).
+ * Callers embedding a digest must keep using the capped `computeRowDigest`.
+ */
+export function computeRowDigestUncapped(rows, itemKey, rowRevision) {
     const out = {};
     for (const row of rows)
         out[itemKey(row)] = rowRev(row, rowRevision);

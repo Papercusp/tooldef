@@ -14,15 +14,25 @@
  */
 export { applySeeAlso, resolveSeeAlso, renderSeeAlsoText, readJsonResult, } from './see-also';
 export { setResultAnnotator, resetResultAnnotator, applyResultAnnotator, } from './result-annotator';
+export { setServerVintageResolver, resetServerVintageResolver, readServerVintage, formatVintageAge, } from './server-vintage';
 /* ─── defineTool + sibling authoring primitives ──────────────────────── */
-export { defineTool, toArgsJsonSchema } from './define-tool';
-export { applyPayloadTier, extractPayloadTier, parsePayloadTier, resolvePayloadTier, resetPayloadTierRatchet, PAYLOAD_TIERS, PAYLOAD_TIER_RATCHET_CHARS, } from './payload-tier';
+export { defineTool, toArgsJsonSchema, 
+// The effect oracle — for static scanners that cannot execute defineTool (WI-6464).
+inferCapabilityEffect, WRITE_CAPABILITIES, WRITE_CAPABILITY_SUFFIXES, } from './define-tool';
+export { applyPayloadTier, extractPayloadTier, parsePayloadTier, resolvePayloadTier, resetPayloadTierRatchet, PAYLOAD_TIERS, PAYLOAD_TIER_RATCHET_CHARS, 
+// EI-19408488769901676: the HARD ceiling was defined but never re-exported, while its
+// softer sibling (the ratchet) was — so a shaper wanting to hit the budget ITSELF, and
+// thereby avoid the blind generic fall-through, had no way to reference the number it
+// must stay under except by copying it. Export it so that check can be a real assertion.
+PAYLOAD_TIER_HARD_CEILING_CHARS, } from './payload-tier';
 export { defineResource } from './define-resource';
 export { definePrompt } from './define-prompt';
 /* ─── Result serialization (token-efficient formats) ─────────────────── */
 export { serializeToolResponse, formatOptsFromCtx, } from './serialize-result';
 /* ─── Delta protocol — agent tool result freshness negotiation ───────── */
-export { parseDeltaRequest, formatDeltaRequest, encodeDeltaCursor, decodeDeltaCursor, computeViewFingerprint, contentRevision, negotiateDelta, setSemanticDeltaEnabledResolver, resetSemanticDeltaEnabledResolver, isSemanticDeltaEnabled, computeRowDigest, computeViewChecksum, diffFromDigest, applySemanticDelta, deltaCounts, DELTA_SMALL_RESPONSE_BYTES, DELTA_MAX_DIGEST_ENTRIES, } from './delta-protocol';
+export { parseDeltaRequest, formatDeltaRequest, encodeDeltaCursor, decodeDeltaCursor, computeViewFingerprint, contentRevision, negotiateDelta, setSemanticDeltaEnabledResolver, resetSemanticDeltaEnabledResolver, isSemanticDeltaEnabled, computeRowDigest, computeRowDigestUncapped, computeViewChecksum, diffFromDigest, applySemanticDelta, deltaCounts, DELTA_SMALL_RESPONSE_BYTES, DELTA_MAX_DIGEST_ENTRIES, } from './delta-protocol';
+/* ─── Server-held row digests for large views (P-024) ─────────────────── */
+export { putRowDigest, getRowDigest, resetRowDigestStore, rowDigestStoreStats, DIGEST_STORE_MAX_ROWS, } from './delta-digest-store';
 /* ─── Registries ─────────────────────────────────────────────────────── */
 export { getCatalog, lookup, _resetCatalogForTests } from './registry';
 /* ─── Catalogue summaries (defineGroup + derived capability map) ──────── */
@@ -51,6 +61,8 @@ export { negotiateRowsDelta } from './rows-delta';
 export { registerCard, resolveCardResponse, cancelPendingCardsForRun, cancelPendingCardsForWorkspaceSwitch, _resetCardCorrelatorForTests, } from './card-correlator';
 /* ─── Capability tiers ───────────────────────────────────────────────── */
 export { tierFor, setCapabilityTierResolver, defaultTierResolver, } from './capability-tiers';
+/* ─── Entity-reference args (referential integrity at dispatch) ───────── */
+export { entityRef, entityRefMeta, collectEntityRefs, setEntityResolver, clearEntityResolvers, hasEntityResolver, resolveEntityRefs, formatEntityRefViolations, setEntityEnum, clearEntityEnums, applyEntityRefEnums, entityEnumRevision, DEFAULT_MAX_ENUM_VALUES, } from './entity-ref';
 /* ─── Schema → JSON-Schema adapter (pluggable; default Zod) ───────────── */
 export { toJsonSchema, setJsonSchemaAdapter, zodJsonSchemaAdapter, } from './schema-adapter';
 /* ─── Standard Schema validation (validator-agnostic) ────────────────── */

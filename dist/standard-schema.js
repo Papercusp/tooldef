@@ -41,12 +41,52 @@ export function validateSync(schema, input) {
     return { ok: true, value: result.value };
 }
 /**
+ * EI-19968462161677390: an `invalid_union` issue's own top-level message is Zod's
+ * generic "Invalid input" — it never names which field was wrong, because the union
+ * itself has no field. The USEFUL diagnosis lives in `issue.errors`: one sub-issue
+ * array per union branch, each carrying the field-level issues THAT branch produced
+ * trying to match the input. A caller who sends a well-shaped ARRAY into
+ * `z.union([z.string(), z.array(section)])` gets a deep, specific issue from the
+ * array branch (e.g. `body[1].forYouBecause.note: Required`) and a shallow
+ * "expected string, received array" from the string branch — the deep one is the
+ * branch the caller actually meant, so its issues are the ones worth surfacing.
+ *
+ * Picks the branch reaching the greatest PATH DEPTH (ties keep the first). A branch
+ * with depth 0 (e.g. the string branch's bare type mismatch) never wins once any
+ * other branch located a specific field — reproduced live: reporting the deepest
+ * branch turns "body: Invalid input" into
+ * "body[1].forYouBecause.note: forYouBecause.relation:'other' REQUIRES a `note`".
+ */
+function bestUnionBranch(issue) {
+    const branches = issue.errors;
+    if (!Array.isArray(branches) || branches.length === 0)
+        return null;
+    let best = null;
+    let bestDepth = 0;
+    for (const branch of branches) {
+        if (!Array.isArray(branch) || branch.length === 0)
+            continue;
+        const depth = Math.max(...branch.map((i) => (i.path ?? []).length));
+        if (depth > bestDepth) {
+            bestDepth = depth;
+            best = branch;
+        }
+    }
+    return best;
+}
+/**
  * Value-level issue codes: the caller used a KEY THAT EXISTS and supplied a value the
  * field would not take. Contrast with a shape problem (an unrecognized key, a missing
  * required field, a wrong type) where the caller demonstrably does not know the schema.
  * The distinction drives `issuesAreValueLevel` below — see its doc.
  */
 const VALUE_LEVEL_CODES = new Set(['too_big', 'too_small', 'invalid_format', 'invalid_value', 'not_multiple_of']);
+/**
+ * Codes whose verdict is about a value's SIZE. These are the only ones suppressed
+ * when the same path also failed its type check (see `formatIssues`) — a length
+ * verdict on a value of the wrong type describes nothing the caller can act on.
+ */
+const SIZE_CODES = new Set(['too_big', 'too_small']);
 export function issuePath(issue) {
     return (issue.path ?? [])
         .map((seg) => (typeof seg === 'object' && seg !== null ? String(seg.key) : String(seg)))
@@ -83,32 +123,93 @@ export function issuesAreValueLevel(issues) {
  * characters" never says by how much). Needs the input to measure the actual length;
  * without it the message degrades gracefully to the target-only form.
  */
+/**
+ * Resolve issues to their LEAF diagnoses, each with its fully-qualified segment path.
+ *
+ * This is the traversal `formatIssues` renders from, extracted so other consumers can
+ * reach the same leaves. The distinction it encodes is easy to get wrong and expensive
+ * when you do: an `invalid_union` issue's own `path` stops at the UNION NODE (`body`),
+ * while its real diagnosis lives in per-branch sub-issues several levels deeper
+ * (`body.2.couldNotDetermine.0.what`). Anyone reading `issue.path` directly therefore
+ * sees a shallow path that does not match the deep one the rendered message shows —
+ * which reads as a bug in the renderer rather than a missing descent.
+ *
+ * Kept as ONE traversal deliberately: a second copy would drift from the rendered
+ * message, and a path hint that disagrees with the error beside it is worse than none.
+ */
+export function issueLeaves(issues) {
+    const out = [];
+    const walk = (issue, prefix, depth) => {
+        const segs = [
+            ...prefix,
+            ...(issue.path ?? []).map((seg) => typeof seg === 'object' && seg !== null ? seg.key : seg),
+        ];
+        // An `invalid_union` issue's real diagnosis lives in its per-branch sub-issues
+        // (see `bestUnionBranch`) — surface the branch that located an actual field
+        // instead of the union's own generic "Invalid input". Bounded recursion so a
+        // union of unions cannot spin.
+        if (depth < 4) {
+            const branch = bestUnionBranch(issue);
+            if (branch) {
+                for (const sub of branch)
+                    walk(sub, segs, depth + 1);
+                return;
+            }
+        }
+        out.push({ issue, segs });
+    };
+    for (const issue of issues)
+        walk(issue, [], 0);
+    return out;
+}
 export function formatIssues(issues, input) {
-    return issues
-        .map((i) => {
-        const path = issuePath(i);
-        const extras = i;
+    const render = (issue, segs) => {
+        const path = segs.map((s) => String(s)).join('.');
+        const extras = issue;
         if (extras.code === 'too_big' && extras.origin === 'string' && typeof extras.maximum === 'number') {
             const max = extras.maximum;
-            const actual = input !== undefined ? valueAtIssuePath(input, i) : undefined;
-            const over = typeof actual === 'string' ? actual.length - max : null;
+            const actual = input !== undefined ? valueAtPath(input, segs) : undefined;
+            const actualLen = typeof actual === 'string' ? actual.length : null;
+            const over = actualLen !== null ? actualLen - max : null;
             const detail = over !== null && over > 0
-                ? `too long — ${actual.length} chars, ${over} over the ${max}-char limit; trim to ${max}.`
+                ? `too long — ${actualLen} chars, ${over} over the ${max}-char limit; trim to ${max}.`
                 : `too long — over the ${max}-char limit; trim to ${max}.`;
-            return path ? `${path}: ${detail}` : detail;
+            return { path, code: extras.code, text: path ? `${path}: ${detail}` : detail };
         }
-        return path ? `${path}: ${i.message}` : i.message;
-    })
-        .join('; ');
+        return {
+            path,
+            code: extras.code,
+            text: path ? `${path}: ${issue.message}` : issue.message,
+        };
+    };
+    const rows = issueLeaves(issues).map(({ issue, segs }) => render(issue, segs));
+    // A SIZE verdict on a value that failed its TYPE check is meaningless, and worse
+    // than meaningless when rendered actionably. Zod's `.max(n)` on an array is a
+    // size check that reads `.length` off whatever it is handed — so a prose STRING
+    // passed to an array field reports `too_big { origin: 'string', maximum: n }`
+    // ALONGSIDE the invalid_type, and the branch above dutifully renders it as
+    // "too long — 312 chars, 292 over the 20-char limit; trim to 20." The 20 bounds
+    // ITEMS, not characters, and trimming the prose is the opposite of the fix
+    // (pass an array). Being the more specific-sounding of the two messages, it
+    // out-competes the correct one.
+    //
+    // EI-20018883577474576: six independent agents hit this on coord:send's
+    // `youMayNotKnow` / `couldNotDetermine`, and every report ends the same way —
+    // they shipped by DELETING the structured field. The renderer taught agents to
+    // strip the epistemic-honesty fields the protocol exists to carry.
+    const typeFailedPaths = new Set(rows.filter((r) => r.code === 'invalid_type').map((r) => r.path));
+    const kept = rows.filter((r) => !(r.code && SIZE_CODES.has(r.code) && typeFailedPaths.has(r.path)));
+    // Never return an empty string: if suppression somehow removed everything, the
+    // caller is better served by the raw issues than by a silent success-shaped "".
+    return (kept.length > 0 ? kept : rows).map((r) => r.text).join('; ');
 }
-/** Walk `input` to the value an issue points at (undefined if the path does not resolve). */
-function valueAtIssuePath(input, issue) {
+/** Walk `input` to the value at a resolved (already-flattened) segment path. */
+function valueAtPath(input, segs) {
     let cur = input;
-    for (const seg of issue.path ?? []) {
-        const key = typeof seg === 'object' && seg !== null ? seg.key : seg;
+    for (const seg of segs) {
         if (cur === null || typeof cur !== 'object')
             return undefined;
-        cur = cur[key];
+        cur = cur[seg];
     }
     return cur;
 }

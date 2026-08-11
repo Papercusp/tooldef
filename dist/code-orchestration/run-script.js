@@ -15,7 +15,7 @@
 const WORKER_SRC = `(() => {
   const { parentPort, workerData } = require('node:worker_threads');
   const vm = require('node:vm');
-  const { script, maxLogLines } = workerData;
+  const { script, maxLogLines, sleepMaxMs } = workerData;
 
   const stringify = (v) => {
     if (typeof v === 'string') return v;
@@ -43,17 +43,93 @@ const WORKER_SRC = `(() => {
     parentPort.postMessage(Object.assign({ t: 'call', id }, payload));
   });
 
+  // --- EI-19301148486657755: detect reads of fields the tool result does not have ---
+  // Every tool result handed to the script is wrapped in a Proxy that records a read of a key
+  // that is not present. A wrong FIELD name was previously silent (undefined is indistinguishable
+  // from a legitimately-absent value), which is how "count: null" got read as a real 0.
+  //
+  // Membership is tested with \`key in target\`, which walks the prototype chain — so Array.prototype
+  // methods (.map/.filter), Object.prototype members (.toString) and the like resolve normally and
+  // record nothing. Only PROBE_KEYS (runtime lookups performed on arbitrary values, never authored
+  // field reads) and numeric array indices need explicit exclusion.
+  //
+  // Proxies are memoized per raw object so identity is stable (\`r.a === r.a\` stays true), and the
+  // script's returned value is deep-unwrapped before postMessage — a Proxy is NOT structured-
+  // cloneable, so letting one escape would turn every \`return someToolResult\` into
+  // result_not_serializable.
+  const MISS_LIMIT = 12;
+  const AVAIL_LIMIT = 30;
+  const fieldMisses = [];
+  const missSeen = new Set();
+  const proxyToRaw = new WeakMap();
+  const rawToProxy = new WeakMap();
+  const PROBE_KEYS = new Set(['then', 'toJSON', 'constructor', 'inspect', 'nodeType', '$$typeof']);
+  // Plain data (object/array) test that works ACROSS REALMS. The script runs under
+  // vm.runInNewContext, so an object it builds itself (\`return { viaCall };\`) has the VM
+  // context's Object.prototype — a strict \`proto === Object.prototype\` identity check is false
+  // for it, which made unwrap() skip the wrapper and let a Proxy escape into postMessage
+  // (result_not_serializable). Compare structurally instead: any realm's Object.prototype is the
+  // object whose own prototype is null. A Date/Map/class instance has a deeper chain, so it is
+  // correctly excluded and passes through untouched.
+  const isContainer = (v) => {
+    if (Array.isArray(v)) return true; // realm-agnostic by spec
+    if (typeof v !== 'object' || v === null) return false;
+    const proto = Object.getPrototypeOf(v);
+    if (proto === null) return true; // Object.create(null)
+    return Object.getPrototypeOf(proto) === null;
+  };
+  const track = (value, tool, path) => {
+    if (!isContainer(value)) return value;
+    const cached = rawToProxy.get(value);
+    if (cached) return cached;
+    const isArr = Array.isArray(value);
+    const proxy = new Proxy(value, {
+      get(target, key) {
+        // Symbol keys pass straight through, UNTRACKED and UNWRAPPED. They are protocol lookups
+        // (Symbol.iterator for for...of, Symbol.toPrimitive, util.inspect.custom), never an
+        // authored field read — and a Symbol cannot be concatenated into the dotted path below:
+        // \`'items' + '.' + Symbol.iterator\` throws "Cannot convert a Symbol value to a string",
+        // which is exactly how a for...of over a NESTED array (l.items) broke before this guard.
+        if (typeof key === 'symbol') return Reflect.get(target, key);
+        if (!(key in target)
+          && !PROBE_KEYS.has(key)
+          && !(isArr && /^\\d+$/.test(key))
+          && fieldMisses.length < MISS_LIMIT) {
+          const sig = tool + '|' + path + '|' + key;
+          if (!missSeen.has(sig)) {
+            missSeen.add(sig);
+            fieldMisses.push({ tool, path: path || '(root)', read: key, available: Object.keys(target).slice(0, AVAIL_LIMIT) });
+          }
+        }
+        return track(Reflect.get(target, key), tool, path ? path + '.' + key : key);
+      },
+    });
+    proxyToRaw.set(proxy, value);
+    rawToProxy.set(value, proxy);
+    return proxy;
+  };
+  const unwrap = (v, seen) => {
+    if (!v || typeof v !== 'object') return v;
+    const raw = proxyToRaw.get(v) || v;
+    if (!isContainer(raw)) return raw;
+    if (seen.has(raw)) return seen.get(raw);
+    const out = Array.isArray(raw) ? [] : {};
+    seen.set(raw, out);
+    for (const k of Object.keys(raw)) out[k] = unwrap(raw[k], seen);
+    return out;
+  };
+
   // --- the Proxy facade injected as \`tools\` (mirrors tool-facade.ts: tools.ns.verb + tools.call) ---
   const nsProxy = (ns) => new Proxy({}, {
     get(_t, verb) {
       if (typeof verb !== 'string' || verb === 'then') return undefined;
-      return (...a) => rpc({ ns, verb, args: a[0] });
+      return (...a) => rpc({ ns, verb, args: a[0] }).then((v) => track(v, ns + ':' + verb, ''));
     },
   });
   const tools = new Proxy({}, {
     get(_t, prop) {
       if (typeof prop !== 'string' || prop === 'then') return undefined;
-      if (prop === 'call') return (name, args) => rpc({ callName: name, args });
+      if (prop === 'call') return (name, args) => rpc({ callName: name, args }).then((v) => track(v, String(name), ''));
       return nsProxy(prop);
     },
   });
@@ -66,10 +142,24 @@ const WORKER_SRC = `(() => {
   // sleep(huge) degrades to the existing overall script_timeout kill rather than a surprising
   // multi-minute hang; built on the WORKER's own (real, Node) setTimeout — this scope is outside
   // the sandboxed vm context, so it is not itself exposed to the script.
-  const SLEEP_MAX_MS = 10000;
+  //
+  // EI-19324793244855883: the clamp used to be silent — no throw, no log, no field anywhere
+  // saying the delay was shortened. A script measuring a rate/share over a requested window
+  // (e.g. sleep(30000) to sample a 30s delta) got a window 3x+ shorter than requested and divided
+  // by the number it ASKED for, producing a confidently wrong result. Now every clamped call is
+  // recorded (bounded by SLEEP_CAP_LIMIT, same pattern as fieldMisses above) and returned in the
+  // \`done\` message as \`sleepCaps\`, AND sleep() resolves with the ACTUAL ms waited so a careful
+  // script can self-correct with \`const actual = await sleep(n)\`.
+  const SLEEP_MAX_MS = Number(sleepMaxMs) > 0 ? Number(sleepMaxMs) : 10000;
+  const SLEEP_CAP_LIMIT = 20;
+  const sleepCaps = [];
   const sleep = (ms) => new Promise((resolve) => {
-    const bounded = Math.max(0, Math.min(Number(ms) || 0, SLEEP_MAX_MS));
-    setTimeout(resolve, bounded);
+    const requested = Number(ms) || 0;
+    const bounded = Math.max(0, Math.min(requested, SLEEP_MAX_MS));
+    if (bounded < requested && sleepCaps.length < SLEEP_CAP_LIMIT) {
+      sleepCaps.push({ requestedMs: requested, actualMs: bounded });
+    }
+    setTimeout(() => resolve(bounded), bounded);
   });
 
   // --- compile + run the body under vm (globals-scoped); a leading newline guards a trailing // comment ---
@@ -84,10 +174,22 @@ const WORKER_SRC = `(() => {
   (async () => {
     try {
       const result = await factory(tools, log);
-      try { parentPort.postMessage({ t: 'done', result }); }
+      // Deep-unwrap first: a tracking Proxy is not structured-cloneable, so returning a tool
+      // result verbatim (\`return pp;\`) would otherwise become result_not_serializable.
+      const plain = unwrap(result, new Map());
+      try { parentPort.postMessage({ t: 'done', result: plain, fieldMisses, sleepCaps }); }
       catch (cloneErr) { parentPort.postMessage({ t: 'error', error: 'result_not_serializable: ' + ((cloneErr && cloneErr.message) || String(cloneErr)) }); }
     } catch (err) {
-      parentPort.postMessage({ t: 'error', error: (err && err.message) || String(err) });
+      const msg = (err && err.message) || String(err);
+      // EI-19294786663902075: vm.runInNewContext is built with no importModuleDynamically
+      // callback, so a script's await import(...) throws this exact V8-level message before
+      // the specifier is ever looked at -- indistinguishable, on first read, from a bad path.
+      // Rewritten here so the constraint (tools.* only -- the whitelist IS the security boundary,
+      // same reason require/process are absent) costs one read instead of a wasted retry.
+      const friendly = /dynamic import callback/i.test(msg)
+        ? 'dynamic_import_unsupported: code:run cannot import()/require() repo modules or node builtins -- only tools.ns.verb(args) is exposed (the role tool whitelist IS the sandbox security boundary, same reason require/process are absent). Use capability:bash + npx tsx for direct module/DB access outside that whitelist.'
+        : msg;
+      parentPort.postMessage({ t: 'error', error: friendly });
     }
   })();
 })();`;
@@ -102,7 +204,7 @@ export async function runOrchestrationScript(script, facade, opts = {}) {
         const worker = new Worker(WORKER_SRC, {
             eval: true,
             name: 'code-orchestration',
-            workerData: { script, maxLogLines },
+            workerData: { script, maxLogLines, sleepMaxMs: opts.sleepMaxMs },
             ...(opts.maxOldGenerationSizeMb
                 ? { resourceLimits: { maxOldGenerationSizeMb: opts.maxOldGenerationSizeMb } }
                 : {}),
@@ -123,8 +225,14 @@ export async function runOrchestrationScript(script, facade, opts = {}) {
                     logs.push(m.text);
                 return;
             }
-            if (m.t === 'done')
-                return finish({ ok: true, result: m.result });
+            if (m.t === 'done') {
+                return finish({
+                    ok: true,
+                    result: m.result,
+                    ...(m.fieldMisses && m.fieldMisses.length ? { fieldMisses: m.fieldMisses } : {}),
+                    ...(m.sleepCaps && m.sleepCaps.length ? { sleepCaps: m.sleepCaps } : {}),
+                });
+            }
             if (m.t === 'error')
                 return finish({ ok: false, error: m.error });
             if (m.t === 'call')

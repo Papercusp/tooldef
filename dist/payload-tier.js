@@ -20,7 +20,9 @@ export function extractPayloadTier(input) {
     return { input: rest, callTier };
 }
 /** Per-call override outranks the session tier; absent both ⇒ full. */
-export function resolvePayloadTier(callTier, ctxTier) {
+export function resolvePayloadTier(callTier, ctxTier, opts) {
+    if (opts?.ignoreSessionTier)
+        return callTier ?? 'full';
     return callTier ?? ctxTier ?? 'full';
 }
 /** Unshaped payloads above this (JSON chars) served to a non-full session trip
@@ -57,26 +59,119 @@ function jsonLen(v) {
         return 0;
     }
 }
-function recordOmission(state, path, reason, count = 1) {
+function recordOmission(state, path, reason, count = 1, priority = false) {
     state.omittedCount += Math.max(1, count);
-    if (state.omitted.length < GENERIC_PROJECTION_OMISSION_SAMPLES) {
-        state.omitted.push({ path, reason });
+    const bucket = priority ? state.priorityOmitted : state.omitted;
+    if (bucket.length < GENERIC_PROJECTION_OMISSION_SAMPLES) {
+        bucket.push({ path, reason });
     }
 }
+/**
+ * A clipped string must ANNOUNCE ITS OWN CLIPPING, IN BAND.
+ *
+ * EI-19447969329510166. The previous marker was a bare `…` — a character that
+ * occurs constantly inside real content (checkpoints, prose, tool guidance,
+ * this very file's comments), so a truncated value was INDISTINGUISHABLE from a
+ * complete one. The only evidence lived in a sibling `_projection.omitted` entry
+ * the reader has to think to correlate.
+ *
+ * Measured cost: a `work_items:get` checkpoint clipped from ~13,000 chars to 800
+ * read as a complete (if terse) note — the visible head ended mid-sentence at a
+ * `-` and the reader nearly acted on a SUPERSEDED root-cause block whose
+ * retraction sat in the dropped 85%. On the designated continuity surface a
+ * silent clip does not merely lose information, it MANUFACTURES confident wrong
+ * state, which is strictly worse than returning nothing.
+ *
+ * The marker is charged to the same projection budget as the content, so keep it
+ * cheap — but never confusable with content. The square-bracket form matches
+ * this file's existing `[circular]` / `[omitted: projection budget]` convention,
+ * and `TRUNCATED` is greppable in a transcript.
+ */
+function truncationMarker(omittedChars) {
+    return `…[TRUNCATED +${omittedChars} chars — see _projection.cursor]`;
+}
+function clipString(value, keep) {
+    const head = value.slice(0, Math.max(0, keep));
+    return `${head}${truncationMarker(value.length - head.length)}`;
+}
+/**
+ * WI-36048 (borrow item 1 of the opencode/OMP token-reduction research).
+ *
+ * The sibling of `truncationMarker` above, for values dropped WHOLE rather than
+ * clipped. Both answer the same question — "what was here, and can I get it
+ * back?" — and until now only the clip path did.
+ *
+ * The comparison that motivated it: OMP replaces evicted content with
+ * `[shaken ~N tokens — recover: artifact://<id> (region N)]`; opencode uses a
+ * fixed `[Old tool result content cleared]`. The first tells the model how much
+ * went and how to get it back, so it can decide whether recovery is worth a
+ * call; the second tells it neither, so the only rational move is to re-run the
+ * whole tool or silently proceed on partial data. Our bare
+ * `[omitted: projection budget]` was the second kind.
+ *
+ * ⚠ The research is equally explicit that a self-describing placeholder is WORSE
+ * than nothing if the recovery pointer it advertises does not resolve — it
+ * becomes a lie the model trusts. So the pointer here is deliberately NOT the
+ * result-door spill, which provably cannot recover these (the omitted values are
+ * never serialized, so they are not in the spill either). It is the re-call with
+ * an EXPLICIT `payloadTier:'full'`, which sets `explicitFullRequest` — the one
+ * documented exit from the hard-ceiling force-shape (see applyPayloadTier
+ * below). That path resolves; the spill path does not.
+ *
+ * Size is included only where the caller ALREADY computed it. The depth-boundary
+ * sites deliberately omit it rather than pay a `JSON.stringify` per dropped node
+ * — this marker is charged to the same projection budget as the content it
+ * replaces, so it stays cheap.
+ */
+function omissionMarker(reason, omittedChars) {
+    const size = omittedChars != null && omittedChars > 0 ? `, ~${omittedChars} chars` : '';
+    return `[omitted: ${reason}${size} — recover: re-call with payloadTier:'full']`;
+}
+/**
+ * An array whose ELEMENT COUNT was truncated must announce it the same way a
+ * clipped string does (see `truncationMarker`) — otherwise the array's own
+ * `.length` (and any header a downstream encoder derives from it, e.g. TOON's
+ * `key[N]{fields}`) silently asserts a complete count. Appended as an extra
+ * element so the signal travels WITH the array into whatever the caller does
+ * with it — a `.length` read, a completeness check, a rendered table header —
+ * rather than living only in a `_projection.omitted` entry a reader has to
+ * think to correlate (EI-19965559011729712).
+ */
+function arrayTruncationMarker(droppedCount) {
+    return `[TRUNCATED +${droppedCount} more item(s) — see _projection.cursor]`;
+}
 function takePrimitive(state, value, path) {
-    let candidate = value;
-    if (typeof value === 'string' && value.length > state.limits.maxString) {
-        candidate = `${value.slice(0, state.limits.maxString)}…`;
-        recordOmission(state, path, `${value.length - state.limits.maxString} string characters omitted`);
+    if (typeof value !== 'string') {
+        const size = jsonLen(value);
+        if (size > state.remaining) {
+            recordOmission(state, path, 'value omitted to fit projection budget');
+            return omissionMarker('projection budget', size);
+        }
+        state.remaining -= size;
+        return value;
     }
+    // Two independent clip pressures — the per-tier `maxString` cap and the
+    // running budget. The SECOND one used to be entirely silent: the old halving
+    // loop appended a bare `…` and never called recordOmission at all, so a string
+    // clipped by budget alone produced NO in-band marker AND no `_projection`
+    // entry — nothing anywhere said it had been cut. Both paths now converge on
+    // one clip + exactly one omission record carrying the FINAL char count.
+    let keep = value.length > state.limits.maxString ? state.limits.maxString : value.length;
+    let candidate = keep < value.length ? clipString(value, keep) : value;
     let size = jsonLen(candidate);
-    while (typeof candidate === 'string' && size > state.remaining && candidate.length > 32) {
-        candidate = `${candidate.slice(0, Math.max(32, Math.floor(candidate.length / 2) - 1))}…`;
+    while (size > state.remaining && keep > 32) {
+        keep = Math.max(32, Math.floor(keep / 2) - 1);
+        candidate = clipString(value, keep);
         size = jsonLen(candidate);
+    }
+    if (keep < value.length) {
+        recordOmission(state, path, `${value.length - keep} string characters omitted`);
     }
     if (size > state.remaining) {
         recordOmission(state, path, 'value omitted to fit projection budget');
-        return '[omitted: projection budget]';
+        // The WHOLE string is dropped here, not the clipped candidate — so the
+        // omitted amount is the original length, which we already have for free.
+        return omissionMarker('projection budget', value.length);
     }
     state.remaining -= size;
     return candidate;
@@ -119,7 +214,7 @@ function projectIdentityPreview(value, path, depth, state) {
     }
     if (depth >= IDENTITY_PREVIEW_DEPTH) {
         recordOmission(state, path, 'non-identity detail omitted at compact preview depth');
-        return '[omitted: compact preview depth]';
+        return omissionMarker('compact preview depth');
     }
     state.active.add(value);
     try {
@@ -127,14 +222,17 @@ function projectIdentityPreview(value, path, depth, state) {
             const shown = value.slice(0, state.limits.maxArray);
             const projected = [];
             for (let i = 0; i < shown.length; i += 1) {
-                if (state.remaining < 128) {
-                    recordOmission(state, `${path}[${i}]`, 'remaining identity rows omitted to fit projection budget', value.length - i);
+                if (state.remaining < 128)
                     break;
-                }
                 projected.push(projectIdentityPreview(shown[i], `${path}[${i}]`, depth + 1, state));
             }
-            if (value.length > shown.length) {
-                recordOmission(state, `${path}[${shown.length}]`, `${value.length - shown.length} identity rows omitted`, value.length - shown.length);
+            const droppedCount = value.length - projected.length;
+            if (droppedCount > 0) {
+                // priority: an element-count drop must survive the omitted[] sample cap
+                // even when per-row entries for the KEPT elements would otherwise fill it
+                // first (EI-19965559011729712).
+                recordOmission(state, `${path}[${projected.length}]`, `${droppedCount} identity row(s) omitted`, droppedCount, true);
+                projected.push(arrayTruncationMarker(droppedCount));
             }
             return projected;
         }
@@ -142,7 +240,7 @@ function projectIdentityPreview(value, path, depth, state) {
         const chosen = entries.filter(([key]) => IDENTITY_FIELDS.has(key) || IDENTITY_ENVELOPES.has(key));
         if (chosen.length === 0) {
             recordOmission(state, path, 'nested value omitted at projection depth limit');
-            return '[omitted: depth limit]';
+            return omissionMarker('depth limit');
         }
         const projected = {};
         for (const [key, child] of chosen) {
@@ -196,32 +294,57 @@ function projectValue(value, path, depth, state) {
             const shown = value.slice(0, state.limits.maxArray);
             const projected = [];
             for (let i = 0; i < shown.length; i += 1) {
-                if (state.remaining < 128) {
-                    recordOmission(state, `${path}[${i}]`, 'remaining array values omitted to fit projection budget', value.length - i);
+                if (state.remaining < 128)
                     break;
-                }
                 projected.push(projectValue(shown[i], `${path}[${i}]`, depth + 1, state));
             }
-            if (value.length > shown.length) {
-                recordOmission(state, `${path}[${shown.length}]`, `${value.length - shown.length} array items omitted`, value.length - shown.length);
+            const droppedCount = value.length - projected.length;
+            if (droppedCount > 0) {
+                // priority: an element-count drop must survive the omitted[] sample cap
+                // even when per-row entries for the KEPT elements would otherwise fill it
+                // first — this is the omission that changes the array's APPARENT
+                // completeness (a `criteria[12]` header/`.length` read over a 17-element
+                // source), so it must never be the one that gets starved out
+                // (EI-19965559011729712). The in-band marker also travels WITH the array
+                // itself, so a downstream encoder's own element count reflects the drop.
+                recordOmission(state, `${path}[${projected.length}]`, `${droppedCount} array item(s) omitted`, droppedCount, true);
+                projected.push(arrayTruncationMarker(droppedCount));
             }
             return projected;
         }
+        // EI-18683546971375407: project IDENTITY_FIELDS (id/ok/kind/title/status/…)
+        // BEFORE any other key, regardless of the object's own insertion order. Without
+        // this, a bulk `results[i]` element whose non-identity fields (workItem,
+        // checkpoint, summary, …) are large can exhaust `state.remaining` partway
+        // through the key loop — and since the budget check below breaks the loop the
+        // MOMENT it trips, whichever keys hadn't been reached yet (often `id` itself,
+        // since handlers conventionally return `{ ok, id, ...detail }` but detail is
+        // what's bulky) are silently dropped, producing a bare `{ok:true}` or even `{}`
+        // stub that has lost its correlation key entirely. That reads exactly like a
+        // dropped row (a bulk caller sees fewer usable results than ids requested,
+        // `ok:true`, no error) when the row was actually present, just stripped bare by
+        // projection. Same failure CLASS as EI-11404's depth-limit case (which already
+        // fixed the analogous problem at the nesting-depth boundary via
+        // projectIdentityPreview) — this fixes the budget-exhaustion boundary in the
+        // NORMAL (non-depth-limited) path with the same IDENTITY_FIELDS priority.
         const entries = Object.entries(value);
+        const prioritized = entries.length > 1
+            ? [...entries].sort((a, b) => Number(IDENTITY_FIELDS.has(b[0])) - Number(IDENTITY_FIELDS.has(a[0])))
+            : entries;
         const projected = {};
-        const shown = entries.slice(0, state.limits.maxKeys);
+        const shown = prioritized.slice(0, state.limits.maxKeys);
         for (let i = 0; i < shown.length; i += 1) {
             const [key, child] = shown[i];
             const keyCost = jsonLen(key) + 2;
             if (state.remaining < keyCost + 128) {
-                recordOmission(state, `${path}.${key}`, 'remaining fields omitted to fit projection budget', entries.length - i);
+                recordOmission(state, `${path}.${key}`, 'remaining fields omitted to fit projection budget', shown.length - i);
                 break;
             }
             state.remaining -= keyCost;
             projected[key] = projectValue(child, `${path}.${key}`, depth + 1, state);
         }
-        if (entries.length > shown.length) {
-            recordOmission(state, `${path}.*`, `${entries.length - shown.length} object fields omitted`, entries.length - shown.length);
+        if (prioritized.length > shown.length) {
+            recordOmission(state, `${path}.*`, `${prioritized.length - shown.length} object fields omitted`, prioritized.length - shown.length);
         }
         return projected;
     }
@@ -242,6 +365,7 @@ export function projectBoundedPayload(data, opts) {
         remaining: Math.max(1_000, target - 1_600),
         omittedCount: 0,
         omitted: [],
+        priorityOmitted: [],
         active: new WeakSet(),
         limits: projectionTier === 'standard'
             ? { maxArray: 40, maxDepth: 8, maxKeys: 100, maxString: 2_500 }
@@ -256,7 +380,10 @@ export function projectBoundedPayload(data, opts) {
         originalChars: opts.originalChars ?? jsonLen(data),
         returnedChars: 0,
         omittedCount: Math.max(1, state.omittedCount),
-        omitted: state.omitted,
+        // priorityOmitted first: an array-element-count drop must never be starved
+        // out of the sample by lower-priority field/depth entries recorded for the
+        // elements that survived (EI-19965559011729712).
+        omitted: [...state.priorityOmitted, ...state.omitted].slice(0, GENERIC_PROJECTION_OMISSION_SAMPLES),
         cursor: {
             kind: 'full-detail',
             tool: opts.toolName,
@@ -267,7 +394,19 @@ export function projectBoundedPayload(data, opts) {
                 payloadTier: 'full',
             },
         },
-        next: `Call ${opts.toolName} with the exact args in _projection.cursor.args for full detail.`,
+        // EI-19447969329510166: this used to read "Call <tool> with the EXACT args in
+        // _projection.cursor.args" — advice that is literally un-executable from a
+        // schema-validating client. `payloadTier` is framework-reserved: it is pulled
+        // off the raw input by extractPayloadTier BEFORE schema validation, so it is
+        // deliberately absent from every published input schema, and
+        // deepStrictifyInPlace stamps those schemas additionalProperties:false. The
+        // caller therefore gets a validation rejection while following the tool's own
+        // printed recovery instruction — at exactly the moment they are trying to
+        // recover a field they have just been told was dropped. Say what is true.
+        next: `Call ${opts.toolName} again with _projection.cursor.args for full detail. ` +
+            `NOTE: 'payloadTier' is FRAMEWORK-RESERVED — stripped before schema validation and absent from ` +
+            `${opts.toolName}'s published schema (additionalProperties:false), so a schema-validating client ` +
+            `REJECTS it on a direct call; route these args through your host's raw-args dispatch path instead.`,
     };
     let result = Array.isArray(preview)
         ? { items: preview, _projection: metadata }
@@ -302,14 +441,24 @@ function markForced(data) {
  * payload fires the once-per-tool ratchet warning and returns the generic
  * projection instead of flooding the model context.
  *
- * FINALLY, regardless of tier, a HARD CEILING guard force-applies the smallest
- * available shaper if the result is still oversized — so a shaper-tool can never
- * emit a result the transport rejects (WI-2859).
+ * FINALLY, regardless of RESOLVED tier, a HARD CEILING guard force-applies the
+ * smallest available shaper if the result is still oversized — so a shaper-tool
+ * can never emit a result the transport rejects (WI-2859). The ONE exit is an
+ * EXPLICIT per-call `payloadTier: 'full'` (`explicitFullRequest`) — the escape
+ * hatch every shaper hint documents, and the contract the UI's in-process
+ * dispatch relies on (WI-5078).
  */
 export function applyPayloadTier(opts) {
-    const { toolName, shape, response, tier, args, log } = opts;
+    const { toolName, shape, response, tier, explicitFullRequest, args, log } = opts;
     if (!response || typeof response !== 'object' || response.data === undefined)
         return response;
+    // WI-37843: a tool may raise its OWN hard ceiling. Validate rather than trust —
+    // a NaN/0/negative override must fall back to the shared ceiling, never disable
+    // the guard (a ceiling of 0 would force-shape every result; NaN would compare
+    // false against every size and silently uncap the tool).
+    const ceiling = typeof opts.ceilingChars === 'number' && Number.isFinite(opts.ceilingChars) && opts.ceilingChars > 0
+        ? opts.ceilingChars
+        : PAYLOAD_TIER_HARD_CEILING_CHARS;
     // 1. Normal tier shaping (full ⇒ no tier shaper; keeps prior behavior).
     let out = response;
     const tierShaper = tier === 'full' ? undefined : tier === 'trimmed' ? (shape?.trimmed ?? shape?.standard) : shape?.standard;
@@ -339,13 +488,29 @@ export function applyPayloadTier(opts) {
                 ratchetWarned.add(key);
                 (log ?? console.warn)(`[payload-tier] ${toolName} bounded a ${size}-char unshaped payload for a '${tier}' session — add shape.${tier} for a domain-specific projection (context-trimming-tiers P-011)`);
             }
-            out = { ...response, data: projectBoundedPayload(response.data, { toolName, tier, originalChars: size, args }) };
+            const projected = projectBoundedPayload(response.data, { toolName, tier, originalChars: size, args });
+            out = {
+                ...response,
+                data: projected,
+                payloadProjection: {
+                    truncated: true,
+                    tier: projected._projection.tier,
+                    forced: projected._projection.forced,
+                    originalChars: projected._projection.originalChars,
+                    returnedChars: projected._projection.returnedChars,
+                    omittedCount: projected._projection.omittedCount,
+                },
+            };
         }
     }
     // 2. Hard ceiling: never emit an over-cap result. Prefer the tool's smallest
     //    domain-specific shaper, then fall back to the generic bounded projection.
+    //    An EXPLICIT payloadTier:'full' call opts out (see explicitFullRequest) —
+    //    that is the documented escape hatch, and the UI/sync in-process path.
+    if (explicitFullRequest)
+        return out;
     const size = jsonLen(out.data);
-    if (size > PAYLOAD_TIER_HARD_CEILING_CHARS) {
+    if (size > ceiling) {
         const smallest = shape?.trimmed ?? shape?.standard;
         if (smallest) {
             try {
@@ -353,20 +518,48 @@ export function applyPayloadTier(opts) {
                 const forcedSize = jsonLen(forced);
                 // Only swap if it genuinely shrank (a trimmed tier already at this size
                 // gains nothing — that shaper still needs to bound a growing field).
-                if (forcedSize < size && forcedSize <= PAYLOAD_TIER_HARD_CEILING_CHARS) {
-                    (log ?? console.warn)(`[payload-tier] ${toolName} '${tier}' result ${size} chars > hard ceiling ${PAYLOAD_TIER_HARD_CEILING_CHARS}; force-applied the trimmed shaper (${forcedSize} chars) to fit the transport cap (WI-2859)`);
-                    return { ...response, data: markForced(forced) };
+                if (forcedSize < size && forcedSize <= ceiling) {
+                    (log ?? console.warn)(`[payload-tier] ${toolName} '${tier}' result ${size} chars > hard ceiling ${ceiling}; force-applied the trimmed shaper (${forcedSize} chars) to fit the transport cap (WI-2859)`);
+                    return {
+                        ...response,
+                        data: markForced(forced),
+                        // No `_projection` marker rides a custom shaper's own output, but
+                        // it is exactly as lossy from the door's point of view: `data` was
+                        // swapped for a smaller representation than the tool's true full
+                        // result. Flag it the same way (EI-13918) — omittedCount is
+                        // unknown here (the shaper owns its own omission bookkeeping), so
+                        // report it as unspecified (0) rather than fabricate a count.
+                        payloadProjection: {
+                            truncated: true,
+                            tier: 'trimmed',
+                            forced: true,
+                            originalChars: size,
+                            returnedChars: forcedSize,
+                            omittedCount: 0,
+                        },
+                    };
                 }
             }
             catch (err) {
                 (log ?? console.warn)(`[payload-tier] ${toolName} hard-ceiling force-shape threw (using generic bounded projection): ${err instanceof Error ? err.message : String(err)}`);
             }
         }
-        (log ?? console.warn)(`[payload-tier] ${toolName} '${tier}' result ${size} chars > hard ceiling ${PAYLOAD_TIER_HARD_CEILING_CHARS}; used the generic bounded projection to fit the transport cap`);
-        return {
-            ...response,
-            data: projectBoundedPayload(out.data, { toolName, tier, forced: true, originalChars: size, args }),
-        };
+        (log ?? console.warn)(`[payload-tier] ${toolName} '${tier}' result ${size} chars > hard ceiling ${ceiling}; used the generic bounded projection to fit the transport cap`);
+        {
+            const projected = projectBoundedPayload(out.data, { toolName, tier, forced: true, originalChars: size, args });
+            return {
+                ...response,
+                data: projected,
+                payloadProjection: {
+                    truncated: true,
+                    tier: projected._projection.tier,
+                    forced: projected._projection.forced,
+                    originalChars: projected._projection.originalChars,
+                    returnedChars: projected._projection.returnedChars,
+                    omittedCount: projected._projection.omittedCount,
+                },
+            };
+        }
     }
     return out;
 }

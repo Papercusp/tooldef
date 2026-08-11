@@ -18,7 +18,7 @@
  *     chosen compact format can't faithfully represent the data; the downgrade
  *     is labeled via `_meta.formatFallback`.
  */
-import { encode, encodeToonChecked, encodePositionalRows, isFlatObjectArray, isObjectWithArrayField, parseFormatRequest, readPrePromptFormat, } from '@papercusp/result-encoding';
+import { encode, encodeToonChecked, encodePositionalRows, isFlatObjectArray, isObjectWithArrayField, parseFormatRequest, readPrePromptFormat, isPositionalReadEncoding, } from '@papercusp/result-encoding';
 /** Shape the negotiation into the compact `_meta.delta` envelope (omit absent fields). */
 function deltaMeta(delta) {
     return {
@@ -30,6 +30,11 @@ function deltaMeta(delta) {
         ...(delta.counts ? { counts: delta.counts } : {}),
         // itemKey FIELD NAME for out-of-process generic merge (the MCP proxy) — P-004.
         ...(delta.itemKeyField ? { itemKeyField: delta.itemKeyField } : {}),
+        // P-024: this view is structurally un-deltaable right now (over
+        // DELTA_MAX_DIGEST_ENTRIES). Without it on the wire the response is an ordinary
+        // `full` and the caller cannot tell "nothing changed" from "this will NEVER delta",
+        // so it keeps paying for `_delta` round-trips that can never pay off.
+        ...(delta.semanticUnavailable ? { semanticUnavailable: delta.semanticUnavailable } : {}),
     };
 }
 /** Build the format options for a call from the request context + the tool's precomputed eligibility. */
@@ -126,8 +131,10 @@ function tryTier3Read(data, opts) {
     if (!opts.toolName || !opts.readColumns || opts.readColumns.length === 0)
         return null;
     const fmt = readPrePromptFormat(opts.toolName);
-    if (fmt !== 'csv' && fmt !== 'tsv')
-        return null; // 'toon' / 'off' → normal path
+    // 'toon' / 'off' → normal path. Shared with the legend generator so the two
+    // ends of the positional protocol cannot drift (see isPositionalReadEncoding).
+    if (!isPositionalReadEncoding(fmt))
+        return null;
     if (opts.includeStructured)
         return null; // structured consumer wants the lossless body
     const req = opts.requested ?? (opts.defaultCompact ? 'compact' : 'json');
@@ -158,6 +165,12 @@ export function serializeToolResponse(response, opts) {
             _meta.degraded = response.degraded;
         if (response.degradedReasons !== undefined)
             _meta.degradedReasons = response.degradedReasons;
+        // EI-13918: surface payload-tier truncation in `_meta` (not just inline in
+        // the serialized body) so a downstream consumer that reads only `_meta`
+        // (the per-result door, result-door.ts) can tell `data` is already a lossy
+        // projection without parsing the body.
+        if (response.payloadProjection !== undefined)
+            _meta.payloadProjection = response.payloadProjection;
     }
     const data = response.data ?? response;
     // Freshness negotiation (agent-tool-delta-protocol-2026-06-22, P-005). A
@@ -227,8 +240,25 @@ export function serializeToolResponse(response, opts) {
         _meta.delta = deltaMeta(opts.delta);
     const result = { content, _meta, format: chosen.format, fallback: chosen.fallback };
     // Opt-in lossless structured payload for UI/programmatic consumers (P-010).
-    // Only meaningful when the body itself isn't already the lossless JSON.
-    if (opts.includeStructured && hasData && chosen.format !== 'json') {
+    //
+    // EI-13245: this used to also require `chosen.format !== 'json'`, on the
+    // theory that when the compact TEXT body already IS the lossless JSON,
+    // structuredContent would just duplicate it. That reasoning doesn't hold:
+    // `structuredContent` is a distinct MCP response field, and the official
+    // MCP SDK's `Client.callTool()` enforces its presence purely from whether
+    // the tool advertised an `outputSchema` in `tools/list` — it never looks at
+    // `content[]`. Any tool with an object-rooted `result` schema (which is
+    // EVERY tool whose chosen text format resolves to plain JSON, i.e. most
+    // non-tabular tools) unconditionally advertises `outputSchema`
+    // (tool-projection.ts), so a caller that opts in via `_meta.structured`
+    // must always get `structuredContent` back — never conditioned on which
+    // text format happened to be chosen — or a strict client throws
+    // `"has an output schema but did not return structured content"` even
+    // though the caller asked for exactly that. (Scoped to the full-body path:
+    // no registered tool today combines an object-rooted `result` with a
+    // `delta` capability, so the not_modified/delta early-returns above are
+    // unaffected — see their branches if that combination is ever added.)
+    if (opts.includeStructured && hasData) {
         result.structuredContent = data;
         _meta.structured = true;
     }

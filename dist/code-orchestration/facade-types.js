@@ -1,4 +1,4 @@
-import { camelNamespace, camelVerb } from './tool-facade';
+import { camelNamespace, camelVerb, splitToolName } from './tool-facade';
 /** Default nesting depth before a deep/recursive schema collapses to `Record<string, unknown>`. */
 const DEFAULT_MAX_DEPTH = 8;
 /** Truncation cap for the per-signature description comment (token economy). */
@@ -164,6 +164,43 @@ export function toolArgsType(tool, maxDepth = DEFAULT_MAX_DEPTH) {
     const required = Array.isArray(schema.required) ? schema.required : [];
     return { type, optional: required.length === 0 };
 }
+/**
+ * EI-13298 — render the tool's RETURN shape, not just its args.
+ *
+ * The root cause of the bug this fixes: a `code:run` script author sees only the arg
+ * signature (`Promise<unknown>` for the return) and so guesses response keys — a guess
+ * that fails SILENTLY (an optional-chained `||`-fallback over a wrong key just collapses
+ * to `[]`/`undefined`, never an error), which then reads as a true negative ("no data")
+ * instead of the mapping bug it actually is. Two independent sources feed this, since
+ * most tools declare only one of them:
+ *
+ *   1. `tool.outputJsonSchema` — a REAL JSON-Schema (present when the tool declared a
+ *      Zod `result`, i.e. `defineTool({ result: z.object({...}) })`) — rendered to a
+ *      precise TS type via the same `schemaToTs` walker `toolArgsType` uses for args.
+ *   2. `tool.guidance.returns` — a free-text description of the shape (EI-10882),
+ *      already authored on ~many tools for `tools:find`'s `returns` field but never
+ *      surfaced anywhere a `code:run` script is actually being WRITTEN.
+ *
+ * When neither is declared, the return type stays `unknown` (honest — better than a
+ * confident-looking but made-up shape) and no `@returns` comment is emitted.
+ */
+export function toolResultType(tool, maxDepth = DEFAULT_MAX_DEPTH) {
+    const schema = tool.outputJsonSchema;
+    if (!isObj(schema))
+        return 'unknown';
+    const defs = rootDefs(schema);
+    return schemaToTs(schema, 0, defs, maxDepth);
+}
+/** Truncation cap for the `@returns` free-text comment (token economy; this one earns a bit more room than `desc` since it's the whole point of this render). */
+const RETURNS_DESC_MAX = 220;
+/** The tool's authored `guidance.returns` free-text shape hint (EI-10882), if any. */
+function returnsNote(tool) {
+    const raw = tool.guidance?.returns?.trim();
+    if (!raw)
+        return undefined;
+    const one = raw.replace(/\s+/g, ' ').trim();
+    return one.length > RETURNS_DESC_MAX ? `${one.slice(0, RETURNS_DESC_MAX - 1)}…` : one;
+}
 /** One line of description, whitespace-collapsed and truncated for the signature comment. */
 function shortDesc(desc) {
     if (!desc)
@@ -180,12 +217,12 @@ function facadeEntries(tools, opts) {
         const name = tool.expose?.mcp?.name;
         if (!name)
             continue;
-        const ci = name.indexOf(':');
-        if (ci <= 0)
+        const split = splitToolName(name);
+        if (!split)
             continue;
         if (opts.allowed && !opts.allowed.has(name))
             continue;
-        const rawNs = name.slice(0, ci);
+        const { rawNs, rawVerb } = split;
         const ns = camelNamespace(rawNs);
         if (rawNs === 'call' || ns === 'call')
             continue; // never shadow the escape hatch
@@ -197,10 +234,12 @@ function facadeEntries(tools, opts) {
         }
         entries.push({
             ns,
-            verb: camelVerb(name.slice(ci + 1)),
+            verb: camelVerb(rawVerb),
             name,
             desc: shortDesc(tool.description),
             args: toolArgsType(tool, opts.maxDepth),
+            resultType: toolResultType(tool, opts.maxDepth),
+            returns: returnsNote(tool),
         });
     }
     entries.sort((a, b) => (a.ns === b.ns ? a.verb.localeCompare(b.verb) : a.ns.localeCompare(b.ns)));
@@ -226,10 +265,16 @@ export function generateToolFacadeTypes(tools, opts = {}) {
         for (const e of byNs.get(ns)) {
             if (e.desc)
                 lines.push(`    /** ${e.desc} */`);
+            // EI-13298: surface the RETURN shape right next to the arg signature — a
+            // free-text `@returns` hint (guidance.returns, EI-10882) when authored, so the
+            // model reads the real response shape instead of guessing keys that silently
+            // collapse to an empty/undefined "true negative".
+            if (e.returns)
+                lines.push(`    /** @returns ${e.returns} */`);
             const argPart = e.args.type === '{}'
                 ? 'args?: {}'
                 : `args${e.args.optional ? '?' : ''}: ${e.args.type}`;
-            lines.push(`    ${e.verb}(${argPart}): Promise<unknown>;`);
+            lines.push(`    ${e.verb}(${argPart}): Promise<${e.resultType}>;`);
         }
         lines.push('  };');
     }

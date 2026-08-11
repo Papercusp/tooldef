@@ -1,4 +1,5 @@
 import { dispatchProjectedTool } from '../dispatch-projected';
+import { parseJsonWithTrailer } from './json-prefix';
 import { decode, isResultFormat } from '@papercusp/result-encoding';
 /** Matches the `format: <fmt>\n` self-identifying marker `serializeToolResponse` prefixes onto
  *  any non-JSON compact body (serialize-result.ts) — JSON itself carries no marker. */
@@ -18,12 +19,20 @@ const FORMAT_MARKER_RE = /^format: (\S+)\n/;
  * string, and the script's `result.ok` check passed, reporting a phantom plan creation.
  * Parse the marker first and DECODE with the matching format (the lossless inverse of
  * the encoder that produced it) so the script always sees the real structured value.
+ *
+ * WI-6458 is the same failure from the other direction: a PROXIED upstream MCP server
+ * (gitnexus) ends its text with a chat affordance — `\n\n---\n**Next:** READ gitnexus://…`
+ * — after otherwise-valid JSON, so `JSON.parse` throws and the script got the raw string.
+ * `parseJsonWithTrailer` recovers the leading value; the trailing prose is DROPPED for the
+ * script (it addresses a human/model reading the raw text, and the direct MCP path still
+ * returns it verbatim — only the code-mode facade unwraps).
  */
 export function unwrapToolResult(result) {
     if (!result)
         return undefined;
-    if (result.structuredContent !== undefined)
-        return result.structuredContent;
+    if (result.structuredContent !== undefined) {
+        return withIsErrorOk(result.structuredContent, result.isError);
+    }
     // Narrow on the `type` discriminant — the prior `c is { text: string }` predicate was not a
     // subtype of the content union (TS2677) so it failed to narrow, leaving `.text` unreadable on
     // the image/resource variants (TS2339). Extracting the 'text' member fixes both.
@@ -34,7 +43,7 @@ export function unwrapToolResult(result) {
     const marker = FORMAT_MARKER_RE.exec(text);
     if (marker && isResultFormat(marker[1]) && marker[1] !== 'md') {
         try {
-            return decode(text.slice(marker[0].length), marker[1]);
+            return withIsErrorOk(decode(text.slice(marker[0].length), marker[1]), result.isError);
         }
         catch {
             // Fall through to the JSON/raw-text attempts below — never let a decode
@@ -42,11 +51,42 @@ export function unwrapToolResult(result) {
         }
     }
     try {
-        return JSON.parse(text);
+        return withIsErrorOk(JSON.parse(text), result.isError);
     }
     catch {
+        const withTrailer = parseJsonWithTrailer(text);
+        if (withTrailer)
+            return withIsErrorOk(withTrailer.value, result.isError);
         return text;
     }
+}
+/**
+ * EI-18664105352441219: the MCP protocol's own `isError` flag is the AUTHORITATIVE
+ * "this call failed" signal (set by a tool returning `isError: true` alongside its
+ * content) — independent of whatever shape the handler's own JSON body happens to
+ * use. Several handlers signal failure via a bare `{ error: '<code>', ... }` body
+ * with NO `ok: false` field (plans:new's `similar_exists` refusal is the reported
+ * case: `{ error: 'similar_exists', slug, similar, hint }`, isError: true) — every
+ * sibling refusal in the same file has the identical shape (`busy`, `slug_exists`).
+ * Downstream, `isOkFalseResult` (orchestrate.ts) and a script's own idiomatic
+ * `res?.ok !== false` guard both only recognize a top-level `ok === false`, so the
+ * bare-`error` shape reads as a SUCCESS — no plan is written, but the caller (and
+ * the orchestrator's own semantic-failure tally) never finds out. Stamping
+ * `ok: false` onto the unwrapped value whenever the protocol says `isError` closes
+ * the gap for every existing and future handler using this shape, without
+ * requiring each one to remember to add `ok: false` explicitly. A handler that
+ * already sets `ok: false` (or anything other than a plain object, e.g. a raw-text
+ * fallback) is left untouched.
+ */
+function withIsErrorOk(value, isError) {
+    if (!isError)
+        return value;
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+        const v = value;
+        if (v.ok !== false)
+            return { ...v, ok: false };
+    }
+    return value;
 }
 /**
  * Dispatcher error codes decided BEFORE the tool's handler runs — a gate or a schema

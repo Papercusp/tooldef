@@ -21,6 +21,7 @@
  *
  * Plan ref: phase-4-endpoint-system-2026-05-12.md § T2.2.
  */
+import { pinModuleState } from '@papercusp/module-singleton';
 import { onWorkspaceSwitch } from './workspace-lifecycle';
 const BUFFER_TTL_MS = 5 * 60 * 1000;
 /**
@@ -36,13 +37,26 @@ function key(workspaceId, toolName, runId) {
  * them mid-stream. Same pattern as other in-process state in this
  * codebase (e.g. the schema-ensure flags).
  */
-const __SYM = Symbol.for('papercusp.replayBufferRegistry');
+/**
+ * The pin key — also the id this module reports under in
+ * `listModuleDuplications()`, so a split here shows up in the REALM-WIDE report
+ * rather than only through this module's own accessor. Unchanged from the
+ * `Symbol.for(...)` description used before the migration (EI-19479108855357092).
+ */
+const STATE_KEY = 'papercusp.replayBufferRegistry';
+/**
+ * Pinned + counted rather than hand-rolled: a hand-rolled
+ * `globalThis[Symbol.for(...)]` slot is equally correct and completely invisible
+ * to `listModuleDuplications()`. Must stay at module scope. Lifecycle
+ * subscription stays lazy in `registry()` — only the data is eager.
+ */
+const state = pinModuleState(STATE_KEY, () => ({
+    buffers: new Map(),
+    gcTimer: null,
+    lifecycleSubscribed: false,
+}));
 function registry() {
-    const g = globalThis;
-    if (!g[__SYM]) {
-        g[__SYM] = { buffers: new Map(), gcTimer: null, lifecycleSubscribed: false };
-    }
-    const r = g[__SYM];
+    const r = state;
     if (!r.lifecycleSubscribed) {
         onWorkspaceSwitch((wid) => clearRingBuffersForWorkspaceSwitch(wid));
         r.lifecycleSubscribed = true;

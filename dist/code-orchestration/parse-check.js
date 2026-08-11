@@ -1,4 +1,4 @@
-import { camelNamespace, camelVerb } from './tool-facade';
+import { camelNamespace, camelVerb, splitToolName } from './tool-facade';
 let _ts = null;
 /** Lazily load the TS compiler (kept out of the eager client bundle). Await once before checkScript(). Idempotent. */
 export async function ensureParseCheckReady() {
@@ -19,16 +19,23 @@ export function checkScript(script, tools, allowed) {
     const fullNames = new Set();
     for (const t of tools) {
         const name = t.expose?.mcp?.name;
-        if (!name || name.indexOf(':') <= 0)
+        if (!name)
+            continue;
+        // EI-18683272396981279: a plugin-namespaced tool projects with a DOT (`gitnexus.query`),
+        // not the canonical colon — recognize both shapes here the same way buildToolFacade does,
+        // or a plugin tool that IS reachable at runtime gets falsely flagged as an "unknown ref" by
+        // this static pre-check.
+        const split = splitToolName(name);
+        if (!split)
             continue;
         if (allowed && !allowed.has(name))
             continue;
-        const ci = name.indexOf(':');
-        memberToName.set(`${camelNamespace(name.slice(0, ci))}.${camelVerb(name.slice(ci + 1))}`, name);
+        memberToName.set(`${camelNamespace(split.rawNs)}.${camelVerb(split.rawVerb)}`, name);
         fullNames.add(name);
     }
     const refs = new Set();
     const unknown = new Set();
+    const calls = [];
     // Accept the snake_case OR camelCase spelling of a `ns.verb` member: the
     // facade exposes BOTH (the canonical MCP name is snake_case), so normalize to
     // the camel key before deciding "unknown". Deterministic, not fuzzy — mirrors
@@ -50,6 +57,71 @@ export function checkScript(script, tools, allowed) {
         if (!fullNames.has(name))
             unknown.add(name);
     };
+    /** Preserve every literal leaf we can prove while marking the aggregate
+     * incomplete when a computed/spread/runtime value appears. */
+    const readStaticValue = (node) => {
+        if (ts.isParenthesizedExpression(node) || ts.isNonNullExpression(node)) {
+            return readStaticValue(node.expression);
+        }
+        if (ts.isStringLiteralLike(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+            return { value: node.text, complete: true };
+        }
+        if (ts.isNumericLiteral(node))
+            return { value: Number(node.text), complete: true };
+        if (node.kind === ts.SyntaxKind.TrueKeyword)
+            return { value: true, complete: true };
+        if (node.kind === ts.SyntaxKind.FalseKeyword)
+            return { value: false, complete: true };
+        if (node.kind === ts.SyntaxKind.NullKeyword)
+            return { value: null, complete: true };
+        if (ts.isPrefixUnaryExpression(node) &&
+            (node.operator === ts.SyntaxKind.MinusToken || node.operator === ts.SyntaxKind.PlusToken) &&
+            ts.isNumericLiteral(node.operand)) {
+            const n = Number(node.operand.text);
+            return { value: node.operator === ts.SyntaxKind.MinusToken ? -n : n, complete: true };
+        }
+        if (ts.isArrayLiteralExpression(node)) {
+            const out = [];
+            let complete = true;
+            for (const element of node.elements) {
+                if (ts.isSpreadElement(element) || ts.isOmittedExpression(element)) {
+                    complete = false;
+                    continue;
+                }
+                const part = readStaticValue(element);
+                complete = complete && part.complete;
+                if (part.value !== undefined)
+                    out.push(part.value);
+            }
+            return { value: out, complete };
+        }
+        if (ts.isObjectLiteralExpression(node)) {
+            const out = {};
+            let complete = true;
+            for (const property of node.properties) {
+                if (!ts.isPropertyAssignment(property)) {
+                    complete = false;
+                    continue;
+                }
+                const key = ts.isIdentifier(property.name) || ts.isStringLiteralLike(property.name)
+                    ? property.name.text
+                    : ts.isNumericLiteral(property.name)
+                        ? property.name.text
+                        : null;
+                if (key == null) {
+                    complete = false;
+                    continue;
+                }
+                const part = readStaticValue(property.initializer);
+                complete = complete && part.complete;
+                if (part.value !== undefined)
+                    out[key] = part.value;
+            }
+            return { value: out, complete };
+        }
+        return { value: undefined, complete: false };
+    };
+    const canonicalMemberName = (member) => memberToName.get(member) ?? memberToName.get(canonMember(member)) ?? member;
     let source;
     try {
         source = ts.createSourceFile('script.ts', script, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
@@ -149,11 +221,24 @@ export function checkScript(script, tools, allowed) {
             const r = resolve(node.expression);
             if (r?.kind === 'callHatch') {
                 const name = node.arguments[0] ? literalKey(node.arguments[0]) : null;
-                if (name != null)
+                if (name != null) {
                     recordFull(name); // dynamic arg → runtime boundary
+                    const parsed = node.arguments[1]
+                        ? readStaticValue(node.arguments[1])
+                        : { value: null, complete: node.arguments.length < 2 };
+                    calls.push({ tool: name, args: parsed.value ?? null, dynamicArgs: !parsed.complete });
+                }
             }
             else if (r?.kind === 'member') {
                 recordMember(r.member);
+                const parsed = node.arguments[0]
+                    ? readStaticValue(node.arguments[0])
+                    : { value: null, complete: true };
+                calls.push({
+                    tool: canonicalMemberName(r.member),
+                    args: parsed.value ?? null,
+                    dynamicArgs: !parsed.complete,
+                });
             }
         }
         else if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
@@ -164,7 +249,7 @@ export function checkScript(script, tools, allowed) {
         ts.forEachChild(node, visit);
     };
     visit(source);
-    return { ok: unknown.size === 0, unknownRefs: [...unknown].sort(), refs: [...refs].sort() };
+    return { ok: unknown.size === 0, unknownRefs: [...unknown].sort(), refs: [...refs].sort(), calls };
 }
 /** Degrade gracefully if AST parsing ever throws: the original regex scan (dotted + call only). */
 function regexFallback(script, memberToName, fullNames) {
@@ -184,5 +269,5 @@ function regexFallback(script, memberToName, fullNames) {
         if (!fullNames.has(m[1]))
             unknown.add(m[1]);
     }
-    return { ok: unknown.size === 0, unknownRefs: [...unknown].sort(), refs: [...refs].sort() };
+    return { ok: unknown.size === 0, unknownRefs: [...unknown].sort(), refs: [...refs].sort(), calls: [] };
 }

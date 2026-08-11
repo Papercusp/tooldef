@@ -27,6 +27,7 @@ import { cancelPendingCardsForRun, registerCard, } from './card-correlator';
 import { openRun, closeRun, setToolState } from './state-channel';
 import { validateSync, formatIssues } from './standard-schema';
 import { tierFor } from './capability-tiers';
+import { collectEntityRefs, formatEntityRefViolations, resolveEntityRefs, } from './entity-ref';
 import { PASS_THROUGH, HarnessRequiredError, InvalidInputError, UnauthorizedToolError, defaultComputeQuotaWindow, } from './dispatch-types';
 import { evaluateDataCondition } from '@papercusp/rules';
 function initExecution(tool, toolName, input, ctx, deps) {
@@ -742,6 +743,91 @@ const preconditionsStep = {
         return null;
     },
 };
+/**
+ * Per-tool cache of the entity-reference SITES in its args schema. The walk is
+ * structural (schema-shaped, not value-shaped), so it is computed once on the
+ * first call for a tool and reused for every later one — the per-call cost is
+ * then just the resolver lookups, which are themselves batched per kind.
+ */
+const ENTITY_SITES = new WeakMap();
+function entitySitesFor(tool) {
+    const key = (tool.args ?? tool);
+    const cached = ENTITY_SITES.get(key);
+    if (cached)
+        return cached;
+    let sites = [];
+    try {
+        sites = tool.args ? collectEntityRefs(tool.args) : [];
+    }
+    catch {
+        sites = []; // a schema shape we cannot walk is simply unvalidated
+    }
+    ENTITY_SITES.set(key, sites);
+    return sites;
+}
+/**
+ * Referential-integrity gate for args that NAME A DURABLE ENTITY
+ * (tool-arg-referential-integrity-2026-07-19 P-002 / D-001).
+ *
+ * An arg declared with `entityRef(kind)` must identify something that EXISTS.
+ * JSON Schema cannot express that (it is deliberately I/O-free), so the check
+ * lives here, where a host resolver is reachable. Values are grouped by kind
+ * and each resolver is consulted ONCE per call (DataLoader-style), so the
+ * common case — a host answering from a process-local `Set` — costs no queries
+ * at all.
+ *
+ * Placement: after `preconditions`, before `timeout`. It must not run before
+ * the auth gates, because the corrective message names near-matches and can
+ * name the valid set — telling an UNAUTHORIZED caller which pots exist would
+ * leak the entity namespace. It runs before `invoke` so a bad reference never
+ * reaches a handler that would persist it.
+ *
+ * FAILS OPEN by construction (see resolveEntityRefs): an unregistered kind or a
+ * throwing resolver yields no violations. This layer improves diagnostics and
+ * catches agent-invented values; the DATABASE's foreign keys remain the
+ * authoritative backstop, and an outage in the lookup path must never take down
+ * every tool that happens to name an entity. `soft: true` refs warn rather than
+ * reject, so a host can adopt the type broadly before its data is clean.
+ */
+const entityCheckStep = {
+    name: 'entity-check',
+    async run(exec) {
+        const { tool, toolName, input } = exec;
+        const sites = entitySitesFor(tool);
+        if (!sites.length)
+            return null;
+        let violations;
+        try {
+            violations = await resolveEntityRefs(sites, input);
+        }
+        catch {
+            return null; // fail open — never the reason a tool dies
+        }
+        if (!violations.length)
+            return null;
+        const hard = violations.filter((v) => !v.soft);
+        if (!hard.length) {
+            // Soft-only ⇒ the call PROCEEDS, but it must not proceed SILENTLY: the
+            // entire point of `soft` is to observe how much real traffic a kind would
+            // reject before flipping it hard. A soft violation nobody can see makes
+            // the staged rollout unmeasurable and the flip a guess.
+            exec.ctx.log?.(`[entity-check] ${toolName}: ${formatEntityRefViolations(violations)} ` +
+                `(soft — allowed through; this WOULD be rejected once the ref is hard)`);
+            return null;
+        }
+        return {
+            ok: false,
+            error: {
+                code: 'invalid_input',
+                message: `${toolName}: ${formatEntityRefViolations(hard)}`,
+                meta: {
+                    tool: toolName,
+                    violations: hard.map((v) => ({ path: v.path, kind: v.kind, value: v.value })),
+                },
+            },
+        };
+    },
+};
 /* ─── Default stack ──────────────────────────────────────────────────── */
 /**
  * Default ordered stack the dispatcher runs. Steps execute in this order;
@@ -756,6 +842,11 @@ const preconditionsStep = {
  *     `authorize` and before `timeout`: a corrective auto-fire must only
  *     happen for an authorized caller, and a functional precondition should
  *     not mask an auth denial.
+ *   - `entity-check` (referential integrity for `entityRef` args) runs
+ *     after `preconditions` and before `timeout`: its corrective message can
+ *     name near-matches and the valid set, so it must never run for an
+ *     unauthorized caller (that would leak the entity namespace), and it must
+ *     run before `invoke` so a bad reference never reaches a handler.
  *   - `timeout` arms the AbortController; every subsequent step that
  *     races against it depends on this having run.
  *   - `idle-watchdog` runs after `timeout` so it composes with the same
@@ -776,6 +867,7 @@ export const DEFAULT_DISPATCH_STACK = Object.freeze([
     quotaStep,
     authorizeStep,
     preconditionsStep,
+    entityCheckStep,
     timeoutStep,
     idleWatchdogStep,
     replayBufferStep,
@@ -809,6 +901,35 @@ export function withReplacedStep(stack, name, replacement) {
     return Object.freeze(out);
 }
 /* ─── Telemetry (always runs in finally) ─────────────────────────────── */
+/** Max chars of a refusal code persisted to the error_code column. */
+const REFUSAL_CODE_MAX = 80;
+/**
+ * Lift a self-reported refusal's own error code out of its payload.
+ *
+ * The house convention for `isError: true` results is a single text content whose
+ * body is JSON with a string `error` field (`{"error":"similar_exists", ...}`).
+ * This reads that and nothing else: any other shape yields null rather than a
+ * guess, because a WRONG code on a first-class column is worse than an absent one
+ * (it would group cleanly and silently mislead, which is the exact failure mode
+ * this whole change exists to remove).
+ */
+function extractRefusalCode(r) {
+    const text = r.content?.[0]?.text;
+    if (typeof text !== 'string' || text.length === 0)
+        return null;
+    try {
+        const parsed = JSON.parse(text);
+        if (parsed && typeof parsed === 'object') {
+            const code = parsed.error;
+            if (typeof code === 'string' && code.length > 0)
+                return code.slice(0, REFUSAL_CODE_MAX);
+        }
+    }
+    catch {
+        /* not JSON — a refusal is still a refusal; it just has no machine code */
+    }
+    return null;
+}
 /**
  * Record a tool-invocation row from a completed execution + its final
  * result. Called by the orchestrator after the stack settles (success,
@@ -884,13 +1005,30 @@ async function recordTelemetry(exec, result) {
                     metaWithFormat = { ...(metaWithFormat ?? {}), deltaServed: derivedDeltaServed };
                 }
             }
+            // A handler can fail in TWO ways, and only one of them throws. Dispatch-level
+            // failure (throw / gate denial) is `!result.ok` and handled in the else branch
+            // below. The other is a SELF-REPORTED refusal: the handler returns normally with
+            // `isError: true` on the ToolResult. That path used to be recorded as a flat
+            // 'ok' with a NULL error code — indistinguishable in the ledger from a call that
+            // actually did the work, which is how a refusal reads as a phantom silent write
+            // loss (EI-20184794555427363; the doc comment on RecordInvocation['status']
+            // carries the full case). Derive the status from the result the handler actually
+            // returned, not merely from the fact that it returned.
+            const selfReportedFailure = r.isError === true;
             await deps.recordInvocation({
                 toolName,
                 pluginName: tool.pluginName,
                 ctx,
                 windowKey: windowKey ?? '',
                 durationMs: Date.now() - startedAt,
-                status: 'ok',
+                status: selfReportedFailure ? 'refused' : 'ok',
+                // The refusal's OWN code (`{"error":"similar_exists"}`), lifted onto the
+                // first-class column so a consumer can group refusals by reason without
+                // LIKE-matching a payload blob — the same rationale as the dispatcher error
+                // CLASS below. Best-effort by construction: the convention is a JSON body
+                // with a string `error`, and a handler that refuses in some other shape is
+                // still correctly marked 'refused', just without a code.
+                ...(selfReportedFailure ? { errorCode: extractRefusalCode(r) } : {}),
                 outputSize: r.outputSize ?? JSON.stringify(r.content).length,
                 ...(r.outputRef ? { outputRef: r.outputRef } : {}),
                 args: input,

@@ -31,20 +31,36 @@
  *   - closeRun(runId)                       → drop after retention window (5min)
  *   - dispatchWorkspaceSwitch → drops all snapshots for that workspace
  */
+import { pinModuleState } from '@papercusp/module-singleton';
 import { onWorkspaceSwitch } from './workspace-lifecycle';
 const STATE_TTL_MS = 5 * 60 * 1000;
-const __SYM = Symbol.for('papercusp.stateChannelRegistry');
+/**
+ * The pin key — also the id this module reports under in
+ * `listModuleDuplications()`, so a split here is visible in the REALM-WIDE
+ * report rather than only through this module's own accessor. Unchanged from
+ * the `Symbol.for(...)` description used before the migration
+ * (EI-19479108855357092).
+ */
+const STATE_KEY = 'papercusp.stateChannelRegistry';
+/**
+ * Pinned + counted by `@papercusp/module-singleton` rather than hand-rolled on
+ * `globalThis[Symbol.for(...)]`. Both fix the split; only this one is VISIBLE to
+ * `listModuleDuplications()`, so the realm-wide report stops answering a clean
+ * `[]` for a module it cannot see. Must stay at module scope — `evaluations` is
+ * a module-RECORD count only if this runs once per evaluation of this body.
+ *
+ * Only the DATA is eager. Lifecycle subscription and the GC timer stay lazy in
+ * `registry()` below: arming a `setInterval` at import time would be a real
+ * behaviour change, not a refactor.
+ */
+const state = pinModuleState(STATE_KEY, () => ({
+    runs: new Map(),
+    workspaceSubs: new Map(),
+    gcTimer: null,
+    lifecycleSubscribed: false,
+}));
 function registry() {
-    const g = globalThis;
-    if (!g[__SYM]) {
-        g[__SYM] = {
-            runs: new Map(),
-            workspaceSubs: new Map(),
-            gcTimer: null,
-            lifecycleSubscribed: false,
-        };
-    }
-    const r = g[__SYM];
+    const r = state;
     if (!r.lifecycleSubscribed) {
         onWorkspaceSwitch((wid) => dropStateSnapshotsForWorkspaceSwitch(wid));
         r.lifecycleSubscribed = true;

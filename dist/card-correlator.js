@@ -16,6 +16,7 @@
  * State source-of-truth: the PENDING map IS what `setOpenCards` mirrors
  * to the state channel. No double-bookkeeping (H2).
  */
+import { pinModuleState } from '@papercusp/module-singleton';
 import { setOpenCards } from './state-channel';
 import { onWorkspaceSwitch } from './workspace-lifecycle';
 import { toJsonSchema } from './schema-adapter';
@@ -27,18 +28,27 @@ function makeDeferred() {
     });
     return { promise, resolve };
 }
-const __SYM = Symbol.for('papercusp.cardCorrelatorRegistry');
+/**
+ * The pin key — also the id this module reports under in
+ * `listModuleDuplications()`, so a split here shows up in the REALM-WIDE report
+ * rather than only through this module's own accessor. Unchanged from the
+ * `Symbol.for(...)` description used before the migration (EI-19479108855357092).
+ */
+const STATE_KEY = 'papercusp.cardCorrelatorRegistry';
+/**
+ * Pinned + counted rather than hand-rolled: a hand-rolled
+ * `globalThis[Symbol.for(...)]` slot is equally correct and completely invisible
+ * to `listModuleDuplications()`. Must stay at module scope. Lifecycle
+ * subscription stays lazy in `registry()` — only the data is eager.
+ */
+const state = pinModuleState(STATE_KEY, () => ({
+    pending: new Map(),
+    byRun: new Map(),
+    idempotency: new Map(),
+    lifecycleSubscribed: false,
+}));
 function registry() {
-    const g = globalThis;
-    if (!g[__SYM]) {
-        g[__SYM] = {
-            pending: new Map(),
-            byRun: new Map(),
-            idempotency: new Map(),
-            lifecycleSubscribed: false,
-        };
-    }
-    const r = g[__SYM];
+    const r = state;
     if (!r.lifecycleSubscribed) {
         onWorkspaceSwitch((wid) => cancelPendingCardsForWorkspaceSwitch(wid));
         r.lifecycleSubscribed = true;
