@@ -265,6 +265,44 @@ describe('dispatchProjectedTool', () => {
     expect(recorded).toEqual(['error']);
   });
 
+  it('records PostgreSQL SQLSTATE and constraint identity without changing handler_error', async () => {
+    const pgError = Object.assign(new Error('duplicate key value violates unique constraint'), {
+      code: '23505',
+      constraint: 'goals_attach_pot_one_owner',
+    });
+    const tool = makeTool({
+      fn: async (_input, ctx) => {
+        ctx.metadata({ requestId: 'req-1' });
+        throw pgError;
+      },
+    });
+    let captured: { errorCode?: string | null; metadataJson?: Record<string, unknown> | null } = {};
+    const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
+      recordInvocation: vi.fn(async (input) => {
+        captured = { errorCode: input.errorCode, metadataJson: input.metadataJson };
+      }),
+    }));
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe('handler_error');
+    expect(captured.errorCode).toBe('handler_error');
+    expect(captured.metadataJson).toEqual({
+      requestId: 'req-1',
+      postgres: { sqlState: '23505', constraintName: 'goals_attach_pot_one_owner' },
+    });
+  });
+
+  it('does not classify a non-SQLSTATE driver code as PostgreSQL metadata', async () => {
+    const driverError = Object.assign(new Error('connection closed'), { code: 'CONNECTION_CLOSED' });
+    const tool = makeTool({ fn: async () => { throw driverError; } });
+    let capturedMetadata: Record<string, unknown> | null | undefined;
+    await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
+      recordInvocation: vi.fn(async (input) => {
+        capturedMetadata = input.metadataJson;
+      }),
+    }));
+    expect(capturedMetadata?.postgres).toBeUndefined();
+  });
+
   it('codes InvalidInputError as invalid_input, not handler_error (EI-334 false-structural leg)', async () => {
     // defineTool's projected fn throws InvalidInputError on a zod-parse
     // failure. handler_error is the STRUCTURAL telemetry class (a tool bug);
