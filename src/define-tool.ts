@@ -1404,9 +1404,12 @@ function failingFieldSchemaHint(
   // prints — is several levels deeper. Reading `issue.path` here silently never fires.
   for (const { segs } of issueLeaves(issues ?? [])) {
     const path = segs as ReadonlyArray<PropertyKey>;
-    // Depth 1 is a plain top-level arg — the full dump already reaches it, and
-    // `unknownArgHint` already names the accepted keys. Only deeper paths are unreachable.
-    if (path.length < 2) continue;
+    // A primitive top-level arg is already adequately described by its own type
+    // error, and the full dump is still the useful fallback for it. A top-level
+    // OBJECT (or union branch with properties), however, can be far enough into a
+    // large schema that the flat dump cuts off before the field's accepted keys —
+    // exactly the coord:send `why: "..."` dead end. Render that object's shape too.
+    if (path.length < 1) continue;
 
     // Walk the path, remembering the deepest prefix whose node actually lists properties.
     let nodes: unknown[] = [rawSchema];

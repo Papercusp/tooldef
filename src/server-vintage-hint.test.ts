@@ -110,4 +110,37 @@ describe('unknownArgHint + server-vintage wiring', () => {
     expect(outcome.ok).toBe(true);
     expect((outcome.result as { content: { text: string }[] }).content[0]!.text).toBe('{"known":"x"}');
   });
+
+  it('a top-level object type error renders that field shape instead of the oversized full schema', async () => {
+    defineTool({
+      name: 'test:top-level-object-schema-hint',
+      capability: 'test:read',
+      description: 'fixture',
+      args: z.object({
+        why: z.object({
+          goalRef: z.string().min(1),
+          note: z.string().min(1).optional(),
+        }),
+        unrelated: z.string().optional().describe('A deliberately verbose sibling field description.'),
+      }),
+      async handler() {
+        return { content: [{ type: 'text', text: 'ok' }] };
+      },
+    });
+
+    const outcome = await dispatchProjectedTool(
+      lookupByMcpName('test:top-level-object-schema-hint')!,
+      'test:top-level-object-schema-hint',
+      { why: 'invalid scalar' },
+      ctx(),
+      DEPS,
+    );
+    if (outcome.ok) throw new Error('expected the call to fail with invalid_input');
+    const message = outcome.error?.message ?? '';
+    expect(outcome.error?.code).toBe('invalid_input');
+    expect(message).toContain('why: Invalid input: expected object');
+    expect(message).toContain('why` accepts');
+    expect(message).toContain('goalRef');
+    expect(message).not.toContain('full args schema:');
+  });
 });
