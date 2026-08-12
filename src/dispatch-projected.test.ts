@@ -272,7 +272,7 @@ describe('dispatchProjectedTool', () => {
     });
     const tool = makeTool({
       fn: async (_input, ctx) => {
-        ctx.metadata({ requestId: 'req-1' });
+        ctx.metadata?.({ requestId: 'req-1' });
         throw pgError;
       },
     });
