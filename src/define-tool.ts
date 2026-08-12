@@ -1216,7 +1216,9 @@ export function nestedArgPaths(props: Record<string, unknown> | undefined): Map<
   return out;
 }
 
-function unknownArgHint(
+// Exported for direct unit test alongside its sibling correction sources
+// (`nestedArgPaths`, `suggestArgName`) — see strict-args.test.ts.
+export function unknownArgHint(
   issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
   rawSchema: unknown,
   argRedirects?: Record<string, string>,
@@ -1619,7 +1621,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
         // required field). A caller who used the right key and merely overran a limit already
         // knows the shape — appending 1,800 chars of schema to "too long by 3 chars" is pure
         // context burn for the agent least able to spare it.
-        `invalid_args: ${formatIssues(parsed.issues, shimmed)}${unknownArgHint(parsed.issues, rawSchema)}` +
+        `invalid_args: ${formatIssues(parsed.issues, shimmed)}${unknownArgHint(parsed.issues, rawSchema, def.guidance?.argRedirects)}` +
           (issuesAreValueLevel(parsed.issues)
             ? ''
             : // EI-20087434994864624: prefer the NESTED failing field's own schema when the
@@ -1772,7 +1774,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
         // required field). A caller who used the right key and merely overran a limit already
         // knows the shape — appending 1,800 chars of schema to "too long by 3 chars" is pure
         // context burn for the agent least able to spare it.
-        `invalid_args: ${formatIssues(parsed.issues, shimmed)}${unknownArgHint(parsed.issues, rawSchema)}` +
+        `invalid_args: ${formatIssues(parsed.issues, shimmed)}${unknownArgHint(parsed.issues, rawSchema, def.guidance?.argRedirects)}` +
           (issuesAreValueLevel(parsed.issues)
             ? ''
             : // EI-20087434994864624: prefer the NESTED failing field's own schema when the

@@ -14,7 +14,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { nestedArgPaths, strictArgs, suggestArgName } from './define-tool';
+import { nestedArgPaths, strictArgs, suggestArgName, unknownArgHint } from './define-tool';
 
 /** Zod 4 exposes safeParse on the schema; keep the test honest about the shape. */
 function parse(schema: unknown, value: unknown): { ok: boolean; message: string } {
@@ -175,6 +175,57 @@ describe('strictArgs deep nesting (EI-18723223344390510)', () => {
     const out = strictArgs(union);
     expect(out).toBe(union);
     expect(parse(out, { op: 'a', a: 'x' }).ok).toBe(true);
+  });
+});
+
+describe('unknownArgHint argRedirects (EI-20281509195248260)', () => {
+  // The measured shape: `tags` on work_items:update. It has no nested home and no
+  // near-miss name, so BOTH pre-existing correction sources produce nothing and the
+  // caller was told only what the tool does not accept — read as "the capability does
+  // not exist", and filed 10+ times.
+  const issues = [{ message: 'Unrecognized key: "tags"', keys: ['tags'] }];
+  const schema = { properties: { id: {}, title: {}, body: {}, severity: {} } };
+
+  it('names the owning tool for a redirected key', () => {
+    const out = unknownArgHint(issues, schema, { tags: 'work_items:tag { id, topic }' });
+    expect(out).toContain('`tags` is not an arg of this tool');
+    expect(out).toContain('work_items:tag { id, topic }');
+  });
+
+  it('CONTROL: without a redirect the same rejection names no owner (the bug)', () => {
+    const out = unknownArgHint(issues, schema);
+    expect(out).toContain('this tool accepts ONLY');
+    expect(out).not.toContain('work_items:tag');
+    expect(out).not.toContain('is not an arg of this tool');
+  });
+
+  it('an authored redirect OUTRANKS an edit-distance guess, and suppresses it', () => {
+    // `summary` would otherwise be corrected to the near-name `summry`; an authored
+    // statement of fact must beat a string-distance heuristic, and the contradictory
+    // guess must not also be emitted.
+    const competing = [{ message: 'Unrecognized key: "summary"', keys: ['summary'] }];
+    const out = unknownArgHint(competing, { properties: { id: {}, summry: {} } }, {
+      summary: 'some_other:tool { id, summary }',
+    });
+    expect(out).toContain('some_other:tool { id, summary }');
+    expect(out).not.toContain('Did you mean');
+  });
+
+  it('leaves NON-redirected unknown keys on the existing correction paths', () => {
+    // Regression guard: adding a redirect map must not disturb the two sources that
+    // were already there. `summry` still edit-distances to `summary`.
+    const out = unknownArgHint(
+      [{ message: 'Unrecognized key: "summry"', keys: ['summry'] }],
+      { properties: { id: {}, summary: {} } },
+      { tags: 'work_items:tag { id, topic }' },
+    );
+    expect(out).toContain('Did you mean `summary` for `summry`?');
+    expect(out).not.toContain('work_items:tag');
+  });
+
+  it('an empty-string redirect target falls through rather than emitting a blank pointer', () => {
+    const out = unknownArgHint(issues, schema, { tags: '' });
+    expect(out).not.toContain('is not an arg of this tool');
   });
 });
 
