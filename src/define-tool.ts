@@ -1106,6 +1106,21 @@ const COMMON_ARG_ALIASES: Readonly<Record<string, readonly string[]>> = {
   scope: ['harness'],
   script: ['code'],
   summary: ['body', 'comment', 'text', 'content'],
+  // ── Additions from a MEASURED rejection burst (WI-38059 / EI-20204653748131789):
+  // eight arg-shape rejections in ~35 min of one agent's ordinary work, every one
+  // correct-intent/wrong-spelling. These four were each verified to fall OUTSIDE
+  // `suggestArgName`'s edit-distance threshold, so no suggestion was produced and
+  // the caller had to re-read a schema. e.g. compact('ttldays') vs compact('ttlsec')
+  // = distance 3, threshold 2. They are the obvious natural-language names for the
+  // concept, which is exactly why agents reach for them.
+  category: ['kind', 'type', 'lane'],
+  kind: ['category', 'type'],
+  text: ['content', 'body', 'summary', 'comment'],
+  ttl: ['ttlSec', 'ttl_sec', 'ttlMs', 'ttl_ms'],
+  ttldays: ['ttlSec', 'ttl_sec', 'ttlMs'],
+  ttlseconds: ['ttlSec', 'ttl_sec'],
+  type: ['kind', 'category'],
+  value: ['body', 'content', 'summary'],
 };
 
 function compactArgName(value: string): string {
@@ -1134,6 +1149,14 @@ function editDistance(a: string, b: string): number {
 /** Return the closest declared field for an unknown arg, when confidence is high. */
 export function suggestArgName(unknown: string, accepted: readonly string[]): string | null {
   const compactUnknown = compactArgName(unknown);
+  // An EXACT declared match outranks every alias. Latent via `unknownArgHint`
+  // (which filters declared keys before asking), but `suggestArgName` is exported
+  // and used directly, and without this a tool that genuinely declares `text` or
+  // `value` would be told to use `content`/`body` instead — the alias map
+  // confidently overriding the tool's own vocabulary. Widening the alias map in
+  // WI-38059 is what made that reachable enough to matter.
+  const exact = accepted.find((candidate) => compactArgName(candidate) === compactUnknown);
+  if (exact) return exact;
   const semanticAliases = COMMON_ARG_ALIASES[compactUnknown] ?? [];
   const semantic = semanticAliases.find((alias) =>
     accepted.some((candidate) => compactArgName(candidate) === compactArgName(alias)),
@@ -1151,6 +1174,36 @@ export function suggestArgName(unknown: string, accepted: readonly string[]): st
   return best.distance <= threshold ? best.candidate : null;
 }
 
+/**
+ * Map each key declared on a NESTED object schema to its dotted path
+ * (`observation.refs`), one level deep.
+ *
+ * WHY (WI-38059): `unknownArgHint` built its candidate list from TOP-LEVEL
+ * properties only, so a key that genuinely exists — just one level down —
+ * had nothing to match against and produced NO suggestion. The rejection
+ * then read as "this tool has no `refs` concept" when the truth was "`refs`
+ * lives inside `observation`". The caller's natural inference from that is
+ * to DROP the arg, silently losing whatever it carried (attribution, in the
+ * observed case), rather than to relocate it. That is strictly worse than a
+ * round-trip: it fails quietly.
+ *
+ * One level only, and first-declaration-wins on a collision: this exists to
+ * name an obvious relocation, not to search a schema tree. A deeper or
+ * ambiguous match is left to the full schema hint that follows it.
+ */
+export function nestedArgPaths(props: Record<string, unknown> | undefined): Map<string, string> {
+  const out = new Map<string, string>();
+  if (!props) return out;
+  for (const [parent, rawChild] of Object.entries(props)) {
+    const childProps = (rawChild as { properties?: Record<string, unknown> } | undefined)?.properties;
+    if (!childProps) continue;
+    for (const child of Object.keys(childProps)) {
+      if (!out.has(child)) out.set(child, `${parent}.${child}`);
+    }
+  }
+  return out;
+}
+
 function unknownArgHint(
   issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
   rawSchema: unknown,
@@ -1160,6 +1213,7 @@ function unknownArgHint(
   const props = (rawSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
   const keys = props ? Object.keys(props) : [];
   if (keys.length === 0) return '';
+  const nested = nestedArgPaths(props);
   const unknownKeys = [
     ...new Set([
       ...(issues ?? []).flatMap((issue) => issue.keys ?? []),
@@ -1167,7 +1221,10 @@ function unknownArgHint(
     ]),
   ].filter((key) => !keys.includes(key));
   const corrections = unknownKeys
-    .map((unknown) => ({ unknown, suggestion: suggestArgName(unknown, keys) }))
+    // A key that exists on a nested schema is a RELOCATION, not a typo — prefer
+    // it over any edit-distance guess against the top-level names, which would
+    // point the caller at an unrelated arg that merely looks similar.
+    .map((unknown) => ({ unknown, suggestion: nested.get(unknown) ?? suggestArgName(unknown, keys) }))
     .filter((item): item is { unknown: string; suggestion: string } => item.suggestion !== null);
   const correctionText = corrections.length > 0
     ? ` Did you mean ${corrections.map(({ unknown, suggestion }) => `\`${suggestion}\` for \`${unknown}\``).join('; ')}?`
