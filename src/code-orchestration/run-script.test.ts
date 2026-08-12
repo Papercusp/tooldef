@@ -126,6 +126,32 @@ describe('runOrchestrationScript (B-CX-1A)', () => {
     expect(r.error).toMatch(/tool exploded/);
   });
 
+  it('rejects a NUL introduced by a JavaScript backslash-zero escape with actionable shell guidance', async () => {
+    const bash = vi.fn(async () => ({ ok: true }));
+    // String.raw keeps one backslash in the script source. The vm then parses `\0` as a NUL,
+    // matching the live code:run failure that otherwise surfaced as child_process args[3].
+    const r = await runOrchestrationScript(
+      String.raw`return await tools.capability.bash({ command: "tr '\0' ' ' </proc/self/cmdline" });`,
+      facade({ capability: { bash } }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/contains a NUL byte/);
+    expect(r.error).toMatch(/write `\\\\0`/);
+    expect(bash).not.toHaveBeenCalled();
+  });
+
+  it('passes the correctly escaped shell backslash-zero through unchanged', async () => {
+    const bash = vi.fn(async (args: { command: string }) => ({ ok: true, command: args.command }));
+    // Two backslashes in the script source become one shell backslash after JS parsing.
+    const r = await runOrchestrationScript(
+      String.raw`return await tools.capability.bash({ command: "tr '\\0' ' ' </proc/self/cmdline" });`,
+      facade({ capability: { bash } }),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.result).toEqual({ ok: true, command: "tr '\\0' ' ' </proc/self/cmdline" });
+    expect(bash).toHaveBeenCalledWith({ command: "tr '\\0' ' ' </proc/self/cmdline" });
+  });
+
   it('rejects a call to a tool absent from the facade (whitelist boundary)', async () => {
     const r = await runOrchestrationScript(`return await tools.secret.exfiltrate();`, facade({}));
     expect(r.ok).toBe(false);

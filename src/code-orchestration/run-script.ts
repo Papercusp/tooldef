@@ -425,6 +425,15 @@ async function handleCall(
   isSettled: () => boolean,
 ): Promise<void> {
   try {
+    const toolName = typeof m.callName === 'string' ? m.callName : `${m.ns ?? '?'}.${m.verb ?? '?'}`;
+    const nullBytePath = findNullBytePath(m.args);
+    if (nullBytePath) {
+      throw new Error(
+        `code:run cannot dispatch ${toolName}: ${nullBytePath} contains a NUL byte. ` +
+          'JavaScript `\\0` escapes become an actual NUL; for a shell `\\0` escape, write `\\\\0` in the code:run script source.',
+      );
+    }
+
     let value: unknown;
     if (typeof m.callName === 'string') {
       value = await facade.call(m.callName, m.args);
@@ -446,6 +455,36 @@ async function handleCall(
     if (isSettled()) return;
     worker.postMessage({ t: 'result', id: m.id, ok: false, error: errMsg(err) });
   }
+}
+
+/**
+ * Find the first NUL-containing string in an RPC argument tree before it reaches a real tool.
+ *
+ * JavaScript parses `\0` in a script string literal as an actual NUL. That is valid JavaScript,
+ * but Node's child-process APIs reject NUL-containing argv/command strings, so the eventual
+ * `capability:bash` error otherwise points at its internal `args[3]` rather than the code:run
+ * source that introduced it. Keep the guard at this boundary: it preserves normal argument
+ * semantics and gives the script author the exact extra escaping needed for shell `\0`.
+ */
+function findNullBytePath(value: unknown, path = 'args', seen = new WeakSet<object>()): string | undefined {
+  if (typeof value === 'string') return value.includes('\u0000') ? path : undefined;
+  if (value === null || typeof value !== 'object') return undefined;
+  if (seen.has(value)) return undefined;
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      const found = findNullBytePath(value[i], `${path}[${i}]`, seen);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
+  for (const [key, child] of Object.entries(value)) {
+    const found = findNullBytePath(child, `${path}.${key}`, seen);
+    if (found) return found;
+  }
+  return undefined;
 }
 
 interface CallMessage {
