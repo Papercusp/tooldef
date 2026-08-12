@@ -1740,6 +1740,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     delta: def.delta,
     agentRoles: def.agentRoles,
     rolesQuota: def.rolesQuota,
+    requirePrincipal: false,
     authorize: def.authorize,
     requireRoles: def.requireRoles,
     public: def.public,

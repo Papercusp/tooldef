@@ -918,6 +918,13 @@ export interface ProjectedTool {
   /** Per-role quota windows. Roles without an entry are unlimited. */
   rolesQuota?: Partial<Record<AgentRole, RolesQuota>>;
   /**
+   * Whether the tool's handler requires an authenticated principal. Role-gated
+   * tools set this to false; the MCP host uses it to avoid synthesizing a
+   * principal when a privileged caller can already pass the role/capability
+   * gates and the handler has opted out of its ambient workspace transaction.
+   */
+  requirePrincipal?: boolean;
+  /**
    * Resource-authorization hook (RFC tooldef-auth Phase 1b). When set, the dispatcher
    * runs it after the coarse gates and before the handler — fail-closed, audited, and
    * bypassable only via `GateBypass.policy`. Unset = no resource gate (the legacy
