@@ -1289,6 +1289,80 @@ function schemaUnionBranches(node: unknown): unknown[] {
   return out;
 }
 
+/**
+ * Build a small, valid value for a JSON-Schema node. This is intentionally a
+ * teaching example, not a validator: nested validation hints must expose the
+ * COMPLETE set of accepted keys before their verbose field descriptions, or a
+ * result cap can cut off the only field the caller needs to discover.
+ */
+function compactSchemaExampleValue(node: unknown, depth = 0): unknown {
+  if (!node || typeof node !== 'object' || depth > 4) return '<value>';
+  const rec = node as Record<string, unknown>;
+  if (Object.prototype.hasOwnProperty.call(rec, 'const')) return rec.const;
+  if (Array.isArray(rec.enum) && rec.enum.length > 0) return rec.enum[0];
+
+  for (const branch of schemaUnionBranches(node)) {
+    const value = compactSchemaExampleValue(branch, depth + 1);
+    if (value !== '<value>') return value;
+  }
+
+  switch (rec.type) {
+    case 'string':
+      return '<string>';
+    case 'number':
+    case 'integer':
+      return 0;
+    case 'boolean':
+      return false;
+    case 'array':
+      return [];
+    case 'object':
+      return hasProperties(node) ? compactAcceptedObjectExample(node, depth + 1) : {};
+    default:
+      return hasProperties(node) ? compactAcceptedObjectExample(node, depth + 1) : '<value>';
+  }
+}
+
+/**
+ * Render a complete accepted object shape without copying its descriptions.
+ * The full schema remains useful for limits and prose, but it comes AFTER this
+ * example so a bounded error can never hide a later optional field (notably
+ * `checks[].verified`).
+ */
+function compactAcceptedObjectExample(node: unknown, depth = 0): unknown {
+  if (!node || typeof node !== 'object' || depth > 4) return '<value>';
+  const rec = node as Record<string, unknown>;
+  const props = rec.properties;
+  if (!props || typeof props !== 'object' || Array.isArray(props)) return '<value>';
+
+  const properties = props as Record<string, unknown>;
+  const example: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(properties)) {
+    example[key] = compactSchemaExampleValue(value, depth + 1);
+  }
+  return example;
+}
+
+function compactAcceptedObjectHint(node: unknown): string | null {
+  if (!node || typeof node !== 'object') return null;
+  const rec = node as Record<string, unknown>;
+  const props = rec.properties;
+  if (!props || typeof props !== 'object' || Array.isArray(props)) return null;
+  const properties = props as Record<string, unknown>;
+  const keys = Object.keys(properties);
+  if (keys.length === 0) return null;
+
+  const example = compactAcceptedObjectExample(node);
+  if (!example || typeof example !== 'object') return null;
+  const required = Array.isArray(rec.required) ? rec.required.filter((key): key is string => typeof key === 'string') : [];
+  const optional = keys.filter((key) => !required.includes(key));
+  const qualifiers = [
+    required.length > 0 ? `required: ${required.join(', ')}` : '',
+    optional.length > 0 ? `optional: ${optional.join(', ')}` : '',
+  ].filter(Boolean);
+  return `${JSON.stringify(example)}${qualifiers.length > 0 ? ` (${qualifiers.join('; ')})` : ''}`;
+}
+
 function hasProperties(node: unknown): boolean {
   if (!node || typeof node !== 'object') return false;
   const props = (node as Record<string, unknown>).properties;
@@ -1361,7 +1435,13 @@ function failingFieldSchemaHint(
     }
     if (json.length === 0) continue;
     if (json.length > FIELD_SCHEMA_HINT_MAX) json = `${json.slice(0, FIELD_SCHEMA_HINT_MAX)} …(truncated)`;
-    rendered.set(bestLabel, json);
+    // Keep a complete accepted example ahead of the verbose descriptions. A
+    // nested object such as loop:checkpoint's checks[] row has a long
+    // `verified` description; serializing the raw schema first can hit the
+    // bounded hint before that optional field appears, leaving the caller to
+    // guess the contract (EI-20232348713050420).
+    const compact = compactAcceptedObjectHint(bestNode);
+    rendered.set(bestLabel, compact ? `e.g. ${compact}; verbose schema: ${json}` : json);
     if (rendered.size >= FIELD_SCHEMA_HINT_MAX_FIELDS) break;
   }
   if (rendered.size === 0) return '';
