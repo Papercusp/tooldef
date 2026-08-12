@@ -67,6 +67,38 @@ describe('defineTool effect inference (B-CX-PRE)', () => {
   });
 });
 
+describe('defineTool schema projections', () => {
+  it('keeps union requirements for discovery without weakening the MCP/OpenAI schema', () => {
+    const name = 'test:schema_projection_union';
+    const args = z.union([
+      z.object({ path: z.string().min(1), sha: z.string().optional() }),
+      z.object({ path: z.string().optional(), sha: z.string().min(4) }),
+    ]);
+
+    defineTool({
+      name,
+      capability: 'test:read',
+      requirePrincipal: false,
+      args,
+      handler: async () => ({ content: [{ type: 'text' as const, text: 'ok' }] }),
+    });
+
+    const projected = listAllProjectedTools().find((tool) => tool.expose.mcp?.name === name);
+    expect(projected).toBeDefined();
+    expect(projected?.inputSchema).toMatchObject({ type: 'object' });
+    expect(projected?.inputSchema.oneOf).toBeUndefined();
+    expect(projected?.inputSchema.anyOf).toBeUndefined();
+    expect(projected?.inputSchema.required).toBeUndefined();
+
+    expect(projected?.discoveryInputSchema?.anyOf).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ required: expect.arrayContaining(['path']) }),
+        expect.objectContaining({ required: expect.arrayContaining(['sha']) }),
+      ]),
+    );
+  });
+});
+
 describe('defineTool composition / replaces (tool-call-batching-wrappers P-010)', () => {
   it("derives composition 'composite' from `replaces` + threads replaces to the projected tool", () => {
     const def = defineTool({

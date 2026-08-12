@@ -867,8 +867,21 @@ export interface ProjectedTool {
   pluginName: string;
   /** One-line description shown in tool listings. */
   description: string;
-  /** JSON Schema for tool input. Validated before invocation. */
+  /**
+   * OpenAI/MCP-safe JSON Schema for tool input. Validated before invocation
+   * and advertised to strict function-calling clients. Built-in `defineTool`
+   * registrations flatten root unions here because those clients reject a
+   * top-level `oneOf`/`anyOf`.
+   */
   inputSchema: Record<string, unknown>;
+  /**
+   * Full JSON Schema for discovery/introspection surfaces. This preserves
+   * branch-specific requirements that `inputSchema` must relax for strict
+   * function-calling clients (for example, a union requiring `path` OR
+   * `sha`). Plugin registrations may omit it when they only provide a JSON
+   * Schema surface.
+   */
+  discoveryInputSchema?: Record<string, unknown>;
   /**
    * Capabilities required to invoke. The dispatcher checks these against
    * the calling principal's grants (built-in path) AND against the
@@ -1246,6 +1259,7 @@ function projectedToolSignature(tool: ProjectedTool): string {
     description: tool.description ?? '',
     capabilities: [...(tool.capabilities ?? [])].sort(),
     inputSchema: tool.inputSchema ?? null,
+    discoveryInputSchema: tool.discoveryInputSchema ?? null,
   });
 }
 

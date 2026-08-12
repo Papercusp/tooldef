@@ -1647,6 +1647,9 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     pluginName: 'agent-mcp',
     description: def.description,
     inputSchema,
+    // Keep the complete branch requirements for discovery/introspection while
+    // retaining the flattened schema above for strict OpenAI/MCP callers.
+    discoveryInputSchema: rawSchema,
     capabilities: [def.capability as never],
     effect: def.effect,
     idempotent: def.idempotent,
@@ -1807,6 +1810,9 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     pluginName: 'agent-mcp',
     description: def.description,
     inputSchema,
+    // Keep the complete branch requirements for discovery/introspection while
+    // retaining the flattened schema above for strict OpenAI/MCP callers.
+    discoveryInputSchema: rawSchema,
     capabilities: [def.capability as never],
     effect: def.effect,
     idempotent: def.idempotent,
