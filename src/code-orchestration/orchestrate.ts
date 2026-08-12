@@ -314,8 +314,11 @@ export async function runToolOrchestration(
   const abortFromParent = (): void => {
     if (!orchestrationAbort.signal.aborted) orchestrationAbort.abort();
   };
-  if (ctx.signal.aborted) abortFromParent();
-  else ctx.signal.addEventListener('abort', abortFromParent, { once: true });
+  // `signal` is DECLARED required on UnifiedToolContext, but callers into the stack routinely omit
+  // it — which is why the sibling boundary in dispatch-stack.ts guards it the same way rather than
+  // trusting the type. Reading it unguarded here threw a TypeError before any work ran (WI-38330).
+  if (ctx.signal?.aborted) abortFromParent();
+  else ctx.signal?.addEventListener('abort', abortFromParent, { once: true });
   const dispatchCtx: UnifiedToolContext = { ...ctx, signal: orchestrationAbort.signal };
   const plannedMutations: PlannedMutation[] = [];
   const writeAttempts: WriteAttempt[] = [];
@@ -400,7 +403,7 @@ export async function runToolOrchestration(
     ...(timeoutMs ? { timeoutMs } : {}),
     onTimeout: abortFromParent,
   });
-  ctx.signal.removeEventListener('abort', abortFromParent);
+  ctx.signal?.removeEventListener('abort', abortFromParent);
   // P-020: only meaningful when the script ABORTED — a run that completed reached every line
   // it was going to, so an undispatched write there was a branch not taken, not a stranding.
   const strandedWrites = run.ok
