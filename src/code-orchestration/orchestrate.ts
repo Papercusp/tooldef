@@ -305,6 +305,18 @@ export async function runToolOrchestration(
   opts: OrchestrateOptions,
 ): Promise<OrchestrateResult> {
   const { ctx, deps, tools, allowed, dryRun = false, timeoutMs, wrapDispatch } = opts;
+  // The worker timeout in runOrchestrationScript kills only the script worker. Host-side tool
+  // handlers can still be awaiting their own work after that point, so give every inner dispatch
+  // a signal owned by this orchestration and abort it when the worker deadline fires. Without
+  // this boundary a long foreground capability:bash keeps running after code:run returned with
+  // no bash_id/resumable handle, and a retry can duplicate the command (EI-20282336542235171).
+  const orchestrationAbort = new AbortController();
+  const abortFromParent = (): void => {
+    if (!orchestrationAbort.signal.aborted) orchestrationAbort.abort();
+  };
+  if (ctx.signal.aborted) abortFromParent();
+  else ctx.signal.addEventListener('abort', abortFromParent, { once: true });
+  const dispatchCtx: UnifiedToolContext = { ...ctx, signal: orchestrationAbort.signal };
   const plannedMutations: PlannedMutation[] = [];
   const writeAttempts: WriteAttempt[] = [];
   const okFalseMutations: FailedMutation[] = [];
@@ -342,7 +354,9 @@ export async function runToolOrchestration(
     }
     const call: DispatchNext = (callCtx) => realDispatch(callCtx, deps)(tool, name, args);
     try {
-      const result = await (wrapDispatch ? wrapDispatch(tool, name, args, ctx, call) : call(ctx));
+      const result = await (wrapDispatch
+        ? wrapDispatch(tool, name, args, dispatchCtx, call)
+        : call(dispatchCtx));
       // EI-7669: realDispatch only throws on a dispatch-level failure — a tool that dispatched fine
       // but reports its OWN semantic rejection (ok: false in its result body, e.g. a completion-
       // integrity check) resolves normally here. Tally those so a batched script that doesn't check
@@ -382,7 +396,11 @@ export async function runToolOrchestration(
   };
 
   const facade = buildToolFacade(tools, dispatch, allowed, unknownRefs);
-  const run = await runOrchestrationScript(script, facade, timeoutMs ? { timeoutMs } : {});
+  const run = await runOrchestrationScript(script, facade, {
+    ...(timeoutMs ? { timeoutMs } : {}),
+    onTimeout: abortFromParent,
+  });
+  ctx.signal.removeEventListener('abort', abortFromParent);
   // P-020: only meaningful when the script ABORTED — a run that completed reached every line
   // it was going to, so an undispatched write there was a branch not taken, not a stranding.
   const strandedWrites = run.ok

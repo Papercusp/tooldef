@@ -227,4 +227,32 @@ describe('P-020 end-to-end: a real aborted run reports its stranded writes', () 
     // Do not leave a deliberately pending host dispatch behind for the test process.
     releaseSecond();
   });
+
+  it('aborts a pending inner tool when the code:run worker deadline expires', async () => {
+    let resolveAbort!: () => void;
+    const abortSeen = new Promise<void>((resolve) => {
+      resolveAbort = resolve;
+    });
+    const bash = mkTool('capability:bash', 'read', async (_args, innerCtx) => {
+      const signal = (innerCtx as UnifiedToolContext).signal;
+      await new Promise<never>((_resolve, reject) => {
+        const onAbort = (): void => {
+          resolveAbort();
+          reject(new Error('inner capability:bash aborted with code:run'));
+        };
+        if (signal.aborted) onAbort();
+        else signal.addEventListener('abort', onAbort, { once: true });
+      });
+      return json({ ok: true });
+    });
+
+    const r = await runToolOrchestration(
+      `await tools.capability.bash({ command: 'sleep 60', timeout: 60000 }); return 'unreachable';`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [bash], timeoutMs: 100 },
+    );
+
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('script_timeout');
+    await abortSeen;
+  });
 });

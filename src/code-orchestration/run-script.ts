@@ -128,6 +128,12 @@ export interface RunScriptResult {
 export interface RunScriptOptions {
   /** Wall-clock budget for the whole script. Default 30s. Sync loops are killed at this bound. */
   timeoutMs?: number;
+  /**
+   * Called immediately before the worker is terminated by the wall-clock budget. Host-side tool
+   * calls may still be awaiting their real handler after the worker is gone, so callers must use
+   * this hook to cancel those calls before the result is returned (EI-20282336542235171).
+   */
+  onTimeout?: () => void;
   /** Cap on captured console lines. Default 200. */
   maxLogLines?: number;
   /**
@@ -387,10 +393,15 @@ export async function runOrchestrationScript(
     };
 
     // The kill switch: terminate() stops the worker thread even mid sync-loop.
-    const timer = setTimeout(
-      () => finish({ ok: false, error: `script_timeout after ${timeoutMs}ms` }),
-      timeoutMs,
-    );
+    const timer = setTimeout(() => {
+      // Terminating the worker only stops the script. A host-side facade call may still be
+      // awaiting a real tool (for example a long foreground capability:bash), and letting that
+      // call continue after code:run returned leaves the caller without a resumable handle and
+      // makes a retry capable of duplicating the command. Give the host a cancellation seam
+      // before killing the worker (EI-20282336542235171).
+      opts.onTimeout?.();
+      finish({ ok: false, error: `script_timeout after ${timeoutMs}ms` });
+    }, timeoutMs);
 
     worker.on('message', (m: WorkerMessage) => {
       if (m.t === 'log') {
