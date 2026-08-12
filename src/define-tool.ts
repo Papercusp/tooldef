@@ -1121,6 +1121,18 @@ const COMMON_ARG_ALIASES: Readonly<Record<string, readonly string[]>> = {
   ttlseconds: ['ttlSec', 'ttl_sec'],
   type: ['kind', 'category'],
   value: ['body', 'content', 'summary'],
+  // ── EI-20246935995110683: `q` vs `query` is a CROSS-TOOL near-synonym, not a typo —
+  // both spellings are live in this catalogue (`issues:list` declares `q`,
+  // `search:fulltext`/`search:semantic` declare `query`), so a caller that learned one
+  // reaches for it on the other and gets no suggestion at all: compact('q') -> compact('query')
+  // is edit distance 4 against a threshold of 1 (max(1, min(3, floor(5/3)))), so it falls
+  // outside `suggestArgName`'s distance rescue the same way the WI-38059 additions above did.
+  // Both directions are listed because the confusion runs both ways; the exact-declared-match
+  // precedence in `suggestArgName` means a tool that genuinely declares `q` (or `query`) still
+  // wins over its own alias entry, so neither line can override a tool's real vocabulary.
+  q: ['query', 'search', 'text'],
+  query: ['q', 'search', 'text'],
+  search: ['query', 'q'],
 };
 
 function compactArgName(value: string): string {
