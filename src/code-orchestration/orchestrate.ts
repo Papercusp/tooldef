@@ -70,6 +70,13 @@ export interface PlannedMutation {
   args: unknown;
 }
 
+/** A statically ordered write that the script never reached after an earlier throw. */
+export interface NotDispatchedWrite {
+  tool: string;
+  /** Explicitly false: this write never crossed the dispatcher boundary. */
+  executed: false;
+}
+
 /**
  * A write-effect call whose result reported `ok: false` WITHOUT throwing (EI-7669) — the
  * dispatch itself succeeded (realDispatch only throws on a dispatch-level failure), but the
@@ -150,6 +157,13 @@ export interface OrchestrateResult {
    * Provable set only (see `detectStrandedWrites`): a tool that ran at least once is omitted.
    */
   strandedWrites?: string[];
+  /**
+   * P-020 compatibility companion to `strandedWrites`. The legacy string list is useful for
+   * concise human output but does not carry a disposition in its shape. This field makes the
+   * recovery fact machine-readable: every listed write has `executed:false` because it never
+   * dispatched at all. It is present only when `strandedWrites` is present.
+   */
+  notDispatchedWrites?: NotDispatchedWrite[];
   /**
    * EI-19301148486657755: reads of fields that do not exist on a tool result — the author asked
    * for `count` on a result whose key is `claimableCount`. Present only when non-empty.
@@ -340,6 +354,10 @@ export async function runToolOrchestration(
   const strandedWrites = run.ok
     ? []
     : detectStrandedWrites(check.calls, tools, plannedMutations.map((m) => m.tool));
+  const notDispatchedWrites: NotDispatchedWrite[] = strandedWrites.map((tool) => ({
+    tool,
+    executed: false,
+  }));
   return {
     ok: run.ok,
     summary: run.result,
@@ -353,6 +371,7 @@ export async function runToolOrchestration(
     ...(rejectedMutations.length ? { rejectedMutations } : {}),
     ...(uncertainMutations.length ? { uncertainMutations } : {}),
     ...(strandedWrites.length ? { strandedWrites } : {}),
+    ...(notDispatchedWrites.length ? { notDispatchedWrites } : {}),
     ...(run.fieldMisses?.length ? { fieldMisses: run.fieldMisses } : {}),
     ...(run.sleepCaps?.length ? { sleepCaps: run.sleepCaps } : {}),
     // EI-7784: surfaced independent of `ok` — see the field doc above.

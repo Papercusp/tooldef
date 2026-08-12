@@ -186,7 +186,22 @@ const WORKER_SRC = `(() => {
   const rpc = (payload) => new Promise((resolve, reject) => {
     const id = nextId++;
     pending.set(id, { resolve, reject });
-    parentPort.postMessage(Object.assign({ t: 'call', id }, payload));
+    // Tool results are wrapped in tracking Proxies before the script sees them. If a script
+    // carries one of those nested values into the NEXT tool call, posting the raw Proxy back to
+    // the host throws a DataCloneError (notably: "[object Array] could not be cloned"). The final
+    // script return already uses unwrap() below; apply the same boundary rule to call args so
+    // intermediate tool results can be safely composed into later calls.
+    const callPayload = { ...payload, args: unwrap(payload.args, new Map()) };
+    try {
+      parentPort.postMessage(Object.assign({ t: 'call', id }, callPayload));
+    } catch (cloneErr) {
+      pending.delete(id);
+      reject(new Error(
+        'args_not_serializable: code:run could not send tool arguments across the sandbox boundary ' +
+        'after unwrapping tracked values; pass JSON-serializable args. ' +
+        ((cloneErr && cloneErr.message) || String(cloneErr)),
+      ));
+    }
   });
 
   // --- EI-19301148486657755: detect reads of fields the tool result does not have ---

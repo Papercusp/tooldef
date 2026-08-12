@@ -350,6 +350,45 @@ describe('EI-19301148486657755: reading a field the tool result does not have', 
     expect(r.result).toEqual({ ok: true, deep: { list: [{ x: 1 }] } });
   });
 
+  it('unwraps proxied nested tool-result values before passing them to the next tool', async () => {
+    // Regression: tool results are tracked with Proxies in the worker. Passing a nested array or
+    // object from that result into another tool used to post the Proxy itself across the worker
+    // boundary, which failed with "[object Array] could not be cloned" before the host tool ran.
+    const get = async () => ({
+      frontmatter: {
+        tags: ['agent', 'runbook'],
+        documents: [{ path: 'src/example.ts' }],
+        plans: ['plan-a'],
+      },
+    });
+    const author = vi.fn(async (args: unknown) => ({ ok: true, received: args }));
+    const r = await runOrchestrationScript(
+      `const row = await tools.db.get({});
+       return await tools.docs.author({
+         tags: row.frontmatter.tags,
+         documents: row.frontmatter.documents,
+         plans: row.frontmatter.plans,
+       });`,
+      facade({ db: { get }, docs: { author } }),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.error).toBeUndefined();
+    expect(author).toHaveBeenCalledOnce();
+    expect(author).toHaveBeenCalledWith({
+      tags: ['agent', 'runbook'],
+      documents: [{ path: 'src/example.ts' }],
+      plans: ['plan-a'],
+    });
+    expect(r.result).toEqual({
+      ok: true,
+      received: {
+        tags: ['agent', 'runbook'],
+        documents: [{ path: 'src/example.ts' }],
+        plans: ['plan-a'],
+      },
+    });
+  });
+
   it('serialises a tool result nested inside a SCRIPT-BUILT wrapper object (cross-realm unwrap)', async () => {
     // Regression: the script runs under vm.runInNewContext, so `{ viaCall }` carries the VM
     // realm's Object.prototype. A strict `proto === Object.prototype` check is false for it, so

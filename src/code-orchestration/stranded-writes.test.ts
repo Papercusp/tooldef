@@ -160,6 +160,9 @@ describe('P-020 end-to-end: a real aborted run reports its stranded writes', () 
     expect(r.uncertainMutations ?? []).toEqual([]);
     // Which is exactly why this field has to exist.
     expect(r.strandedWrites).toEqual(['wi:checkpoint']);
+    // The compatibility string list is paired with an explicit disposition so callers do not
+    // have to infer whether "stranded" means attempted, partial, or never dispatched.
+    expect(r.notDispatchedWrites).toEqual([{ tool: 'wi:checkpoint', executed: false }]);
   });
 
   it('reports nothing when the script completes (an untaken branch is not a stranding)', async () => {
