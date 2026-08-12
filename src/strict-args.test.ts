@@ -231,7 +231,26 @@ describe('suggestArgName', () => {
     expect(suggestArgName('kind', ['category', 'label'])).toBe('category');
   });
 
+  it('maps the EI-20246935995110683 q/query cross-tool near-synonym, both directions', () => {
+    // The live filing: search:fulltext { q } was refused with a bare key list.
+    // `q` is not a typo — `issues:list` declares `q` and the search tools declare
+    // `query`, so the two spellings are BOTH live in this catalogue.
+    expect(suggestArgName('q', ['query', 'scope', 'harness_slug', 'limit'])).toBe('query');
+    // …and the inverse, for the caller who learned `query` from the search tools.
+    expect(suggestArgName('query', ['q', 'state', 'assignee', 'limit'])).toBe('q');
+    expect(suggestArgName('search', ['query', 'scope'])).toBe('query');
+    // Pin WHY the alias row is needed at all: distance alone can never reach it.
+    // compact('q')→compact('query') is 4 against a threshold of 1, so a tool with
+    // no `query`-ish field must still produce NO suggestion rather than a guess.
+    expect(suggestArgName('q', ['harness', 'limit', 'state'])).toBeNull();
+  });
+
   it('does not let the new aliases hijack a tool that declares the typed name itself', () => {
+    // `q` and `query` are aliases of each other, so each must lose to a declared
+    // field of its own name — otherwise issues:list would be told to rename its
+    // real `q` arg to `query` and vice versa.
+    expect(suggestArgName('q', ['q', 'query'])).toBe('q');
+    expect(suggestArgName('query', ['query', 'q'])).toBe('query');
     // Regression guard for the real risk of widening an alias map: `text` must not
     // out-rank a declared `text`, and a tool exposing BOTH gets the earlier alias
     // by list order, never a surprise remap.
