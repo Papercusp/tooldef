@@ -1219,6 +1219,7 @@ export function nestedArgPaths(props: Record<string, unknown> | undefined): Map<
 function unknownArgHint(
   issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
   rawSchema: unknown,
+  argRedirects?: Record<string, string>,
 ): string {
   const msgs = (issues ?? []).map((i) => i?.message ?? '').join(' ');
   if (!/nrecognized key/i.test(msgs)) return '';
@@ -1232,7 +1233,22 @@ function unknownArgHint(
       ...Array.from(msgs.matchAll(/["']([^"']+)["']/g), (match) => match[1]),
     ]),
   ].filter((key) => !keys.includes(key));
+  // EI-20281509195248260: an AUTHORED cross-tool redirect outranks both guesses
+  // below. A key whose real home is a different TOOL matches neither the nested
+  // relocation nor an edit-distance near-name, so without this the caller reads
+  // only "this tool accepts ONLY: …" and concludes the capability is missing —
+  // the measured failure mode (`tags` on work_items:update, filed 10+ times).
+  // Redirected keys are withheld from `corrections` so the same key cannot also
+  // draw a string-distance guess that contradicts the authored answer.
+  const redirected = unknownKeys
+    .map((unknown) => ({ unknown, target: argRedirects?.[unknown] }))
+    .filter((item): item is { unknown: string; target: string } => typeof item.target === 'string' && item.target.length > 0);
+  const redirectedKeys = new Set(redirected.map((item) => item.unknown));
+  const redirectText = redirected
+    .map(({ unknown, target }) => ` \`${unknown}\` is not an arg of this tool — it is written by ${target}.`)
+    .join('');
   const corrections = unknownKeys
+    .filter((unknown) => !redirectedKeys.has(unknown))
     // A key that exists on a nested schema is a RELOCATION, not a typo — prefer
     // it over any edit-distance guess against the top-level names, which would
     // point the caller at an unrelated arg that merely looks similar.
@@ -1242,7 +1258,7 @@ function unknownArgHint(
     ? ` Did you mean ${corrections.map(({ unknown, suggestion }) => `\`${suggestion}\` for \`${unknown}\``).join('; ')}?`
     : '';
   return (
-    ` — this tool accepts ONLY: ${keys.join(', ')}.${correctionText}` +
+    ` — this tool accepts ONLY: ${keys.join(', ')}.${redirectText}${correctionText}` +
     ' An undeclared arg is REJECTED, not silently ignored (EI-10883): passing an arg a tool does not declare used to return ok:true' +
     ' while quietly doing something else, which is indistinguishable from success. Re-send using only the keys above.' +
     // EI-19953470656367880: an unrecognized-key rejection is ALSO the exact shape a
