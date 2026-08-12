@@ -70,6 +70,25 @@ export interface PlannedMutation {
   args: unknown;
 }
 
+export type WriteAttemptDisposition =
+  | 'in_flight'
+  | 'settled'
+  | 'semantic_rejected'
+  | 'rejected'
+  | 'uncertain';
+
+/**
+ * Runtime disposition of one committing write call. Unlike `plannedMutations` (which records
+ * only that dispatch started), this remains honest when the vm times out while a host-side tool
+ * promise is still pending. `index` is the zero-based dispatch order, so a sequential caller can
+ * resume from an exact prefix without echoing sensitive/full call args into the result.
+ */
+export interface WriteAttempt {
+  index: number;
+  tool: string;
+  disposition: WriteAttemptDisposition;
+}
+
 /** A statically ordered write that the script never reached after an earlier throw. */
 export interface NotDispatchedWrite {
   tool: string;
@@ -120,6 +139,9 @@ export interface OrchestrateResult {
    *  NOTE: recorded at DISPATCH time, so this includes calls that then threw — subtract
    *  `rejectedMutations` + `uncertainMutations` for the set that actually landed. */
   plannedMutations: PlannedMutation[];
+  /** Runtime disposition for every non-dry-run write dispatch, in dispatch order. A timeout may
+   * return entries as `in_flight`; those are UNKNOWN, not landed, until the caller verifies them. */
+  writeAttempts?: WriteAttempt[];
   /** EI-10951: write-effect calls the dispatcher REJECTED before the handler ran (bad args,
    *  a denied gate). These provably wrote NOTHING — safe to fix and re-run. */
   rejectedMutations?: ThrownMutation[];
@@ -284,6 +306,7 @@ export async function runToolOrchestration(
 ): Promise<OrchestrateResult> {
   const { ctx, deps, tools, allowed, dryRun = false, timeoutMs, wrapDispatch } = opts;
   const plannedMutations: PlannedMutation[] = [];
+  const writeAttempts: WriteAttempt[] = [];
   const okFalseMutations: FailedMutation[] = [];
   const childFailures: ChildFailure[] = [];
   // EI-10951: a write that THREW never landed (rejected) or may have (uncertain) — but it
@@ -304,11 +327,18 @@ export async function runToolOrchestration(
   const unknownRefs = check.ok ? undefined : check.unknownRefs;
 
   const dispatch: FacadeDispatch = async (tool, name, args) => {
+    let writeAttempt: WriteAttempt | undefined;
     if (tool.effect === 'write') {
       plannedMutations.push({ tool: name, args });
       if (dryRun) {
         return { dryRun: true, wouldCall: name, args };
       }
+      writeAttempt = {
+        index: writeAttempts.length,
+        tool: name,
+        disposition: 'in_flight',
+      };
+      writeAttempts.push(writeAttempt);
     }
     const call: DispatchNext = (callCtx) => realDispatch(callCtx, deps)(tool, name, args);
     try {
@@ -320,8 +350,11 @@ export async function runToolOrchestration(
       if (isOkFalseResult(result) || isBulkPartialFailure(result)) {
         childFailures.push({ tool: name, kind: 'semantic', result });
         if (tool.effect === 'write') {
+          if (writeAttempt) writeAttempt.disposition = 'semantic_rejected';
           okFalseMutations.push({ tool: name, args, result });
         }
+      } else if (writeAttempt) {
+        writeAttempt.disposition = 'settled';
       }
       return result;
     } catch (err) {
@@ -337,6 +370,7 @@ export async function runToolOrchestration(
         error: err instanceof Error ? err.message : String(err),
       });
       if (tool.effect === 'write') {
+        if (writeAttempt) writeAttempt.disposition = preExecution ? 'rejected' : 'uncertain';
         (preExecution ? rejectedMutations : uncertainMutations).push({
           tool: name,
           args,
@@ -366,6 +400,9 @@ export async function runToolOrchestration(
     ...(unknownRefs && unknownRefs.length ? { unknownRefs } : {}),
     dryRun,
     plannedMutations,
+    ...(!dryRun && writeAttempts.length
+      ? { writeAttempts: writeAttempts.map((attempt) => ({ ...attempt })) }
+      : {}),
     okFalseMutations,
     childFailures,
     ...(rejectedMutations.length ? { rejectedMutations } : {}),

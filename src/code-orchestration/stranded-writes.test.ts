@@ -194,4 +194,37 @@ describe('P-020 end-to-end: a real aborted run reports its stranded writes', () 
     // It landed — reporting it as stranded would be the cry-wolf failure EI-10951 fixed.
     expect(r.strandedWrites).toBeUndefined();
   });
+
+  it('reports an exact settled prefix and an in-flight write when timeout wins the host dispatch race', async () => {
+    let releaseSecond!: () => void;
+    const secondPending = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    const writeFn = vi.fn(async (args: unknown) => {
+      const n = (args as { n: number }).n;
+      if (n === 2) await secondPending;
+      return json({ ok: true, n });
+    });
+    const write = mkTool('wi:checkpoint', 'write', writeFn);
+
+    const r = await runToolOrchestration(
+      `await tools.wi.checkpoint({ n: 1 });
+       await tools.wi.checkpoint({ n: 2 });
+       await tools.wi.checkpoint({ n: 3 });
+       return { done: true };`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [write], timeoutMs: 200 },
+    );
+
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('script_timeout');
+    expect(writeFn).toHaveBeenCalledTimes(2);
+    expect(r.writeAttempts).toEqual([
+      { index: 0, tool: 'wi:checkpoint', disposition: 'settled' },
+      { index: 1, tool: 'wi:checkpoint', disposition: 'in_flight' },
+    ]);
+    expect(r.strandedWrites).toBeUndefined();
+
+    // Do not leave a deliberately pending host dispatch behind for the test process.
+    releaseSecond();
+  });
 });
