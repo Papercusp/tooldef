@@ -383,6 +383,35 @@ export interface ToolGuidance {
    */
   seeAlso?: SeeAlso;
   /**
+   * Rejected-key → "that lives in ANOTHER TOOL" redirect, surfaced in the
+   * `invalid_args` unrecognized-key message. Map an arg name this tool does
+   * NOT accept to the tool that does accept it.
+   *
+   * WHY (EI-20281509195248260): `unknownArgHint` could only correct a key two
+   * ways — relocate it to a NESTED field of this same tool, or edit-distance
+   * it to a near-miss name. A key whose real home is a DIFFERENT TOOL matches
+   * neither, so the caller got only "this tool accepts ONLY: …", whose honest
+   * reading is "that capability does not exist here" — and, one inference
+   * later, "that capability does not exist". Measured cost: passing `tags` to
+   * `work_items:update` produced exactly that, and the belief "nothing writes
+   * `tags`" was filed 9x in 19h (see work_items/tag.ts's header) plus
+   * EI-18669607533031012, which additionally proposed building two NEW durable
+   * surfaces to solve a problem `work_items:tag` already solved.
+   *
+   * This is the same defect the nested-relocation hint fixes, one level out:
+   * there the rejection hid WHERE the key lives, here it hides WHICH TOOL owns
+   * it. An authored redirect outranks both guesses at render time, because a
+   * human/agent statement of fact should beat a string-distance heuristic.
+   *
+   * Deliberately NOT rendered into the tool description (`describeFromGuidance`
+   * reads only when/notWhen/chaining), so it costs zero prompt weight and is
+   * paid for only on the failure path that needs it.
+   *
+   * Example: `{ tags: 'work_items:tag { id, topic } — the ONLY writer for the
+   * claim-spec-visible tags field' }`
+   */
+  argRedirects?: Record<string, string>;
+  /**
    * Per-role override. Set ONLY the fields that differ from the base
    * guidance; shallowly merged at projection time. Use sparingly — most
    * tools share guidance across roles.
