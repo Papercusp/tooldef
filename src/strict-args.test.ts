@@ -14,7 +14,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { strictArgs, suggestArgName } from './define-tool';
+import { nestedArgPaths, strictArgs, suggestArgName } from './define-tool';
 
 /** Zod 4 exposes safeParse on the schema; keep the test honest about the shape. */
 function parse(schema: unknown, value: unknown): { ok: boolean; message: string } {
@@ -213,5 +213,64 @@ describe('suggestArgName', () => {
 
   it('does not invent a correction for an unrelated field', () => {
     expect(suggestArgName('completelyDifferent', ['id', 'state', 'harness'])).toBeNull();
+  });
+
+  it('maps the WI-38059 measured burst — the natural-language spellings agents actually reach for', () => {
+    // Verbatim from EIGHT arg-shape rejections in ~35 min of one agent's ordinary
+    // work (EI-20204653748131789). Each was correct-intent/wrong-spelling, and each
+    // was verified to fall OUTSIDE the edit-distance threshold before this fix, so
+    // the caller got a bare key list and had to re-read a schema.
+    // memory:remember { text, category } → { content, kind }
+    expect(suggestArgName('text', ['content', 'kind', 'harness_slug', 'force'])).toBe('content');
+    expect(suggestArgName('category', ['content', 'kind', 'harness_slug', 'force'])).toBe('kind');
+    // facts:assert { value, ttl_days } → { body, ttlSec }
+    expect(suggestArgName('value', ['scope', 'key', 'body', 'ttlSec'])).toBe('body');
+    expect(suggestArgName('ttl_days', ['scope', 'key', 'body', 'ttlSec'])).toBe('ttlSec');
+    // The inverse direction must work too — a tool naming it `category` should
+    // catch a caller who typed `kind`.
+    expect(suggestArgName('kind', ['category', 'label'])).toBe('category');
+  });
+
+  it('does not let the new aliases hijack a tool that declares the typed name itself', () => {
+    // Regression guard for the real risk of widening an alias map: `text` must not
+    // out-rank a declared `text`, and a tool exposing BOTH gets the earlier alias
+    // by list order, never a surprise remap.
+    expect(suggestArgName('text', ['text', 'content'])).toBe('text');
+    expect(suggestArgName('value', ['value', 'body'])).toBe('value');
+    expect(suggestArgName('ttl', ['ttlSec', 'ttlMs'])).toBe('ttlSec');
+  });
+});
+
+describe('nestedArgPaths (WI-38059) — a relocation, not a typo', () => {
+  it('maps a key declared one level down to its dotted path', () => {
+    // The observed case: improvements:capture rejects top-level `refs`, but `refs`
+    // genuinely exists at observation.refs. Before this, the rejection read as
+    // "this tool has no refs concept", so the natural fix was to DROP the arg and
+    // silently lose the attribution it carried — quieter, and worse, than a retry.
+    const nested = nestedArgPaths({
+      title: { type: 'string' },
+      observation: {
+        type: 'object',
+        properties: { refs: { type: 'array' }, ratings: { type: 'object' }, subject: { type: 'object' } },
+      },
+    });
+    expect(nested.get('refs')).toBe('observation.refs');
+    expect(nested.get('subject')).toBe('observation.subject');
+  });
+
+  it('returns nothing for a schema with no nested objects (no false relocations)', () => {
+    expect(nestedArgPaths({ id: { type: 'string' }, state: { type: 'string' } }).size).toBe(0);
+    expect(nestedArgPaths(undefined).size).toBe(0);
+  });
+
+  it('is first-declaration-wins on a collision, and never claims a top-level name', () => {
+    // Deliberately narrow: this exists to name an obvious relocation, not to search
+    // a schema tree. An ambiguous child resolves to the first parent that declared
+    // it rather than guessing between them.
+    const nested = nestedArgPaths({
+      alpha: { type: 'object', properties: { shared: { type: 'string' } } },
+      beta: { type: 'object', properties: { shared: { type: 'string' } } },
+    });
+    expect(nested.get('shared')).toBe('alpha.shared');
   });
 });
