@@ -108,6 +108,10 @@ const GENERIC_PROJECTION_TARGET_CHARS: Record<'trimmed' | 'standard', number> = 
   trimmed: 7_000,
   standard: 18_000,
 };
+// Request args are a recovery hint, not a second result body. Keep their
+// serialized contribution independently bounded so a large write request
+// (for example, a bulk coord:send body) cannot re-expand a bounded result.
+const GENERIC_PROJECTION_CURSOR_ARGS_TARGET_CHARS = 2_000;
 const GENERIC_PROJECTION_OMISSION_SAMPLES = 20;
 
 export interface BoundedPayloadProjection {
@@ -124,6 +128,8 @@ export interface BoundedPayloadProjection {
       kind: 'full-detail';
       tool: string;
       args: Record<string, unknown> & { payloadTier: 'full' };
+      /** True when args is an identity-only preview and cannot be replayed as-is. */
+      argsTruncated?: true;
     };
     next: string;
   };
@@ -489,6 +495,48 @@ function projectValue(value: unknown, path: string, depth: number, state: Projec
 }
 
 /**
+ * Keep the recovery cursor useful without copying an arbitrarily large request
+ * into the bounded result. Small argument objects remain exact. Once they
+ * cross the cursor budget, retain only identity-shaped fields; nested request
+ * bodies become omission markers and the caller is told to use its originals.
+ */
+function projectCursorArgs(args: unknown): {
+  args: Record<string, unknown> & { payloadTier: 'full' };
+  truncated: boolean;
+} {
+  const source = args && typeof args === 'object' && !Array.isArray(args)
+    ? args as Record<string, unknown>
+    : {};
+  const exact = { ...source, payloadTier: 'full' as const };
+  const exactSize = jsonLen(exact);
+  if (exactSize > 0 && exactSize <= GENERIC_PROJECTION_CURSOR_ARGS_TARGET_CHARS) {
+    return { args: exact, truncated: false };
+  }
+
+  const state: ProjectionState = {
+    // Leave room for the payloadTier key and JSON punctuation. The final size
+    // check below is still authoritative for pathological keys/escaping.
+    remaining: GENERIC_PROJECTION_CURSOR_ARGS_TARGET_CHARS - 128,
+    omittedCount: 0,
+    omitted: [],
+    priorityOmitted: [],
+    active: new WeakSet<object>(),
+    limits: { maxArray: 12, maxDepth: 5, maxKeys: 40, maxString: 800 },
+  };
+  const preview = projectIdentityPreview(source, '$._projection.cursor.args', 0, state);
+  const bounded = preview && typeof preview === 'object' && !Array.isArray(preview)
+    ? { ...(preview as Record<string, unknown>), payloadTier: 'full' as const }
+    : { payloadTier: 'full' as const };
+
+  // This is deliberately fail-closed. A malformed/circular arg object must
+  // never make the cursor unbounded merely because JSON.stringify failed.
+  if (jsonLen(bounded) === 0 || jsonLen(bounded) > GENERIC_PROJECTION_CURSOR_ARGS_TARGET_CHARS) {
+    return { args: { payloadTier: 'full' }, truncated: true };
+  }
+  return { args: bounded, truncated: true };
+}
+
+/**
  * Framework fallback for a large result whose tool has no usable custom
  * shaper. It preserves a structural preview, makes every omission explicit,
  * and points to the opt-in full-detail request. The returned value is always
@@ -511,6 +559,7 @@ export function projectBoundedPayload(
       : { maxArray: 12, maxDepth: 5, maxKeys: 40, maxString: 800 },
   };
   const preview = projectValue(data, '$', 0, state);
+  const cursorArgs = projectCursorArgs(opts.args);
   const metadata: BoundedPayloadProjection['_projection'] = {
     kind: 'bounded-payload',
     truncated: true,
@@ -526,12 +575,8 @@ export function projectBoundedPayload(
     cursor: {
       kind: 'full-detail',
       tool: opts.toolName,
-      args: {
-        ...(opts.args && typeof opts.args === 'object' && !Array.isArray(opts.args)
-          ? opts.args as Record<string, unknown>
-          : {}),
-        payloadTier: 'full',
-      },
+      args: cursorArgs.args,
+      ...(cursorArgs.truncated ? { argsTruncated: true as const } : {}),
     },
     // EI-19447969329510166: this used to read "Call <tool> with the EXACT args in
     // _projection.cursor.args" — advice that is literally un-executable from a
@@ -542,11 +587,14 @@ export function projectBoundedPayload(
     // caller therefore gets a validation rejection while following the tool's own
     // printed recovery instruction — at exactly the moment they are trying to
     // recover a field they have just been told was dropped. Say what is true.
-    next:
-      `Call ${opts.toolName} again with _projection.cursor.args for full detail. ` +
-      `NOTE: 'payloadTier' is FRAMEWORK-RESERVED — stripped before schema validation and absent from ` +
-      `${opts.toolName}'s published schema (additionalProperties:false), so a schema-validating client ` +
-      `REJECTS it on a direct call; route these args through your host's raw-args dispatch path instead.`,
+    next: cursorArgs.truncated
+      ? `Call ${opts.toolName} again with the ORIGINAL request args and payloadTier:'full' for full detail. ` +
+        `_projection.cursor.args is only a bounded identity preview; route the original args through your ` +
+        `host's raw-args dispatch path.`
+      : `Call ${opts.toolName} again with _projection.cursor.args for full detail. ` +
+        `NOTE: 'payloadTier' is FRAMEWORK-RESERVED — stripped before schema validation and absent from ` +
+        `${opts.toolName}'s published schema (additionalProperties:false), so a schema-validating client ` +
+        `REJECTS it on a direct call; route these args through your host's raw-args dispatch path instead.`,
   };
   let result: BoundedPayloadProjection = Array.isArray(preview)
     ? { items: preview, _projection: metadata }

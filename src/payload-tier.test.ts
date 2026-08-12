@@ -529,6 +529,28 @@ describe('projectBoundedPayload — truncation is announced in band', () => {
     expect(out._projection.next).toMatch(/FRAMEWORK-RESERVED/);
     expect(out._projection.next).toMatch(/additionalProperties:false/);
   });
+
+  it('bounds large request args instead of re-expanding them in the recovery cursor', () => {
+    const args = {
+      messages: Array.from({ length: 67 }, (_, i) => ({
+        to: [`agent-${i}`],
+        body: [{ text: 'x'.repeat(500) }],
+        expects: 'none',
+      })),
+    };
+    const out = projectBoundedPayload(
+      { ok: true, count: args.messages.length, error: null },
+      { toolName: 'coord:send', tier: 'trimmed', args },
+    );
+    const cursor = out._projection.cursor;
+
+    expect(cursor.argsTruncated).toBe(true);
+    expect(cursor.args).toEqual({ payloadTier: 'full' });
+    expect(JSON.stringify(cursor.args).length).toBeLessThan(2_000);
+    expect(JSON.stringify(out).length).toBeLessThan(PAYLOAD_TIER_HARD_CEILING_CHARS);
+    expect(out._projection.next).toContain('ORIGINAL request args');
+    expect(out._projection.next).not.toContain('with _projection.cursor.args for full detail');
+  });
 });
 
 // WI-36048 — borrow item 1 of the opencode/OMP token-reduction research.
