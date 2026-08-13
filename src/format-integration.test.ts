@@ -163,6 +163,32 @@ describe('end-to-end format selection through defineTool', () => {
     const { text } = await call('fmt:raw', { transport: 'mcp' });
     expect(text).toBe('RAW');
   });
+
+  it('adds requested structuredContent to schema-backed raw JSON without changing its text contract', async () => {
+    const payload = { ok: false, error: 'no claimable work' };
+    defineTool({
+      name: 'fmt:raw-structured',
+      requirePrincipal: false,
+      capability: 'test:read',
+      args: z.object({}),
+      result: z.object({ ok: z.boolean(), error: z.string() }).passthrough(),
+      handler: async () => ({
+        content: [{ type: 'text' as const, text: JSON.stringify(payload) }],
+        isError: true,
+      }),
+    });
+
+    const listing = listMcpProjections().find((entry) => entry.name === 'fmt:raw-structured');
+    expect(listing?.outputSchema?.type).toBe('object');
+
+    const { result, text } = await call('fmt:raw-structured', {
+      transport: 'mcp',
+      requestedStructured: true,
+    });
+    expect(text).toBe(JSON.stringify(payload));
+    expect(result.structuredContent).toEqual(payload);
+    expect(result.isError).toBe(true);
+  });
 });
 
 describe('raw-ToolResult re-encode on the MCP transport (definetool-token-optimization-adoption P-002)', () => {

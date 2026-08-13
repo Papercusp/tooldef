@@ -395,6 +395,52 @@ function reencodableJsonPayload(out: ToolResult, ctx: UnifiedToolContext): unkno
 }
 
 /**
+ * EI-20305133624359928: an object-rooted `result` schema is advertised to MCP
+ * clients as `outputSchema`. The official SDK then requires `structuredContent`
+ * whenever the caller opted into it, even when a legacy handler returned an
+ * already-serialized JSON `ToolResult` instead of the canonical `{ data }`
+ * envelope. Passing that raw result through unchanged makes a perfectly valid
+ * business-level miss fail at the transport boundary with MCP -32600.
+ *
+ * Preserve the handler's text bytes, `isError`, resources, and metadata; only
+ * add the schema-validated structured twin the caller explicitly requested.
+ * Invalid/non-JSON raw results remain untouched so we never manufacture data
+ * that the advertised schema does not actually describe.
+ */
+async function attachRequestedStructuredContent(
+  out: ToolResult,
+  ctx: UnifiedToolContext,
+  def: { name: string; result?: StandardSchemaV1 },
+): Promise<ToolResult> {
+  if (
+    ctx.transport !== 'mcp' ||
+    ctx.requestedStructured !== true ||
+    !def.result ||
+    out.structuredContent !== undefined
+  ) {
+    return out;
+  }
+  const first = out.content?.[0] as { type?: unknown; text?: unknown } | undefined;
+  if (!first || first.type !== 'text' || typeof first.text !== 'string') return out;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(first.text);
+  } catch {
+    return out;
+  }
+  const validated = await standardValidate(def.result, parsed);
+  if (!validated.ok) {
+    ctx.log(
+      `[output-schema] ${def.name} returned raw JSON not matching its declared result schema: ` +
+        formatIssues(validated.issues),
+    );
+    return out;
+  }
+  return { ...out, structuredContent: validated.value };
+}
+
+/**
  * P-019 (fleet-leadership-continuity-and-actuation-2026-08-01) — an
  * explicitly-`undefined` value means NOT PROVIDED, at every depth.
  *
@@ -1645,7 +1691,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       if (reencodable !== undefined) {
         return serializeProjectedResult({ data: reencodable } as ToolResponse, ctx, eligibility, def, readColumns, parsed.value);
       }
-      return response as ToolResult;
+      return attachRequestedStructuredContent(response as ToolResult, ctx, def);
     }
     // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
     // the session/call tier before format-aware serialization. Unshaped tools
@@ -1806,7 +1852,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
       if (reencodable !== undefined) {
         return serializeProjectedResult({ data: reencodable } as ToolResponse, ctx, eligibility, def, readColumns, parsed.value);
       }
-      return out as ToolResult;
+      return attachRequestedStructuredContent(out as ToolResult, ctx, def);
     }
 
     // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
