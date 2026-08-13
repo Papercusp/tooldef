@@ -299,7 +299,7 @@ describe('applyPayloadTier', () => {
       cursor: {
         kind: 'scratch-page',
         tool: 'capability:read',
-        args: { file_path: '/tmp/result.json', char_offset: 0, char_limit: 4_000 },
+        args: { file_path: '/tmp/result.json', byte_offset: 0, byte_limit: 4_000 },
       },
       next: 'Page the durable spill with capability:read.',
     };
