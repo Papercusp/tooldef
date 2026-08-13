@@ -19,7 +19,7 @@ export { setServerVintageResolver, resetServerVintageResolver, readServerVintage
 export { defineTool, toArgsJsonSchema, 
 // The effect oracle — for static scanners that cannot execute defineTool (WI-6464).
 inferCapabilityEffect, WRITE_CAPABILITIES, WRITE_CAPABILITY_SUFFIXES, } from './define-tool';
-export { applyPayloadTier, extractPayloadTier, parsePayloadTier, resolvePayloadTier, resetPayloadTierRatchet, PAYLOAD_TIERS, PAYLOAD_TIER_RATCHET_CHARS, 
+export { applyPayloadTier, extractPayloadTier, parsePayloadTier, resolvePayloadTier, resetPayloadTierRatchet, projectBoundedPayload, PAYLOAD_TIERS, PAYLOAD_TIER_RATCHET_CHARS, 
 // EI-19408488769901676: the HARD ceiling was defined but never re-exported, while its
 // softer sibling (the ratchet) was — so a shaper wanting to hit the budget ITSELF, and
 // thereby avoid the blind generic fall-through, had no way to reference the number it
