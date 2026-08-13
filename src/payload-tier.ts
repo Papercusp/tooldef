@@ -125,15 +125,38 @@ export interface BoundedPayloadProjection {
     omittedCount: number;
     omitted: Array<{ path: string; reason: string }>;
     cursor: {
-      kind: 'full-detail';
+      /** Host-defined recovery cursors may page a durable spill instead of
+       * re-running the producing tool. `full-detail` remains the default. */
+      kind: string;
       tool: string;
-      args: Record<string, unknown> & { payloadTier: 'full' };
+      args: Record<string, unknown>;
       /** True when args is an identity-only preview and cannot be replayed as-is. */
       argsTruncated?: true;
+      [key: string]: unknown;
     };
     next: string;
   };
   [key: string]: unknown;
+}
+
+export interface BoundedPayloadRecovery {
+  /** A schema-valid call the client can execute directly. */
+  cursor: BoundedPayloadProjection['_projection']['cursor'];
+  /** Human-readable recovery instruction paired with the cursor. */
+  next: string;
+}
+
+export interface ProjectBoundedPayloadOpts {
+  toolName: string;
+  tier: PayloadTier;
+  forced?: boolean;
+  originalChars?: number;
+  args?: unknown;
+  /** Exact serialized target for this projection. The default remains the
+   * tier's generic payload budget; transport doors can pass their own cap. */
+  targetChars?: number;
+  /** Override the default raw-args re-call with a host-owned durable cursor. */
+  recovery?: BoundedPayloadRecovery;
 }
 
 /** Once-per-(tool,tier) dedup for ratchet warnings — a worklist, not a log storm. */
@@ -544,10 +567,13 @@ function projectCursorArgs(args: unknown): {
  */
 export function projectBoundedPayload(
   data: unknown,
-  opts: { toolName: string; tier: PayloadTier; forced?: boolean; originalChars?: number; args?: unknown },
+  opts: ProjectBoundedPayloadOpts,
 ): BoundedPayloadProjection {
   const projectionTier = opts.tier === 'standard' ? 'standard' : 'trimmed';
-  const target = GENERIC_PROJECTION_TARGET_CHARS[projectionTier];
+  const configuredTarget = opts.targetChars;
+  const target = typeof configuredTarget === 'number' && Number.isFinite(configuredTarget)
+    ? Math.max(1_500, Math.floor(configuredTarget))
+    : GENERIC_PROJECTION_TARGET_CHARS[projectionTier];
   const state: ProjectionState = {
     remaining: Math.max(1_000, target - 1_600),
     omittedCount: 0,
@@ -572,7 +598,7 @@ export function projectBoundedPayload(
     // out of the sample by lower-priority field/depth entries recorded for the
     // elements that survived (EI-19965559011729712).
     omitted: [...state.priorityOmitted, ...state.omitted].slice(0, GENERIC_PROJECTION_OMISSION_SAMPLES),
-    cursor: {
+    cursor: opts.recovery?.cursor ?? {
       kind: 'full-detail',
       tool: opts.toolName,
       args: cursorArgs.args,
@@ -587,14 +613,14 @@ export function projectBoundedPayload(
     // caller therefore gets a validation rejection while following the tool's own
     // printed recovery instruction — at exactly the moment they are trying to
     // recover a field they have just been told was dropped. Say what is true.
-    next: cursorArgs.truncated
+    next: opts.recovery?.next ?? (cursorArgs.truncated
       ? `Call ${opts.toolName} again with the ORIGINAL request args and payloadTier:'full' for full detail. ` +
         `_projection.cursor.args is only a bounded identity preview; route the original args through your ` +
         `host's raw-args dispatch path.`
       : `Call ${opts.toolName} again with _projection.cursor.args for full detail. ` +
         `NOTE: 'payloadTier' is FRAMEWORK-RESERVED — stripped before schema validation and absent from ` +
         `${opts.toolName}'s published schema (additionalProperties:false), so a schema-validating client ` +
-        `REJECTS it on a direct call; route these args through your host's raw-args dispatch path instead.`,
+        `REJECTS it on a direct call; route these args through your host's raw-args dispatch path instead.`),
   };
   let result: BoundedPayloadProjection = Array.isArray(preview)
     ? { items: preview, _projection: metadata }
@@ -605,7 +631,7 @@ export function projectBoundedPayload(
 
   // Exact last-line defense: pathological keys/escaping must not defeat the
   // transport bound even if the approximate recursion budget under-counted.
-  if (metadata.returnedChars >= PAYLOAD_TIER_HARD_CEILING_CHARS) {
+  if (metadata.returnedChars >= Math.min(target, PAYLOAD_TIER_HARD_CEILING_CHARS)) {
     result = {
       summary: '[payload preview omitted: serialized projection exceeded transport budget]',
       _projection: { ...metadata, returnedChars: 0 },

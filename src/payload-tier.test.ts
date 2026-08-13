@@ -294,6 +294,25 @@ describe('applyPayloadTier', () => {
     expect(original).toHaveLength(200);
   });
 
+  it('accepts an exact transport target and a schema-valid host recovery cursor', () => {
+    const recovery = {
+      cursor: {
+        kind: 'scratch-page',
+        tool: 'capability:read',
+        args: { file_path: '/tmp/result.json', char_offset: 0, char_limit: 4_000 },
+      },
+      next: 'Page the durable spill with capability:read.',
+    };
+    const projected = projectBoundedPayload(
+      { rows: Array.from({ length: 100 }, (_, i) => ({ id: `WI-${i}`, detail: 'x'.repeat(500) })) },
+      { toolName: 'work_items:list', tier: 'trimmed', targetChars: 5_000, recovery },
+    );
+
+    expect(JSON.stringify(projected).length).toBeLessThan(5_000);
+    expect(projected._projection.cursor).toEqual(recovery.cursor);
+    expect(projected._projection.next).toBe(recovery.next);
+  });
+
   it('handles circular data in the generic projector without throwing', () => {
     const circular: { name: string; self?: unknown } = { name: 'loop' };
     circular.self = circular;

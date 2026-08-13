@@ -68,6 +68,7 @@ export {
   parsePayloadTier,
   resolvePayloadTier,
   resetPayloadTierRatchet,
+  projectBoundedPayload,
   PAYLOAD_TIERS,
   PAYLOAD_TIER_RATCHET_CHARS,
   // EI-19408488769901676: the HARD ceiling was defined but never re-exported, while its
@@ -78,6 +79,9 @@ export {
   type PayloadTier,
   type PayloadShapers,
   type PayloadShaperCtx,
+  type BoundedPayloadProjection,
+  type BoundedPayloadRecovery,
+  type ProjectBoundedPayloadOpts,
 } from './payload-tier';
 export { defineResource } from './define-resource';
 export { definePrompt } from './define-prompt';
