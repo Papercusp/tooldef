@@ -160,6 +160,7 @@ function projectedToolSignature(tool) {
         description: tool.description ?? '',
         capabilities: [...(tool.capabilities ?? [])].sort(),
         inputSchema: tool.inputSchema ?? null,
+        discoveryInputSchema: tool.discoveryInputSchema ?? null,
     });
 }
 /**

@@ -40,7 +40,22 @@ const WORKER_SRC = `(() => {
   const rpc = (payload) => new Promise((resolve, reject) => {
     const id = nextId++;
     pending.set(id, { resolve, reject });
-    parentPort.postMessage(Object.assign({ t: 'call', id }, payload));
+    // Tool results are wrapped in tracking Proxies before the script sees them. If a script
+    // carries one of those nested values into the NEXT tool call, posting the raw Proxy back to
+    // the host throws a DataCloneError (notably: "[object Array] could not be cloned"). The final
+    // script return already uses unwrap() below; apply the same boundary rule to call args so
+    // intermediate tool results can be safely composed into later calls.
+    const callPayload = { ...payload, args: unwrap(payload.args, new Map()) };
+    try {
+      parentPort.postMessage(Object.assign({ t: 'call', id }, callPayload));
+    } catch (cloneErr) {
+      pending.delete(id);
+      reject(new Error(
+        'args_not_serializable: code:run could not send tool arguments across the sandbox boundary ' +
+        'after unwrapping tracked values; pass JSON-serializable args. ' +
+        ((cloneErr && cloneErr.message) || String(cloneErr)),
+      ));
+    }
   });
 
   // --- EI-19301148486657755: detect reads of fields the tool result does not have ---
@@ -218,7 +233,15 @@ export async function runOrchestrationScript(script, facade, opts = {}) {
             resolve({ ...out, logs });
         };
         // The kill switch: terminate() stops the worker thread even mid sync-loop.
-        const timer = setTimeout(() => finish({ ok: false, error: `script_timeout after ${timeoutMs}ms` }), timeoutMs);
+        const timer = setTimeout(() => {
+            // Terminating the worker only stops the script. A host-side facade call may still be
+            // awaiting a real tool (for example a long foreground capability:bash), and letting that
+            // call continue after code:run returned leaves the caller without a resumable handle and
+            // makes a retry capable of duplicating the command. Give the host a cancellation seam
+            // before killing the worker (EI-20282336542235171).
+            opts.onTimeout?.();
+            finish({ ok: false, error: `script_timeout after ${timeoutMs}ms` });
+        }, timeoutMs);
         worker.on('message', (m) => {
             if (m.t === 'log') {
                 if (logs.length < maxLogLines)
@@ -249,6 +272,12 @@ export async function runOrchestrationScript(script, facade, opts = {}) {
 /** Run one RPC'd tool call against the REAL host facade and post the reply back to the worker. */
 async function handleCall(worker, facade, m, isSettled) {
     try {
+        const toolName = typeof m.callName === 'string' ? m.callName : `${m.ns ?? '?'}.${m.verb ?? '?'}`;
+        const nullBytePath = findNullBytePath(m.args);
+        if (nullBytePath) {
+            throw new Error(`code:run cannot dispatch ${toolName}: ${nullBytePath} contains a NUL byte. ` +
+                'JavaScript `\\0` escapes become an actual NUL; for a shell `\\0` escape, write `\\\\0` in the code:run script source.');
+        }
         let value;
         if (typeof m.callName === 'string') {
             value = await facade.call(m.callName, m.args);
@@ -275,6 +304,38 @@ async function handleCall(worker, facade, m, isSettled) {
             return;
         worker.postMessage({ t: 'result', id: m.id, ok: false, error: errMsg(err) });
     }
+}
+/**
+ * Find the first NUL-containing string in an RPC argument tree before it reaches a real tool.
+ *
+ * JavaScript parses `\0` in a script string literal as an actual NUL. That is valid JavaScript,
+ * but Node's child-process APIs reject NUL-containing argv/command strings, so the eventual
+ * `capability:bash` error otherwise points at its internal `args[3]` rather than the code:run
+ * source that introduced it. Keep the guard at this boundary: it preserves normal argument
+ * semantics and gives the script author the exact extra escaping needed for shell `\0`.
+ */
+function findNullBytePath(value, path = 'args', seen = new WeakSet()) {
+    if (typeof value === 'string')
+        return value.includes('\u0000') ? path : undefined;
+    if (value === null || typeof value !== 'object')
+        return undefined;
+    if (seen.has(value))
+        return undefined;
+    seen.add(value);
+    if (Array.isArray(value)) {
+        for (let i = 0; i < value.length; i++) {
+            const found = findNullBytePath(value[i], `${path}[${i}]`, seen);
+            if (found)
+                return found;
+        }
+        return undefined;
+    }
+    for (const [key, child] of Object.entries(value)) {
+        const found = findNullBytePath(child, `${path}.${key}`, seen);
+        if (found)
+            return found;
+    }
+    return undefined;
 }
 function errMsg(e) {
     return e instanceof Error ? e.message : String(e);

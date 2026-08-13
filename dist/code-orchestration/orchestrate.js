@@ -94,7 +94,26 @@ function isBulkPartialFailure(value) {
 }
 export async function runToolOrchestration(script, opts) {
     const { ctx, deps, tools, allowed, dryRun = false, timeoutMs, wrapDispatch } = opts;
+    // The worker timeout in runOrchestrationScript kills only the script worker. Host-side tool
+    // handlers can still be awaiting their own work after that point, so give every inner dispatch
+    // a signal owned by this orchestration and abort it when the worker deadline fires. Without
+    // this boundary a long foreground capability:bash keeps running after code:run returned with
+    // no bash_id/resumable handle, and a retry can duplicate the command (EI-20282336542235171).
+    const orchestrationAbort = new AbortController();
+    const abortFromParent = () => {
+        if (!orchestrationAbort.signal.aborted)
+            orchestrationAbort.abort();
+    };
+    // `signal` is DECLARED required on UnifiedToolContext, but callers into the stack routinely omit
+    // it — which is why the sibling boundary in dispatch-stack.ts guards it the same way rather than
+    // trusting the type. Reading it unguarded here threw a TypeError before any work ran (WI-38330).
+    if (ctx.signal?.aborted)
+        abortFromParent();
+    else
+        ctx.signal?.addEventListener('abort', abortFromParent, { once: true });
+    const dispatchCtx = { ...ctx, signal: orchestrationAbort.signal };
     const plannedMutations = [];
+    const writeAttempts = [];
     const okFalseMutations = [];
     const childFailures = [];
     // EI-10951: a write that THREW never landed (rejected) or may have (uncertain) — but it
@@ -113,15 +132,24 @@ export async function runToolOrchestration(script, opts) {
     // per-call error.
     const unknownRefs = check.ok ? undefined : check.unknownRefs;
     const dispatch = async (tool, name, args) => {
+        let writeAttempt;
         if (tool.effect === 'write') {
             plannedMutations.push({ tool: name, args });
             if (dryRun) {
                 return { dryRun: true, wouldCall: name, args };
             }
+            writeAttempt = {
+                index: writeAttempts.length,
+                tool: name,
+                disposition: 'in_flight',
+            };
+            writeAttempts.push(writeAttempt);
         }
         const call = (callCtx) => realDispatch(callCtx, deps)(tool, name, args);
         try {
-            const result = await (wrapDispatch ? wrapDispatch(tool, name, args, ctx, call) : call(ctx));
+            const result = await (wrapDispatch
+                ? wrapDispatch(tool, name, args, dispatchCtx, call)
+                : call(dispatchCtx));
             // EI-7669: realDispatch only throws on a dispatch-level failure — a tool that dispatched fine
             // but reports its OWN semantic rejection (ok: false in its result body, e.g. a completion-
             // integrity check) resolves normally here. Tally those so a batched script that doesn't check
@@ -129,8 +157,13 @@ export async function runToolOrchestration(script, opts) {
             if (isOkFalseResult(result) || isBulkPartialFailure(result)) {
                 childFailures.push({ tool: name, kind: 'semantic', result });
                 if (tool.effect === 'write') {
+                    if (writeAttempt)
+                        writeAttempt.disposition = 'semantic_rejected';
                     okFalseMutations.push({ tool: name, args, result });
                 }
+            }
+            else if (writeAttempt) {
+                writeAttempt.disposition = 'settled';
             }
             return result;
         }
@@ -147,6 +180,8 @@ export async function runToolOrchestration(script, opts) {
                 error: err instanceof Error ? err.message : String(err),
             });
             if (tool.effect === 'write') {
+                if (writeAttempt)
+                    writeAttempt.disposition = preExecution ? 'rejected' : 'uncertain';
                 (preExecution ? rejectedMutations : uncertainMutations).push({
                     tool: name,
                     args,
@@ -157,12 +192,20 @@ export async function runToolOrchestration(script, opts) {
         }
     };
     const facade = buildToolFacade(tools, dispatch, allowed, unknownRefs);
-    const run = await runOrchestrationScript(script, facade, timeoutMs ? { timeoutMs } : {});
+    const run = await runOrchestrationScript(script, facade, {
+        ...(timeoutMs ? { timeoutMs } : {}),
+        onTimeout: abortFromParent,
+    });
+    ctx.signal?.removeEventListener('abort', abortFromParent);
     // P-020: only meaningful when the script ABORTED — a run that completed reached every line
     // it was going to, so an undispatched write there was a branch not taken, not a stranding.
     const strandedWrites = run.ok
         ? []
         : detectStrandedWrites(check.calls, tools, plannedMutations.map((m) => m.tool));
+    const notDispatchedWrites = strandedWrites.map((tool) => ({
+        tool,
+        executed: false,
+    }));
     return {
         ok: run.ok,
         summary: run.result,
@@ -171,11 +214,15 @@ export async function runToolOrchestration(script, opts) {
         ...(unknownRefs && unknownRefs.length ? { unknownRefs } : {}),
         dryRun,
         plannedMutations,
+        ...(!dryRun && writeAttempts.length
+            ? { writeAttempts: writeAttempts.map((attempt) => ({ ...attempt })) }
+            : {}),
         okFalseMutations,
         childFailures,
         ...(rejectedMutations.length ? { rejectedMutations } : {}),
         ...(uncertainMutations.length ? { uncertainMutations } : {}),
         ...(strandedWrites.length ? { strandedWrites } : {}),
+        ...(notDispatchedWrites.length ? { notDispatchedWrites } : {}),
         ...(run.fieldMisses?.length ? { fieldMisses: run.fieldMisses } : {}),
         ...(run.sleepCaps?.length ? { sleepCaps: run.sleepCaps } : {}),
         // EI-7784: surfaced independent of `ok` — see the field doc above.

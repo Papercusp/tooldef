@@ -348,6 +348,44 @@ function reencodableJsonPayload(out, ctx) {
     return parsed;
 }
 /**
+ * EI-20305133624359928: an object-rooted `result` schema is advertised to MCP
+ * clients as `outputSchema`. The official SDK then requires `structuredContent`
+ * whenever the caller opted into it, even when a legacy handler returned an
+ * already-serialized JSON `ToolResult` instead of the canonical `{ data }`
+ * envelope. Passing that raw result through unchanged makes a perfectly valid
+ * business-level miss fail at the transport boundary with MCP -32600.
+ *
+ * Preserve the handler's text bytes, `isError`, resources, and metadata; only
+ * add the schema-validated structured twin the caller explicitly requested.
+ * Invalid/non-JSON raw results remain untouched so we never manufacture data
+ * that the advertised schema does not actually describe.
+ */
+async function attachRequestedStructuredContent(out, ctx, def) {
+    if (ctx.transport !== 'mcp' ||
+        ctx.requestedStructured !== true ||
+        !def.result ||
+        out.structuredContent !== undefined) {
+        return out;
+    }
+    const first = out.content?.[0];
+    if (!first || first.type !== 'text' || typeof first.text !== 'string')
+        return out;
+    let parsed;
+    try {
+        parsed = JSON.parse(first.text);
+    }
+    catch {
+        return out;
+    }
+    const validated = await standardValidate(def.result, parsed);
+    if (!validated.ok) {
+        ctx.log(`[output-schema] ${def.name} returned raw JSON not matching its declared result schema: ` +
+            formatIssues(validated.issues));
+        return out;
+    }
+    return { ...out, structuredContent: validated.value };
+}
+/**
  * P-019 (fleet-leadership-continuity-and-actuation-2026-08-01) — an
  * explicitly-`undefined` value means NOT PROVIDED, at every depth.
  *
@@ -1008,6 +1046,33 @@ const COMMON_ARG_ALIASES = {
     scope: ['harness'],
     script: ['code'],
     summary: ['body', 'comment', 'text', 'content'],
+    // ── Additions from a MEASURED rejection burst (WI-38059 / EI-20204653748131789):
+    // eight arg-shape rejections in ~35 min of one agent's ordinary work, every one
+    // correct-intent/wrong-spelling. These four were each verified to fall OUTSIDE
+    // `suggestArgName`'s edit-distance threshold, so no suggestion was produced and
+    // the caller had to re-read a schema. e.g. compact('ttldays') vs compact('ttlsec')
+    // = distance 3, threshold 2. They are the obvious natural-language names for the
+    // concept, which is exactly why agents reach for them.
+    category: ['kind', 'type', 'lane'],
+    kind: ['category', 'type'],
+    text: ['content', 'body', 'summary', 'comment'],
+    ttl: ['ttlSec', 'ttl_sec', 'ttlMs', 'ttl_ms'],
+    ttldays: ['ttlSec', 'ttl_sec', 'ttlMs'],
+    ttlseconds: ['ttlSec', 'ttl_sec'],
+    type: ['kind', 'category'],
+    value: ['body', 'content', 'summary'],
+    // ── EI-20246935995110683: `q` vs `query` is a CROSS-TOOL near-synonym, not a typo —
+    // both spellings are live in this catalogue (`issues:list` declares `q`,
+    // `search:fulltext`/`search:semantic` declare `query`), so a caller that learned one
+    // reaches for it on the other and gets no suggestion at all: compact('q') -> compact('query')
+    // is edit distance 4 against a threshold of 1 (max(1, min(3, floor(5/3)))), so it falls
+    // outside `suggestArgName`'s distance rescue the same way the WI-38059 additions above did.
+    // Both directions are listed because the confusion runs both ways; the exact-declared-match
+    // precedence in `suggestArgName` means a tool that genuinely declares `q` (or `query`) still
+    // wins over its own alias entry, so neither line can override a tool's real vocabulary.
+    q: ['query', 'search', 'text'],
+    query: ['q', 'search', 'text'],
+    search: ['query', 'q'],
 };
 function compactArgName(value) {
     return value.replace(/[^a-z0-9]/gi, '').toLowerCase();
@@ -1032,6 +1097,15 @@ function editDistance(a, b) {
 /** Return the closest declared field for an unknown arg, when confidence is high. */
 export function suggestArgName(unknown, accepted) {
     const compactUnknown = compactArgName(unknown);
+    // An EXACT declared match outranks every alias. Latent via `unknownArgHint`
+    // (which filters declared keys before asking), but `suggestArgName` is exported
+    // and used directly, and without this a tool that genuinely declares `text` or
+    // `value` would be told to use `content`/`body` instead — the alias map
+    // confidently overriding the tool's own vocabulary. Widening the alias map in
+    // WI-38059 is what made that reachable enough to matter.
+    const exact = accepted.find((candidate) => compactArgName(candidate) === compactUnknown);
+    if (exact)
+        return exact;
     const semanticAliases = COMMON_ARG_ALIASES[compactUnknown] ?? [];
     const semantic = semanticAliases.find((alias) => accepted.some((candidate) => compactArgName(candidate) === compactArgName(alias)));
     if (semantic) {
@@ -1046,7 +1120,41 @@ export function suggestArgName(unknown, accepted) {
     const threshold = Math.max(1, Math.min(3, Math.floor(Math.max(compactUnknown.length, compactArgName(best.candidate).length) / 3)));
     return best.distance <= threshold ? best.candidate : null;
 }
-function unknownArgHint(issues, rawSchema) {
+/**
+ * Map each key declared on a NESTED object schema to its dotted path
+ * (`observation.refs`), one level deep.
+ *
+ * WHY (WI-38059): `unknownArgHint` built its candidate list from TOP-LEVEL
+ * properties only, so a key that genuinely exists — just one level down —
+ * had nothing to match against and produced NO suggestion. The rejection
+ * then read as "this tool has no `refs` concept" when the truth was "`refs`
+ * lives inside `observation`". The caller's natural inference from that is
+ * to DROP the arg, silently losing whatever it carried (attribution, in the
+ * observed case), rather than to relocate it. That is strictly worse than a
+ * round-trip: it fails quietly.
+ *
+ * One level only, and first-declaration-wins on a collision: this exists to
+ * name an obvious relocation, not to search a schema tree. A deeper or
+ * ambiguous match is left to the full schema hint that follows it.
+ */
+export function nestedArgPaths(props) {
+    const out = new Map();
+    if (!props)
+        return out;
+    for (const [parent, rawChild] of Object.entries(props)) {
+        const childProps = rawChild?.properties;
+        if (!childProps)
+            continue;
+        for (const child of Object.keys(childProps)) {
+            if (!out.has(child))
+                out.set(child, `${parent}.${child}`);
+        }
+    }
+    return out;
+}
+// Exported for direct unit test alongside its sibling correction sources
+// (`nestedArgPaths`, `suggestArgName`) — see strict-args.test.ts.
+export function unknownArgHint(issues, rawSchema, argRedirects) {
     const msgs = (issues ?? []).map((i) => i?.message ?? '').join(' ');
     if (!/nrecognized key/i.test(msgs))
         return '';
@@ -1054,19 +1162,38 @@ function unknownArgHint(issues, rawSchema) {
     const keys = props ? Object.keys(props) : [];
     if (keys.length === 0)
         return '';
+    const nested = nestedArgPaths(props);
     const unknownKeys = [
         ...new Set([
             ...(issues ?? []).flatMap((issue) => issue.keys ?? []),
             ...Array.from(msgs.matchAll(/["']([^"']+)["']/g), (match) => match[1]),
         ]),
     ].filter((key) => !keys.includes(key));
+    // EI-20281509195248260: an AUTHORED cross-tool redirect outranks both guesses
+    // below. A key whose real home is a different TOOL matches neither the nested
+    // relocation nor an edit-distance near-name, so without this the caller reads
+    // only "this tool accepts ONLY: …" and concludes the capability is missing —
+    // the measured failure mode (`tags` on work_items:update, filed 10+ times).
+    // Redirected keys are withheld from `corrections` so the same key cannot also
+    // draw a string-distance guess that contradicts the authored answer.
+    const redirected = unknownKeys
+        .map((unknown) => ({ unknown, target: argRedirects?.[unknown] }))
+        .filter((item) => typeof item.target === 'string' && item.target.length > 0);
+    const redirectedKeys = new Set(redirected.map((item) => item.unknown));
+    const redirectText = redirected
+        .map(({ unknown, target }) => ` \`${unknown}\` is not an arg of this tool — it is written by ${target}.`)
+        .join('');
     const corrections = unknownKeys
-        .map((unknown) => ({ unknown, suggestion: suggestArgName(unknown, keys) }))
+        .filter((unknown) => !redirectedKeys.has(unknown))
+        // A key that exists on a nested schema is a RELOCATION, not a typo — prefer
+        // it over any edit-distance guess against the top-level names, which would
+        // point the caller at an unrelated arg that merely looks similar.
+        .map((unknown) => ({ unknown, suggestion: nested.get(unknown) ?? suggestArgName(unknown, keys) }))
         .filter((item) => item.suggestion !== null);
     const correctionText = corrections.length > 0
         ? ` Did you mean ${corrections.map(({ unknown, suggestion }) => `\`${suggestion}\` for \`${unknown}\``).join('; ')}?`
         : '';
-    return (` — this tool accepts ONLY: ${keys.join(', ')}.${correctionText}` +
+    return (` — this tool accepts ONLY: ${keys.join(', ')}.${redirectText}${correctionText}` +
         ' An undeclared arg is REJECTED, not silently ignored (EI-10883): passing an arg a tool does not declare used to return ok:true' +
         ' while quietly doing something else, which is indistinguishable from success. Re-send using only the keys above.' +
         // EI-19953470656367880: an unrecognized-key rejection is ALSO the exact shape a
@@ -1123,6 +1250,83 @@ function schemaUnionBranches(node) {
     }
     return out;
 }
+/**
+ * Build a small, valid value for a JSON-Schema node. This is intentionally a
+ * teaching example, not a validator: nested validation hints must expose the
+ * COMPLETE set of accepted keys before their verbose field descriptions, or a
+ * result cap can cut off the only field the caller needs to discover.
+ */
+function compactSchemaExampleValue(node, depth = 0) {
+    if (!node || typeof node !== 'object' || depth > 4)
+        return '<value>';
+    const rec = node;
+    if (Object.prototype.hasOwnProperty.call(rec, 'const'))
+        return rec.const;
+    if (Array.isArray(rec.enum) && rec.enum.length > 0)
+        return rec.enum[0];
+    for (const branch of schemaUnionBranches(node)) {
+        const value = compactSchemaExampleValue(branch, depth + 1);
+        if (value !== '<value>')
+            return value;
+    }
+    switch (rec.type) {
+        case 'string':
+            return '<string>';
+        case 'number':
+        case 'integer':
+            return 0;
+        case 'boolean':
+            return false;
+        case 'array':
+            return [];
+        case 'object':
+            return hasProperties(node) ? compactAcceptedObjectExample(node, depth + 1) : {};
+        default:
+            return hasProperties(node) ? compactAcceptedObjectExample(node, depth + 1) : '<value>';
+    }
+}
+/**
+ * Render a complete accepted object shape without copying its descriptions.
+ * The full schema remains useful for limits and prose, but it comes AFTER this
+ * example so a bounded error can never hide a later optional field (notably
+ * `checks[].verified`).
+ */
+function compactAcceptedObjectExample(node, depth = 0) {
+    if (!node || typeof node !== 'object' || depth > 4)
+        return '<value>';
+    const rec = node;
+    const props = rec.properties;
+    if (!props || typeof props !== 'object' || Array.isArray(props))
+        return '<value>';
+    const properties = props;
+    const example = {};
+    for (const [key, value] of Object.entries(properties)) {
+        example[key] = compactSchemaExampleValue(value, depth + 1);
+    }
+    return example;
+}
+function compactAcceptedObjectHint(node) {
+    if (!node || typeof node !== 'object')
+        return null;
+    const rec = node;
+    const props = rec.properties;
+    if (!props || typeof props !== 'object' || Array.isArray(props))
+        return null;
+    const properties = props;
+    const keys = Object.keys(properties);
+    if (keys.length === 0)
+        return null;
+    const example = compactAcceptedObjectExample(node);
+    if (!example || typeof example !== 'object')
+        return null;
+    const required = Array.isArray(rec.required) ? rec.required.filter((key) => typeof key === 'string') : [];
+    const optional = keys.filter((key) => !required.includes(key));
+    const qualifiers = [
+        required.length > 0 ? `required: ${required.join(', ')}` : '',
+        optional.length > 0 ? `optional: ${optional.join(', ')}` : '',
+    ].filter(Boolean);
+    return `${JSON.stringify(example)}${qualifiers.length > 0 ? ` (${qualifiers.join('; ')})` : ''}`;
+}
 function hasProperties(node) {
     if (!node || typeof node !== 'object')
         return false;
@@ -1167,9 +1371,12 @@ function failingFieldSchemaHint(issues, rawSchema) {
     // prints — is several levels deeper. Reading `issue.path` here silently never fires.
     for (const { segs } of issueLeaves(issues ?? [])) {
         const path = segs;
-        // Depth 1 is a plain top-level arg — the full dump already reaches it, and
-        // `unknownArgHint` already names the accepted keys. Only deeper paths are unreachable.
-        if (path.length < 2)
+        // A primitive top-level arg is already adequately described by its own type
+        // error, and the full dump is still the useful fallback for it. A top-level
+        // OBJECT (or union branch with properties), however, can be far enough into a
+        // large schema that the flat dump cuts off before the field's accepted keys —
+        // exactly the coord:send `why: "..."` dead end. Render that object's shape too.
+        if (path.length < 1)
             continue;
         // Walk the path, remembering the deepest prefix whose node actually lists properties.
         let nodes = [rawSchema];
@@ -1202,7 +1409,13 @@ function failingFieldSchemaHint(issues, rawSchema) {
             continue;
         if (json.length > FIELD_SCHEMA_HINT_MAX)
             json = `${json.slice(0, FIELD_SCHEMA_HINT_MAX)} …(truncated)`;
-        rendered.set(bestLabel, json);
+        // Keep a complete accepted example ahead of the verbose descriptions. A
+        // nested object such as loop:checkpoint's checks[] row has a long
+        // `verified` description; serializing the raw schema first can hit the
+        // bounded hint before that optional field appears, leaving the caller to
+        // guess the contract (EI-20232348713050420).
+        const compact = compactAcceptedObjectHint(bestNode);
+        rendered.set(bestLabel, compact ? `e.g. ${compact}; verbose schema: ${json}` : json);
         if (rendered.size >= FIELD_SCHEMA_HINT_MAX_FIELDS)
             break;
     }
@@ -1336,7 +1549,7 @@ function registerLegacyAsProjected(def, expose) {
             // required field). A caller who used the right key and merely overran a limit already
             // knows the shape — appending 1,800 chars of schema to "too long by 3 chars" is pure
             // context burn for the agent least able to spare it.
-            `invalid_args: ${formatIssues(parsed.issues, shimmed)}${unknownArgHint(parsed.issues, rawSchema)}` +
+            `invalid_args: ${formatIssues(parsed.issues, shimmed)}${unknownArgHint(parsed.issues, rawSchema, def.guidance?.argRedirects)}` +
                 (issuesAreValueLevel(parsed.issues)
                     ? ''
                     : // EI-20087434994864624: prefer the NESTED failing field's own schema when the
@@ -1359,7 +1572,7 @@ function registerLegacyAsProjected(def, expose) {
             if (reencodable !== undefined) {
                 return serializeProjectedResult({ data: reencodable }, ctx, eligibility, def, readColumns, parsed.value);
             }
-            return response;
+            return attachRequestedStructuredContent(response, ctx, def);
         }
         // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
         // the session/call tier before format-aware serialization. Unshaped tools
@@ -1393,6 +1606,9 @@ function registerLegacyAsProjected(def, expose) {
         pluginName: 'agent-mcp',
         description: def.description,
         inputSchema,
+        // Keep the complete branch requirements for discovery/introspection while
+        // retaining the flattened schema above for strict OpenAI/MCP callers.
+        discoveryInputSchema: rawSchema,
         capabilities: [def.capability],
         effect: def.effect,
         idempotent: def.idempotent,
@@ -1476,7 +1692,7 @@ function registerRoleGatedAsProjected(def, expose) {
             // required field). A caller who used the right key and merely overran a limit already
             // knows the shape — appending 1,800 chars of schema to "too long by 3 chars" is pure
             // context burn for the agent least able to spare it.
-            `invalid_args: ${formatIssues(parsed.issues, shimmed)}${unknownArgHint(parsed.issues, rawSchema)}` +
+            `invalid_args: ${formatIssues(parsed.issues, shimmed)}${unknownArgHint(parsed.issues, rawSchema, def.guidance?.argRedirects)}` +
                 (issuesAreValueLevel(parsed.issues)
                     ? ''
                     : // EI-20087434994864624: prefer the NESTED failing field's own schema when the
@@ -1505,7 +1721,7 @@ function registerRoleGatedAsProjected(def, expose) {
             if (reencodable !== undefined) {
                 return serializeProjectedResult({ data: reencodable }, ctx, eligibility, def, readColumns, parsed.value);
             }
-            return out;
+            return attachRequestedStructuredContent(out, ctx, def);
         }
         // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
         // the session/call tier before format-aware serialization. Unshaped tools
@@ -1540,6 +1756,9 @@ function registerRoleGatedAsProjected(def, expose) {
         pluginName: 'agent-mcp',
         description: def.description,
         inputSchema,
+        // Keep the complete branch requirements for discovery/introspection while
+        // retaining the flattened schema above for strict OpenAI/MCP callers.
+        discoveryInputSchema: rawSchema,
         capabilities: [def.capability],
         effect: def.effect,
         idempotent: def.idempotent,
@@ -1553,6 +1772,7 @@ function registerRoleGatedAsProjected(def, expose) {
         delta: def.delta,
         agentRoles: def.agentRoles,
         rolesQuota: def.rolesQuota,
+        requirePrincipal: false,
         authorize: def.authorize,
         requireRoles: def.requireRoles,
         public: def.public,
