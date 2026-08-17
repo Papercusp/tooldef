@@ -337,3 +337,70 @@ describe('runToolOrchestration (WI-1411 — wrapDispatch, per-inner-call context
     expect(wrapDispatch).not.toHaveBeenCalled(); // recorded-not-executed short-circuit precedes wrapDispatch
   });
 });
+
+/**
+ * P-012 (census double-count): dispatchCount = how many times the script ENTERED the
+ * host dispatcher, i.e. the number of inner tool_invocations rows the run produced.
+ * The exact-number assertions are the falsifiability control: a counter that always
+ * reports 0, or that counts dryRun-skipped writes, fails these cases in opposite
+ * directions.
+ */
+describe('runToolOrchestration → dispatchCount (P-012)', () => {
+  it('counts every dispatched call — reads and writes alike', async () => {
+    const items = [{ id: 1 }, { id: 2 }, { id: 3 }];
+    const list = mkTool('wi:list', 'read', async () => json({ items }));
+    const get = mkTool('wi:get', 'read', async (a) => json({ id: (a as { id: number }).id }));
+    const r = await runToolOrchestration(
+      `const l = await tools.wi.list({});
+       for (const w of l.items) await tools.wi.get({ id: w.id });
+       return l.items.length;`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [list, get] },
+    );
+    expect(r.ok).toBe(true);
+    expect(r.dispatchCount).toBe(4); // 1 list + 3 gets
+  });
+
+  it('a pure-compute script (no tool calls) reports 0 — the wrapper row stays countable', async () => {
+    const r = await runToolOrchestration(`return 1 + 1;`, {
+      ctx: MAKE_CTX(),
+      deps: DEPS,
+      tools: [],
+    });
+    expect(r.ok).toBe(true);
+    expect(r.dispatchCount).toBe(0);
+  });
+
+  it('a dryRun-skipped write is NOT counted (it never dispatched), but reads still are', async () => {
+    const list = mkTool('wi:list', 'read', async () => json({ items: [{ id: 1 }] }));
+    const setStatus = mkTool('wi:set-status', 'write', vi.fn());
+    const r = await runToolOrchestration(
+      `const l = await tools.wi.list({});
+       for (const w of l.items) await tools.wi.setStatus({ id: w.id });
+       return 'ok';`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [list, setStatus], dryRun: true },
+    );
+    expect(r.ok).toBe(true);
+    expect(r.dispatchCount).toBe(1); // the read only — the recorded-not-executed write adds no row
+  });
+
+  it('a throwing dispatched call still counts (its row exists, status notwithstanding)', async () => {
+    const boom = mkTool('wi:boom', 'read', async () => {
+      throw new Error('boom');
+    });
+    const r = await runToolOrchestration(
+      `try { await tools.wi.boom({}); } catch {} return 'survived';`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [boom] },
+    );
+    expect(r.ok).toBe(true);
+    expect(r.dispatchCount).toBe(1);
+  });
+
+  it('an unknown-ref stub rejection is NOT counted — the stub throws before the dispatcher', async () => {
+    const r = await runToolOrchestration(
+      `try { await tools.nope.thing({}); } catch {} return 'survived';`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [] },
+    );
+    expect(r.ok).toBe(true);
+    expect(r.dispatchCount).toBe(0);
+  });
+});
