@@ -328,6 +328,7 @@ export async function runToolOrchestration(
   // certainly was not "already executed", which is what we used to tell the caller.
   const rejectedMutations: ThrownMutation[] = [];
   const uncertainMutations: ThrownMutation[] = [];
+  let dispatchCount = 0;
 
   await ensureParseCheckReady(); // lazy-load the TS compiler before the static parse-check (kept out of the eager client bundle)
   const check = checkScript(script, tools, allowed);
@@ -355,6 +356,11 @@ export async function runToolOrchestration(
       };
       writeAttempts.push(writeAttempt);
     }
+    // Counted at the same point the host's dispatcher is entered (a throw below still
+    // reached it), so this equals the number of inner telemetry rows the run produced —
+    // what lets a wrapper tool (code:run / recipes:run) mark its own row as a dispatch
+    // wrapper only when inner rows actually exist (census double-count, P-012).
+    dispatchCount += 1;
     const call: DispatchNext = (callCtx) => realDispatch(callCtx, deps)(tool, name, args);
     try {
       const result = await (wrapDispatch
