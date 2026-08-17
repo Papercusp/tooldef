@@ -135,6 +135,14 @@ export interface OrchestrateResult {
   /** Set when the parse-check failed. */
   unknownRefs?: string[];
   dryRun: boolean;
+  /** P-012 (census double-count): how many times the script actually ENTERED the host
+   *  dispatcher — reads and writes alike, throwing calls included, dryRun-skipped writes
+   *  and unknown-ref stub rejections excluded. Equals the number of inner
+   *  tool_invocations rows this run produced, which is what a wrapper tool needs to
+   *  mark its own row as a dispatch wrapper only when inner rows actually exist.
+   *  Optional so pre-existing hand-built fixture results are unaffected;
+   *  runToolOrchestration's own return always populates it. */
+  dispatchCount?: number;
   /** Write-effect calls the script made (recorded in dryRun, observed otherwise).
    *  NOTE: recorded at DISPATCH time, so this includes calls that then threw — subtract
    *  `rejectedMutations` + `uncertainMutations` for the set that actually landed. */
@@ -426,6 +434,7 @@ export async function runToolOrchestration(
     error: run.error,
     ...(unknownRefs && unknownRefs.length ? { unknownRefs } : {}),
     dryRun,
+    dispatchCount,
     plannedMutations,
     ...(!dryRun && writeAttempts.length
       ? { writeAttempts: writeAttempts.map((attempt) => ({ ...attempt })) }
