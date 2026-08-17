@@ -570,6 +570,64 @@ describe('projectBoundedPayload — truncation is announced in band', () => {
     expect(out._projection.next).toContain('ORIGINAL request args');
     expect(out._projection.next).not.toContain('with _projection.cursor.args for full detail');
   });
+
+  // EI-20720054720826414 — the recovery advice must be EXECUTABLE, not a
+  // description of an instruction. With a host rawDispatchTemplate the abstract
+  // "route through your host's raw-args dispatch path" is replaced by the
+  // concrete call; without one the generic wording survives unchanged (the
+  // CONTROL — a host that never configures it loses nothing). Both branches
+  // also close with the ask-for-LESS lead: narrowing beats paging.
+  it('renders the host rawDispatchTemplate as a concrete executable call in `next`', () => {
+    const out = projectBoundedPayload(
+      { blob: 'z'.repeat(20_000) },
+      {
+        toolName: 'work_items:get',
+        tier: 'trimmed',
+        args: { id: 'WI-1' },
+        rawDispatchTemplate: "tools:invoke { name:'{tool}', args:{ …original args, payloadTier:'full' } }",
+      },
+    );
+    expect(out._projection.next).toContain("tools:invoke { name:'work_items:get'");
+    expect(out._projection.next).not.toContain("host's raw-args dispatch path");
+    // Still truthful about WHY the direct call fails.
+    expect(out._projection.next).toMatch(/FRAMEWORK-RESERVED/);
+  });
+
+  it('CONTROL: no template ⇒ the generic host-neutral wording, unchanged', () => {
+    const out = projectBoundedPayload(
+      { blob: 'z'.repeat(20_000) },
+      { toolName: 'work_items:get', tier: 'trimmed', args: { id: 'WI-1' } },
+    );
+    expect(out._projection.next).toContain("host's raw-args dispatch path");
+    expect(out._projection.next).not.toContain('tools:invoke');
+  });
+
+  it('both truncated-args and normal branches close with the ask-for-LESS lead', () => {
+    const template = "tools:invoke { name:'{tool}', args:{ …original args, payloadTier:'full' } }";
+    const normal = projectBoundedPayload(
+      { blob: 'z'.repeat(20_000) },
+      { toolName: 'work_items:get', tier: 'trimmed', args: { id: 'WI-1' }, rawDispatchTemplate: template },
+    );
+    const bigArgs = {
+      messages: Array.from({ length: 67 }, (_, i) => ({
+        to: [`agent-${i}`],
+        body: [{ text: 'x'.repeat(500) }],
+        expects: 'none',
+      })),
+    };
+    const truncatedArgs = projectBoundedPayload(
+      { ok: true, count: 67, error: null },
+      { toolName: 'coord:send', tier: 'trimmed', args: bigArgs, rawDispatchTemplate: template },
+    );
+    for (const out of [normal, truncatedArgs]) {
+      expect(out._projection.next).toContain('Prefer LESS over more');
+      expect(out._projection.next).toContain('projection { pick: ["[].field"] }');
+    }
+    // The truncated-args branch names the template too — with the caveat that
+    // the ORIGINAL args must be restored (the cursor's are only a preview).
+    expect(truncatedArgs._projection.next).toContain("tools:invoke { name:'coord:send'");
+    expect(truncatedArgs._projection.next).toContain('original args restored');
+  });
 });
 
 // WI-36048 — borrow item 1 of the opencode/OMP token-reduction research.
