@@ -1718,6 +1718,9 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       ceilingChars: def.payloadTierCeilingChars,
       args: parsed.value,
       log: (m) => ctx.log(m),
+      // EI-20720054720826414: the host's executable raw-dispatch spelling for
+      // the recovery `next` — absent ⇒ the generic host-neutral wording.
+      rawDispatchTemplate: ctx.rawDispatchTemplate,
     });
     return serializeProjectedResult(shaped, ctx, eligibility, def, readColumns, parsed.value);
   };
@@ -1880,6 +1883,9 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
       ceilingChars: def.payloadTierCeilingChars,
       args: parsed.value,
       log: (m) => ctx.log(m),
+      // EI-20720054720826414: the host's executable raw-dispatch spelling for
+      // the recovery `next` — absent ⇒ the generic host-neutral wording.
+      rawDispatchTemplate: ctx.rawDispatchTemplate,
     });
     // ToolResponse envelope → format-aware MCP content[] + _meta.
     return serializeProjectedResult(shaped, ctx, eligibility, def, readColumns, parsed.value);

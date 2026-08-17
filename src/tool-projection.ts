@@ -388,6 +388,18 @@ export interface UnifiedToolContext {
    */
   transportCapExempt?: boolean;
   /**
+   * EI-20720054720826414: how THIS host spells a raw-args dispatch that can carry
+   * the framework-reserved `payloadTier` arg — e.g. papercusp's
+   * `tools:invoke { name:'{tool}', args:{ …original args, payloadTier:'full' } }`
+   * (`{tool}` is substituted with the tool name at render time). The bounded-
+   * payload door's recovery `next` used to end at "route these args through your
+   * host's raw-args dispatch path" — a description of an instruction, not an
+   * instruction — leaving the caller to guess the working spelling at exactly
+   * the moment they had just lost a field. Absent ⇒ the generic host-neutral
+   * wording, unchanged; set once where the host builds its tool context.
+   */
+  rawDispatchTemplate?: string;
+  /**
    * True when this call is an INNER dispatch from a `code:run` script, i.e. the
    * result is consumed as a JS VALUE (`result.output`) rather than read as text
    * by a model.
