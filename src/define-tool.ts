@@ -21,7 +21,7 @@ import { toJsonSchema } from './schema-adapter';
 import { standardValidate, formatIssues, issuesAreValueLevel, issueLeaves, type StandardSchemaV1 } from './standard-schema';
 import { register } from './registry';
 import { collectToolEmits } from './emits-registry';
-import { registerProjectedTool, type ToolFn, type ToolExposure, type UnifiedToolContext } from './tool-projection';
+import { registerProjectedTool, recordToolShapers, type ToolFn, type ToolExposure, type UnifiedToolContext } from './tool-projection';
 import { UnauthorizedToolError, InvalidInputError } from './dispatch-projected';
 import { serverVintageHint } from './server-vintage';
 import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
@@ -807,6 +807,13 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
     // WI-37843: see ToolDefinition.ignoreSessionPayloadTier.
     ignoreSessionPayloadTier: input.ignoreSessionPayloadTier,
   };
+
+  // EI-20803112372029993: make the declared shapers reachable from the catalog.
+  // `def.shape` is otherwise closed over by the dispatch handler below and by
+  // nothing else, so no guard could enumerate the tools that rebuild rows at the
+  // trimmed tier. Recorded with the `returns` prose because the contract check
+  // derives its field list from that promise rather than a second hand-typed list.
+  recordToolShapers(name, input.shape, input.guidance?.returns);
 
   // ORDER IS LOAD-BEARING: project FIRST (its first act is the guarded
   // args→JSON-Schema conversion), and only then enter the catalog.

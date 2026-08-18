@@ -301,6 +301,8 @@ export {
   normalizeMcpName,
   lookupByHttpPath,
   listAllProjectedTools,
+  listDeclaredToolShapers,
+  recordToolShapers,
   listMcpProjections,
   ToolRegistrationError,
   emitToSseSink,

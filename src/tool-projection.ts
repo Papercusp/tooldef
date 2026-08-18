@@ -26,6 +26,7 @@ import type {
   ToolResult,
 } from './wire';
 import type { AgentRole, Capability, PluginSpawn } from './host-types';
+import type { PayloadShapers } from './payload-tier';
 
 /**
  * WHY a tool's result skips the per-result door (`applyResultDoor`). This is a
@@ -1242,11 +1243,42 @@ if (!__g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY]) {
     REGISTRY: new Map<string, ProjectedTool>(),
     BY_MCP_NAME: new Map<string, ProjectedTool>(),
     BY_HTTP_PATH: new Map<string, ProjectedTool>(),
+    SHAPERS: new Map<string, { shape: PayloadShapers; returns?: string }>(),
   };
 }
 const REGISTRY = __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].REGISTRY;
 const BY_MCP_NAME = __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].BY_MCP_NAME;
 const BY_HTTP_PATH = __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].BY_HTTP_PATH;
+// A store pinned before this field existed has no SHAPERS map (an older module
+// record can win the `if (!__g[...])` race above). Backfill rather than letting
+// `.set` throw on undefined — an absent map must degrade to "nothing recorded",
+// never to a crash at import time.
+const SHAPERS = (__g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].SHAPERS ??= new Map<
+  string,
+  { shape: PayloadShapers; returns?: string }
+>());
+
+/**
+ * Record a tool's declared payload shapers. Called by `defineTool`; the shapers
+ * are otherwise unreachable from the catalog (see `RegistryStore.SHAPERS`).
+ */
+export function recordToolShapers(
+  name: string,
+  shape: PayloadShapers | undefined,
+  returns?: string,
+): void {
+  if (!shape) return;
+  SHAPERS.set(name, { shape, returns });
+}
+
+/** Every tool that declared payload shapers, with its `guidance.returns` prose. */
+export function listDeclaredToolShapers(): ReadonlyArray<{
+  name: string;
+  shape: PayloadShapers;
+  returns?: string;
+}> {
+  return [...SHAPERS.entries()].map(([name, v]) => ({ name, ...v }));
+}
 
 /** Stable unique key for a tool entry. */
 function entryKey(tool: ProjectedTool): string {
@@ -1659,4 +1691,5 @@ export function _resetProjectionRegistryForTests(): void {
   REGISTRY.clear();
   BY_MCP_NAME.clear();
   BY_HTTP_PATH.clear();
+  SHAPERS.clear();
 }
