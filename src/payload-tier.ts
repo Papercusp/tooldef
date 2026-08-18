@@ -45,6 +45,28 @@ export interface PayloadShaperCtx {
 export interface PayloadShapers {
   standard?: (data: unknown, sctx: PayloadShaperCtx) => unknown;
   trimmed?: (data: unknown, sctx: PayloadShaperCtx) => unknown;
+  /**
+   * EI-20803112372029993 — opt a row-shaped `trimmed` projection into the
+   * contract check (`trimmed-contract.ts`).
+   *
+   * A `trimmed` shaper that REBUILDS each row from a hardcoded allowlist drops
+   * any field not on that list, on the tier agents get BY DEFAULT — and the
+   * result still reads `ok:true` with a well-formed row, so the field looks
+   * absent from the data rather than removed by the shaper. `routines:list`
+   * shipped exactly that defect three times on one allowlist.
+   *
+   * Declaring `rows` is the whole opt-in. The FIELD LIST is deliberately NOT
+   * repeated here: it is derived from the tool's own `guidance.returns`
+   * "Each row: { a, b, c }" promise, so the promise and the check are one
+   * artifact and cannot drift. `fields` is the escape hatch for a tool whose
+   * `returns` prose is not in that form.
+   */
+  contract?: {
+    /** Key of the row array in the handler's `data` envelope (e.g. `'routines'`). */
+    rows: string;
+    /** Override the fields parsed from `returns`. Prefer the derived list. */
+    fields?: readonly string[];
+  };
 }
 
 export function parsePayloadTier(v: unknown): PayloadTier | undefined {
