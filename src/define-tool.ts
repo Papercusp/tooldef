@@ -859,6 +859,12 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
       'Pass `name` explicitly or place the file under `tools/<group>/<verb>.ts`.',
     );
   }
+  // EI-20803112372029993 — see the twin call in `definePrincipalGatedTool`.
+  // Recorded per-branch rather than once in the `defineTool` dispatcher because
+  // the name is only resolved here: a tool that omits `name` and lets it be
+  // derived from the call site is invisible upstream, and the SU tools this
+  // guard exists for (routines:list among them) all take this branch.
+  recordToolShapers(name, input.shape, input.guidance?.returns);
   const description =
     input.description ??
     describeFromGuidance(input.guidance) ??
