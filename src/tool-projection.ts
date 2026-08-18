@@ -1447,6 +1447,14 @@ export function unregisterProjectedToolsForPlugin(pluginName: string): number {
   for (const [k, t] of Array.from(BY_HTTP_PATH.entries())) {
     if (t.pluginName === pluginName) BY_HTTP_PATH.delete(k);
   }
+  // EI-20803112372029993: drop the plugin's declared shapers too. Tool names are
+  // unique across the registry, so deleting by name cannot reach a core tool —
+  // and leaving them behind would let the contract check report on a tool that is
+  // no longer loaded, which reads as a live violation nobody can find.
+  for (const [k, t] of Array.from(REGISTRY.entries())) {
+    void k;
+    if (t.pluginName === pluginName && t.expose.mcp?.name) SHAPERS.delete(t.expose.mcp.name);
+  }
   return removed;
 }
 
