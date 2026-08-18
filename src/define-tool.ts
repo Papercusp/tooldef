@@ -677,6 +677,18 @@ export function defineTool(
   if ('method' in input && 'path' in input) {
     return defineRouteShaped(input as RouteDefinition<ZodTypeAny | undefined>);
   }
+  // EI-20803112372029993: record declared shapers HERE — the one point both tool
+  // paths pass through. `def.shape` is otherwise closed over by the dispatch
+  // handler and reachable from nowhere else, so no guard could enumerate the
+  // tools that rebuild rows at the trimmed tier. Doing this inside either branch
+  // instead would silently cover only half the catalog (the first attempt hooked
+  // the principal-gated path alone and saw none of the role-gated SU tools).
+  // Routes are excluded above: they never enter the tool catalog.
+  const shaped = input as { name?: string; shape?: PayloadShapers; guidance?: { returns?: string } };
+  if (shaped.name && shaped.shape) {
+    recordToolShapers(shaped.name, shaped.shape, shaped.guidance?.returns);
+  }
+
   if ((input as RoleToolDefinitionInput<StandardSchemaV1>).requirePrincipal === false) {
     return defineRoleGatedTool(input as RoleToolDefinitionInput<StandardSchemaV1>);
   }
