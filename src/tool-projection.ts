@@ -1219,6 +1219,21 @@ interface RegistryStore {
   REGISTRY: Map<string, ProjectedTool>;
   BY_MCP_NAME: Map<string, ProjectedTool>;
   BY_HTTP_PATH: Map<string, ProjectedTool>;
+  /**
+   * EI-20803112372029993 — declared payload shapers, by tool name.
+   *
+   * `shape` is closed over by the dispatch handler and never reaches
+   * `ProjectedTool` (it holds functions; the projection is serialized into
+   * prompts and catalogs). Without a registry there is no way to ASK the
+   * catalog "which tools rebuild their rows at the trimmed tier", so the
+   * contract check could only ever run against a hand-typed list of tools —
+   * which rots exactly like the allowlists it exists to police.
+   *
+   * Rides the registry store that is already pinned to globalThis rather than
+   * adding a second pin (a new hand-rolled one would fail
+   * `lint:no-hand-rolled-module-pin`, and a split here would under-report).
+   */
+  SHAPERS: Map<string, { shape: PayloadShapers; returns?: string }>;
 }
 const __PAPERCUSP_PROJECTED_TOOL_REGISTRY = '__papercuspProjectedToolRegistry';
 const __g = globalThis as unknown as Record<string, RegistryStore>;
