@@ -140,6 +140,44 @@ describe('payloadTier override threading for raw ToolResult handlers', () => {
     expect(received?.contextTier).toBe('full');
     expect(received?.payloadTierOverride).toBe('full');
   });
+
+  it('passes the resolved tier to post-handler serialization for raw ToolResults', async () => {
+    let observedScope: string | undefined;
+    const payload = {
+      ok: true,
+      results: Array.from({ length: 12 }, (_, i) => ({
+        id: `row-${i}`,
+        summary: 'serialization context must honor the explicit full override',
+      })),
+      counts: { ok: 12, failed: 0 },
+    };
+    defineTool({
+      name: 'test:role-raw-payload-tier-serialization',
+      capability: 'test:read',
+      description: 'fixture',
+      requirePrincipal: false as const,
+      args: z.object({}),
+      async handler() {
+        return { content: [{ type: 'text', text: JSON.stringify(payload) }] };
+      },
+      delta: {
+        scope: (_args, deltaCtx) => {
+          observedScope = (deltaCtx as UnifiedToolContext).contextTier ?? 'missing';
+          return observedScope;
+        },
+      },
+    });
+
+    await dispatchProjectedTool(
+      lookupByMcpName('test:role-raw-payload-tier-serialization')!,
+      'test:role-raw-payload-tier-serialization',
+      { payloadTier: 'full' },
+      ctx({ contextTier: 'trimmed', requestedDelta: 'auto' }),
+      DEPS,
+    );
+
+    expect(observedScope).toBe('full');
+  });
 });
 
 /**
