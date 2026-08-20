@@ -1864,11 +1864,11 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     // re-encoded for the token win (P-002); see `reencodableJsonPayload` — it is
     // a no-op on every non-mcp transport, so verbatim-content consumers are safe.
     if (out && typeof out === 'object' && Array.isArray((out as ToolResult).content)) {
-      const reencodable = reencodableJsonPayload(out as ToolResult, ctx);
+      const reencodable = reencodableJsonPayload(out as ToolResult, handlerCtx);
       if (reencodable !== undefined) {
-        return serializeProjectedResult({ data: reencodable } as ToolResponse, ctx, eligibility, def, readColumns, parsed.value);
+        return serializeProjectedResult({ data: reencodable } as ToolResponse, handlerCtx, eligibility, def, readColumns, parsed.value);
       }
-      return attachRequestedStructuredContent(out as ToolResult, ctx, def);
+      return attachRequestedStructuredContent(out as ToolResult, handlerCtx, def);
     }
 
     // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
@@ -1881,7 +1881,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
       // WI-37843: a tool may opt OUT of routine per-session shaping, in which
       // case the session tier is discarded and an un-overridden call resolves
       // to 'full'. An explicit per-call payloadTier still wins either way.
-      tier: resolvePayloadTier(callTier, ctx.contextTier, {
+      tier: resolvePayloadTier(callTier, handlerCtx.contextTier, {
         ignoreSessionTier: def.ignoreSessionPayloadTier,
       }),
       // An explicit per-call payloadTier:'full' is the documented escape hatch
@@ -1889,19 +1889,19 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
       // never a defaulted/session 'full'. A ctx-borne `transportCapExempt`
       // consumer (code:run's inner dispatch — the result never reaches an
       // agent's context) gets the same exemption (EI-18719561823587590).
-      explicitFullRequest: callTier === 'full' || ctx.transportCapExempt === true,
+      explicitFullRequest: callTier === 'full' || handlerCtx.transportCapExempt === true,
       // WI-37843: a tool may raise its OWN hard ceiling (coord:orient, the
       // session-bootstrap read, whose full payload IS the value). Absent ⇒ the
       // shared PAYLOAD_TIER_HARD_CEILING_CHARS, unchanged for every other tool.
       ceilingChars: def.payloadTierCeilingChars,
       args: parsed.value,
-      log: (m) => ctx.log(m),
+      log: (m) => handlerCtx.log(m),
       // EI-20720054720826414: the host's executable raw-dispatch spelling for
       // the recovery `next` — absent ⇒ the generic host-neutral wording.
-      rawDispatchTemplate: ctx.rawDispatchTemplate,
+      rawDispatchTemplate: handlerCtx.rawDispatchTemplate,
     });
     // ToolResponse envelope → format-aware MCP content[] + _meta.
-    return serializeProjectedResult(shaped, ctx, eligibility, def, readColumns, parsed.value);
+    return serializeProjectedResult(shaped, handlerCtx, eligibility, def, readColumns, parsed.value);
   };
 
   registerProjectedTool({
