@@ -410,7 +410,7 @@ export interface ToolGuidance {
    * Example: `{ tags: 'work_items:tag { id, topic } — the ONLY writer for the
    * claim-spec-visible tags field' }`
    */
-  argRedirects?: Record<string, string>;
+  argRedirects?: Record<string, string | ToolGuidanceCorrectiveCall>;
   /**
    * Per-role override. Set ONLY the fields that differ from the base
    * guidance; shallowly merged at projection time. Use sparingly — most
@@ -421,6 +421,17 @@ export interface ToolGuidance {
    * different framing.
    */
   byRole?: Partial<Record<AgentRole, Partial<Omit<ToolGuidance, 'byRole'>>>>;
+}
+
+/**
+ * A cross-tool invalid-input remedy whose executable shape is registry-owned.
+ * `tool` and `args` are validated together before prompt/error rendering; `note`
+ * remains authored workflow semantics and is never parsed as a call.
+ */
+export interface ToolGuidanceCorrectiveCall {
+  tool: string;
+  args: Record<string, unknown>;
+  note?: string;
 }
 
 /**
