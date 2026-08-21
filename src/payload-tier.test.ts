@@ -730,4 +730,86 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
       expect(m).not.toMatch(/~\d+ chars/);
     }
   });
+
+  // EI-21058972492075433 — release:checkpoint-run's own launch receipt, once its
+  // diagnostics (excludedCommits, a repair queue, callerEditsInCandidate, a long
+  // prose `note`) are rich enough to fill the 20-slot omission sample and the
+  // 2,000-char cursor-args budget, pushed the projector's OWN bookkeeping past
+  // the tier target — even though the walk itself had already fit `ok`,
+  // `launched`, and `candidate` inside its data budget. The "exact last-line
+  // defense" then discarded the WHOLE preview (identity fields included) rather
+  // than the metadata that actually caused the overrun, so a singleton write —
+  // one the caller must not retry to discover whether it launched — came back
+  // with no way to tell.
+  it('REGRESSION (EI-21058972492075433): a rich write receipt keeps ok/launched/candidate even when diagnostics alone would blow the tier budget', () => {
+    const receipt = {
+      ok: true,
+      launched: true,
+      unit: 'papercusp-checkpoint-manual-abc123.service',
+      candidate: 'd8f1f2b1e7b1af680061134f021919337dcb9c9d',
+      argv: Array.from({ length: 12 }, (_, i) => `--systemd-run-arg-${i}=/some/moderately/long/path/value/${i}`),
+      logPath: '/tmp/papercusp-checkpoint-manual-abc123.service.run-2026-08-21T10-43-00.log',
+      willJudge: {
+        candidate: 'd8f1f2b1e7b1af680061134f021919337dcb9c9d',
+        tip: 'a2d69cef50a2d69cef50a2d69cef50a2d69cef5',
+        quietCutApplied: true,
+        quietCutSec: 240,
+        excludedCommits: Array.from({ length: 25 }, (_, i) => `sha${i}abcdef fix: some moderately descriptive commit subject line number ${i}`),
+        excludedPaths: Array.from({ length: 25 }, (_, i) => `packages/operator-core/lib/some/nested/path/file-${i}.ts`),
+        excludedEligibility: Array.from({ length: 25 }, (_, i) => ({ sha: `sha${i}abcdef`, subject: `commit subject ${i}`, eligibleInSec: i * 3 })),
+        soonestEligibleInSec: 12,
+      },
+      requiredAncestor: {
+        requiredSha: 'd8f1f2b1e7b1af680061134f021919337dcb9c9d',
+        candidate: 'd8f1f2b1e7b1af680061134f021919337dcb9c9d',
+        candidateSource: 'frozen-repair-queue',
+        containedAtPreflight: true,
+        repairQueue: {
+          phase: 'awaiting-fixer',
+          fixerSpawnId: 'su-abcdef12-3456-7890-abcd-ef1234567890',
+          repairHead: 'd8f1f2b1e7b1af680061134f021919337dcb9c9d',
+          attempts: 2,
+          lastAttemptAt: '2026-08-21T10:00:00.000Z',
+          notes: 'a moderately long free-text note about why this repair queue entry exists and what it is waiting on',
+        },
+        queueDecision: 'verify-repair',
+        fixerAlive: true,
+      },
+      candidateBinding: {
+        status: 'predicted-unconfirmed',
+        predictedCandidate: 'd8f1f2b1e7b1af680061134f021919337dcb9c9d',
+        actualCandidate: null,
+        verifyWith: 'release:trace — then git merge-base --is-ancestor <required-sha> <checkpointRunInFlight.candidate>',
+      },
+      callerEditsInCandidate: {
+        source: 'caller-supplied',
+        included: Array.from({ length: 20 }, (_, i) => `packages/operator-core/lib/some/other/nested/path/file-${i}.ts`),
+        missing: Array.from({ length: 5 }, (_, i) => `packages/operator-core/lib/missing/file-${i}.ts`),
+        candidateReliability: 'predicted-unconfirmed',
+        verifiedAgainstActualWriter: false,
+        warning:
+          '⚠ PRE-LAUNCH PREDICTION ONLY — the predicted candidate lacks 5 declared file(s). The detached writer can bind another commit; confirm its actual candidate with release:trace before treating a red or green as evidence about your change.',
+      },
+      note:
+        'green-checkpoint suite launched (detached, up to ~55 min). ⚠ CANDIDATE BINDING UNCONFIRMED: this receipt predicts d8f1f2b1e7b1, but the detached writer re-resolves independently and may follow a persisted frozen-repair queue. Re-read release:trace for checkpointRunInFlight.candidate before acting on containment or verdict. Watch /admin/git or the log for the verdict; if green it advances the pin. Then release:deploy { op:status } → op:trigger.',
+    };
+
+    const projected = projectBoundedPayload(receipt, {
+      toolName: 'release:checkpoint-run',
+      tier: 'trimmed',
+      args: { requiredAncestorSha: 'd8f1f2b1e7b1af680061134f021919337dcb9c9d' },
+    });
+
+    // The load-bearing outcome identity of a SINGLETON write: a caller must not
+    // retry to discover whether it launched, so these must survive no matter how
+    // much diagnostic detail gets trimmed around them.
+    expect(projected.ok).toBe(true);
+    expect(projected.launched).toBe(true);
+    expect(projected.candidate).toBe('d8f1f2b1e7b1af680061134f021919337dcb9c9d');
+    expect(projected.unit).toBe('papercusp-checkpoint-manual-abc123.service');
+    // A bare, all-detail-erased "[payload preview omitted]" placeholder is exactly
+    // the failure mode this guards: no identity, even though ok/launched/candidate
+    // demonstrably fit within the tier's own data budget on their own.
+    expect(projected.summary).toBeUndefined();
+  });
 });
