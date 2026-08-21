@@ -19,7 +19,7 @@ import { toJsonSchema } from './schema-adapter';
 import { standardValidate, formatIssues, issuesAreValueLevel, issueLeaves } from './standard-schema';
 import { register } from './registry';
 import { collectToolEmits } from './emits-registry';
-import { registerProjectedTool } from './tool-projection';
+import { registerProjectedTool, recordToolShapers } from './tool-projection';
 import { UnauthorizedToolError, InvalidInputError } from './dispatch-projected';
 import { serverVintageHint } from './server-vintage';
 import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
@@ -712,6 +712,12 @@ function definePrincipalGatedTool(input) {
         // WI-37843: see ToolDefinition.ignoreSessionPayloadTier.
         ignoreSessionPayloadTier: input.ignoreSessionPayloadTier,
     };
+    // EI-20803112372029993: make the declared shapers reachable from the catalog.
+    // `def.shape` is otherwise closed over by the dispatch handler below and by
+    // nothing else, so no guard could enumerate the tools that rebuild rows at the
+    // trimmed tier. Recorded with the `returns` prose because the contract check
+    // derives its field list from that promise rather than a second hand-typed list.
+    recordToolShapers(name, input.shape, input.guidance?.returns);
     // ORDER IS LOAD-BEARING: project FIRST (its first act is the guarded
     // args→JSON-Schema conversion), and only then enter the catalog.
     //
@@ -751,6 +757,12 @@ function defineRoleGatedTool(input) {
         throw new Error('defineTool: could not derive tool name from call site. ' +
             'Pass `name` explicitly or place the file under `tools/<group>/<verb>.ts`.');
     }
+    // EI-20803112372029993 — see the twin call in `definePrincipalGatedTool`.
+    // Recorded per-branch rather than once in the `defineTool` dispatcher because
+    // the name is only resolved here: a tool that omits `name` and lets it be
+    // derived from the call site is invisible upstream, and the SU tools this
+    // guard exists for (routines:list among them) all take this branch.
+    recordToolShapers(name, input.shape, input.guidance?.returns);
     const description = input.description ??
         describeFromGuidance(input.guidance) ??
         `Tool ${name}`;
@@ -1599,6 +1611,9 @@ function registerLegacyAsProjected(def, expose) {
             ceilingChars: def.payloadTierCeilingChars,
             args: parsed.value,
             log: (m) => ctx.log(m),
+            // EI-20720054720826414: the host's executable raw-dispatch spelling for
+            // the recovery `next` — absent ⇒ the generic host-neutral wording.
+            rawDispatchTemplate: ctx.rawDispatchTemplate,
         });
         return serializeProjectedResult(shaped, ctx, eligibility, def, readColumns, parsed.value);
     };
@@ -1717,11 +1732,11 @@ function registerRoleGatedAsProjected(def, expose) {
         // re-encoded for the token win (P-002); see `reencodableJsonPayload` — it is
         // a no-op on every non-mcp transport, so verbatim-content consumers are safe.
         if (out && typeof out === 'object' && Array.isArray(out.content)) {
-            const reencodable = reencodableJsonPayload(out, ctx);
+            const reencodable = reencodableJsonPayload(out, handlerCtx);
             if (reencodable !== undefined) {
-                return serializeProjectedResult({ data: reencodable }, ctx, eligibility, def, readColumns, parsed.value);
+                return serializeProjectedResult({ data: reencodable }, handlerCtx, eligibility, def, readColumns, parsed.value);
             }
-            return attachRequestedStructuredContent(out, ctx, def);
+            return attachRequestedStructuredContent(out, handlerCtx, def);
         }
         // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
         // the session/call tier before format-aware serialization. Unshaped tools
@@ -1733,7 +1748,7 @@ function registerRoleGatedAsProjected(def, expose) {
             // WI-37843: a tool may opt OUT of routine per-session shaping, in which
             // case the session tier is discarded and an un-overridden call resolves
             // to 'full'. An explicit per-call payloadTier still wins either way.
-            tier: resolvePayloadTier(callTier, ctx.contextTier, {
+            tier: resolvePayloadTier(callTier, handlerCtx.contextTier, {
                 ignoreSessionTier: def.ignoreSessionPayloadTier,
             }),
             // An explicit per-call payloadTier:'full' is the documented escape hatch
@@ -1741,16 +1756,19 @@ function registerRoleGatedAsProjected(def, expose) {
             // never a defaulted/session 'full'. A ctx-borne `transportCapExempt`
             // consumer (code:run's inner dispatch — the result never reaches an
             // agent's context) gets the same exemption (EI-18719561823587590).
-            explicitFullRequest: callTier === 'full' || ctx.transportCapExempt === true,
+            explicitFullRequest: callTier === 'full' || handlerCtx.transportCapExempt === true,
             // WI-37843: a tool may raise its OWN hard ceiling (coord:orient, the
             // session-bootstrap read, whose full payload IS the value). Absent ⇒ the
             // shared PAYLOAD_TIER_HARD_CEILING_CHARS, unchanged for every other tool.
             ceilingChars: def.payloadTierCeilingChars,
             args: parsed.value,
-            log: (m) => ctx.log(m),
+            log: (m) => handlerCtx.log(m),
+            // EI-20720054720826414: the host's executable raw-dispatch spelling for
+            // the recovery `next` — absent ⇒ the generic host-neutral wording.
+            rawDispatchTemplate: handlerCtx.rawDispatchTemplate,
         });
         // ToolResponse envelope → format-aware MCP content[] + _meta.
-        return serializeProjectedResult(shaped, ctx, eligibility, def, readColumns, parsed.value);
+        return serializeProjectedResult(shaped, handlerCtx, eligibility, def, readColumns, parsed.value);
     };
     registerProjectedTool({
         pluginName: 'agent-mcp',

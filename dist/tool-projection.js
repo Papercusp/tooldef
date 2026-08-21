@@ -117,11 +117,30 @@ if (!__g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY]) {
         REGISTRY: new Map(),
         BY_MCP_NAME: new Map(),
         BY_HTTP_PATH: new Map(),
+        SHAPERS: new Map(),
     };
 }
 const REGISTRY = __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].REGISTRY;
 const BY_MCP_NAME = __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].BY_MCP_NAME;
 const BY_HTTP_PATH = __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].BY_HTTP_PATH;
+// A store pinned before this field existed has no SHAPERS map (an older module
+// record can win the `if (!__g[...])` race above). Backfill rather than letting
+// `.set` throw on undefined — an absent map must degrade to "nothing recorded",
+// never to a crash at import time.
+const SHAPERS = (__g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].SHAPERS ??= new Map());
+/**
+ * Record a tool's declared payload shapers. Called by `defineTool`; the shapers
+ * are otherwise unreachable from the catalog (see `RegistryStore.SHAPERS`).
+ */
+export function recordToolShapers(name, shape, returns) {
+    if (!shape)
+        return;
+    SHAPERS.set(name, { shape, returns });
+}
+/** Every tool that declared payload shapers, with its `guidance.returns` prose. */
+export function listDeclaredToolShapers() {
+    return [...SHAPERS.entries()].map(([name, v]) => ({ name, ...v }));
+}
 /** Stable unique key for a tool entry. */
 function entryKey(tool) {
     // Prefer mcp.name; fall back to http.path; last resort plugin/<idx>.
@@ -264,6 +283,14 @@ export function unregisterProjectedToolsForPlugin(pluginName) {
     let removed = 0;
     for (const [k, t] of Array.from(REGISTRY.entries())) {
         if (t.pluginName === pluginName) {
+            // EI-20803112372029993: drop the plugin's declared shapers too, and do it
+            // HERE — the entry is gone from REGISTRY by the end of this loop, so a
+            // later pass over it would find nothing and silently leak. Tool names are
+            // unique across the registry, so deleting by name cannot reach a core tool;
+            // leaving them behind would let the contract check report a violation
+            // against a tool that is no longer loaded.
+            if (t.expose.mcp?.name)
+                SHAPERS.delete(t.expose.mcp.name);
             REGISTRY.delete(k);
             removed++;
         }
@@ -466,4 +493,5 @@ export function _resetProjectionRegistryForTests() {
     REGISTRY.clear();
     BY_MCP_NAME.clear();
     BY_HTTP_PATH.clear();
+    SHAPERS.clear();
 }

@@ -396,6 +396,35 @@ function projectCursorArgs(args) {
     return { args: bounded, truncated: true };
 }
 /**
+ * The generic recovery `next` for a bounded payload — kept budget-conscious on
+ * purpose: this string shares the projection's char budget with the retained
+ * preview, so every char here evicts a preview field (EI-20685195115158619).
+ * With a host `rawDispatchTemplate` the abstract "route through your host's
+ * raw-args dispatch path" explainer is REPLACED by the concrete executable
+ * call, so the executable branch is no longer than the abstract one.
+ */
+function buildDefaultRecoveryNext(opts, argsTruncated) {
+    const rawCall = opts.rawDispatchTemplate?.replaceAll('{tool}', opts.toolName);
+    const lessHint = ` Prefer LESS over more: re-call with the tool's own narrowing args (limit/since/filters) ` +
+        `or projection { pick: ["[].field"] } instead of paging a full payload.`;
+    if (argsTruncated) {
+        return (`Call ${opts.toolName} again with the ORIGINAL request args and payloadTier:'full' for full detail. ` +
+            `_projection.cursor.args is only a bounded identity preview; ` +
+            (rawCall
+                ? `dispatch it as: ${rawCall} (with the original args restored).`
+                : `route the original args through your host's raw-args dispatch path.`) +
+            lessHint);
+    }
+    return (`Call ${opts.toolName} again with _projection.cursor.args for full detail. ` +
+        `NOTE: 'payloadTier' is FRAMEWORK-RESERVED — stripped before schema validation and absent from ` +
+        `${opts.toolName}'s published schema (additionalProperties:false), so a schema-validating client ` +
+        `REJECTS it on a direct call; ` +
+        (rawCall
+            ? `dispatch it as: ${rawCall}.`
+            : `route these args through your host's raw-args dispatch path instead.`) +
+        lessHint);
+}
+/**
  * Framework fallback for a large result whose tool has no usable custom
  * shaper. It preserves a structural preview, makes every omission explicit,
  * and points to the opt-in full-detail request. The returned value is always
@@ -445,15 +474,13 @@ export function projectBoundedPayload(data, opts) {
         // deepStrictifyInPlace stamps those schemas additionalProperties:false. The
         // caller therefore gets a validation rejection while following the tool's own
         // printed recovery instruction — at exactly the moment they are trying to
-        // recover a field they have just been told was dropped. Say what is true.
-        next: opts.recovery?.next ?? (cursorArgs.truncated
-            ? `Call ${opts.toolName} again with the ORIGINAL request args and payloadTier:'full' for full detail. ` +
-                `_projection.cursor.args is only a bounded identity preview; route the original args through your ` +
-                `host's raw-args dispatch path.`
-            : `Call ${opts.toolName} again with _projection.cursor.args for full detail. ` +
-                `NOTE: 'payloadTier' is FRAMEWORK-RESERVED — stripped before schema validation and absent from ` +
-                `${opts.toolName}'s published schema (additionalProperties:false), so a schema-validating client ` +
-                `REJECTS it on a direct call; route these args through your host's raw-args dispatch path instead.`),
+        // recover a field they have just been told was dropped. Say what is true —
+        // and, when the host has told us its raw-dispatch spelling
+        // (rawDispatchTemplate, EI-20720054720826414), say the EXECUTABLE thing:
+        // "route through your host's raw-args dispatch path" is a description of an
+        // instruction, not an instruction. Both branches also close with the
+        // ask-for-LESS lead: for an oversized result, narrowing beats paging.
+        next: opts.recovery?.next ?? buildDefaultRecoveryNext(opts, cursorArgs.truncated),
     };
     let result = Array.isArray(preview)
         ? { items: preview, _projection: metadata }
@@ -535,7 +562,9 @@ export function applyPayloadTier(opts) {
                 ratchetWarned.add(key);
                 (log ?? console.warn)(`[payload-tier] ${toolName} bounded a ${size}-char unshaped payload for a '${tier}' session — add shape.${tier} for a domain-specific projection (context-trimming-tiers P-011)`);
             }
-            const projected = projectBoundedPayload(response.data, { toolName, tier, originalChars: size, args });
+            const projected = projectBoundedPayload(response.data, {
+                toolName, tier, originalChars: size, args, rawDispatchTemplate: opts.rawDispatchTemplate,
+            });
             out = {
                 ...response,
                 data: projected,
@@ -593,7 +622,9 @@ export function applyPayloadTier(opts) {
         }
         (log ?? console.warn)(`[payload-tier] ${toolName} '${tier}' result ${size} chars > hard ceiling ${ceiling}; used the generic bounded projection to fit the transport cap`);
         {
-            const projected = projectBoundedPayload(out.data, { toolName, tier, forced: true, originalChars: size, args });
+            const projected = projectBoundedPayload(out.data, {
+                toolName, tier, forced: true, originalChars: size, args, rawDispatchTemplate: opts.rawDispatchTemplate,
+            });
             return {
                 ...response,
                 data: projected,
