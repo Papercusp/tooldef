@@ -1529,6 +1529,53 @@ export function listAllProjectedTools(): readonly ProjectedTool[] {
 }
 
 /**
+ * Stable content revision for the executable MCP contract.
+ *
+ * The registry is the authority for names, accepted argument shapes, and
+ * client/role visibility. Every agent-facing projection carries this same
+ * revision so callers can detect guidance produced from a different contract.
+ * Registration order is deliberately excluded; executable content is not.
+ */
+export function projectedToolRegistryRevision(
+  tools: readonly Pick<
+    ProjectedTool,
+    'expose' | 'inputSchema' | 'discoveryInputSchema' | 'agentRoles' | 'profile' | 'modality'
+  >[] = listAllProjectedTools(),
+): string {
+  const canonical = (value: unknown): string => {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+    if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+    const row = value as Record<string, unknown>;
+    return `{${Object.keys(row)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonical(row[key])}`)
+      .join(',')}}`;
+  };
+  const contracts = tools
+    .flatMap((tool) => {
+      const name = tool.expose.mcp?.name;
+      if (!name) return [];
+      return [{
+        name,
+        inputSchema: tool.discoveryInputSchema ?? tool.inputSchema,
+        agentRoles: [...(tool.agentRoles ?? [])].sort(),
+        profile: tool.profile ?? 'all',
+        modality: [...(tool.modality ?? ['text', 'voice'])].sort(),
+      }];
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  // Deterministic drift watermark, not a security primitive. FNV-1a avoids
+  // making this generic registry module Node-crypto-specific.
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of new TextEncoder().encode(canonical(contracts))) {
+    hash ^= BigInt(byte);
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+  }
+  return `projected-tool-registry-v1:${hash.toString(16).padStart(16, '0')}`;
+}
+
+/**
  * True if a tool declares ANY auth gate — a capability, an agent-role allowlist, an RBAC
  * role requirement, or an `authorize` hook. The single predicate behind both the
  * default-deny dispatch gate and `listUngatedProjectedTools` (RFC tooldef-auth Phase 3),
@@ -1648,6 +1695,7 @@ function serializeEventsSchema(events: EventsSchema): Record<string, Record<stri
 
 export function listMcpProjections(role?: AgentRole, profile?: 'engineer' | 'power'): McpToolListing[] {
   const out: McpToolListing[] = [];
+  const registryRevision = projectedToolRegistryRevision();
   for (const tool of REGISTRY.values()) {
     if (!tool.expose.mcp) continue;
     if (role && tool.agentRoles && !tool.agentRoles.includes(role)) continue;
@@ -1660,6 +1708,10 @@ export function listMcpProjections(role?: AgentRole, profile?: 'engineer' | 'pow
       name: tool.expose.mcp.name,
       description: tool.description,
       inputSchema: tool.inputSchema,
+      _meta: {
+        'papercusp/toolRegistryRevision': registryRevision,
+        'papercusp/toolRegistrySource': 'projected-tool-registry',
+      },
     };
     // Advertise the output schema + negotiable formats when the tool declared
     // an output schema (P-010). Tools without one still get the runtime

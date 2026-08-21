@@ -12,6 +12,7 @@ import {
   lookupByHttpPath,
   listAllProjectedTools,
   listMcpProjections,
+  projectedToolRegistryRevision,
   classifyEventWire,
   ToolRegistrationError,
   _resetProjectionRegistryForTests,
@@ -259,7 +260,7 @@ describe('listMcpProjections', () => {
     expect(workerView).toEqual(['a.worker', 'c.any']);
   });
 
-  it('exposes name + description + inputSchema only when events is absent', () => {
+  it('exposes the executable contract plus shared registry provenance when events is absent', () => {
     registerProjectedTool(baseTool({
       description: 'desc x',
       inputSchema: { type: 'object', properties: { foo: { type: 'string' } } },
@@ -271,10 +272,27 @@ describe('listMcpProjections', () => {
       name: 'x.tool',
       description: 'desc x',
       inputSchema: { type: 'object', properties: { foo: { type: 'string' } } },
+      _meta: {
+        'papercusp/toolRegistryRevision': projectedToolRegistryRevision(),
+        'papercusp/toolRegistrySource': 'projected-tool-registry',
+      },
     });
     // capabilities, roles, etc. NOT exposed in listing — agents see only the contract.
     expect((list[0] as unknown as Record<string, unknown>).capabilities).toBeUndefined();
     expect((list[0] as unknown as Record<string, unknown>).events).toBeUndefined();
+  });
+
+  it('uses one order-independent revision and changes it when an accepted schema changes', () => {
+    const a = baseTool({
+      expose: { mcp: { name: 'rev:a' } },
+      inputSchema: { type: 'object', properties: { x: { type: 'string' } }, required: ['x'] },
+    });
+    const b = baseTool({ expose: { mcp: { name: 'rev:b' } } });
+    expect(projectedToolRegistryRevision([a, b])).toBe(projectedToolRegistryRevision([b, a]));
+    expect(projectedToolRegistryRevision([a, b])).not.toBe(projectedToolRegistryRevision([
+      { ...a, inputSchema: { type: 'object', properties: { x: { type: 'number' } }, required: ['x'] } },
+      b,
+    ]));
   });
 
   it('surfaces events schemas as JSON-Schema when the tool declares them', () => {
