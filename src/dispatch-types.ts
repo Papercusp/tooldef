@@ -99,6 +99,12 @@ export interface InvalidInputCorrection {
   rejectedArg: string;
   target: string;
   kind: 'authored-redirect' | 'nested-path' | 'near-name';
+  call?: {
+    tool: string;
+    args: Record<string, unknown>;
+    source: 'projected-tool-registry';
+    registryRevision: string;
+  };
 }
 
 export interface InvalidInputMetadata {

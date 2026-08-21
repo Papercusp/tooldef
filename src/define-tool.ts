@@ -24,8 +24,10 @@ import { collectToolEmits } from './emits-registry';
 import {
   PROJECTED_TOOL_REGISTRY_SOURCE,
   projectedToolRegistryRevision,
+  renderProjectedToolCall,
   registerProjectedTool,
   recordToolShapers,
+  type ProjectedToolCorrectiveCall,
   type ToolFn,
   type ToolExposure,
   type UnifiedToolContext,
@@ -1291,7 +1293,7 @@ export function nestedArgPaths(props: Record<string, unknown> | undefined): Map<
 export function invalidInputCorrections(
   issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
   rawSchema: unknown,
-  argRedirects?: Record<string, string>,
+  argRedirects?: Record<string, string | ProjectedToolCorrectiveCall>,
 ): InvalidInputCorrection[] {
   const msgs = (issues ?? []).map((i) => i?.message ?? '').join(' ');
   if (!/nrecognized key/i.test(msgs)) return [];
@@ -1317,6 +1319,21 @@ export function invalidInputCorrections(
     if (typeof redirect === 'string' && redirect.length > 0) {
       return [{ rejectedArg, target: redirect, kind: 'authored-redirect' }];
     }
+    if (redirect && typeof redirect === 'object') {
+      const registryRevision = projectedToolRegistryRevision();
+      const rendered = renderProjectedToolCall(redirect.tool, redirect.args);
+      return [{
+        rejectedArg,
+        target: `${rendered}${redirect.note ? ` — ${redirect.note}` : ''}`,
+        kind: 'authored-redirect',
+        call: {
+          tool: redirect.tool,
+          args: redirect.args,
+          source: PROJECTED_TOOL_REGISTRY_SOURCE,
+          registryRevision,
+        },
+      }];
+    }
     const nestedTarget = nested.get(rejectedArg);
     if (nestedTarget) return [{ rejectedArg, target: nestedTarget, kind: 'nested-path' }];
     const nearName = suggestArgName(rejectedArg, keys);
@@ -1329,7 +1346,7 @@ export function invalidInputCorrections(
 export function unknownArgHint(
   issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
   rawSchema: unknown,
-  argRedirects?: Record<string, string>,
+  argRedirects?: Record<string, string | ProjectedToolCorrectiveCall>,
 ): string {
   const msgs = (issues ?? []).map((i) => i?.message ?? '').join(' ');
   if (!/nrecognized key/i.test(msgs)) return '';
@@ -1364,7 +1381,7 @@ function makeInvalidInputError(
   issues: ReadonlyArray<StandardSchemaV1.Issue>,
   input: unknown,
   rawSchema: unknown,
-  argRedirects: Record<string, string> | undefined,
+  argRedirects: Record<string, string | ProjectedToolCorrectiveCall> | undefined,
   schemaHintCache: { hint?: string },
 ): InvalidInputError {
   const metadata: InvalidInputMetadata = {

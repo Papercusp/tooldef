@@ -18,6 +18,7 @@ import {
   projectedToolCallContract,
   assertProjectedToolCallContract,
   renderProjectedToolCall,
+  projectedToolCorrectiveCalls,
   ProjectedToolContractError,
   classifyEventWire,
   ToolRegistrationError,
@@ -522,6 +523,80 @@ describe('registry-derived executable tool contracts (P-002)', () => {
       .toThrow(/modality voice is not admitted/);
     expect(() => projectedToolCallContract('fleet:missing'))
       .toThrow(ProjectedToolContractError);
+  });
+
+  it('validates structured corrective calls against target schema and client admission', () => {
+    registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'work_items:tag' } },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          topic: { type: 'string' },
+          mode: { type: 'string', enum: ['add', 'remove'] },
+        },
+        required: ['id', 'topic', 'mode'],
+        additionalProperties: false,
+      },
+      agentRoles: ['worker'],
+      profile: 'engineer',
+      modality: ['text'],
+    }));
+    registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'work_items:update' } },
+      agentRoles: ['worker'],
+      profile: 'engineer',
+      modality: ['text'],
+      guidance: {
+        argRedirects: {
+          tags: {
+            tool: 'work_items:tag',
+            args: { id: '<work-item-id>', topic: '<topic>', mode: 'add' },
+            note: 'the canonical tag writer',
+          },
+        },
+      },
+    }));
+
+    expect(projectedToolCorrectiveCalls('work_items:update', {
+      role: 'worker', profile: 'engineer', modality: 'text',
+    })).toEqual([expect.objectContaining({
+      rejectedArg: 'tags',
+      tool: 'work_items:tag',
+      args: { id: '<work-item-id>', topic: '<topic>', mode: 'add' },
+      note: 'the canonical tag writer',
+      source: PROJECTED_TOOL_REGISTRY_SOURCE,
+      registryRevision: projectedToolRegistryRevision(),
+      rendered: 'work_items:tag {"id":"<work-item-id>","topic":"<topic>","mode":"add"}',
+    })]);
+    expect(() => projectedToolCorrectiveCalls('work_items:update', { role: 'architect' }))
+      .toThrow(/role architect is not admitted/);
+    expect(() => projectedToolCorrectiveCalls('work_items:update', { role: 'worker', modality: 'voice' }))
+      .toThrow(/modality voice is not admitted/);
+  });
+
+  it('fails structured corrective-call conformance on missing tools, required keys, enums, and undeclared keys', () => {
+    const targetSchema = {
+      type: 'object',
+      properties: { id: { type: 'string' }, mode: { type: 'string', enum: ['add'] } },
+      required: ['id', 'mode'],
+      additionalProperties: false,
+    };
+    registerProjectedTool(baseTool({ expose: { mcp: { name: 'target:write' } }, inputSchema: targetSchema }));
+    const source = (name: string, tool: string, args: Record<string, unknown>) => registerProjectedTool(baseTool({
+      expose: { mcp: { name } },
+      guidance: { argRedirects: { stale: { tool, args } } },
+    }));
+
+    source('source:missing', 'target:missing', { id: 'x', mode: 'add' });
+    source('source:required', 'target:write', { mode: 'add' });
+    source('source:enum', 'target:write', { id: 'x', mode: 'remove' });
+    source('source:extra', 'target:write', { id: 'x', mode: 'add', stale: true });
+
+    expect(() => projectedToolCorrectiveCalls('source:missing')).toThrow(/tool contract unavailable/);
+    expect(() => projectedToolCorrectiveCalls('source:required')).toThrow(/\.id: required/);
+    expect(() => projectedToolCorrectiveCalls('source:enum')).toThrow(/not one of add/);
+    expect(() => projectedToolCorrectiveCalls('source:extra')).toThrow(/\.stale: undeclared key/);
   });
 });
 

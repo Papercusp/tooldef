@@ -1201,10 +1201,23 @@ export interface ProjectedTool {
      */
     returns?: string;
     /** Authored rejected-key → canonical field/tool correction map. */
-    argRedirects?: Record<string, string>;
+    argRedirects?: Record<string, string | ProjectedToolCorrectiveCall>;
     seeAlso?: import('./see-also').SeeAlso;
     byRole?: Record<string, { when?: string; notWhen?: string; chaining?: string }>;
   };
+}
+
+export interface ProjectedToolCorrectiveCall {
+  tool: string;
+  args: Record<string, unknown>;
+  note?: string;
+}
+
+export interface ValidatedProjectedToolCorrectiveCall extends ProjectedToolCorrectiveCall {
+  rejectedArg: string;
+  source: typeof PROJECTED_TOOL_REGISTRY_SOURCE;
+  registryRevision: string;
+  rendered: string;
 }
 
 /* ─── Registry ───────────────────────────────────────────────────────── */
@@ -1644,10 +1657,12 @@ export function projectedToolCallContract(
     name,
     inputSchema: tool.discoveryInputSchema ?? tool.inputSchema,
     aliases: Object.fromEntries(
-      Object.entries(tool.guidance?.argRedirects ?? {}).map(([key, target]) => [
+      Object.entries(tool.guidance?.argRedirects ?? {})
+        .filter((entry): entry is [string, string] => typeof entry[1] === 'string')
+        .map(([key, target]) => [
         key,
         { target, provenance: 'authored-tool-guidance' as const },
-      ]),
+        ]),
     ),
   };
 }
@@ -1731,6 +1746,72 @@ export function renderProjectedToolCall(
 ): string {
   assertProjectedToolCallContract(name, args, context);
   return `${name} ${JSON.stringify(args)}`;
+}
+
+/** Validate and render every structured rejected-arg remedy on one source tool. */
+export function projectedToolCorrectiveCalls(
+  name: string,
+  context: ProjectedToolAvailability = {},
+): ValidatedProjectedToolCorrectiveCall[] {
+  projectedToolCallContract(name, context);
+  const tool = lookupByMcpName(name)!;
+  return Object.entries(tool.guidance?.argRedirects ?? {}).flatMap(([rejectedArg, redirect]) => {
+    if (typeof redirect === 'string') return [];
+    const rendered = renderProjectedToolCall(redirect.tool, redirect.args, context);
+    return [{
+      rejectedArg,
+      tool: redirect.tool,
+      args: redirect.args,
+      ...(redirect.note ? { note: redirect.note } : {}),
+      source: PROJECTED_TOOL_REGISTRY_SOURCE,
+      registryRevision: projectedToolRegistryRevision(),
+      rendered,
+    }];
+  });
+}
+
+export interface ProjectedToolGuidanceConformance {
+  source: typeof PROJECTED_TOOL_REGISTRY_SOURCE;
+  registryRevision: string;
+  toolsChecked: number;
+  correctiveCallsChecked: number;
+}
+
+/**
+ * CI/render rail for executable guidance. Every context admitted by the source
+ * tool must also admit the remedy, and every remedy must satisfy the target's
+ * current required/enum/closed-object schema.
+ */
+export function assertProjectedToolGuidanceConformance(): ProjectedToolGuidanceConformance {
+  let toolsChecked = 0;
+  let correctiveCallsChecked = 0;
+  for (const tool of listAllProjectedTools()) {
+    const name = tool.expose.mcp?.name;
+    if (!name) continue;
+    const hasStructured = Object.values(tool.guidance?.argRedirects ?? {}).some(
+      (redirect) => typeof redirect === 'object' && redirect !== null,
+    );
+    if (!hasStructured) continue;
+    toolsChecked += 1;
+    const roles: Array<AgentRole | undefined> = tool.agentRoles?.length ? [...tool.agentRoles] : [undefined];
+    const profiles: Array<'engineer' | 'power'> = tool.profile === 'engineer'
+      ? ['engineer']
+      : ['engineer', 'power'];
+    const modalities: Array<'text' | 'voice'> = [...(tool.modality ?? ['text', 'voice'])];
+    for (const role of roles) {
+      for (const profile of profiles) {
+        for (const modality of modalities) {
+          correctiveCallsChecked += projectedToolCorrectiveCalls(name, { role, profile, modality }).length;
+        }
+      }
+    }
+  }
+  return {
+    source: PROJECTED_TOOL_REGISTRY_SOURCE,
+    registryRevision: projectedToolRegistryRevision(),
+    toolsChecked,
+    correctiveCallsChecked,
+  };
 }
 
 /**
