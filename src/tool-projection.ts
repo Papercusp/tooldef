@@ -1200,6 +1200,8 @@ export interface ProjectedTool {
      * so every consumer gets it typed, not just the one that cast around the gap.
      */
     returns?: string;
+    /** Authored rejected-key → canonical field/tool correction map. */
+    argRedirects?: Record<string, string>;
     seeAlso?: import('./see-also').SeeAlso;
     byRole?: Record<string, { when?: string; notWhen?: string; chaining?: string }>;
   };
@@ -1235,6 +1237,9 @@ interface RegistryStore {
    * `lint:no-hand-rolled-module-pin`, and a split here would under-report).
    */
   SHAPERS: Map<string, { shape: PayloadShapers; returns?: string }>;
+  /** Mutation epoch + cached executable-contract revision (shared across module instances). */
+  CONTRACT_EPOCH?: number;
+  CONTRACT_REVISION_CACHE?: { epoch: number; revision: string };
 }
 const __PAPERCUSP_PROJECTED_TOOL_REGISTRY = '__papercuspProjectedToolRegistry';
 const __g = globalThis as unknown as Record<string, RegistryStore>;
@@ -1244,8 +1249,10 @@ if (!__g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY]) {
     BY_MCP_NAME: new Map<string, ProjectedTool>(),
     BY_HTTP_PATH: new Map<string, ProjectedTool>(),
     SHAPERS: new Map<string, { shape: PayloadShapers; returns?: string }>(),
+    CONTRACT_EPOCH: 0,
   };
 }
+const REGISTRY_STORE = __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY];
 const REGISTRY = __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].REGISTRY;
 const BY_MCP_NAME = __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].BY_MCP_NAME;
 const BY_HTTP_PATH = __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].BY_HTTP_PATH;
@@ -1257,6 +1264,11 @@ const SHAPERS = (__g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].SHAPERS ??= new Map<
   string,
   { shape: PayloadShapers; returns?: string }
 >());
+
+function invalidateProjectedToolContract(): void {
+  REGISTRY_STORE.CONTRACT_EPOCH = (REGISTRY_STORE.CONTRACT_EPOCH ?? 0) + 1;
+  REGISTRY_STORE.CONTRACT_REVISION_CACHE = undefined;
+}
 
 /**
  * Record a tool's declared payload shapers. Called by `defineTool`; the shapers
@@ -1428,6 +1440,7 @@ export function registerProjectedTool(tool: ProjectedTool): void {
     BY_HTTP_PATH.set(p, tool);
   }
   REGISTRY.set(entryKey(tool), tool);
+  invalidateProjectedToolContract();
 }
 
 /**
@@ -1457,6 +1470,7 @@ export function unregisterProjectedToolsForPlugin(pluginName: string): number {
   for (const [k, t] of Array.from(BY_HTTP_PATH.entries())) {
     if (t.pluginName === pluginName) BY_HTTP_PATH.delete(k);
   }
+  if (removed > 0) invalidateProjectedToolContract();
   return removed;
 }
 
@@ -1536,12 +1550,22 @@ export function listAllProjectedTools(): readonly ProjectedTool[] {
  * revision so callers can detect guidance produced from a different contract.
  * Registration order is deliberately excluded; executable content is not.
  */
+export const PROJECTED_TOOL_REGISTRY_SOURCE = 'projected-tool-registry' as const;
+
 export function projectedToolRegistryRevision(
-  tools: readonly Pick<
+  tools?: readonly Pick<
     ProjectedTool,
-    'expose' | 'inputSchema' | 'discoveryInputSchema' | 'agentRoles' | 'profile' | 'modality'
-  >[] = listAllProjectedTools(),
+    'expose' | 'inputSchema' | 'discoveryInputSchema' | 'agentRoles' | 'profile' | 'modality' | 'guidance'
+  >[],
 ): string {
+  if (!tools) {
+    const epoch = REGISTRY_STORE.CONTRACT_EPOCH ?? 0;
+    const cached = REGISTRY_STORE.CONTRACT_REVISION_CACHE;
+    if (cached?.epoch === epoch) return cached.revision;
+    const revision = projectedToolRegistryRevision(listAllProjectedTools());
+    REGISTRY_STORE.CONTRACT_REVISION_CACHE = { epoch, revision };
+    return revision;
+  }
   const canonical = (value: unknown): string => {
     if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
     if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
@@ -1561,6 +1585,7 @@ export function projectedToolRegistryRevision(
         agentRoles: [...(tool.agentRoles ?? [])].sort(),
         profile: tool.profile ?? 'all',
         modality: [...(tool.modality ?? ['text', 'voice'])].sort(),
+        argRedirects: tool.guidance?.argRedirects ?? {},
       }];
     })
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -1573,6 +1598,139 @@ export function projectedToolRegistryRevision(
     hash = BigInt.asUintN(64, hash * 0x100000001b3n);
   }
   return `projected-tool-registry-v1:${hash.toString(16).padStart(16, '0')}`;
+}
+
+export interface ProjectedToolAvailability {
+  role?: AgentRole;
+  profile?: 'engineer' | 'power';
+  modality?: 'text' | 'voice';
+}
+
+export interface ProjectedToolCallContract {
+  source: typeof PROJECTED_TOOL_REGISTRY_SOURCE;
+  revision: string;
+  name: string;
+  inputSchema: Record<string, unknown>;
+  aliases: Record<string, { target: string; provenance: 'authored-tool-guidance' }>;
+}
+
+export class ProjectedToolContractError extends Error {
+  override readonly name = 'ProjectedToolContractError';
+}
+
+function availabilityProblem(tool: ProjectedTool, context: ProjectedToolAvailability): string | null {
+  if (context.role && tool.agentRoles?.length && !tool.agentRoles.includes(context.role)) {
+    return `role ${context.role} is not admitted`;
+  }
+  if (context.profile === 'power' && tool.profile === 'engineer') return 'power profile is not admitted';
+  if (context.modality && !(tool.modality ?? ['text', 'voice']).includes(context.modality)) {
+    return `modality ${context.modality} is not admitted`;
+  }
+  return null;
+}
+
+/** Resolve one exact, currently callable registry contract or fail render/CI loudly. */
+export function projectedToolCallContract(
+  name: string,
+  context: ProjectedToolAvailability = {},
+): ProjectedToolCallContract {
+  const tool = lookupByMcpName(name);
+  if (!tool?.expose.mcp) throw new ProjectedToolContractError(`tool contract unavailable: ${name}`);
+  const unavailable = availabilityProblem(tool, context);
+  if (unavailable) throw new ProjectedToolContractError(`tool contract unavailable: ${name} (${unavailable})`);
+  return {
+    source: PROJECTED_TOOL_REGISTRY_SOURCE,
+    revision: projectedToolRegistryRevision(),
+    name,
+    inputSchema: tool.discoveryInputSchema ?? tool.inputSchema,
+    aliases: Object.fromEntries(
+      Object.entries(tool.guidance?.argRedirects ?? {}).map(([key, target]) => [
+        key,
+        { target, provenance: 'authored-tool-guidance' as const },
+      ]),
+    ),
+  };
+}
+
+type ContractSchema = Record<string, unknown>;
+
+function contractProblems(schema: ContractSchema, value: unknown, path = '$'): string[] {
+  const alternatives = Array.isArray(schema.anyOf)
+    ? schema.anyOf
+    : Array.isArray(schema.oneOf)
+      ? schema.oneOf
+      : null;
+  if (alternatives) {
+    const attempts = alternatives
+      .filter((branch): branch is ContractSchema => !!branch && typeof branch === 'object' && !Array.isArray(branch))
+      .map((branch) => contractProblems(branch, value, path));
+    if (attempts.some((problems) => problems.length === 0)) return [];
+    return attempts.sort((a, b) => a.length - b.length)[0] ?? [`${path}: no declared schema branch matched`];
+  }
+  if (Array.isArray(schema.allOf)) {
+    return schema.allOf.flatMap((branch) =>
+      branch && typeof branch === 'object' && !Array.isArray(branch)
+        ? contractProblems(branch as ContractSchema, value, path)
+        : [],
+    );
+  }
+  if (Array.isArray(schema.enum) && !schema.enum.some((candidate) => Object.is(candidate, value))) {
+    return [`${path}: ${JSON.stringify(value)} is not one of ${schema.enum.map(String).join('|')}`];
+  }
+  if ('const' in schema && !Object.is(schema.const, value)) return [`${path}: expected ${JSON.stringify(schema.const)}`];
+  if (schema.type === 'object' || schema.properties) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return [`${path}: expected object`];
+    const row = value as Record<string, unknown>;
+    const properties = schema.properties && typeof schema.properties === 'object' && !Array.isArray(schema.properties)
+      ? schema.properties as Record<string, unknown>
+      : {};
+    const problems: string[] = [];
+    for (const key of Array.isArray(schema.required) ? schema.required : []) {
+      if (typeof key === 'string' && !(key in row)) problems.push(`${path}.${key}: required`);
+    }
+    if (schema.additionalProperties === false) {
+      for (const key of Object.keys(row)) if (!(key in properties)) problems.push(`${path}.${key}: undeclared key`);
+    }
+    for (const [key, child] of Object.entries(properties)) {
+      if (!(key in row) || !child || typeof child !== 'object' || Array.isArray(child)) continue;
+      problems.push(...contractProblems(child as ContractSchema, row[key], `${path}.${key}`));
+    }
+    return problems;
+  }
+  if (schema.type === 'array') {
+    if (!Array.isArray(value)) return [`${path}: expected array`];
+    const item = schema.items;
+    return item && typeof item === 'object' && !Array.isArray(item)
+      ? value.flatMap((entry, index) => contractProblems(item as ContractSchema, entry, `${path}[${index}]`))
+      : [];
+  }
+  if (schema.type === 'string' && typeof value !== 'string') return [`${path}: expected string`];
+  if ((schema.type === 'number' || schema.type === 'integer') && typeof value !== 'number') return [`${path}: expected ${schema.type}`];
+  if (schema.type === 'boolean' && typeof value !== 'boolean') return [`${path}: expected boolean`];
+  if (schema.type === 'null' && value !== null) return [`${path}: expected null`];
+  return [];
+}
+
+/** Validate a prompt/example call against the same accepted schema used for discovery. */
+export function assertProjectedToolCallContract(
+  name: string,
+  args: unknown,
+  context: ProjectedToolAvailability = {},
+): ProjectedToolCallContract {
+  const contract = projectedToolCallContract(name, context);
+  const problems = contractProblems(contract.inputSchema, args);
+  if (problems.length > 0) throw new ProjectedToolContractError(`invalid generated call for ${name}: ${problems.join('; ')}`);
+  return contract;
+}
+
+/** Render an exact example only after registry/schema/admission conformance succeeds. */
+export function renderProjectedToolCall(
+  name: string,
+  args: unknown,
+  context: ProjectedToolAvailability = {},
+): string {
+  assertProjectedToolCallContract(name, args, context);
+  return `${name} ${JSON.stringify(args)}`;
 }
 
 /**
@@ -1710,7 +1868,7 @@ export function listMcpProjections(role?: AgentRole, profile?: 'engineer' | 'pow
       inputSchema: tool.inputSchema,
       _meta: {
         'papercusp/toolRegistryRevision': registryRevision,
-        'papercusp/toolRegistrySource': 'projected-tool-registry',
+        'papercusp/toolRegistrySource': PROJECTED_TOOL_REGISTRY_SOURCE,
       },
     };
     // Advertise the output schema + negotiable formats when the tool declared
@@ -1753,5 +1911,6 @@ export function _resetProjectionRegistryForTests(): void {
   REGISTRY.clear();
   BY_MCP_NAME.clear();
   BY_HTTP_PATH.clear();
+  invalidateProjectedToolContract();
   SHAPERS.clear();
 }

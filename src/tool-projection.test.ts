@@ -6,13 +6,19 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import {
   registerProjectedTool,
+  unregisterProjectedToolsForPlugin,
   lookupByMcpName,
   resolveMcpName,
   normalizeMcpName,
   lookupByHttpPath,
   listAllProjectedTools,
   listMcpProjections,
+  PROJECTED_TOOL_REGISTRY_SOURCE,
   projectedToolRegistryRevision,
+  projectedToolCallContract,
+  assertProjectedToolCallContract,
+  renderProjectedToolCall,
+  ProjectedToolContractError,
   classifyEventWire,
   ToolRegistrationError,
   _resetProjectionRegistryForTests,
@@ -428,6 +434,94 @@ describe('listMcpProjections', () => {
       expect(names).toContain('eng.b');
     });
 
+  });
+});
+
+describe('registry-derived executable tool contracts (P-002)', () => {
+  it('returns the accepted schema, authored aliases, and registry provenance', () => {
+    const inputSchema = {
+      type: 'object',
+      properties: { current_plan_slug: { type: 'string' } },
+      required: ['current_plan_slug'],
+      additionalProperties: false,
+    };
+    registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'coord:declare-intent' } },
+      inputSchema,
+      guidance: { argRedirects: { planSlug: 'current_plan_slug' } },
+    }));
+
+    expect(projectedToolCallContract('coord:declare-intent')).toEqual({
+      source: PROJECTED_TOOL_REGISTRY_SOURCE,
+      revision: projectedToolRegistryRevision(),
+      name: 'coord:declare-intent',
+      inputSchema,
+      aliases: {
+        planSlug: { target: 'current_plan_slug', provenance: 'authored-tool-guidance' },
+      },
+    });
+  });
+
+  it('invalidates the cached registry revision after register and unregister mutations', () => {
+    registerProjectedTool(baseTool({ expose: { mcp: { name: 'revision:first' } } }));
+    const before = projectedToolRegistryRevision();
+    expect(projectedToolRegistryRevision()).toBe(before);
+
+    registerProjectedTool(baseTool({
+      pluginName: 'temporary-contract',
+      expose: { mcp: { name: 'revision:second' } },
+    }));
+    const afterRegister = projectedToolRegistryRevision();
+    expect(afterRegister).not.toBe(before);
+
+    expect(unregisterProjectedToolsForPlugin('temporary-contract')).toBe(1);
+    expect(projectedToolRegistryRevision()).toBe(before);
+  });
+
+  it('renders only calls that satisfy required, enum, and undeclared-key constraints', () => {
+    registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'work_items:complete' } },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          state: { type: 'string', enum: ['done', 'resolved'] },
+        },
+        required: ['id', 'state'],
+        additionalProperties: false,
+      },
+    }));
+
+    expect(renderProjectedToolCall('work_items:complete', { id: 'WI-1', state: 'done' }))
+      .toBe('work_items:complete {"id":"WI-1","state":"done"}');
+    expect(() => assertProjectedToolCallContract('work_items:complete', { state: 'done' }))
+      .toThrow(/\$\.id: required/);
+    expect(() => assertProjectedToolCallContract('work_items:complete', { id: 'WI-1', state: 'closed' }))
+      .toThrow(/not one of done\|resolved/);
+    expect(() => assertProjectedToolCallContract('work_items:complete', {
+      id: 'WI-1', state: 'done', completion: 'extra',
+    })).toThrow(/\$\.completion: undeclared key/);
+  });
+
+  it('fails closed when the tool is absent or excluded by role, profile, or modality', () => {
+    registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'fleet:restricted' } },
+      agentRoles: ['worker'],
+      profile: 'engineer',
+      modality: ['text'],
+    }));
+
+    expect(projectedToolCallContract('fleet:restricted', {
+      role: 'worker', profile: 'engineer', modality: 'text',
+    }).name).toBe('fleet:restricted');
+    expect(() => projectedToolCallContract('fleet:restricted', { role: 'architect' }))
+      .toThrow(/role architect is not admitted/);
+    expect(() => projectedToolCallContract('fleet:restricted', { profile: 'power' }))
+      .toThrow(/power profile is not admitted/);
+    expect(() => projectedToolCallContract('fleet:restricted', { modality: 'voice' }))
+      .toThrow(/modality voice is not admitted/);
+    expect(() => projectedToolCallContract('fleet:missing'))
+      .toThrow(ProjectedToolContractError);
   });
 });
 
