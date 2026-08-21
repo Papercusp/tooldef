@@ -37,6 +37,8 @@ export {
   type DispatchProjectedDeps,
   type DispatchProjectedErrorCode,
   type DispatchProjectedResult,
+  type InvalidInputCorrection,
+  type InvalidInputMetadata,
   type PostInvokeEvent,
   type CapabilityEnvelopeVerdict,
   type ToolDispatchOverrideFn,

@@ -95,6 +95,19 @@ export class HarnessRequiredError extends Error {
   override readonly name = 'HarnessRequiredError';
 }
 
+export interface InvalidInputCorrection {
+  rejectedArg: string;
+  target: string;
+  kind: 'authored-redirect' | 'nested-path' | 'near-name';
+}
+
+export interface InvalidInputMetadata {
+  source: 'projected-tool-registry';
+  registryRevision: string;
+  toolName: string;
+  corrections: InvalidInputCorrection[];
+}
+
 /**
  * Throw to signal the CALLER's input failed schema validation. The dispatcher
  * surfaces this as `invalid_input` (HTTP 400) instead of `handler_error`
@@ -105,6 +118,13 @@ export class HarnessRequiredError extends Error {
  */
 export class InvalidInputError extends Error {
   override readonly name = 'InvalidInputError';
+
+  constructor(
+    message: string,
+    readonly metadata?: InvalidInputMetadata,
+  ) {
+    super(message);
+  }
 }
 
 export interface DispatchProjectedResult {

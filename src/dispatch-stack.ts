@@ -24,7 +24,12 @@ import type { ToolResult } from './wire';
 import { applySeeAlso } from './see-also';
 import { applyResultAnnotator } from './result-annotator';
 import type { AgentRole } from './host-types';
-import { toolDeclaresGate, type ProjectedTool, type UnifiedToolContext } from './tool-projection';
+import {
+  PROJECTED_TOOL_REGISTRY_SOURCE,
+  toolDeclaresGate,
+  type ProjectedTool,
+  type UnifiedToolContext,
+} from './tool-projection';
 import {
   openBuffer as openReplayBuffer,
   type ReplayBufferWriter,
@@ -675,7 +680,15 @@ const invokeStep: DispatchStep = {
       // `handler_error` (500) keeps caller mistakes out of the structural
       // tool-error telemetry class (EI-334's false-fire leg).
       if (err instanceof InvalidInputError || errName === 'InvalidInputError') {
-        return { ok: false, error: { code: 'invalid_input', message: (err as Error).message } };
+        const meta = extractInvalidInputErrorMetadata(err);
+        return {
+          ok: false,
+          error: {
+            code: 'invalid_input',
+            message: (err as Error).message,
+            ...(meta ? { meta } : {}),
+          },
+        };
       }
       const postgresMeta = extractPostgresErrorMetadata(err);
       return {
@@ -692,6 +705,20 @@ const invokeStep: DispatchStep = {
 
 const POSTGRES_SQLSTATE_RE = /^[0-9A-Z]{5}$/;
 const POSTGRES_METADATA_STRING_MAX = 256;
+
+function extractInvalidInputErrorMetadata(error: unknown): Record<string, unknown> | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const metadata = (error as { metadata?: unknown }).metadata;
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return undefined;
+  const row = metadata as Record<string, unknown>;
+  if (
+    row.source !== PROJECTED_TOOL_REGISTRY_SOURCE ||
+    typeof row.registryRevision !== 'string' ||
+    typeof row.toolName !== 'string' ||
+    !Array.isArray(row.corrections)
+  ) return undefined;
+  return { invalidInput: metadata };
+}
 
 /**
  * Extract the stable, low-cardinality identity of a postgres-js error.
@@ -1084,6 +1111,10 @@ export function withReplacedStep(
 
 /** Max chars of a refusal code persisted to the error_code column. */
 const REFUSAL_CODE_MAX = 80;
+/** Max chars of a self-reported refusal message persisted to error_message. */
+const REFUSAL_MESSAGE_MAX = 512;
+const REFUSAL_FALLBACK_CODE = 'handler_refusal';
+const REFUSAL_FALLBACK_MESSAGE = 'tool returned isError=true without a structured refusal message';
 
 /**
  * Lift a self-reported refusal's own error code out of its payload.
@@ -1095,19 +1126,31 @@ const REFUSAL_CODE_MAX = 80;
  * (it would group cleanly and silently mislead, which is the exact failure mode
  * this whole change exists to remove).
  */
-function extractRefusalCode(r: { content?: Array<{ text?: string; [k: string]: unknown }> }): string | null {
+function extractRefusalDetails(r: { content?: Array<{ text?: string; [k: string]: unknown }> }): {
+  code: string | null;
+  message: string | null;
+} {
   const text = r.content?.[0]?.text;
-  if (typeof text !== 'string' || text.length === 0) return null;
+  if (typeof text !== 'string' || text.length === 0) return { code: null, message: null };
   try {
     const parsed: unknown = JSON.parse(text);
     if (parsed && typeof parsed === 'object') {
-      const code = (parsed as { error?: unknown }).error;
-      if (typeof code === 'string' && code.length > 0) return code.slice(0, REFUSAL_CODE_MAX);
+      const fields = parsed as Record<string, unknown>;
+      const code = [fields.error, fields.reason, fields.code, fields.errorCode].find(
+        (value): value is string => typeof value === 'string' && value.length > 0,
+      );
+      const message = [fields.message, fields.errorMessage, fields.detail].find(
+        (value): value is string => typeof value === 'string' && value.length > 0,
+      );
+      return {
+        code: code ? code.slice(0, REFUSAL_CODE_MAX) : null,
+        message: message ? message.slice(0, REFUSAL_MESSAGE_MAX) : null,
+      };
     }
   } catch {
-    /* not JSON — a refusal is still a refusal; it just has no machine code */
+    /* not JSON — a refusal is still a refusal; use the bounded fallback below */
   }
-  return null;
+  return { code: null, message: null };
 }
 
 /**
@@ -1146,7 +1189,7 @@ async function recordTelemetry(
       code === 'quota_exceeded');
   if (!isGateDenial && !windowKey) return;
 
-  const metadataJson = mergePostgresErrorMetadata(finalizeMetadata(exec), result);
+  const metadataJson = mergeDispatchErrorMetadata(finalizeMetadata(exec), result);
 
   try {
     if (result.ok && result.result) {
@@ -1200,6 +1243,7 @@ async function recordTelemetry(
       // carries the full case). Derive the status from the result the handler actually
       // returned, not merely from the fact that it returned.
       const selfReportedFailure = r.isError === true;
+      const refusal = selfReportedFailure ? extractRefusalDetails(r) : null;
       await deps.recordInvocation({
         toolName,
         pluginName: tool.pluginName,
@@ -1207,13 +1251,15 @@ async function recordTelemetry(
         windowKey: windowKey ?? '',
         durationMs: Date.now() - startedAt,
         status: selfReportedFailure ? 'refused' : 'ok',
-        // The refusal's OWN code (`{"error":"similar_exists"}`), lifted onto the
-        // first-class column so a consumer can group refusals by reason without
-        // LIKE-matching a payload blob — the same rationale as the dispatcher error
-        // CLASS below. Best-effort by construction: the convention is a JSON body
-        // with a string `error`, and a handler that refuses in some other shape is
-        // still correctly marked 'refused', just without a code.
-        ...(selfReportedFailure ? { errorCode: extractRefusalCode(r) } : {}),
+        // Lift the refusal's OWN code/reason onto the first-class column so a
+        // consumer can group refusals without LIKE-matching a payload blob. The
+        // bounded fallback keeps malformed/plain-text refusals auditable too.
+        ...(selfReportedFailure
+          ? {
+              errorCode: refusal?.code ?? REFUSAL_FALLBACK_CODE,
+              errorMessage: refusal?.message ?? REFUSAL_FALLBACK_MESSAGE,
+            }
+          : {}),
         outputSize: r.outputSize ?? JSON.stringify(r.content).length,
         ...(r.outputRef ? { outputRef: r.outputRef } : {}),
         args: input,
@@ -1253,13 +1299,21 @@ function finalizeMetadata(exec: DispatchExecution): Record<string, unknown> | nu
   return exec.metadataJson;
 }
 
-function mergePostgresErrorMetadata(
+function mergeDispatchErrorMetadata(
   metadataJson: Record<string, unknown> | null,
   result: DispatchProjectedResult,
 ): Record<string, unknown> | null {
-  const postgres = !result.ok ? result.error?.meta?.postgres : undefined;
-  if (!postgres || typeof postgres !== 'object' || Array.isArray(postgres)) return metadataJson;
-  return { ...(metadataJson ?? {}), postgres };
+  const errorMeta = !result.ok ? result.error?.meta : undefined;
+  const postgres = errorMeta?.postgres;
+  const invalidInput = errorMeta?.invalidInput;
+  const hasPostgres = !!postgres && typeof postgres === 'object' && !Array.isArray(postgres);
+  const hasInvalidInput = !!invalidInput && typeof invalidInput === 'object' && !Array.isArray(invalidInput);
+  if (!hasPostgres && !hasInvalidInput) return metadataJson;
+  return {
+    ...(metadataJson ?? {}),
+    ...(hasPostgres ? { postgres } : {}),
+    ...(hasInvalidInput ? { invalidInput } : {}),
+  };
 }
 
 /* ─── Orchestrator ───────────────────────────────────────────────────── */

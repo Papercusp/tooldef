@@ -21,8 +21,21 @@ import { toJsonSchema } from './schema-adapter';
 import { standardValidate, formatIssues, issuesAreValueLevel, issueLeaves, type StandardSchemaV1 } from './standard-schema';
 import { register } from './registry';
 import { collectToolEmits } from './emits-registry';
-import { registerProjectedTool, recordToolShapers, type ToolFn, type ToolExposure, type UnifiedToolContext } from './tool-projection';
-import { UnauthorizedToolError, InvalidInputError } from './dispatch-projected';
+import {
+  PROJECTED_TOOL_REGISTRY_SOURCE,
+  projectedToolRegistryRevision,
+  registerProjectedTool,
+  recordToolShapers,
+  type ToolFn,
+  type ToolExposure,
+  type UnifiedToolContext,
+} from './tool-projection';
+import {
+  UnauthorizedToolError,
+  InvalidInputError,
+  type InvalidInputCorrection,
+  type InvalidInputMetadata,
+} from './dispatch-projected';
 import { serverVintageHint } from './server-vintage';
 import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
 import { applyPayloadTier, extractPayloadTier, resolvePayloadTier } from './payload-tier';
@@ -1275,18 +1288,16 @@ export function nestedArgPaths(props: Record<string, unknown> | undefined): Map<
   return out;
 }
 
-// Exported for direct unit test alongside its sibling correction sources
-// (`nestedArgPaths`, `suggestArgName`) — see strict-args.test.ts.
-export function unknownArgHint(
+export function invalidInputCorrections(
   issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
   rawSchema: unknown,
   argRedirects?: Record<string, string>,
-): string {
+): InvalidInputCorrection[] {
   const msgs = (issues ?? []).map((i) => i?.message ?? '').join(' ');
-  if (!/nrecognized key/i.test(msgs)) return '';
+  if (!/nrecognized key/i.test(msgs)) return [];
   const props = (rawSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
   const keys = props ? Object.keys(props) : [];
-  if (keys.length === 0) return '';
+  if (keys.length === 0) return [];
   const nested = nestedArgPaths(props);
   const unknownKeys = [
     ...new Set([
@@ -1301,22 +1312,38 @@ export function unknownArgHint(
   // the measured failure mode (`tags` on work_items:update, filed 10+ times).
   // Redirected keys are withheld from `corrections` so the same key cannot also
   // draw a string-distance guess that contradicts the authored answer.
-  const redirected = unknownKeys
-    .map((unknown) => ({ unknown, target: argRedirects?.[unknown] }))
-    .filter((item): item is { unknown: string; target: string } => typeof item.target === 'string' && item.target.length > 0);
-  const redirectedKeys = new Set(redirected.map((item) => item.unknown));
+  return unknownKeys.flatMap((rejectedArg): InvalidInputCorrection[] => {
+    const redirect = argRedirects?.[rejectedArg];
+    if (typeof redirect === 'string' && redirect.length > 0) {
+      return [{ rejectedArg, target: redirect, kind: 'authored-redirect' }];
+    }
+    const nestedTarget = nested.get(rejectedArg);
+    if (nestedTarget) return [{ rejectedArg, target: nestedTarget, kind: 'nested-path' }];
+    const nearName = suggestArgName(rejectedArg, keys);
+    return nearName ? [{ rejectedArg, target: nearName, kind: 'near-name' }] : [];
+  });
+}
+
+// Exported for direct unit test alongside its sibling correction sources
+// (`nestedArgPaths`, `suggestArgName`) — see strict-args.test.ts.
+export function unknownArgHint(
+  issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
+  rawSchema: unknown,
+  argRedirects?: Record<string, string>,
+): string {
+  const msgs = (issues ?? []).map((i) => i?.message ?? '').join(' ');
+  if (!/nrecognized key/i.test(msgs)) return '';
+  const props = (rawSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
+  const keys = props ? Object.keys(props) : [];
+  if (keys.length === 0) return '';
+  const corrections = invalidInputCorrections(issues, rawSchema, argRedirects);
+  const redirected = corrections.filter((correction) => correction.kind === 'authored-redirect');
   const redirectText = redirected
-    .map(({ unknown, target }) => ` \`${unknown}\` is not an arg of this tool — it is written by ${target}.`)
+    .map(({ rejectedArg, target }) => ` \`${rejectedArg}\` is not an arg of this tool — it is written by ${target}.`)
     .join('');
-  const corrections = unknownKeys
-    .filter((unknown) => !redirectedKeys.has(unknown))
-    // A key that exists on a nested schema is a RELOCATION, not a typo — prefer
-    // it over any edit-distance guess against the top-level names, which would
-    // point the caller at an unrelated arg that merely looks similar.
-    .map((unknown) => ({ unknown, suggestion: nested.get(unknown) ?? suggestArgName(unknown, keys) }))
-    .filter((item): item is { unknown: string; suggestion: string } => item.suggestion !== null);
-  const correctionText = corrections.length > 0
-    ? ` Did you mean ${corrections.map(({ unknown, suggestion }) => `\`${suggestion}\` for \`${unknown}\``).join('; ')}?`
+  const localCorrections = corrections.filter((correction) => correction.kind !== 'authored-redirect');
+  const correctionText = localCorrections.length > 0
+    ? ` Did you mean ${localCorrections.map(({ rejectedArg, target }) => `\`${target}\` for \`${rejectedArg}\``).join('; ')}?`
     : '';
   return (
     ` — this tool accepts ONLY: ${keys.join(', ')}.${redirectText}${correctionText}` +
@@ -1329,6 +1356,29 @@ export function unknownArgHint(
     // host has registered a vintage resolver, say so, so that reads as "restart the
     // app" instead of "I typo'd an arg".
     serverVintageHint()
+  );
+}
+
+function makeInvalidInputError(
+  toolName: string,
+  issues: ReadonlyArray<StandardSchemaV1.Issue>,
+  input: unknown,
+  rawSchema: unknown,
+  argRedirects: Record<string, string> | undefined,
+  schemaHintCache: { hint?: string },
+): InvalidInputError {
+  const metadata: InvalidInputMetadata = {
+    source: PROJECTED_TOOL_REGISTRY_SOURCE,
+    registryRevision: projectedToolRegistryRevision(),
+    toolName,
+    corrections: invalidInputCorrections(issues, rawSchema, argRedirects),
+  };
+  return new InvalidInputError(
+    `invalid_args: ${formatIssues(issues, input)}${unknownArgHint(issues, rawSchema, argRedirects)}` +
+      (issuesAreValueLevel(issues)
+        ? ''
+        : failingFieldSchemaHint(issues, rawSchema) || argsSchemaHint(rawSchema, schemaHintCache)),
+    metadata,
   );
 }
 
@@ -1675,18 +1725,13 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     );
     const parsed = await standardValidate(def.args, shimmed);
     if (!parsed.ok) {
-      throw new InvalidInputError(
-        // EI-10943: the full-schema dump is for a SHAPE-blind caller (unknown key, missing
-        // required field). A caller who used the right key and merely overran a limit already
-        // knows the shape — appending 1,800 chars of schema to "too long by 3 chars" is pure
-        // context burn for the agent least able to spare it.
-        `invalid_args: ${formatIssues(parsed.issues, shimmed)}${unknownArgHint(parsed.issues, rawSchema, def.guidance?.argRedirects)}` +
-          (issuesAreValueLevel(parsed.issues)
-            ? ''
-            : // EI-20087434994864624: prefer the NESTED failing field's own schema when the
-              // path resolves — the flat dump truncates long before reaching it. Falls back
-              // to the full dump, so this only ever narrows, never hides.
-              failingFieldSchemaHint(parsed.issues, rawSchema) || argsSchemaHint(rawSchema, schemaHintCache)),
+      throw makeInvalidInputError(
+        def.name,
+        parsed.issues,
+        shimmed,
+        rawSchema,
+        def.guidance?.argRedirects,
+        schemaHintCache,
       );
     }
     const response = await def.handler(parsed.value, legacyCtx);
@@ -1831,18 +1876,13 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     );
     const parsed = await standardValidate(def.args, shimmed);
     if (!parsed.ok) {
-      throw new InvalidInputError(
-        // EI-10943: the full-schema dump is for a SHAPE-blind caller (unknown key, missing
-        // required field). A caller who used the right key and merely overran a limit already
-        // knows the shape — appending 1,800 chars of schema to "too long by 3 chars" is pure
-        // context burn for the agent least able to spare it.
-        `invalid_args: ${formatIssues(parsed.issues, shimmed)}${unknownArgHint(parsed.issues, rawSchema, def.guidance?.argRedirects)}` +
-          (issuesAreValueLevel(parsed.issues)
-            ? ''
-            : // EI-20087434994864624: prefer the NESTED failing field's own schema when the
-              // path resolves — the flat dump truncates long before reaching it. Falls back
-              // to the full dump, so this only ever narrows, never hides.
-              failingFieldSchemaHint(parsed.issues, rawSchema) || argsSchemaHint(rawSchema, schemaHintCache)),
+      throw makeInvalidInputError(
+        def.name,
+        parsed.issues,
+        shimmed,
+        rawSchema,
+        def.guidance?.argRedirects,
+        schemaHintCache,
       );
     }
     // Thread the per-call tier override into the HANDLER's ctx too: tools that

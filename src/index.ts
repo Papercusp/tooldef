@@ -346,6 +346,8 @@ export {
   type DispatchProjectedDeps,
   type DispatchProjectedResult,
   type DispatchProjectedErrorCode,
+  type InvalidInputCorrection,
+  type InvalidInputMetadata,
   type DispatchStreamEvent,
   type PostInvokeEvent,
   type CapabilityEnvelopeVerdict,

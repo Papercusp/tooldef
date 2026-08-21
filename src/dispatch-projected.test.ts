@@ -3,6 +3,8 @@
  * Run with: npx vitest run packages/agent-mcp/src/dispatch-projected.test.ts
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
+import { defineTool } from './define-tool';
 import {
   dispatchProjectedTool,
   dispatchProjectedToolStream,
@@ -13,6 +15,7 @@ import {
 } from './dispatch-projected';
 import {
   _resetProjectionRegistryForTests,
+  lookupByMcpName,
   type ProjectedTool,
   type UnifiedToolContext,
 } from './tool-projection';
@@ -327,6 +330,43 @@ describe('dispatchProjectedTool', () => {
     const tool = makeTool({ fn: async () => { throw foreign; } });
     const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS());
     expect(r.error?.code).toBe('invalid_input');
+  });
+
+  it('preserves registry provenance and deterministic corrections in dispatch + telemetry', async () => {
+    defineTool({
+      name: 'test:invalid-input-provenance',
+      requirePrincipal: false as const,
+      capability: 'test:read',
+      args: z.object({ id: z.string(), topic: z.string() }),
+      guidance: { argRedirects: { tags: 'work_items:tag { id, topic }' } },
+      async handler() {
+        return { content: [{ type: 'text' as const, text: 'ok' }] };
+      },
+    });
+    let metadataJson: Record<string, unknown> | null | undefined;
+    const result = await dispatchProjectedTool(
+      lookupByMcpName('test:invalid-input-provenance')!,
+      'test:invalid-input-provenance',
+      { id: 'WI-1', topic: 'ops', tags: ['drift'] },
+      MAKE_CTX(),
+      MAKE_DEPS({
+        recordInvocation: vi.fn(async (input) => { metadataJson = input.metadataJson; }),
+      }),
+    );
+
+    const expected = {
+      source: 'projected-tool-registry',
+      registryRevision: expect.stringMatching(/^projected-tool-registry-v1:/),
+      toolName: 'test:invalid-input-provenance',
+      corrections: [{
+        rejectedArg: 'tags',
+        target: 'work_items:tag { id, topic }',
+        kind: 'authored-redirect',
+      }],
+    };
+    expect(result.ok).toBe(false);
+    expect(result.error?.meta?.invalidInput).toEqual(expected);
+    expect(metadataJson?.invalidInput).toEqual(expected);
   });
 
   it('returns timeout when fn exceeds timeoutSec', async () => {
