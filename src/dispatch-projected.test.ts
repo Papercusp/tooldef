@@ -1157,18 +1157,33 @@ describe('self-reported refusals are recorded as refused, not ok (EI-20184794555
     expect(captured?.errorCode).toBe('similar_exists');
   });
 
-  it('still marks a non-JSON refusal as refused, with no invented code', async () => {
+  it('marks a non-JSON refusal as refused with a bounded fallback code and message', async () => {
     const tool = makeTool({
       fn: async () => ({ content: [{ type: 'text', text: 'plain prose refusal' }], isError: true }),
     });
-    let captured: { status?: string; errorCode?: string | null } | undefined;
+    let captured: { status?: string; errorCode?: string | null; errorMessage?: string | null } | undefined;
     await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
       recordInvocation: async (input) => { captured = input; },
     }));
     expect(captured?.status).toBe('refused');
-    // A WRONG code on a first-class column groups cleanly and misleads silently —
-    // strictly worse than an absent one.
-    expect(captured?.errorCode ?? null).toBeNull();
+    expect(captured?.errorCode).toBe('handler_refusal');
+    expect(captured?.errorMessage).toBe('tool returned isError=true without a structured refusal message');
+  });
+
+  it('lifts reason/message fields used by structured handler refusals', async () => {
+    const tool = makeTool({
+      fn: async () => ({
+        content: [{ type: 'text', text: JSON.stringify({ ok: false, reason: 'invalid_path', message: 'scratch URI is outside the allow-list' }) }],
+        isError: true,
+      }),
+    });
+    let captured: { status?: string; errorCode?: string | null; errorMessage?: string | null } | undefined;
+    await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
+      recordInvocation: async (input) => { captured = input; },
+    }));
+    expect(captured?.status).toBe('refused');
+    expect(captured?.errorCode).toBe('invalid_path');
+    expect(captured?.errorMessage).toBe('scratch URI is outside the allow-list');
   });
 
   it('leaves an ordinary success as ok with no error code (no regression)', async () => {
