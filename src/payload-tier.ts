@@ -180,6 +180,14 @@ export interface ProjectBoundedPayloadOpts {
   /** Override the default raw-args re-call with a host-owned durable cursor. */
   recovery?: BoundedPayloadRecovery;
   /**
+   * Top-level fields the host must keep visible in the last-resort identity
+   * fallback. The normal projection already preserves insertion order, but its
+   * final metadata defense intentionally rebuilds a tiny identity-only preview;
+   * a host may nominate an additional load-bearing field (for example,
+   * coord:orient's post-compaction recovery block) for that rebuild.
+   */
+  preserveTopLevelKeys?: readonly string[];
+  /**
    * EI-20720054720826414: the host's concrete raw-args dispatch spelling for a
    * `payloadTier:'full'` re-call (`{tool}` substituted with the tool name) —
    * see UnifiedToolContext.rawDispatchTemplate. Present ⇒ the recovery `next`
@@ -731,6 +739,16 @@ export function projectBoundedPayload(
       identityOnly && typeof identityOnly === 'object' && !Array.isArray(identityOnly)
         ? (identityOnly as Record<string, unknown>)
         : null;
+    const sourceFields =
+      data && typeof data === 'object' && !Array.isArray(data)
+        ? (data as Record<string, unknown>)
+        : null;
+    if (identityFields && sourceFields) {
+      for (const key of opts.preserveTopLevelKeys ?? []) {
+        if (!Object.prototype.hasOwnProperty.call(sourceFields, key) || key in identityFields) continue;
+        identityFields[key] = projectValue(sourceFields[key], `$.${key}`, 0, identityState);
+      }
+    }
     result =
       identityFields && Object.keys(identityFields).length > 0
         ? { ...identityFields, _projection: { ...metadata, returnedChars: 0 } }
