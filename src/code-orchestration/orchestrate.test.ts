@@ -53,6 +53,81 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     expect(r.summary).toEqual({ scanned: 3, bad: [2] }); // 4 tool calls collapsed into ONE code:run
   });
 
+  describe('P-027 explicit final media result', () => {
+    it('extracts validated image/audio blocks while preserving the authored summary', async () => {
+      const r = await runToolOrchestration(
+        `return {
+          summary: { rendered: 2, kept: true },
+          media: [
+            { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' },
+            { type: 'audio', data: 'd29ybGQ=', mimeType: 'audio/mpeg' }
+          ]
+        };`,
+        { ctx: MAKE_CTX(), deps: DEPS, tools: [] },
+      );
+
+      expect(r.ok).toBe(true);
+      expect(r.summary).toEqual({ rendered: 2, kept: true });
+      expect(r.media).toEqual([
+        { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' },
+        { type: 'audio', data: 'd29ybGQ=', mimeType: 'audio/mpeg' },
+      ]);
+    });
+
+    it.each([
+      ['missing summary', `return { media: [] };`, 'must include a summary field'],
+      ['non-array media', `return { summary: true, media: 'nope' };`, 'media must be an array'],
+      [
+        'invalid base64',
+        `return { summary: true, media: [{ type: 'image', data: 'not base64!', mimeType: 'image/png' }] };`,
+        'data must be non-empty canonical base64',
+      ],
+      [
+        'mismatched MIME family',
+        `return { summary: true, media: [{ type: 'audio', data: 'YQ==', mimeType: 'image/png' }] };`,
+        'mimeType must match its audio content type',
+      ],
+      [
+        'unsupported content type',
+        `return { summary: true, media: [{ type: 'resource', data: 'YQ==', mimeType: 'text/plain' }] };`,
+        'type must be "image" or "audio"',
+      ],
+    ])('rejects %s instead of emitting it', async (label, script, expectedError) => {
+      const r = await runToolOrchestration(script, { ctx: MAKE_CTX(), deps: DEPS, tools: [] });
+
+      expect(r.ok).toBe(false);
+      if (label === 'missing summary') expect(r.summary).toBeUndefined();
+      else expect(r.summary).toBe(true);
+      expect(r.media).toBeUndefined();
+      expect(r.error).toContain(expectedError);
+    });
+
+    it('does not implicitly emit media returned by an intermediate tool call', async () => {
+      const preview = mkTool('assets:preview', 'read', async () => ({
+        content: [{ type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' }],
+      }));
+      const r = await runToolOrchestration(
+        `await tools.assets.preview({}); return { inspected: true };`,
+        { ctx: MAKE_CTX(), deps: DEPS, tools: [preview] },
+      );
+
+      expect(r.ok).toBe(true);
+      expect(r.summary).toEqual({ inspected: true });
+      expect(r.media).toBeUndefined();
+    });
+
+    it('does not reinterpret a legacy summary object without a media field', async () => {
+      const r = await runToolOrchestration(
+        `return { summary: { still: 'nested' }, count: 1 };`,
+        { ctx: MAKE_CTX(), deps: DEPS, tools: [] },
+      );
+
+      expect(r.ok).toBe(true);
+      expect(r.summary).toEqual({ summary: { still: 'nested' }, count: 1 });
+      expect(r.media).toBeUndefined();
+    });
+  });
+
   it('dryRun RECORDS write-effect calls without executing them; reads still run', async () => {
     const readFn = vi.fn(async () => json({ items: [{ id: 1 }] }));
     const writeFn = vi.fn(async () => json({ ok: true }));

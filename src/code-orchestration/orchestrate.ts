@@ -126,10 +126,22 @@ export interface ChildFailure {
   error?: string;
 }
 
+/**
+ * P-027: media a script explicitly elects to return to the model. This is deliberately
+ * narrower than an arbitrary inner ToolResult: only image/audio data blocks are eligible,
+ * and they cross the outer transport only when the FINAL script result uses the
+ * `{ summary, media }` contract. Intermediate tool results never populate this array.
+ */
+export type CodeRunMediaContent =
+  | { type: 'image'; data: string; mimeType: string }
+  | { type: 'audio'; data: string; mimeType: string };
+
 export interface OrchestrateResult {
   ok: boolean;
   /** The script's returned summary (what re-enters the model's context). */
   summary?: unknown;
+  /** Validated image/audio blocks from an explicit final `{ summary, media }` result. */
+  media?: CodeRunMediaContent[];
   logs: string[];
   error?: string;
   /** Set when the parse-check failed. */
@@ -308,6 +320,71 @@ function isBulkPartialFailure(
   return typeof failed === 'number' && failed > 0;
 }
 
+const STRICT_BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const MEDIA_MIME_RE = /^(image|audio)\/[A-Za-z0-9][A-Za-z0-9.+_-]*$/;
+
+interface ParsedFinalResult {
+  summary: unknown;
+  media?: CodeRunMediaContent[];
+  error?: string;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function validateMediaItem(value: unknown, index: number): CodeRunMediaContent | string {
+  if (!isPlainRecord(value)) return `media[${index}] must be an object`;
+  const type = value.type;
+  if (type !== 'image' && type !== 'audio') {
+    return `media[${index}].type must be "image" or "audio"`;
+  }
+  if (typeof value.data !== 'string' || value.data.length === 0 || !STRICT_BASE64_RE.test(value.data)) {
+    return `media[${index}].data must be non-empty canonical base64`;
+  }
+  if (typeof value.mimeType !== 'string' || !MEDIA_MIME_RE.test(value.mimeType)) {
+    return `media[${index}].mimeType must be a concrete image/* or audio/* MIME type`;
+  }
+  if (!value.mimeType.startsWith(`${type}/`)) {
+    return `media[${index}].mimeType must match its ${type} content type`;
+  }
+  // Copy only the validated MCP fields: arbitrary sibling properties from script data must not
+  // hitch a ride around the authored summary/result-door contract.
+  return { type, data: value.data, mimeType: value.mimeType };
+}
+
+/**
+ * Interpret the opt-in final media contract without changing legacy summaries. An ordinary
+ * returned object — including `{ summary: ... }` — remains byte-for-byte the script summary;
+ * only the presence of `media` activates the envelope and therefore requires `summary` too.
+ */
+function parseFinalResult(value: unknown): ParsedFinalResult {
+  if (!isPlainRecord(value) || !Object.prototype.hasOwnProperty.call(value, 'media')) {
+    return { summary: value };
+  }
+  const summary = value.summary;
+  if (!Object.prototype.hasOwnProperty.call(value, 'summary')) {
+    return {
+      summary: undefined,
+      error: 'invalid_media_result: an explicit media result must include a summary field',
+    };
+  }
+  if (!Array.isArray(value.media)) {
+    return { summary, error: 'invalid_media_result: media must be an array' };
+  }
+  const media: CodeRunMediaContent[] = [];
+  for (let index = 0; index < value.media.length; index += 1) {
+    const item = validateMediaItem(value.media[index], index);
+    if (typeof item === 'string') {
+      return { summary, error: `invalid_media_result: ${item}` };
+    }
+    media.push(item);
+  }
+  return { summary, media };
+}
+
 export async function runToolOrchestration(
   script: string,
   opts: OrchestrateOptions,
@@ -427,11 +504,14 @@ export async function runToolOrchestration(
     tool,
     executed: false,
   }));
+  const finalResult = run.ok ? parseFinalResult(run.result) : { summary: run.result };
+  const effectiveOk = run.ok && !finalResult.error;
   return {
-    ok: run.ok,
-    summary: run.result,
+    ok: effectiveOk,
+    summary: finalResult.summary,
+    ...(finalResult.media ? { media: finalResult.media } : {}),
     logs: run.logs,
-    error: run.error,
+    error: finalResult.error ?? run.error,
     ...(unknownRefs && unknownRefs.length ? { unknownRefs } : {}),
     dryRun,
     dispatchCount,
@@ -448,6 +528,6 @@ export async function runToolOrchestration(
     ...(run.fieldMisses?.length ? { fieldMisses: run.fieldMisses } : {}),
     ...(run.sleepCaps?.length ? { sleepCaps: run.sleepCaps } : {}),
     // EI-7784: surfaced independent of `ok` — see the field doc above.
-    partial: run.ok && childFailures.length > 0,
+    partial: effectiveOk && childFailures.length > 0,
   };
 }
