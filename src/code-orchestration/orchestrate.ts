@@ -89,6 +89,41 @@ export interface WriteAttempt {
   disposition: WriteAttemptDisposition;
 }
 
+/**
+ * A validated durable-output identity observed on an inner result. The preview
+ * and owner fields from the model-facing reference envelope are deliberately
+ * absent: a trace needs identity/integrity, not another copy of potentially
+ * sensitive display text or an invocation-ephemeral owner id.
+ */
+export interface OrchestrationOutputReference {
+  uri: string;
+  byteCount: number;
+  sha256: string;
+  expiresAt?: string;
+  audience?: 'owner' | 'workspace' | 'public';
+}
+
+export type OrchestrationCallDisposition =
+  | 'planned'
+  | 'in_flight'
+  | 'settled'
+  | 'semantic_rejected'
+  | 'rejected'
+  | 'uncertain';
+
+/**
+ * Secret-free runtime evidence for one inner call. Arguments and results never
+ * enter this record. The operator-side P-013 normalizer combines these records
+ * with checkScript's static argument view before anything is persisted.
+ */
+export interface OrchestrationCallRecord {
+  ordinal: number;
+  tool: string;
+  effect: 'read' | 'write' | 'unknown';
+  disposition: OrchestrationCallDisposition;
+  outputReferences: OrchestrationOutputReference[];
+}
+
 /** A statically ordered write that the script never reached after an earlier throw. */
 export interface NotDispatchedWrite {
   tool: string;
@@ -224,6 +259,11 @@ export interface OrchestrateResult {
    * sandbox's cap and were silently clamped. Present only when non-empty — see {@link SleepCap}.
    */
   sleepCaps?: SleepCap[];
+  /**
+   * Internal P-013 capture evidence. code:run and recipes:run remove this field
+   * from their model-facing payloads after persisting the normalized trace.
+   */
+  callRecords?: OrchestrationCallRecord[];
 }
 
 /**
@@ -323,6 +363,94 @@ function isBulkPartialFailure(
   return typeof failed === 'number' && failed > 0;
 }
 
+const OUTPUT_REFERENCE_SHA_RE = /^[0-9a-f]{64}$/i;
+const OUTPUT_REFERENCE_AUDIENCES = new Set(['owner', 'workspace', 'public']);
+
+/**
+ * Copy only the integrity-bearing subset of a typed P-006 reference. Reject
+ * credential-bearing/query URIs and malformed metadata rather than letting a
+ * result-shaped object smuggle arbitrary text into a persisted execution trace.
+ */
+function safeOutputReference(value: unknown): OrchestrationOutputReference | null {
+  if (!isPlainRecord(value) || value.kind !== 'reference') return null;
+  const { uri, byteCount, sha256, expiresAt, audience } = value;
+  if (
+    typeof uri !== 'string' ||
+    uri.length === 0 ||
+    uri.length > 2_048 ||
+    typeof byteCount !== 'number' ||
+    !Number.isSafeInteger(byteCount) ||
+    byteCount < 0 ||
+    typeof sha256 !== 'string' ||
+    !OUTPUT_REFERENCE_SHA_RE.test(sha256)
+  ) {
+    return null;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(uri);
+  } catch {
+    return null;
+  }
+  if (
+    (parsed.protocol !== 'papercusp:' && parsed.protocol !== 'https:') ||
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash
+  ) {
+    return null;
+  }
+  if (expiresAt !== undefined && (typeof expiresAt !== 'string' || !Number.isFinite(Date.parse(expiresAt)))) {
+    return null;
+  }
+  if (audience !== undefined && (typeof audience !== 'string' || !OUTPUT_REFERENCE_AUDIENCES.has(audience))) {
+    return null;
+  }
+  return {
+    uri,
+    byteCount,
+    sha256: sha256.toLowerCase(),
+    ...(typeof expiresAt === 'string' ? { expiresAt } : {}),
+    ...(audience === 'owner' || audience === 'workspace' || audience === 'public' ? { audience } : {}),
+  };
+}
+
+/** Bounded recursive scan: inner tool results are arbitrary transport values. */
+function extractOutputReferences(value: unknown): OrchestrationOutputReference[] {
+  const found: OrchestrationOutputReference[] = [];
+  const seenObjects = new Set<object>();
+  const seenRefs = new Set<string>();
+  const pending: Array<{ value: unknown; depth: number }> = [{ value, depth: 0 }];
+  let visited = 0;
+  while (pending.length > 0 && visited < 2_000 && found.length < 32) {
+    const current = pending.pop()!;
+    visited += 1;
+    if (typeof current.value !== 'object' || current.value === null || current.depth > 16) continue;
+    if (seenObjects.has(current.value)) continue;
+    seenObjects.add(current.value);
+    const reference = safeOutputReference(current.value);
+    if (reference) {
+      const key = `${reference.uri}\u0000${reference.sha256}`;
+      if (!seenRefs.has(key)) {
+        seenRefs.add(key);
+        found.push(reference);
+      }
+      continue;
+    }
+    if (Array.isArray(current.value)) {
+      for (let index = current.value.length - 1; index >= 0; index -= 1) {
+        pending.push({ value: current.value[index], depth: current.depth + 1 });
+      }
+      continue;
+    }
+    for (const child of Object.values(current.value as Record<string, unknown>)) {
+      pending.push({ value: child, depth: current.depth + 1 });
+    }
+  }
+  return found;
+}
+
 const STRICT_BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const MEDIA_MIME_RE = /^(image|audio)\/[A-Za-z0-9][A-Za-z0-9.+_-]*$/;
 
@@ -416,6 +544,7 @@ export async function runToolOrchestration(
   // certainly was not "already executed", which is what we used to tell the caller.
   const rejectedMutations: ThrownMutation[] = [];
   const uncertainMutations: ThrownMutation[] = [];
+  const callRecords: OrchestrationCallRecord[] = [];
   let dispatchCount = 0;
   let intermediateBytes = 0;
 
@@ -432,10 +561,19 @@ export async function runToolOrchestration(
   const unknownRefs = check.ok ? undefined : check.unknownRefs;
 
   const dispatch: FacadeDispatch = async (tool, name, args) => {
+    const callRecord: OrchestrationCallRecord = {
+      ordinal: callRecords.length,
+      tool: name,
+      effect: tool.effect === 'read' || tool.effect === 'write' ? tool.effect : 'unknown',
+      disposition: 'in_flight',
+      outputReferences: [],
+    };
+    callRecords.push(callRecord);
     let writeAttempt: WriteAttempt | undefined;
     if (tool.effect === 'write') {
       plannedMutations.push({ tool: name, args });
       if (dryRun) {
+        callRecord.disposition = 'planned';
         return { dryRun: true, wouldCall: name, args };
       }
       writeAttempt = {
@@ -466,11 +604,13 @@ export async function runToolOrchestration(
       } catch {
         // Telemetry must never turn a settled child call into a failed run.
       }
+      callRecord.outputReferences = extractOutputReferences(result);
       // EI-7669: realDispatch only throws on a dispatch-level failure — a tool that dispatched fine
       // but reports its OWN semantic rejection (ok: false in its result body, e.g. a completion-
       // integrity check) resolves normally here. Tally those so a batched script that doesn't check
       // every result still gets visibility instead of silently counting the write as executed.
       if (isOkFalseResult(result) || isBulkPartialFailure(result)) {
+        callRecord.disposition = 'semantic_rejected';
         childFailures.push({ tool: name, kind: 'semantic', result });
         if (tool.effect === 'write') {
           if (writeAttempt) writeAttempt.disposition = 'semantic_rejected';
@@ -478,6 +618,9 @@ export async function runToolOrchestration(
         }
       } else if (writeAttempt) {
         writeAttempt.disposition = 'settled';
+        callRecord.disposition = 'settled';
+      } else {
+        callRecord.disposition = 'settled';
       }
       return result;
     } catch (err) {
@@ -487,6 +630,7 @@ export async function runToolOrchestration(
       // (bad args, a denied gate) provably wrote nothing and is safe to re-run, while any
       // other throw stays UNKNOWN and keeps the loud warning it deserves.
       const preExecution = isPreExecutionFailure(err);
+      callRecord.disposition = preExecution ? 'rejected' : 'uncertain';
       childFailures.push({
         tool: name,
         kind: preExecution ? 'rejected' : 'uncertain',
@@ -543,6 +687,10 @@ export async function runToolOrchestration(
     ...(notDispatchedWrites.length ? { notDispatchedWrites } : {}),
     ...(run.fieldMisses?.length ? { fieldMisses: run.fieldMisses } : {}),
     ...(run.sleepCaps?.length ? { sleepCaps: run.sleepCaps } : {}),
+    callRecords: callRecords.map((record) => ({
+      ...record,
+      outputReferences: record.outputReferences.map((reference) => ({ ...reference })),
+    })),
     // EI-7784: surfaced independent of `ok` — see the field doc above.
     partial: effectiveOk && childFailures.length > 0,
   };
