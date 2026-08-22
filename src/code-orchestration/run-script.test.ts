@@ -79,6 +79,35 @@ describe('runOrchestrationScript (B-CX-1A)', () => {
     expect(r.result).toBe('undefined,undefined');
   });
 
+  it('decodes a capability:read byte page with VM-local atob without exposing Buffer', async () => {
+    const bytes = Uint8Array.from([0, 255, 1, 128, 226, 156, 147]);
+    const encoded = Buffer.from(bytes).toString('base64');
+    const read = vi.fn(async () => ({
+      ok: true,
+      encoding: 'base64',
+      byte_offset: 0,
+      byte_length: bytes.length,
+      total_bytes: bytes.length,
+      eof: true,
+      data: encoded,
+      next_cursor: null,
+    }));
+    const r = await runOrchestrationScript(
+      `const page = await tools.capability.read({ file_path: '/tmp/spill.md', byte_offset: 0, byte_limit: 4096 });
+       const binary = atob(page.data);
+       const decoded = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+       return { bytes: Array.from(decoded), atobType: typeof atob, bufferType: typeof Buffer };`,
+      facade({ capability: { read } }),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.result).toEqual({
+      bytes: Array.from(bytes),
+      atobType: 'function',
+      bufferType: 'undefined',
+    });
+    expect(read).toHaveBeenCalledOnce();
+  });
+
   // EI-19294786663902075: the vm context has no importModuleDynamically callback, so a script's
   // `await import(...)` throws the V8-internal "A dynamic import callback was not specified."
   // before the specifier is even looked at -- which reads like a bad path, not a sandbox limit.
