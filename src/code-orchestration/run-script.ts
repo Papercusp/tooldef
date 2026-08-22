@@ -28,8 +28,10 @@
  *
  * Inside the worker we STILL run the body under `node:vm.runInNewContext`, which scopes the
  * script's globals (no `require`/`process`/`module`/`Buffer`; standard intrinsics like
- * JSON/Math/Promise present) and gives clean compile-error reporting. So the worker is the
- * isolation+kill boundary; the inner vm is the globals-scoping + compile boundary.
+ * JSON/Math/Promise present) and gives clean compile-error reporting. A VM-local, browser-style
+ * `atob` helper is installed for decoding the base64 byte pages returned by `capability:read`;
+ * it is defined inside the VM rather than passing a host function across the boundary. So the
+ * worker is the isolation+kill boundary; the inner vm is the globals-scoping + compile boundary.
  *
  * `setTimeout`/`setInterval` are Node/DOM globals, not JS-spec intrinsics, so they are NOT
  * ambient in the vm context (EI-7839: a script calling `setTimeout(...)` throws `setTimeout is
@@ -231,6 +233,18 @@ const WORKER_SRC = `(() => {
   const proxyToRaw = new WeakMap();
   const rawToProxy = new WeakMap();
   const PROBE_KEYS = new Set(['then', 'toJSON', 'constructor', 'inspect', 'nodeType', '$$typeof']);
+  const ROOT_ENVELOPE_FIELDS = new Set(['content', 'text']);
+  const SHAPE_HINT_LIMIT = 8;
+  const compactShapeHint = (target) => Object.keys(target)
+    .sort()
+    .slice(0, SHAPE_HINT_LIMIT)
+    .join(', ') || '(none)';
+  const shapeQuote = String.fromCharCode(96);
+  const structuredRootShapeError = (tool, key, target) =>
+    'structured_result_shape: ' + tool +
+    ' returned a typed structured root; missing ' + shapeQuote + key + shapeQuote +
+    ' is an MCP content/text envelope read. Use direct typed fields. Available keys: ' +
+    compactShapeHint(target);
   // Plain data (object/array) test that works ACROSS REALMS. The script runs under
   // vm.runInNewContext, so an object it builds itself (\`return { viaCall };\`) has the VM
   // context's Object.prototype — a strict \`proto === Object.prototype\` identity check is false
@@ -260,12 +274,14 @@ const WORKER_SRC = `(() => {
         if (typeof key === 'symbol') return Reflect.get(target, key);
         if (!(key in target)
           && !PROBE_KEYS.has(key)
-          && !(isArr && /^\\d+$/.test(key))
-          && fieldMisses.length < MISS_LIMIT) {
+          && !(isArr && /^\\d+$/.test(key))) {
           const sig = tool + '|' + path + '|' + key;
-          if (!missSeen.has(sig)) {
+          if (!missSeen.has(sig) && fieldMisses.length < MISS_LIMIT) {
             missSeen.add(sig);
             fieldMisses.push({ tool, path: path || '(root)', read: key, available: Object.keys(target).slice(0, AVAIL_LIMIT) });
+          }
+          if (!path && ROOT_ENVELOPE_FIELDS.has(key)) {
+            throw new Error(structuredRootShapeError(tool, key, target));
           }
         }
         return track(Reflect.get(target, key), tool, path ? path + '.' + key : key);
@@ -335,7 +351,39 @@ const WORKER_SRC = `(() => {
   // and a formal parameter named 'log' makes that valid script fail at compile time with
   // "Identifier 'log' has already been declared". The global still preserves the documented
   // bare log(...) convenience while allowing function-local shadowing.
-  const wrap = (body) => '(async (tools) => {\\n' + body + '\\n})';
+  const wrap = (body) =>
+    '(async (tools) => {\\n' +
+    // atob is deliberately defined in the VM realm. Passing Node's host atob into the
+    // context would give the script its host Function constructor, which can escape the VM.
+    // This forgiving-base64 implementation matches the byte-page use case while keeping Node
+    // globals (Buffer, process, require) out of the script's reach.
+    'globalThis.atob = (input) => {\\n' +
+    "  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';\\n" +
+    "  const value = String(input).replace(/[\\\\t\\\\n\\\\f\\\\r ]/g, '');\\n" +
+    "  const remainder = value.length % 4;\\n" +
+    "  if (remainder === 1) throw new Error('InvalidCharacterError: invalid base64 length');\\n" +
+    "  const padded = value + (remainder === 2 ? '==' : remainder === 3 ? '=' : '');\\n" +
+    "  let output = '';\\n" +
+    "  for (let i = 0; i < padded.length; i += 4) {\\n" +
+    "    const c0 = padded.charAt(i);\\n" +
+    "    const c1 = padded.charAt(i + 1);\\n" +
+    "    const c2 = padded.charAt(i + 2);\\n" +
+    "    const c3 = padded.charAt(i + 3);\\n" +
+    "    const n0 = alphabet.indexOf(c0);\\n" +
+    "    const n1 = alphabet.indexOf(c1);\\n" +
+    "    const n2 = c2 === '=' ? 0 : alphabet.indexOf(c2);\\n" +
+    "    const n3 = c3 === '=' ? 0 : alphabet.indexOf(c3);\\n" +
+    "    if (n0 < 0 || n1 < 0 || n2 < 0 || n3 < 0 || (c2 === '=' && c3 !== '=') || ((c2 === '=' || c3 === '=') && i + 4 < padded.length)) {\\n" +
+    "      throw new Error('InvalidCharacterError: invalid base64 data');\\n" +
+    "    }\\n" +
+    "    output += String.fromCharCode((n0 << 2) | (n1 >> 4));\\n" +
+    "    if (c2 !== '=') output += String.fromCharCode(((n1 & 15) << 4) | (n2 >> 2));\\n" +
+    "    if (c3 !== '=') output += String.fromCharCode(((n2 & 3) << 6) | n3);\\n" +
+    "  }\\n" +
+    "  return output;\\n" +
+    '}\\n' +
+    body +
+    '\\n})';
   let factory;
   try {
     factory = vm.runInNewContext(

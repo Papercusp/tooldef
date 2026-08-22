@@ -301,6 +301,50 @@ describe('EI-19301148486657755: reading a field the tool result does not have', 
     claimable: [{ id: 'WI-1' }],
   });
 
+  it('fails compactly when a script reads the content envelope from a typed structured root', async () => {
+    const presence = async () => ({
+      summary: { alive: 1, active: 1 },
+      active: [{ id: 'member-with-a-large-roster-payload' }],
+    });
+    const r = await runOrchestrationScript(
+      `const result = await tools.coord.presence({});
+       return result?.content?.[0]?.text ?? result;`,
+      facade({ coord: { presence } }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.result).toBeUndefined();
+    expect(r.error).toMatch(/^structured_result_shape:/);
+    expect(r.error).toContain('coord:presence');
+    expect(r.error).toContain('content');
+    expect(r.error).toContain('summary');
+    expect(r.error).not.toContain('member-with-a-large-roster-payload');
+    expect(r.error?.length).toBeLessThan(300);
+  });
+
+  it('uses the same compact error for a root text-envelope read', async () => {
+    const presence = async () => ({ summary: { alive: 1 }, active: [] });
+    const r = await runOrchestrationScript(
+      `const result = await tools.coord.presence({});
+       return result?.text ?? result;`,
+      facade({ coord: { presence } }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/^structured_result_shape:/);
+    expect(r.error).toContain('`text`');
+  });
+
+  it('preserves direct typed access on the same structured root', async () => {
+    const presence = async () => ({ summary: { alive: 1 }, active: [{ id: 'member-1' }] });
+    const r = await runOrchestrationScript(
+      `const result = await tools.coord.presence({});
+       return { alive: result.summary.alive, active: result.active.length };`,
+      facade({ coord: { presence } }),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.result).toEqual({ alive: 1, active: 1 });
+    expect(r.fieldMisses).toBeUndefined();
+  });
+
   it('reports the miss AND the real keys for the exact shape that caused the incident', async () => {
     const r = await runOrchestrationScript(
       `const c = await tools.work_items.claimable({});
