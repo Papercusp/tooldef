@@ -45,6 +45,18 @@ describe('runOrchestrationScript (B-CX-1A)', () => {
     expect(r.logs).toContain('starting');
   });
 
+  it('allows a script to use log as a local tool-result binding', async () => {
+    const get = vi.fn(async () => ({ value: 42 }));
+    const r = await runOrchestrationScript(
+      `const log = await tools.db.get(); return log.value;`,
+      facade({ db: { get } }),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.error).toBeUndefined();
+    expect(r.result).toBe(42);
+    expect(get).toHaveBeenCalledOnce();
+  });
+
   it('reports a compile error for malformed script', async () => {
     const r = await runOrchestrationScript(`this is ( not valid`, facade({}));
     expect(r.ok).toBe(false);
