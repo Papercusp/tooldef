@@ -479,3 +479,75 @@ describe('runToolOrchestration → dispatchCount (P-012)', () => {
     expect(r.dispatchCount).toBe(0);
   });
 });
+
+describe('runToolOrchestration → callRecords (P-013)', () => {
+  it('records only secret-free call identity, disposition, and validated output references', async () => {
+    const referenced = mkTool('assets:render', 'read', async () =>
+      json({
+        ok: true,
+        credential: 'must-not-enter-the-trace',
+        output: {
+          kind: 'reference',
+          uri: 'papercusp://results/run-1/output.json',
+          byteCount: 42,
+          sha256: 'a'.repeat(64),
+          preview: 'sensitive preview text',
+          owner: 'su-ephemeral',
+          audience: 'workspace',
+        },
+      }),
+    );
+
+    const r = await runToolOrchestration(
+      `await tools.assets.render({ apiKey: 'must-not-enter-the-trace' }); return 'ok';`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [referenced] },
+    );
+
+    expect(r.callRecords).toEqual([
+      {
+        ordinal: 0,
+        tool: 'assets:render',
+        effect: 'read',
+        disposition: 'settled',
+        outputReferences: [
+          {
+            uri: 'papercusp://results/run-1/output.json',
+            byteCount: 42,
+            sha256: 'a'.repeat(64),
+            audience: 'workspace',
+          },
+        ],
+      },
+    ]);
+    expect(JSON.stringify(r.callRecords)).not.toContain('apiKey');
+    expect(JSON.stringify(r.callRecords)).not.toContain('credential');
+    expect(JSON.stringify(r.callRecords)).not.toContain('preview');
+    expect(JSON.stringify(r.callRecords)).not.toContain('owner');
+  });
+
+  it('preserves actual dispatch order and truthful dry-run/semantic/throw dispositions', async () => {
+    const read = mkTool('wi:list', 'read', async () => json({ ok: true }));
+    const reject = mkTool('wi:set-status', 'write', async () => json({ ok: false, reason: 'denied' }));
+    const boom = mkTool('wi:boom', 'read', async () => {
+      throw new Error('boom');
+    });
+
+    const dry = await runToolOrchestration(
+      `await tools.wi.list({}); await tools.wi.setStatus({ id: 'WI-1' }); return 'preview';`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [read, reject], dryRun: true },
+    );
+    expect(dry.callRecords?.map(({ ordinal, tool, disposition }) => ({ ordinal, tool, disposition }))).toEqual([
+      { ordinal: 0, tool: 'wi:list', disposition: 'settled' },
+      { ordinal: 1, tool: 'wi:set-status', disposition: 'planned' },
+    ]);
+
+    const live = await runToolOrchestration(
+      `await tools.wi.setStatus({ id: 'WI-1' }); try { await tools.wi.boom({}); } catch {} return 'done';`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [reject, boom] },
+    );
+    expect(live.callRecords?.map(({ ordinal, tool, disposition }) => ({ ordinal, tool, disposition }))).toEqual([
+      { ordinal: 0, tool: 'wi:set-status', disposition: 'semantic_rejected' },
+      { ordinal: 1, tool: 'wi:boom', disposition: 'uncertain' },
+    ]);
+  });
+});
