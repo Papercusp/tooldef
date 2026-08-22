@@ -155,6 +155,9 @@ export interface OrchestrateResult {
    *  Optional so pre-existing hand-built fixture results are unaffected;
    *  runToolOrchestration's own return always populates it. */
   dispatchCount?: number;
+  /** Exact UTF-8 bytes of every child result that settled and entered the script
+   *  runtime. Thrown dispatches have no result body and therefore add zero. */
+  intermediateBytes?: number;
   /** Write-effect calls the script made (recorded in dryRun, observed otherwise).
    *  NOTE: recorded at DISPATCH time, so this includes calls that then threw — subtract
    *  `rejectedMutations` + `uncertainMutations` for the set that actually landed. */
@@ -414,6 +417,7 @@ export async function runToolOrchestration(
   const rejectedMutations: ThrownMutation[] = [];
   const uncertainMutations: ThrownMutation[] = [];
   let dispatchCount = 0;
+  let intermediateBytes = 0;
 
   await ensureParseCheckReady(); // lazy-load the TS compiler before the static parse-check (kept out of the eager client bundle)
   const check = checkScript(script, tools, allowed);
@@ -451,6 +455,17 @@ export async function runToolOrchestration(
       const result = await (wrapDispatch
         ? wrapDispatch(tool, name, args, dispatchCtx, call)
         : call(dispatchCtx));
+      // P-008: measure the exact serialized payload the script receives. Tool
+      // results are JSON transport values; keep telemetry fail-soft if a custom
+      // in-process fixture returns a non-serializable object.
+      try {
+        const serialized = JSON.stringify(result);
+        if (serialized !== undefined) {
+          intermediateBytes += new TextEncoder().encode(serialized).byteLength;
+        }
+      } catch {
+        // Telemetry must never turn a settled child call into a failed run.
+      }
       // EI-7669: realDispatch only throws on a dispatch-level failure — a tool that dispatched fine
       // but reports its OWN semantic rejection (ok: false in its result body, e.g. a completion-
       // integrity check) resolves normally here. Tally those so a batched script that doesn't check
@@ -515,6 +530,7 @@ export async function runToolOrchestration(
     ...(unknownRefs && unknownRefs.length ? { unknownRefs } : {}),
     dryRun,
     dispatchCount,
+    intermediateBytes,
     plannedMutations,
     ...(!dryRun && writeAttempts.length
       ? { writeAttempts: writeAttempts.map((attempt) => ({ ...attempt })) }
