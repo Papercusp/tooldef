@@ -330,17 +330,26 @@ const WORKER_SRC = `(() => {
   });
 
   // --- compile + run the body under vm (globals-scoped); a leading newline guards a trailing // comment ---
-  const wrap = (body) => '(async (tools, log) => {\\n' + body + '\\n})';
+  // Keep the logger in the vm global scope rather than as a function parameter. A script is
+  // allowed to use 'log' as an ordinary local variable (for example, to hold a tool result),
+  // and a formal parameter named 'log' makes that valid script fail at compile time with
+  // "Identifier 'log' has already been declared". The global still preserves the documented
+  // bare log(...) convenience while allowing function-local shadowing.
+  const wrap = (body) => '(async (tools) => {\\n' + body + '\\n})';
   let factory;
   try {
-    factory = vm.runInNewContext(wrap(script), { console: { log, error: log, warn: log }, sleep }, { displayErrors: true });
+    factory = vm.runInNewContext(
+      wrap(script),
+      { console: { log, error: log, warn: log }, log, sleep },
+      { displayErrors: true },
+    );
   } catch (err) {
     parentPort.postMessage({ t: 'error', error: 'compile_error: ' + ((err && err.message) || String(err)) });
     return;
   }
   (async () => {
     try {
-      const result = await factory(tools, log);
+      const result = await factory(tools);
       // Deep-unwrap first: a tracking Proxy is not structured-cloneable, so returning a tool
       // result verbatim (\`return pp;\`) would otherwise become result_not_serializable.
       const plain = unwrap(result, new Map());
