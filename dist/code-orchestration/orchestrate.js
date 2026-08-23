@@ -1,6 +1,6 @@
 import { buildToolFacade } from './tool-facade';
 import { realDispatch, isPreExecutionFailure } from './dispatch-binding';
-import { runOrchestrationScript } from './run-script';
+import { runOrchestrationScript, } from './run-script';
 import { checkScript, ensureParseCheckReady } from './parse-check';
 /**
  * P-020 (fleet-leadership-continuity-and-actuation-2026-08-01) — name the writes that
@@ -92,6 +92,148 @@ function isBulkPartialFailure(value) {
     const failed = counts.failed;
     return typeof failed === 'number' && failed > 0;
 }
+const OUTPUT_REFERENCE_SHA_RE = /^[0-9a-f]{64}$/i;
+const OUTPUT_REFERENCE_AUDIENCES = new Set(['owner', 'workspace', 'public']);
+/**
+ * Copy only the integrity-bearing subset of a typed P-006 reference. Reject
+ * credential-bearing/query URIs and malformed metadata rather than letting a
+ * result-shaped object smuggle arbitrary text into a persisted execution trace.
+ */
+function safeOutputReference(value) {
+    if (!isPlainRecord(value) || value.kind !== 'reference')
+        return null;
+    const { uri, byteCount, sha256, expiresAt, audience } = value;
+    if (typeof uri !== 'string' ||
+        uri.length === 0 ||
+        uri.length > 2_048 ||
+        typeof byteCount !== 'number' ||
+        !Number.isSafeInteger(byteCount) ||
+        byteCount < 0 ||
+        typeof sha256 !== 'string' ||
+        !OUTPUT_REFERENCE_SHA_RE.test(sha256)) {
+        return null;
+    }
+    let parsed;
+    try {
+        parsed = new URL(uri);
+    }
+    catch {
+        return null;
+    }
+    if ((parsed.protocol !== 'papercusp:' && parsed.protocol !== 'https:') ||
+        parsed.username ||
+        parsed.password ||
+        parsed.search ||
+        parsed.hash) {
+        return null;
+    }
+    if (expiresAt !== undefined && (typeof expiresAt !== 'string' || !Number.isFinite(Date.parse(expiresAt)))) {
+        return null;
+    }
+    if (audience !== undefined && (typeof audience !== 'string' || !OUTPUT_REFERENCE_AUDIENCES.has(audience))) {
+        return null;
+    }
+    return {
+        uri,
+        byteCount,
+        sha256: sha256.toLowerCase(),
+        ...(typeof expiresAt === 'string' ? { expiresAt } : {}),
+        ...(audience === 'owner' || audience === 'workspace' || audience === 'public' ? { audience } : {}),
+    };
+}
+/** Bounded recursive scan: inner tool results are arbitrary transport values. */
+function extractOutputReferences(value) {
+    const found = [];
+    const seenObjects = new Set();
+    const seenRefs = new Set();
+    const pending = [{ value, depth: 0 }];
+    let visited = 0;
+    while (pending.length > 0 && visited < 2_000 && found.length < 32) {
+        const current = pending.pop();
+        visited += 1;
+        if (typeof current.value !== 'object' || current.value === null || current.depth > 16)
+            continue;
+        if (seenObjects.has(current.value))
+            continue;
+        seenObjects.add(current.value);
+        const reference = safeOutputReference(current.value);
+        if (reference) {
+            const key = `${reference.uri}\u0000${reference.sha256}`;
+            if (!seenRefs.has(key)) {
+                seenRefs.add(key);
+                found.push(reference);
+            }
+            continue;
+        }
+        if (Array.isArray(current.value)) {
+            for (let index = current.value.length - 1; index >= 0; index -= 1) {
+                pending.push({ value: current.value[index], depth: current.depth + 1 });
+            }
+            continue;
+        }
+        for (const child of Object.values(current.value)) {
+            pending.push({ value: child, depth: current.depth + 1 });
+        }
+    }
+    return found;
+}
+const STRICT_BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const MEDIA_MIME_RE = /^(image|audio)\/[A-Za-z0-9][A-Za-z0-9.+_-]*$/;
+function isPlainRecord(value) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value))
+        return false;
+    const proto = Object.getPrototypeOf(value);
+    return proto === Object.prototype || proto === null;
+}
+function validateMediaItem(value, index) {
+    if (!isPlainRecord(value))
+        return `media[${index}] must be an object`;
+    const type = value.type;
+    if (type !== 'image' && type !== 'audio') {
+        return `media[${index}].type must be "image" or "audio"`;
+    }
+    if (typeof value.data !== 'string' || value.data.length === 0 || !STRICT_BASE64_RE.test(value.data)) {
+        return `media[${index}].data must be non-empty canonical base64`;
+    }
+    if (typeof value.mimeType !== 'string' || !MEDIA_MIME_RE.test(value.mimeType)) {
+        return `media[${index}].mimeType must be a concrete image/* or audio/* MIME type`;
+    }
+    if (!value.mimeType.startsWith(`${type}/`)) {
+        return `media[${index}].mimeType must match its ${type} content type`;
+    }
+    // Copy only the validated MCP fields: arbitrary sibling properties from script data must not
+    // hitch a ride around the authored summary/result-door contract.
+    return { type, data: value.data, mimeType: value.mimeType };
+}
+/**
+ * Interpret the opt-in final media contract without changing legacy summaries. An ordinary
+ * returned object — including `{ summary: ... }` — remains byte-for-byte the script summary;
+ * only the presence of `media` activates the envelope and therefore requires `summary` too.
+ */
+function parseFinalResult(value) {
+    if (!isPlainRecord(value) || !Object.prototype.hasOwnProperty.call(value, 'media')) {
+        return { summary: value };
+    }
+    const summary = value.summary;
+    if (!Object.prototype.hasOwnProperty.call(value, 'summary')) {
+        return {
+            summary: undefined,
+            error: 'invalid_media_result: an explicit media result must include a summary field',
+        };
+    }
+    if (!Array.isArray(value.media)) {
+        return { summary, error: 'invalid_media_result: media must be an array' };
+    }
+    const media = [];
+    for (let index = 0; index < value.media.length; index += 1) {
+        const item = validateMediaItem(value.media[index], index);
+        if (typeof item === 'string') {
+            return { summary, error: `invalid_media_result: ${item}` };
+        }
+        media.push(item);
+    }
+    return { summary, media };
+}
 export async function runToolOrchestration(script, opts) {
     const { ctx, deps, tools, allowed, dryRun = false, timeoutMs, wrapDispatch } = opts;
     // The worker timeout in runOrchestrationScript kills only the script worker. Host-side tool
@@ -120,7 +262,9 @@ export async function runToolOrchestration(script, opts) {
     // certainly was not "already executed", which is what we used to tell the caller.
     const rejectedMutations = [];
     const uncertainMutations = [];
+    const callRecords = [];
     let dispatchCount = 0;
+    let intermediateBytes = 0;
     await ensureParseCheckReady(); // lazy-load the TS compiler before the static parse-check (kept out of the eager client bundle)
     const check = checkScript(script, tools, allowed);
     // F8 (autonomous-loop-hardening / H2): an unknown tool ref no longer NUKES the whole run before
@@ -133,10 +277,19 @@ export async function runToolOrchestration(script, opts) {
     // per-call error.
     const unknownRefs = check.ok ? undefined : check.unknownRefs;
     const dispatch = async (tool, name, args) => {
+        const callRecord = {
+            ordinal: callRecords.length,
+            tool: name,
+            effect: tool.effect === 'read' || tool.effect === 'write' ? tool.effect : 'unknown',
+            disposition: 'in_flight',
+            outputReferences: [],
+        };
+        callRecords.push(callRecord);
         let writeAttempt;
         if (tool.effect === 'write') {
             plannedMutations.push({ tool: name, args });
             if (dryRun) {
+                callRecord.disposition = 'planned';
                 return { dryRun: true, wouldCall: name, args };
             }
             writeAttempt = {
@@ -156,11 +309,25 @@ export async function runToolOrchestration(script, opts) {
             const result = await (wrapDispatch
                 ? wrapDispatch(tool, name, args, dispatchCtx, call)
                 : call(dispatchCtx));
+            // P-008: measure the exact serialized payload the script receives. Tool
+            // results are JSON transport values; keep telemetry fail-soft if a custom
+            // in-process fixture returns a non-serializable object.
+            try {
+                const serialized = JSON.stringify(result);
+                if (serialized !== undefined) {
+                    intermediateBytes += new TextEncoder().encode(serialized).byteLength;
+                }
+            }
+            catch {
+                // Telemetry must never turn a settled child call into a failed run.
+            }
+            callRecord.outputReferences = extractOutputReferences(result);
             // EI-7669: realDispatch only throws on a dispatch-level failure — a tool that dispatched fine
             // but reports its OWN semantic rejection (ok: false in its result body, e.g. a completion-
             // integrity check) resolves normally here. Tally those so a batched script that doesn't check
             // every result still gets visibility instead of silently counting the write as executed.
             if (isOkFalseResult(result) || isBulkPartialFailure(result)) {
+                callRecord.disposition = 'semantic_rejected';
                 childFailures.push({ tool: name, kind: 'semantic', result });
                 if (tool.effect === 'write') {
                     if (writeAttempt)
@@ -170,6 +337,10 @@ export async function runToolOrchestration(script, opts) {
             }
             else if (writeAttempt) {
                 writeAttempt.disposition = 'settled';
+                callRecord.disposition = 'settled';
+            }
+            else {
+                callRecord.disposition = 'settled';
             }
             return result;
         }
@@ -180,6 +351,7 @@ export async function runToolOrchestration(script, opts) {
             // (bad args, a denied gate) provably wrote nothing and is safe to re-run, while any
             // other throw stays UNKNOWN and keeps the loud warning it deserves.
             const preExecution = isPreExecutionFailure(err);
+            callRecord.disposition = preExecution ? 'rejected' : 'uncertain';
             childFailures.push({
                 tool: name,
                 kind: preExecution ? 'rejected' : 'uncertain',
@@ -201,6 +373,7 @@ export async function runToolOrchestration(script, opts) {
     const run = await runOrchestrationScript(script, facade, {
         ...(timeoutMs ? { timeoutMs } : {}),
         onTimeout: abortFromParent,
+        ...(opts.inputs ? { inputs: opts.inputs } : {}),
     });
     ctx.signal?.removeEventListener('abort', abortFromParent);
     // P-020: only meaningful when the script ABORTED — a run that completed reached every line
@@ -212,14 +385,18 @@ export async function runToolOrchestration(script, opts) {
         tool,
         executed: false,
     }));
+    const finalResult = run.ok ? parseFinalResult(run.result) : { summary: run.result };
+    const effectiveOk = run.ok && !finalResult.error;
     return {
-        ok: run.ok,
-        summary: run.result,
+        ok: effectiveOk,
+        summary: finalResult.summary,
+        ...(finalResult.media ? { media: finalResult.media } : {}),
         logs: run.logs,
-        error: run.error,
+        error: finalResult.error ?? run.error,
         ...(unknownRefs && unknownRefs.length ? { unknownRefs } : {}),
         dryRun,
         dispatchCount,
+        intermediateBytes,
         plannedMutations,
         ...(!dryRun && writeAttempts.length
             ? { writeAttempts: writeAttempts.map((attempt) => ({ ...attempt })) }
@@ -232,7 +409,11 @@ export async function runToolOrchestration(script, opts) {
         ...(notDispatchedWrites.length ? { notDispatchedWrites } : {}),
         ...(run.fieldMisses?.length ? { fieldMisses: run.fieldMisses } : {}),
         ...(run.sleepCaps?.length ? { sleepCaps: run.sleepCaps } : {}),
+        callRecords: callRecords.map((record) => ({
+            ...record,
+            outputReferences: record.outputReferences.map((reference) => ({ ...reference })),
+        })),
         // EI-7784: surfaced independent of `ok` — see the field doc above.
-        partial: run.ok && childFailures.length > 0,
+        partial: effectiveOk && childFailures.length > 0,
     };
 }

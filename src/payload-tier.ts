@@ -327,6 +327,33 @@ function arrayTruncationMarker(droppedCount: number, shownCount: number, totalCo
   return `[TRUNCATED +${droppedCount} more item(s) — header count includes this marker; showing ${shownCount} of ${totalCount} — see _projection.cursor]`;
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+/** Preserve an array's element contract while keeping truncation visible in band. */
+function arrayTruncationValue(
+  source: unknown[],
+  droppedCount: number,
+  shownCount: number,
+  totalCount: number,
+): string | Record<string, unknown> {
+  const note = arrayTruncationMarker(droppedCount, shownCount, totalCount);
+  if (source.length > 0 && source.every(isPlainObject)) {
+    return {
+      id: '(truncated)',
+      _truncated: true,
+      omittedCount: droppedCount,
+      shownCount,
+      totalCount,
+      note,
+    };
+  }
+  return note;
+}
+
 function takePrimitive(state: ProjectionState, value: unknown, path: string): unknown {
   if (typeof value !== 'string') {
     const size = jsonLen(value);
@@ -434,7 +461,7 @@ function projectIdentityPreview(
           droppedCount,
           true,
         );
-        projected.push(arrayTruncationMarker(droppedCount, projected.length, value.length));
+        projected.push(arrayTruncationValue(value, droppedCount, projected.length, value.length));
       }
       return projected;
     }
@@ -514,7 +541,7 @@ function projectValue(value: unknown, path: string, depth: number, state: Projec
           droppedCount,
           true,
         );
-        projected.push(arrayTruncationMarker(droppedCount, projected.length, value.length));
+        projected.push(arrayTruncationValue(value, droppedCount, projected.length, value.length));
       }
       return projected;
     }

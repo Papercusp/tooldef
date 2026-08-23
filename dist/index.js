@@ -67,7 +67,7 @@ export { toJsonSchema, setJsonSchemaAdapter, zodJsonSchemaAdapter, } from './sch
 /* ─── Standard Schema validation (validator-agnostic) ────────────────── */
 export { standardValidate, validateSync, formatIssues, } from './standard-schema';
 /* ─── Projected-tool registry (the function-as-truth core) ───────────── */
-export { registerProjectedTool, unregisterProjectedToolsForPlugin, toolDeclaresGate, listUngatedProjectedTools, lookupByMcpName, resolveMcpName, normalizeMcpName, lookupByHttpPath, listAllProjectedTools, listDeclaredToolShapers, recordToolShapers, listMcpProjections, ToolRegistrationError, emitToSseSink, isPapercuspBinaryEnvelope, _resetProjectionRegistryForTests, } from './tool-projection';
+export { registerProjectedTool, unregisterProjectedToolsForPlugin, toolDeclaresGate, listUngatedProjectedTools, lookupByMcpName, resolveMcpName, normalizeMcpName, lookupByHttpPath, listAllProjectedTools, listDeclaredToolShapers, recordToolShapers, PROJECTED_TOOL_REGISTRY_SOURCE, projectedToolRegistryRevision, projectedToolCallContract, assertProjectedToolCallContract, renderProjectedToolCall, projectedToolCorrectiveCalls, assertProjectedToolGuidanceConformance, ProjectedToolContractError, listMcpProjections, ToolRegistrationError, emitToSseSink, isPapercuspBinaryEnvelope, _resetProjectionRegistryForTests, } from './tool-projection';
 /* ─── Dispatcher ─────────────────────────────────────────────────────── */
 export { dispatchProjectedTool, dispatchProjectedToolStream, defaultComputeQuotaWindow, UnauthorizedToolError, HarnessRequiredError, InvalidInputError, PASS_THROUGH, } from './dispatch-projected';
 /* ─── Resource authorization (RFC tooldef-auth-rfc Phase 1 — contract only) ─── */

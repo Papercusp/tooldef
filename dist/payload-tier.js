@@ -147,6 +147,27 @@ function omissionMarker(reason, omittedChars) {
 function arrayTruncationMarker(droppedCount, shownCount, totalCount) {
     return `[TRUNCATED +${droppedCount} more item(s) — header count includes this marker; showing ${shownCount} of ${totalCount} — see _projection.cursor]`;
 }
+function isPlainObject(value) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value))
+        return false;
+    const prototype = Object.getPrototypeOf(value);
+    return prototype === Object.prototype || prototype === null;
+}
+/** Preserve an array's element contract while keeping truncation visible in band. */
+function arrayTruncationValue(source, droppedCount, shownCount, totalCount) {
+    const note = arrayTruncationMarker(droppedCount, shownCount, totalCount);
+    if (source.length > 0 && source.every(isPlainObject)) {
+        return {
+            id: '(truncated)',
+            _truncated: true,
+            omittedCount: droppedCount,
+            shownCount,
+            totalCount,
+            note,
+        };
+    }
+    return note;
+}
 function takePrimitive(state, value, path) {
     if (typeof value !== 'string') {
         const size = jsonLen(value);
@@ -194,6 +215,11 @@ function takePrimitive(state, value, path) {
 const IDENTITY_FIELDS = new Set([
     'id', 'title', 'name', 'slug', 'ref', 'kind', 'state', 'status', 'ok', 'error',
     'item', 'itemId', 'plan', 'planSlug', 'rubricRef', 'workItemId',
+    // EI-21058972492075433: the outcome-identity of a WRITE/LAUNCH receipt (a
+    // singleton fire-and-can't-safely-retry call like release:checkpoint-run) —
+    // "did it launch, and against what" is exactly as load-bearing as `ok`/`id`
+    // above, and just as cheap to prioritize ahead of verbose diagnostics.
+    'launched', 'candidate', 'unit', 'runId',
 ]);
 const IDENTITY_ENVELOPES = new Set(['results', 'items', 'workItem', 'counts']);
 const IDENTITY_PREVIEW_DEPTH = 4;
@@ -239,7 +265,7 @@ function projectIdentityPreview(value, path, depth, state) {
                 // even when per-row entries for the KEPT elements would otherwise fill it
                 // first (EI-19965559011729712).
                 recordOmission(state, `${path}[${projected.length}]`, `${droppedCount} identity row(s) omitted; showing ${projected.length} of ${value.length}`, droppedCount, true);
-                projected.push(arrayTruncationMarker(droppedCount, projected.length, value.length));
+                projected.push(arrayTruncationValue(value, droppedCount, projected.length, value.length));
             }
             return projected;
         }
@@ -315,7 +341,7 @@ function projectValue(value, path, depth, state) {
                 // (EI-19965559011729712). The in-band marker also travels WITH the array
                 // itself, so a downstream encoder's own element count reflects the drop.
                 recordOmission(state, `${path}[${projected.length}]`, `${droppedCount} array item(s) omitted; showing ${projected.length} of ${value.length}`, droppedCount, true);
-                projected.push(arrayTruncationMarker(droppedCount, projected.length, value.length));
+                projected.push(arrayTruncationValue(value, droppedCount, projected.length, value.length));
             }
             return projected;
         }
@@ -490,11 +516,55 @@ export function projectBoundedPayload(data, opts) {
     metadata.returnedChars = jsonLen(result);
     // Exact last-line defense: pathological keys/escaping must not defeat the
     // transport bound even if the approximate recursion budget under-counted.
+    //
+    // EI-21058972492075433: the walk above already spent ITS OWN budget honestly
+    // and preserved identity fields (ok/launched/candidate/unit/...) whenever they
+    // fit — what usually pushes the total over here is the METADATA built on TOP
+    // of that preview (up to GENERIC_PROJECTION_OMISSION_SAMPLES omission entries
+    // plus a GENERIC_PROJECTION_CURSOR_ARGS_TARGET_CHARS-sized cursor.args), not
+    // the data itself. A rich write receipt (release:checkpoint-run's launch
+    // reply, with a repair-queue object, excluded-commit lists, and a long prose
+    // note) can legitimately produce enough distinct omissions to blow the fixed
+    // metadata reserve on its own. Discarding the WHOLE preview here used to throw
+    // those already-fitting identity fields away too — unrecoverable for a caller
+    // that must not retry a singleton write just to learn whether it launched.
+    //
+    // Fall back to a SEPARATELY, tightly budgeted identity-only preview instead of
+    // a bare summary placeholder, so the load-bearing outcome fields survive even
+    // when the full preview + metadata genuinely cannot. Only when NOTHING
+    // identifiable survives even that (no id/ok/launched/... anywhere in the
+    // payload) does this keep the old all-detail-erased summary — there is
+    // nothing left to preserve.
     if (metadata.returnedChars >= Math.min(target, PAYLOAD_TIER_HARD_CEILING_CHARS)) {
-        result = {
-            summary: '[payload preview omitted: serialized projection exceeded transport budget]',
-            _projection: { ...metadata, returnedChars: 0 },
+        const identityState = {
+            remaining: Math.max(400, Math.floor(target * 0.2)),
+            omittedCount: 0,
+            omitted: [],
+            priorityOmitted: [],
+            active: new WeakSet(),
+            limits: { maxArray: 8, maxDepth: 3, maxKeys: 20, maxString: 300 },
         };
+        const identityOnly = projectIdentityPreview(data, '$', 0, identityState);
+        const identityFields = identityOnly && typeof identityOnly === 'object' && !Array.isArray(identityOnly)
+            ? identityOnly
+            : null;
+        const sourceFields = data && typeof data === 'object' && !Array.isArray(data)
+            ? data
+            : null;
+        if (identityFields && sourceFields) {
+            for (const key of opts.preserveTopLevelKeys ?? []) {
+                if (!Object.prototype.hasOwnProperty.call(sourceFields, key) || key in identityFields)
+                    continue;
+                identityFields[key] = projectValue(sourceFields[key], `$.${key}`, 0, identityState);
+            }
+        }
+        result =
+            identityFields && Object.keys(identityFields).length > 0
+                ? { ...identityFields, _projection: { ...metadata, returnedChars: 0 } }
+                : {
+                    summary: '[payload preview omitted: serialized projection exceeded transport budget]',
+                    _projection: { ...metadata, returnedChars: 0 },
+                };
         result._projection.returnedChars = jsonLen(result);
     }
     return result;

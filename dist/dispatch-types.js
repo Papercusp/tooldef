@@ -51,7 +51,12 @@ export class HarnessRequiredError extends Error {
  * an oversized cup:spawn `brief` fired the structural watchdog key).
  */
 export class InvalidInputError extends Error {
+    metadata;
     name = 'InvalidInputError';
+    constructor(message, metadata) {
+        super(message);
+        this.metadata = metadata;
+    }
 }
 /* ─── Dispatch deps (DI surface) ─────────────────────────────────────── */
 /** Sentinel — return this from overrideTool to let the real handler run. */

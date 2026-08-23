@@ -118,8 +118,10 @@ if (!__g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY]) {
         BY_MCP_NAME: new Map(),
         BY_HTTP_PATH: new Map(),
         SHAPERS: new Map(),
+        CONTRACT_EPOCH: 0,
     };
 }
+const REGISTRY_STORE = __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY];
 const REGISTRY = __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].REGISTRY;
 const BY_MCP_NAME = __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].BY_MCP_NAME;
 const BY_HTTP_PATH = __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].BY_HTTP_PATH;
@@ -128,6 +130,10 @@ const BY_HTTP_PATH = __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].BY_HTTP_PATH;
 // `.set` throw on undefined — an absent map must degrade to "nothing recorded",
 // never to a crash at import time.
 const SHAPERS = (__g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].SHAPERS ??= new Map());
+function invalidateProjectedToolContract() {
+    REGISTRY_STORE.CONTRACT_EPOCH = (REGISTRY_STORE.CONTRACT_EPOCH ?? 0) + 1;
+    REGISTRY_STORE.CONTRACT_REVISION_CACHE = undefined;
+}
 /**
  * Record a tool's declared payload shapers. Called by `defineTool`; the shapers
  * are otherwise unreachable from the catalog (see `RegistryStore.SHAPERS`).
@@ -272,6 +278,7 @@ export function registerProjectedTool(tool) {
         BY_HTTP_PATH.set(p, tool);
     }
     REGISTRY.set(entryKey(tool), tool);
+    invalidateProjectedToolContract();
 }
 /**
  * Remove all entries for a plugin from the registry. Used by the host's
@@ -303,6 +310,8 @@ export function unregisterProjectedToolsForPlugin(pluginName) {
         if (t.pluginName === pluginName)
             BY_HTTP_PATH.delete(k);
     }
+    if (removed > 0)
+        invalidateProjectedToolContract();
     return removed;
 }
 /** Look up by MCP name (e.g. 'repomix.pack') — EXACT match only. */
@@ -372,6 +381,229 @@ export function listAllProjectedTools() {
     return Array.from(REGISTRY.values());
 }
 /**
+ * Stable content revision for the executable MCP contract.
+ *
+ * The registry is the authority for names, accepted argument shapes, and
+ * client/role visibility. Every agent-facing projection carries this same
+ * revision so callers can detect guidance produced from a different contract.
+ * Registration order is deliberately excluded; executable content is not.
+ */
+export const PROJECTED_TOOL_REGISTRY_SOURCE = 'projected-tool-registry';
+export function projectedToolRegistryRevision(tools) {
+    if (!tools) {
+        const epoch = REGISTRY_STORE.CONTRACT_EPOCH ?? 0;
+        const cached = REGISTRY_STORE.CONTRACT_REVISION_CACHE;
+        if (cached?.epoch === epoch)
+            return cached.revision;
+        const revision = projectedToolRegistryRevision(listAllProjectedTools());
+        REGISTRY_STORE.CONTRACT_REVISION_CACHE = { epoch, revision };
+        return revision;
+    }
+    const canonical = (value) => {
+        if (value === null || typeof value !== 'object')
+            return JSON.stringify(value) ?? 'null';
+        if (Array.isArray(value))
+            return `[${value.map(canonical).join(',')}]`;
+        const row = value;
+        return `{${Object.keys(row)
+            .sort()
+            .map((key) => `${JSON.stringify(key)}:${canonical(row[key])}`)
+            .join(',')}}`;
+    };
+    const contracts = tools
+        .flatMap((tool) => {
+        const name = tool.expose.mcp?.name;
+        if (!name)
+            return [];
+        return [{
+                name,
+                inputSchema: tool.discoveryInputSchema ?? tool.inputSchema,
+                agentRoles: [...(tool.agentRoles ?? [])].sort(),
+                profile: tool.profile ?? 'all',
+                modality: [...(tool.modality ?? ['text', 'voice'])].sort(),
+                argRedirects: tool.guidance?.argRedirects ?? {},
+            }];
+    })
+        .sort((a, b) => a.name.localeCompare(b.name));
+    // Deterministic drift watermark, not a security primitive. FNV-1a avoids
+    // making this generic registry module Node-crypto-specific.
+    let hash = 0xcbf29ce484222325n;
+    for (const byte of new TextEncoder().encode(canonical(contracts))) {
+        hash ^= BigInt(byte);
+        hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+    }
+    return `projected-tool-registry-v1:${hash.toString(16).padStart(16, '0')}`;
+}
+export class ProjectedToolContractError extends Error {
+    name = 'ProjectedToolContractError';
+}
+function availabilityProblem(tool, context) {
+    if (context.role && tool.agentRoles?.length && !tool.agentRoles.includes(context.role)) {
+        return `role ${context.role} is not admitted`;
+    }
+    if (context.profile === 'power' && tool.profile === 'engineer')
+        return 'power profile is not admitted';
+    if (context.modality && !(tool.modality ?? ['text', 'voice']).includes(context.modality)) {
+        return `modality ${context.modality} is not admitted`;
+    }
+    return null;
+}
+/** Resolve one exact, currently callable registry contract or fail render/CI loudly. */
+export function projectedToolCallContract(name, context = {}) {
+    const tool = lookupByMcpName(name);
+    if (!tool?.expose.mcp)
+        throw new ProjectedToolContractError(`tool contract unavailable: ${name}`);
+    const unavailable = availabilityProblem(tool, context);
+    if (unavailable)
+        throw new ProjectedToolContractError(`tool contract unavailable: ${name} (${unavailable})`);
+    return {
+        source: PROJECTED_TOOL_REGISTRY_SOURCE,
+        revision: projectedToolRegistryRevision(),
+        name,
+        inputSchema: tool.discoveryInputSchema ?? tool.inputSchema,
+        aliases: Object.fromEntries(Object.entries(tool.guidance?.argRedirects ?? {})
+            .filter((entry) => typeof entry[1] === 'string')
+            .map(([key, target]) => [
+            key,
+            { target, provenance: 'authored-tool-guidance' },
+        ])),
+    };
+}
+function contractProblems(schema, value, path = '$') {
+    const alternatives = Array.isArray(schema.anyOf)
+        ? schema.anyOf
+        : Array.isArray(schema.oneOf)
+            ? schema.oneOf
+            : null;
+    if (alternatives) {
+        const attempts = alternatives
+            .filter((branch) => !!branch && typeof branch === 'object' && !Array.isArray(branch))
+            .map((branch) => contractProblems(branch, value, path));
+        if (attempts.some((problems) => problems.length === 0))
+            return [];
+        return attempts.sort((a, b) => a.length - b.length)[0] ?? [`${path}: no declared schema branch matched`];
+    }
+    if (Array.isArray(schema.allOf)) {
+        return schema.allOf.flatMap((branch) => branch && typeof branch === 'object' && !Array.isArray(branch)
+            ? contractProblems(branch, value, path)
+            : []);
+    }
+    if (Array.isArray(schema.enum) && !schema.enum.some((candidate) => Object.is(candidate, value))) {
+        return [`${path}: ${JSON.stringify(value)} is not one of ${schema.enum.map(String).join('|')}`];
+    }
+    if ('const' in schema && !Object.is(schema.const, value))
+        return [`${path}: expected ${JSON.stringify(schema.const)}`];
+    if (schema.type === 'object' || schema.properties) {
+        if (!value || typeof value !== 'object' || Array.isArray(value))
+            return [`${path}: expected object`];
+        const row = value;
+        const properties = schema.properties && typeof schema.properties === 'object' && !Array.isArray(schema.properties)
+            ? schema.properties
+            : {};
+        const problems = [];
+        for (const key of Array.isArray(schema.required) ? schema.required : []) {
+            if (typeof key === 'string' && !(key in row))
+                problems.push(`${path}.${key}: required`);
+        }
+        if (schema.additionalProperties === false) {
+            for (const key of Object.keys(row))
+                if (!(key in properties))
+                    problems.push(`${path}.${key}: undeclared key`);
+        }
+        for (const [key, child] of Object.entries(properties)) {
+            if (!(key in row) || !child || typeof child !== 'object' || Array.isArray(child))
+                continue;
+            problems.push(...contractProblems(child, row[key], `${path}.${key}`));
+        }
+        return problems;
+    }
+    if (schema.type === 'array') {
+        if (!Array.isArray(value))
+            return [`${path}: expected array`];
+        const item = schema.items;
+        return item && typeof item === 'object' && !Array.isArray(item)
+            ? value.flatMap((entry, index) => contractProblems(item, entry, `${path}[${index}]`))
+            : [];
+    }
+    if (schema.type === 'string' && typeof value !== 'string')
+        return [`${path}: expected string`];
+    if ((schema.type === 'number' || schema.type === 'integer') && typeof value !== 'number')
+        return [`${path}: expected ${schema.type}`];
+    if (schema.type === 'boolean' && typeof value !== 'boolean')
+        return [`${path}: expected boolean`];
+    if (schema.type === 'null' && value !== null)
+        return [`${path}: expected null`];
+    return [];
+}
+/** Validate a prompt/example call against the same accepted schema used for discovery. */
+export function assertProjectedToolCallContract(name, args, context = {}) {
+    const contract = projectedToolCallContract(name, context);
+    const problems = contractProblems(contract.inputSchema, args);
+    if (problems.length > 0)
+        throw new ProjectedToolContractError(`invalid generated call for ${name}: ${problems.join('; ')}`);
+    return contract;
+}
+/** Render an exact example only after registry/schema/admission conformance succeeds. */
+export function renderProjectedToolCall(name, args, context = {}) {
+    assertProjectedToolCallContract(name, args, context);
+    return `${name} ${JSON.stringify(args)}`;
+}
+/** Validate and render every structured rejected-arg remedy on one source tool. */
+export function projectedToolCorrectiveCalls(name, context = {}) {
+    projectedToolCallContract(name, context);
+    const tool = lookupByMcpName(name);
+    return Object.entries(tool.guidance?.argRedirects ?? {}).flatMap(([rejectedArg, redirect]) => {
+        if (typeof redirect === 'string')
+            return [];
+        const rendered = renderProjectedToolCall(redirect.tool, redirect.args, context);
+        return [{
+                rejectedArg,
+                tool: redirect.tool,
+                args: redirect.args,
+                ...(redirect.note ? { note: redirect.note } : {}),
+                source: PROJECTED_TOOL_REGISTRY_SOURCE,
+                registryRevision: projectedToolRegistryRevision(),
+                rendered,
+            }];
+    });
+}
+/**
+ * CI/render rail for executable guidance. Every context admitted by the source
+ * tool must also admit the remedy, and every remedy must satisfy the target's
+ * current required/enum/closed-object schema.
+ */
+export function assertProjectedToolGuidanceConformance() {
+    let toolsChecked = 0;
+    let correctiveCallsChecked = 0;
+    for (const tool of listAllProjectedTools()) {
+        const name = tool.expose.mcp?.name;
+        if (!name)
+            continue;
+        const hasStructured = Object.values(tool.guidance?.argRedirects ?? {}).some((redirect) => typeof redirect === 'object' && redirect !== null);
+        if (!hasStructured)
+            continue;
+        toolsChecked += 1;
+        const roles = tool.agentRoles?.length ? [...tool.agentRoles] : [undefined];
+        const profiles = tool.profile === 'engineer'
+            ? ['engineer']
+            : ['engineer', 'power'];
+        const modalities = [...(tool.modality ?? ['text', 'voice'])];
+        for (const role of roles) {
+            for (const profile of profiles) {
+                for (const modality of modalities) {
+                    correctiveCallsChecked += projectedToolCorrectiveCalls(name, { role, profile, modality }).length;
+                }
+            }
+        }
+    }
+    return {
+        source: PROJECTED_TOOL_REGISTRY_SOURCE,
+        registryRevision: projectedToolRegistryRevision(),
+        toolsChecked,
+        correctiveCallsChecked,
+    };
+}
+/**
  * True if a tool declares ANY auth gate — a capability, an agent-role allowlist, an RBAC
  * role requirement, or an `authorize` hook. The single predicate behind both the
  * default-deny dispatch gate and `listUngatedProjectedTools` (RFC tooldef-auth Phase 3),
@@ -437,6 +669,7 @@ function serializeEventsSchema(events) {
 }
 export function listMcpProjections(role, profile) {
     const out = [];
+    const registryRevision = projectedToolRegistryRevision();
     for (const tool of REGISTRY.values()) {
         if (!tool.expose.mcp)
             continue;
@@ -452,6 +685,10 @@ export function listMcpProjections(role, profile) {
             name: tool.expose.mcp.name,
             description: tool.description,
             inputSchema: tool.inputSchema,
+            _meta: {
+                'papercusp/toolRegistryRevision': registryRevision,
+                'papercusp/toolRegistrySource': PROJECTED_TOOL_REGISTRY_SOURCE,
+            },
         };
         // Advertise the output schema + negotiable formats when the tool declared
         // an output schema (P-010). Tools without one still get the runtime
@@ -493,5 +730,6 @@ export function _resetProjectionRegistryForTests() {
     REGISTRY.clear();
     BY_MCP_NAME.clear();
     BY_HTTP_PATH.clear();
+    invalidateProjectedToolContract();
     SHAPERS.clear();
 }

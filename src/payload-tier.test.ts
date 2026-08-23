@@ -696,11 +696,16 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     const projectedCriteria = (out.rubric as { criteria: unknown[] }).criteria;
     // The header a downstream TOON/array-length read would derive is no longer
     // silently short — the drop is visible IN the array's own last element.
-    const marker = projectedCriteria[projectedCriteria.length - 1];
-    expect(typeof marker).toBe('string');
-    expect(marker as string).toMatch(/TRUNCATED \+\d+ more item\(s\)/);
-    expect(marker as string).toContain('header count includes this marker');
-    expect(marker as string).toContain('showing 12 of 17');
+    const marker = projectedCriteria[projectedCriteria.length - 1] as Record<string, unknown>;
+    expect(marker).toMatchObject({
+      _truncated: true,
+      omittedCount: 5,
+      shownCount: 12,
+      totalCount: 17,
+    });
+    expect(marker.note as string).toMatch(/TRUNCATED \+\d+ more item\(s\)/);
+    expect(marker.note as string).toContain('header count includes this marker');
+    expect(marker.note as string).toContain('showing 12 of 17');
 
     // The actual agent-facing TOON shape still has a projected-length header,
     // so the adjacent marker must carry the shown/true total distinction.
@@ -712,6 +717,35 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     // per-element field/depth omissions recorded for the elements that DID
     // survive.
     expect(out._projection.omitted.some((o) => /array item\(s\) omitted; showing 12 of 17/.test(o.reason))).toBe(true);
+  });
+
+  it('REGRESSION (EI-21205111248838257): truncating an object-row array preserves object homogeneity', () => {
+    const runs = Array.from({ length: 17 }, (_, i) => ({
+      startedAt: `2026-08-23T00:00:${String(i).padStart(2, '0')}Z`,
+      filePath: `suite-${i}.test.ts`,
+      outputTail: 'x'.repeat(20),
+    }));
+    const out = projectBoundedPayload({ runs }, { toolName: 'testing:runs', tier: 'trimmed' });
+    const projectedRuns = out.runs as Array<Record<string, unknown>>;
+
+    expect(projectedRuns.every((row) => row !== null && typeof row === 'object' && !Array.isArray(row))).toBe(true);
+    expect(projectedRuns.at(-1)).toMatchObject({
+      _truncated: true,
+      omittedCount: 5,
+      shownCount: 12,
+      totalCount: 17,
+    });
+    expect(() => projectedRuns.map((row) => [row.startedAt, row.filePath, row.outputTail])).not.toThrow();
+  });
+
+  it('keeps the scalar in-band marker for primitive arrays', () => {
+    const out = projectBoundedPayload(
+      { values: Array.from({ length: 17 }, (_, i) => i) },
+      { toolName: 't', tier: 'trimmed' },
+    );
+    const marker = (out.values as unknown[]).at(-1);
+    expect(typeof marker).toBe('string');
+    expect(marker as string).toContain('showing 12 of 17');
   });
 
   it('the depth-boundary markers carry the recovery knob too, and pay no stringify for a size', () => {

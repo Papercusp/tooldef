@@ -1,3 +1,67 @@
+function jsonInputError(value, path, seen) {
+    if (value === null || typeof value === 'string' || typeof value === 'boolean')
+        return null;
+    if (typeof value === 'number')
+        return Number.isFinite(value) ? null : `${path} must be a finite number`;
+    if (typeof value !== 'object')
+        return `${path} contains non-JSON ${typeof value}`;
+    if (seen.has(value))
+        return `${path} contains a cycle`;
+    seen.add(value);
+    if (Array.isArray(value)) {
+        const ownKeys = Reflect.ownKeys(value);
+        for (const key of ownKeys) {
+            if (key === 'length')
+                continue;
+            if (typeof key !== 'string' || !/^\d+$/.test(key)) {
+                seen.delete(value);
+                return `${path} contains a non-JSON array property`;
+            }
+        }
+        for (let index = 0; index < value.length; index += 1) {
+            if (!Object.prototype.hasOwnProperty.call(value, index)) {
+                seen.delete(value);
+                return `${path}[${index}] is a sparse array slot`;
+            }
+            const error = jsonInputError(value[index], `${path}[${index}]`, seen);
+            if (error) {
+                seen.delete(value);
+                return error;
+            }
+        }
+        seen.delete(value);
+        return null;
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+        seen.delete(value);
+        return `${path} must be a plain JSON object`;
+    }
+    for (const key of Reflect.ownKeys(value)) {
+        if (typeof key !== 'string') {
+            seen.delete(value);
+            return `${path} contains a symbol key`;
+        }
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        if (!descriptor?.enumerable || !('value' in descriptor)) {
+            seen.delete(value);
+            return `${path}.${key} must be an enumerable data property`;
+        }
+        const error = jsonInputError(descriptor.value, `${path}.${key}`, seen);
+        if (error) {
+            seen.delete(value);
+            return error;
+        }
+    }
+    seen.delete(value);
+    return null;
+}
+function validateJsonInputs(inputs) {
+    if (inputs === null || typeof inputs !== 'object' || Array.isArray(inputs)) {
+        return 'inputs must be a plain JSON object';
+    }
+    return jsonInputError(inputs, 'inputs', new Set());
+}
 /**
  * The worker body, embedded as a string and run via `new Worker(src, { eval: true })`.
  *
@@ -15,7 +79,7 @@
 const WORKER_SRC = `(() => {
   const { parentPort, workerData } = require('node:worker_threads');
   const vm = require('node:vm');
-  const { script, maxLogLines, sleepMaxMs } = workerData;
+  const { script, maxLogLines, sleepMaxMs, inputs: workerInputs } = workerData;
 
   const stringify = (v) => {
     if (typeof v === 'string') return v;
@@ -79,6 +143,18 @@ const WORKER_SRC = `(() => {
   const proxyToRaw = new WeakMap();
   const rawToProxy = new WeakMap();
   const PROBE_KEYS = new Set(['then', 'toJSON', 'constructor', 'inspect', 'nodeType', '$$typeof']);
+  const ROOT_ENVELOPE_FIELDS = new Set(['content', 'text']);
+  const SHAPE_HINT_LIMIT = 8;
+  const compactShapeHint = (target) => Object.keys(target)
+    .sort()
+    .slice(0, SHAPE_HINT_LIMIT)
+    .join(', ') || '(none)';
+  const shapeQuote = String.fromCharCode(96);
+  const structuredRootShapeError = (tool, key, target) =>
+    'structured_result_shape: ' + tool +
+    ' returned a typed structured root; missing ' + shapeQuote + key + shapeQuote +
+    ' is an MCP content/text envelope read. Use direct typed fields. Available keys: ' +
+    compactShapeHint(target);
   // Plain data (object/array) test that works ACROSS REALMS. The script runs under
   // vm.runInNewContext, so an object it builds itself (\`return { viaCall };\`) has the VM
   // context's Object.prototype — a strict \`proto === Object.prototype\` identity check is false
@@ -108,12 +184,14 @@ const WORKER_SRC = `(() => {
         if (typeof key === 'symbol') return Reflect.get(target, key);
         if (!(key in target)
           && !PROBE_KEYS.has(key)
-          && !(isArr && /^\\d+$/.test(key))
-          && fieldMisses.length < MISS_LIMIT) {
+          && !(isArr && /^\\d+$/.test(key))) {
           const sig = tool + '|' + path + '|' + key;
-          if (!missSeen.has(sig)) {
+          if (!missSeen.has(sig) && fieldMisses.length < MISS_LIMIT) {
             missSeen.add(sig);
             fieldMisses.push({ tool, path: path || '(root)', read: key, available: Object.keys(target).slice(0, AVAIL_LIMIT) });
+          }
+          if (!path && ROOT_ENVELOPE_FIELDS.has(key)) {
+            throw new Error(structuredRootShapeError(tool, key, target));
           }
         }
         return track(Reflect.get(target, key), tool, path ? path + '.' + key : key);
@@ -178,17 +256,75 @@ const WORKER_SRC = `(() => {
   });
 
   // --- compile + run the body under vm (globals-scoped); a leading newline guards a trailing // comment ---
-  const wrap = (body) => '(async (tools, log) => {\\n' + body + '\\n})';
+  // Keep the logger in the vm global scope rather than as a function parameter. A script is
+  // allowed to use 'log' as an ordinary local variable (for example, to hold a tool result),
+  // and a formal parameter named 'log' makes that valid script fail at compile time with
+  // "Identifier 'log' has already been declared". The global still preserves the documented
+  // bare log(...) convenience while allowing function-local shadowing.
+  const wrap = (body) =>
+    '(() => {\\n' +
+    // Only the JSON string crosses the worker→VM context boundary. JSON.parse and Object.freeze
+    // below are resolved inside the VM realm, so the script receives no worker/host prototypes.
+    'const rawInputs = globalThis.__papercuspInputsJson;\\n' +
+    'delete globalThis.__papercuspInputsJson;\\n' +
+    'const freezeInputs = (value) => {\\n' +
+    "  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value;\\n" +
+    '  for (const child of Object.values(value)) freezeInputs(child);\\n' +
+    '  return Object.freeze(value);\\n' +
+    '};\\n' +
+    'const inputs = freezeInputs(JSON.parse(rawInputs));\\n' +
+    'return (async (tools) => {\\n' +
+    // atob is deliberately defined in the VM realm. Passing Node's host atob into the
+    // context would give the script its host Function constructor, which can escape the VM.
+    // This forgiving-base64 implementation matches the byte-page use case while keeping Node
+    // globals (Buffer, process, require) out of the script's reach.
+    'globalThis.atob = (input) => {\\n' +
+    "  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';\\n" +
+    "  const value = String(input).replace(/[\\\\t\\\\n\\\\f\\\\r ]/g, '');\\n" +
+    "  const remainder = value.length % 4;\\n" +
+    "  if (remainder === 1) throw new Error('InvalidCharacterError: invalid base64 length');\\n" +
+    "  const padded = value + (remainder === 2 ? '==' : remainder === 3 ? '=' : '');\\n" +
+    "  let output = '';\\n" +
+    "  for (let i = 0; i < padded.length; i += 4) {\\n" +
+    "    const c0 = padded.charAt(i);\\n" +
+    "    const c1 = padded.charAt(i + 1);\\n" +
+    "    const c2 = padded.charAt(i + 2);\\n" +
+    "    const c3 = padded.charAt(i + 3);\\n" +
+    "    const n0 = alphabet.indexOf(c0);\\n" +
+    "    const n1 = alphabet.indexOf(c1);\\n" +
+    "    const n2 = c2 === '=' ? 0 : alphabet.indexOf(c2);\\n" +
+    "    const n3 = c3 === '=' ? 0 : alphabet.indexOf(c3);\\n" +
+    "    if (n0 < 0 || n1 < 0 || n2 < 0 || n3 < 0 || (c2 === '=' && c3 !== '=') || ((c2 === '=' || c3 === '=') && i + 4 < padded.length)) {\\n" +
+    "      throw new Error('InvalidCharacterError: invalid base64 data');\\n" +
+    "    }\\n" +
+    "    output += String.fromCharCode((n0 << 2) | (n1 >> 4));\\n" +
+    "    if (c2 !== '=') output += String.fromCharCode(((n1 & 15) << 4) | (n2 >> 2));\\n" +
+    "    if (c3 !== '=') output += String.fromCharCode(((n2 & 3) << 6) | n3);\\n" +
+    "  }\\n" +
+    "  return output;\\n" +
+    '}\\n' +
+    body +
+    '\\n});\\n' +
+    '})()';
   let factory;
   try {
-    factory = vm.runInNewContext(wrap(script), { console: { log, error: log, warn: log }, sleep }, { displayErrors: true });
+    factory = vm.runInNewContext(
+      wrap(script),
+      {
+        console: { log, error: log, warn: log },
+        log,
+        sleep,
+        __papercuspInputsJson: JSON.stringify(workerInputs),
+      },
+      { displayErrors: true },
+    );
   } catch (err) {
     parentPort.postMessage({ t: 'error', error: 'compile_error: ' + ((err && err.message) || String(err)) });
     return;
   }
   (async () => {
     try {
-      const result = await factory(tools, log);
+      const result = await factory(tools);
       // Deep-unwrap first: a tracking Proxy is not structured-cloneable, so returning a tool
       // result verbatim (\`return pp;\`) would otherwise become result_not_serializable.
       const plain = unwrap(result, new Map());
@@ -212,6 +348,11 @@ export async function runOrchestrationScript(script, facade, opts = {}) {
     const timeoutMs = opts.timeoutMs ?? 30_000;
     const maxLogLines = opts.maxLogLines ?? 200;
     const logs = [];
+    const inputs = opts.inputs ?? {};
+    const inputsError = validateJsonInputs(inputs);
+    if (inputsError) {
+        return { ok: false, error: `inputs_not_serializable: ${inputsError}`, logs };
+    }
     // Lazy: keeps the barrel browser-safe (see the header note on the type-only import above).
     const { Worker } = await import('node:worker_threads');
     return await new Promise((resolve) => {
@@ -219,7 +360,9 @@ export async function runOrchestrationScript(script, facade, opts = {}) {
         const worker = new Worker(WORKER_SRC, {
             eval: true,
             name: 'code-orchestration',
-            workerData: { script, maxLogLines, sleepMaxMs: opts.sleepMaxMs },
+            // Worker construction performs the host→worker structured clone. The worker serializes
+            // this validated JSON data and the VM parses it again with realm-local intrinsics.
+            workerData: { script, maxLogLines, sleepMaxMs: opts.sleepMaxMs, inputs },
             ...(opts.maxOldGenerationSizeMb
                 ? { resourceLimits: { maxOldGenerationSizeMb: opts.maxOldGenerationSizeMb } }
                 : {}),
