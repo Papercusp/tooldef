@@ -24,6 +24,7 @@ const mkTool = (
   name: string,
   effect: 'read' | 'write',
   fn: ProjectedTool['fn'],
+  effectForCall?: ProjectedTool['effectForCall'],
 ): ProjectedTool =>
   ({
     pluginName: 'fix',
@@ -31,6 +32,7 @@ const mkTool = (
     inputSchema: { type: 'object' },
     capabilities: [],
     effect,
+    ...(effectForCall ? { effectForCall } : {}),
     expose: { mcp: { name } },
     fn,
   }) as unknown as ProjectedTool;
@@ -216,6 +218,30 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     expect(readFn).toHaveBeenCalledOnce(); // read executed
     expect(writeFn).not.toHaveBeenCalled(); // write NOT executed under dryRun
     expect(r.plannedMutations).toEqual([{ tool: 'wi:set-status', args: { id: 1, status: 'done' } }]);
+  });
+
+  it('resolves argument-sensitive effects before applying the dry-run gate', async () => {
+    const deployFn = vi.fn(async () => json({ ok: true, state: 'gate-red' }));
+    const deploy = mkTool(
+      'release:deploy',
+      'write',
+      deployFn,
+      (args) => ((args as { op?: string }).op === 'status' ? 'read' : 'write'),
+    );
+    const r = await runToolOrchestration(
+      `const status = await tools.release.deploy({ op: 'status' });
+       await tools.release.deploy({ op: 'trigger' });
+       return { status };`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [deploy], dryRun: true },
+    );
+
+    expect(r.ok).toBe(true);
+    expect(deployFn).toHaveBeenCalledOnce();
+    expect(r.plannedMutations).toEqual([{ tool: 'release:deploy', args: { op: 'trigger' } }]);
+    expect(r.callRecords).toEqual([
+      expect.objectContaining({ ordinal: 0, tool: 'release:deploy', effect: 'read', disposition: 'settled' }),
+      expect.objectContaining({ ordinal: 1, tool: 'release:deploy', effect: 'write', disposition: 'planned' }),
+    ]);
   });
 
   it('without dryRun, write-effect calls execute (and are still recorded for audit)', async () => {
