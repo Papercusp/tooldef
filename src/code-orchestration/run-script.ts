@@ -141,6 +141,15 @@ export interface RunScriptResult {
    * {@link SleepCap}). Present only when non-empty.
    */
   sleepCaps?: SleepCap[];
+  /** Explicit replay state after any store/load helper call. Seeded from `inputs`. */
+  state?: OrchestrationInputs;
+  /** Raw generated-image helper calls; validated and converted by the orchestration boundary. */
+  generatedImages?: GeneratedImageRequest[];
+}
+
+export interface GeneratedImageRequest {
+  image_url: string;
+  output_hint?: string;
 }
 
 export interface RunScriptOptions {
@@ -168,6 +177,8 @@ export interface RunScriptOptions {
   sleepMaxMs?: number;
   /** Optional JSON-only runtime inputs exposed to the script as the deeply frozen `inputs` value. */
   inputs?: OrchestrationInputs;
+  /** Streaming helper sink. notify/yield_control map to this caller-scoped transport callback. */
+  emit?: (name: string, data: unknown) => void;
 }
 
 function jsonInputError(value: unknown, path: string, seen: Set<object>): string | null {
@@ -383,6 +394,92 @@ const WORKER_SRC = `(() => {
     return out;
   };
 
+  // --- functions.exec compatibility helpers without hidden cross-call state ---
+  // bindings.values arrive as workerInputs. They remain immutable through \`inputs\`, while this
+  // private copy is the explicit store/load state returned to the host for replay on the next run.
+  const replayState = JSON.parse(JSON.stringify(workerInputs));
+  let stateTouched = false;
+  const STATE_KEY_LIMIT = 200;
+  const STATE_BYTES_LIMIT = 65536;
+  const generatedImages = [];
+  const jsonValueError = (value, path, seen) => {
+    if (value === null || typeof value === 'string' || typeof value === 'boolean') return null;
+    if (typeof value === 'number') return Number.isFinite(value) ? null : path + ' must be a finite number';
+    if (typeof value !== 'object') return path + ' contains non-JSON ' + typeof value;
+    if (seen.has(value)) return path + ' contains a cycle';
+    seen.add(value);
+    if (Array.isArray(value)) {
+      for (let index = 0; index < value.length; index += 1) {
+        if (!Object.prototype.hasOwnProperty.call(value, index)) return path + '[' + index + '] is sparse';
+        const error = jsonValueError(value[index], path + '[' + index + ']', seen);
+        if (error) return error;
+      }
+      seen.delete(value);
+      return null;
+    }
+    const proto = Object.getPrototypeOf(value);
+    if (proto !== null && Object.getPrototypeOf(proto) !== null) return path + ' must be a plain JSON object';
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== 'string') return path + ' contains a symbol key';
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) {
+        return path + '.' + key + ' must be an enumerable data property';
+      }
+      const error = jsonValueError(descriptor.value, path + '.' + key, seen);
+      if (error) return error;
+    }
+    seen.delete(value);
+    return null;
+  };
+  const cloneJsonValue = (value, path) => {
+    const plain = unwrap(value, new Map());
+    const error = jsonValueError(plain, path, new Set());
+    if (error) throw new Error('state_not_serializable: ' + error);
+    return JSON.parse(JSON.stringify(plain));
+  };
+  const requireStateKey = (key) => {
+    if (typeof key !== 'string' || key.length === 0 || key.length > 200) {
+      throw new Error('state_key_invalid: store/load keys must be strings of 1-200 characters');
+    }
+    return key;
+  };
+  const touchState = () => {
+    if (stateTouched) return;
+    stateTouched = true;
+    parentPort.postMessage({ t: 'state', op: 'touch' });
+  };
+  const load = (key) => {
+    const safeKey = requireStateKey(key);
+    touchState();
+    if (!Object.prototype.hasOwnProperty.call(replayState, safeKey)) return undefined;
+    return cloneJsonValue(replayState[safeKey], 'state.' + safeKey);
+  };
+  const store = (key, value) => {
+    const safeKey = requireStateKey(key);
+    const cloned = cloneJsonValue(value, 'state.' + safeKey);
+    const nextState = { ...replayState, [safeKey]: cloned };
+    if (Object.keys(nextState).length > STATE_KEY_LIMIT) {
+      throw new Error('state_limit_exceeded: replay state may contain at most ' + STATE_KEY_LIMIT + ' keys');
+    }
+    const serialized = JSON.stringify(nextState);
+    if (Buffer.byteLength(serialized, 'utf8') > STATE_BYTES_LIMIT) {
+      throw new Error('state_limit_exceeded: replay state may contain at most ' + STATE_BYTES_LIMIT + ' UTF-8 bytes');
+    }
+    replayState[safeKey] = cloned;
+    touchState();
+    parentPort.postMessage({ t: 'state', op: 'set', key: safeKey, value: cloned });
+    return cloneJsonValue(cloned, 'state.' + safeKey);
+  };
+  const notify = (value) => {
+    parentPort.postMessage({ t: 'emit', name: 'notify', data: unwrap(value, new Map()) });
+  };
+  const yield_control = () => {
+    parentPort.postMessage({ t: 'emit', name: 'yield_control', data: null });
+  };
+  const generatedImage = (value) => {
+    generatedImages.push(unwrap(value, new Map()));
+  };
+
   // --- the Proxy facade injected as \`tools\` (mirrors tool-facade.ts: tools.ns.verb + tools.call) ---
   const nsProxy = (ns) => new Proxy({}, {
     get(_t, verb) {
@@ -485,6 +582,11 @@ const WORKER_SRC = `(() => {
         console: { log, error: log, warn: log },
         log,
         sleep,
+        notify,
+        yield_control,
+        generatedImage,
+        store,
+        load,
         __papercuspInputsJson: JSON.stringify(workerInputs),
       },
       { displayErrors: true },
@@ -499,7 +601,16 @@ const WORKER_SRC = `(() => {
       // Deep-unwrap first: a tracking Proxy is not structured-cloneable, so returning a tool
       // result verbatim (\`return pp;\`) would otherwise become result_not_serializable.
       const plain = unwrap(result, new Map());
-      try { parentPort.postMessage({ t: 'done', result: plain, fieldMisses, sleepCaps }); }
+      try {
+        parentPort.postMessage({
+          t: 'done',
+          result: plain,
+          fieldMisses,
+          sleepCaps,
+          generatedImages,
+          ...(stateTouched ? { state: replayState } : {}),
+        });
+      }
       catch (cloneErr) { parentPort.postMessage({ t: 'error', error: 'result_not_serializable: ' + ((cloneErr && cloneErr.message) || String(cloneErr)) }); }
     } catch (err) {
       const msg = (err && err.message) || String(err);
@@ -511,7 +622,12 @@ const WORKER_SRC = `(() => {
       const friendly = /dynamic import callback/i.test(msg)
         ? 'dynamic_import_unsupported: code:run cannot import()/require() repo modules or node builtins -- only tools.ns.verb(args) is exposed (the role tool whitelist IS the sandbox security boundary, same reason require/process are absent). Use capability:bash + npx tsx for direct module/DB access outside that whitelist.'
         : msg;
-      parentPort.postMessage({ t: 'error', error: friendly });
+      parentPort.postMessage({
+        t: 'error',
+        error: friendly,
+        generatedImages,
+        ...(stateTouched ? { state: replayState } : {}),
+      });
     }
   })();
 })();`;
@@ -535,6 +651,7 @@ export async function runOrchestrationScript(
 
   return await new Promise<RunScriptResult>((resolve) => {
     let settled = false;
+    let latestState: Record<string, OrchestrationInputValue> | undefined;
     const worker: NodeWorker = new Worker(WORKER_SRC, {
       eval: true,
       name: 'code-orchestration',
@@ -551,7 +668,11 @@ export async function runOrchestrationScript(
       settled = true;
       clearTimeout(timer);
       void worker.terminate();
-      resolve({ ...out, logs });
+      resolve({
+        ...out,
+        ...(out.state ? {} : latestState ? { state: latestState } : {}),
+        logs,
+      });
     };
 
     // The kill switch: terminate() stops the worker thread even mid sync-loop.
@@ -576,9 +697,31 @@ export async function runOrchestrationScript(
           result: m.result,
           ...(m.fieldMisses && m.fieldMisses.length ? { fieldMisses: m.fieldMisses } : {}),
           ...(m.sleepCaps && m.sleepCaps.length ? { sleepCaps: m.sleepCaps } : {}),
+          ...(m.generatedImages && m.generatedImages.length ? { generatedImages: m.generatedImages } : {}),
+          ...(m.state ? { state: m.state } : {}),
         });
       }
-      if (m.t === 'error') return finish({ ok: false, error: m.error });
+      if (m.t === 'error') {
+        return finish({
+          ok: false,
+          error: m.error,
+          ...(m.generatedImages && m.generatedImages.length ? { generatedImages: m.generatedImages } : {}),
+          ...(m.state ? { state: m.state } : {}),
+        });
+      }
+      if (m.t === 'state') {
+        latestState ??= JSON.parse(JSON.stringify(inputs)) as Record<string, OrchestrationInputValue>;
+        if (m.op === 'set') latestState[m.key] = m.value;
+        return;
+      }
+      if (m.t === 'emit') {
+        try {
+          opts.emit?.(m.name, m.data);
+        } catch {
+          // Streaming is advisory: a detached/non-streaming transport must not fail the run.
+        }
+        return;
+      }
       if (m.t === 'call') void handleCall(worker, facade, m, () => settled);
     });
 
@@ -670,8 +813,23 @@ interface CallMessage {
 }
 type WorkerMessage =
   | { t: 'log'; text: string }
-  | { t: 'done'; result: unknown; fieldMisses?: FieldMiss[]; sleepCaps?: SleepCap[] }
-  | { t: 'error'; error: string }
+  | {
+      t: 'done';
+      result: unknown;
+      fieldMisses?: FieldMiss[];
+      sleepCaps?: SleepCap[];
+      state?: OrchestrationInputs;
+      generatedImages?: GeneratedImageRequest[];
+    }
+  | {
+      t: 'error';
+      error: string;
+      state?: OrchestrationInputs;
+      generatedImages?: GeneratedImageRequest[];
+    }
+  | { t: 'state'; op: 'touch' }
+  | { t: 'state'; op: 'set'; key: string; value: OrchestrationInputValue }
+  | { t: 'emit'; name: string; data: unknown }
   | CallMessage;
 
 function errMsg(e: unknown): string {
