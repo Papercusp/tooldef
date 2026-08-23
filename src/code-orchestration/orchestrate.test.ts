@@ -140,6 +140,67 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     });
   });
 
+  describe('P-017 functions.exec helper parity', () => {
+    it('streams notify/yield_control and emits a validated generated image with hint metadata', async () => {
+      const emit = vi.fn();
+      const r = await runToolOrchestration(
+        `notify({ phase: 'render' });
+         yield_control();
+         generatedImage({ image_url: 'data:image/png;base64,aGVsbG8=', output_hint: 'preview' });
+         return 'rendered';`,
+        { ctx: MAKE_CTX({ emit }), deps: DEPS, tools: [] },
+      );
+
+      expect(r).toMatchObject({
+        ok: true,
+        summary: 'rendered',
+        media: [
+          {
+            type: 'image',
+            data: 'aGVsbG8=',
+            mimeType: 'image/png',
+            _meta: { output_hint: 'preview' },
+          },
+        ],
+      });
+      expect(emit).toHaveBeenNthCalledWith(1, 'notify', { phase: 'render' });
+      expect(emit).toHaveBeenNthCalledWith(2, 'yield_control', null);
+    });
+
+    it('rejects a generated image that is not a base64 image data URL', async () => {
+      const r = await runToolOrchestration(
+        `generatedImage({ image_url: 'https://example.invalid/image.png' }); return 'bad';`,
+        { ctx: MAKE_CTX(), deps: DEPS, tools: [] },
+      );
+
+      expect(r.ok).toBe(false);
+      expect(r.media).toBeUndefined();
+      expect(r.error).toContain('invalid_generated_image');
+    });
+
+    it('replays store/load state only when the prior result is explicitly rebound', async () => {
+      const first = await runToolOrchestration(
+        `store('cursor', load('cursor') + 1); return 'first';`,
+        { ctx: MAKE_CTX(), deps: DEPS, tools: [], inputs: { cursor: 1 } },
+      );
+      const replayed = await runToolOrchestration(
+        `store('cursor', load('cursor') + 1); return load('cursor');`,
+        { ctx: MAKE_CTX(), deps: DEPS, tools: [], inputs: first.state },
+      );
+      const coldWithoutReplay = await runToolOrchestration(`return load('cursor');`, {
+        ctx: MAKE_CTX(),
+        deps: DEPS,
+        tools: [],
+      });
+
+      expect(first.state).toEqual({ cursor: 2 });
+      expect(replayed.summary).toBe(3);
+      expect(replayed.state).toEqual({ cursor: 3 });
+      expect(coldWithoutReplay.summary).toBeUndefined();
+      expect(coldWithoutReplay.state).toEqual({});
+    });
+  });
+
   it('dryRun RECORDS write-effect calls without executing them; reads still run', async () => {
     const readFn = vi.fn(async () => json({ items: [{ id: 1 }] }));
     const writeFn = vi.fn(async () => json({ ok: true }));
