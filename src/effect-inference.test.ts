@@ -40,6 +40,24 @@ describe('defineTool effect inference (B-CX-PRE)', () => {
     expect(projected('test:eff_override')?.effect).toBe('write');
   });
 
+  it('threads an argument-sensitive effect classifier to the definition and projection', () => {
+    const def = defineTool({
+      ...base,
+      name: 'test:eff_dynamic',
+      capability: 'operator:write',
+      args: z.object({ op: z.enum(['status', 'trigger']) }),
+      effectForCall: (args) => (args.op === 'status' ? 'read' : 'write'),
+    });
+    expect(def.effect).toBe('write');
+    expect(def.effectForCall?.({ op: 'status' })).toBe('read');
+    expect(def.effectForCall?.({ op: 'trigger' })).toBe('write');
+
+    const projectedTool = projected('test:eff_dynamic');
+    expect(projectedTool?.effect).toBe('write');
+    expect(projectedTool?.effectForCall?.({ op: 'status' })).toBe('read');
+    expect(projectedTool?.effectForCall?.({ op: 'trigger' })).toBe('write');
+  });
+
   it("treats known host-capability mutators (capability:bash) as 'write'", () => {
     const def = defineTool({ name: 'test:eff_bash', capability: 'capability:bash', ...base });
     expect(def.effect).toBe('write');

@@ -25,8 +25,8 @@ const DEPS: DispatchProjectedDeps = {};
 // convenience fixture. The first version of this file invented a top-level `name`, so the unit
 // tests passed against a tool shape that does not exist while the detector was a no-op in
 // production. A fixture that is easier to write than the real thing is how that ships green.
-const tool = (name: string, effect: 'read' | 'write'): ProjectedTool =>
-  ({ expose: { mcp: { name } }, effect }) as unknown as ProjectedTool;
+const tool = (name: string, effect: 'read' | 'write', effectForCall?: ProjectedTool['effectForCall']): ProjectedTool =>
+  ({ expose: { mcp: { name } }, effect, ...(effectForCall ? { effectForCall } : {}) }) as unknown as ProjectedTool;
 
 const TOOLS: ProjectedTool[] = [
   tool('sessions:read', 'read'),
@@ -53,6 +53,19 @@ describe('detectStrandedWrites (P-020)', () => {
   it('ignores READS that never ran — re-running a read costs nothing', () => {
     const stranded = detectStrandedWrites(calls('sessions:read', 'work_items:list'), TOOLS, []);
     expect(stranded).toEqual([]);
+  });
+
+  it('uses the per-call classifier when deciding whether a static call is a write', () => {
+    const release = tool(
+      'release:deploy',
+      'write',
+      (args) => ((args as { op?: string }).op === 'status' ? 'read' : 'write'),
+    );
+    const statusCall: StaticToolCall = { tool: 'release:deploy', args: { op: 'status' }, dynamicArgs: false };
+    const triggerCall: StaticToolCall = { tool: 'release:deploy', args: { op: 'trigger' }, dynamicArgs: false };
+
+    expect(detectStrandedWrites([statusCall], [release], [])).toEqual([]);
+    expect(detectStrandedWrites([triggerCall], [release], [])).toEqual(['release:deploy']);
   });
 
   it('omits a write that dispatched at least once (a loop/branch may have run only some)', () => {
