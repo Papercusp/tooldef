@@ -160,6 +160,46 @@ describe('code:run acceptance — only the summary re-enters context', () => {
   });
 });
 
+describe('code:run acceptance — adversarial nested parallel fan-out (P-018)', () => {
+  it('executes exactly 100 nested-parallel calls while keeping 35K+ of intermediate output out of context', async () => {
+    const seen = new Set<number>();
+    let inFlight = 0;
+    let peakInFlight = 0;
+    const get = mkTool('fanout:get', 'read', async (a) => {
+      const id = (a as { id: number }).id;
+      seen.add(id);
+      inFlight += 1;
+      peakInFlight = Math.max(peakInFlight, inFlight);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      inFlight -= 1;
+      return json({ id, payload: 'x'.repeat(350) });
+    });
+
+    const r = await run(
+      `const groups = Array.from({ length: 10 }, (_, group) =>
+         Array.from({ length: 10 }, (_, item) => group * 10 + item));
+       const nested = await Promise.all(groups.map((group) =>
+         Promise.all(group.map((id) => tools.fanout.get({ id })))))
+       const rows = nested.reduce((all, group) => all.concat(group), []);
+       return {
+         count: rows.length,
+         checksum: rows.reduce((sum, row) => sum + row.id, 0),
+         payloadChars: rows.reduce((sum, row) => sum + row.payload.length, 0)
+       };`,
+      [get],
+    );
+
+    expect(r.ok).toBe(true);
+    expect(r.dispatchCount).toBe(100);
+    expect(r.intermediateBytes).toBeGreaterThan(35_000);
+    expect(seen.size).toBe(100);
+    expect([...seen].sort((a, b) => a - b)).toEqual(Array.from({ length: 100 }, (_, i) => i));
+    expect(peakInFlight).toBeGreaterThan(1);
+    expect(r.summary).toEqual({ count: 100, checksum: 4_950, payloadChars: 35_000 });
+    expect(JSON.stringify(r.summary).length).toBeLessThan(80);
+  });
+});
+
 // ───────────────────────────────────────────────────────────────────────────
 // 3. Branch / conditional / retry-until — non-linear control flow.
 // ───────────────────────────────────────────────────────────────────────────
