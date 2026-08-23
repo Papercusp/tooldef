@@ -531,6 +531,12 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
    * sandbox's dry-run/confirm gate (a read-only tool needs no gate).
    */
   effect?: 'read' | 'write';
+  /**
+   * Optional argument-sensitive effect classifier for union-shaped tools. The
+   * static effect remains the safe fallback when this classifier is absent or
+   * cannot classify a call.
+   */
+  effectForCall?: (args: StandardSchemaV1.InferOutput<TArgs>) => 'read' | 'write';
   /** Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): when
    *  true, a handler that COMPLETED but whose `ctx.signal` had already aborted (the
    *  wall-clock/idle timeout fired mid-handler under load) surfaces its completed result as
@@ -639,6 +645,8 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
   capability: string;
   /** Read/write effect (B-CX-PRE); inferred from the capability suffix when omitted. See ToolDefinition.effect. */
   effect?: 'read' | 'write';
+  /** Optional argument-sensitive effect classifier; see ToolDefinition.effectForCall. */
+  effectForCall?: (args: StandardSchemaV1.InferOutput<TArgs>) => 'read' | 'write';
   /** Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): when
    *  true, a handler that COMPLETED but whose `ctx.signal` had already aborted (the
    *  wall-clock/idle timeout fired mid-handler under load) surfaces its completed result as
@@ -786,6 +794,8 @@ export interface RoleToolDefinition<
   capability: string;
   /** Read/write effect (B-CX-PRE); inferred from the capability suffix when omitted. See ToolDefinition.effect. */
   effect?: 'read' | 'write';
+  /** Optional argument-sensitive effect classifier; see ToolDefinition.effectForCall. */
+  effectForCall?: (args: StandardSchemaV1.InferOutput<TArgs>) => 'read' | 'write';
   /** Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): when
    *  true, a handler that COMPLETED but whose `ctx.signal` had already aborted (the
    *  wall-clock/idle timeout fired mid-handler under load) surfaces its completed result as
@@ -1019,6 +1029,8 @@ export interface RoleToolDefinitionInput<
   capability: string;
   /** Read/write effect (B-CX-PRE); inferred from the capability suffix when omitted. See ToolDefinition.effect. */
   effect?: 'read' | 'write';
+  /** Optional argument-sensitive effect classifier; see RoleToolDefinition.effectForCall. */
+  effectForCall?: (args: StandardSchemaV1.InferOutput<TArgs>) => 'read' | 'write';
   /** Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): when
    *  true, a handler that COMPLETED but whose `ctx.signal` had already aborted (the
    *  wall-clock/idle timeout fired mid-handler under load) surfaces its completed result as

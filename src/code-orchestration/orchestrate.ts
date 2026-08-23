@@ -348,6 +348,28 @@ function authorityWidened(
  *
  * PURE — unit-tested without a vm, PG, or a live dispatcher.
  */
+export type ResolvedToolEffect = 'read' | 'write' | 'unknown';
+
+/**
+ * Resolve a projected tool's effect for one facade call. A classifier is
+ * advisory metadata: malformed output or a thrown classifier must not turn a
+ * safe static write into an executable dry-run call.
+ */
+export function resolveToolEffect(
+  tool: Pick<ProjectedTool, 'effect' | 'effectForCall'>,
+  args: unknown,
+): ResolvedToolEffect {
+  const fallback: ResolvedToolEffect =
+    tool.effect === 'read' || tool.effect === 'write' ? tool.effect : 'unknown';
+  if (typeof tool.effectForCall !== 'function') return fallback;
+  try {
+    const resolved = tool.effectForCall(args);
+    return resolved === 'read' || resolved === 'write' ? resolved : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export function detectStrandedWrites(
   staticCalls: readonly StaticToolCall[],
   tools: readonly ProjectedTool[],
@@ -358,18 +380,18 @@ export function detectStrandedWrites(
   // has no top-level `.name`; reading one yields `undefined` for every tool, which silently
   // empties this set and makes the whole detector a no-op that still passes any unit test whose
   // fixture invents the field. (It did exactly that until an end-to-end run caught it.)
-  const writeEffect = new Set(
+  const toolsByName = new Map(
     tools
-      .filter((t) => t.effect === 'write')
-      .map((t) => t.expose?.mcp?.name)
-      .filter((n): n is string => typeof n === 'string'),
+      .map((tool) => [tool.expose?.mcp?.name, tool] as const)
+      .filter((entry): entry is readonly [string, ProjectedTool] => typeof entry[0] === 'string'),
   );
   const dispatched = new Set(dispatchedToolNames);
   const stranded: string[] = [];
   const seen = new Set<string>();
   for (const call of staticCalls) {
     const name = call.tool;
-    if (!writeEffect.has(name)) continue; // reads are re-runnable; only writes strand
+    const tool = toolsByName.get(name);
+    if (!tool || resolveToolEffect(tool, call.args) !== 'write') continue; // reads are re-runnable; only writes strand
     if (dispatched.has(name)) continue; // ran at least once — cannot prove anything about the rest
     if (seen.has(name)) continue;
     seen.add(name);
@@ -635,6 +657,7 @@ export async function runToolOrchestration(
   const rejectedMutations: ThrownMutation[] = [];
   const uncertainMutations: ThrownMutation[] = [];
   const callRecords: OrchestrationCallRecord[] = [];
+  const dispatchedToolNames: string[] = [];
   let authorizationObservationCount = 0;
   let authorityWideningDetected = false;
   let dispatchCount = 0;
@@ -653,16 +676,17 @@ export async function runToolOrchestration(
   const unknownRefs = check.ok ? undefined : check.unknownRefs;
 
   const dispatch: FacadeDispatch = async (tool, name, args) => {
+    const effect = resolveToolEffect(tool, args);
     const callRecord: OrchestrationCallRecord = {
       ordinal: callRecords.length,
       tool: name,
-      effect: tool.effect === 'read' || tool.effect === 'write' ? tool.effect : 'unknown',
+      effect,
       disposition: 'in_flight',
       outputReferences: [],
     };
     callRecords.push(callRecord);
     let writeAttempt: WriteAttempt | undefined;
-    if (tool.effect === 'write') {
+    if (effect === 'write') {
       plannedMutations.push({ tool: name, args });
       if (dryRun) {
         callRecord.disposition = 'planned';
@@ -675,6 +699,7 @@ export async function runToolOrchestration(
       };
       writeAttempts.push(writeAttempt);
     }
+    dispatchedToolNames.push(name);
     // Counted at the same point the host's dispatcher is entered (a throw below still
     // reached it), so this equals the number of inner telemetry rows the run produced —
     // what lets a wrapper tool (code:run / recipes:run) mark its own row as a dispatch
@@ -711,7 +736,7 @@ export async function runToolOrchestration(
       if (isOkFalseResult(result) || isBulkPartialFailure(result)) {
         callRecord.disposition = 'semantic_rejected';
         childFailures.push({ tool: name, kind: 'semantic', result });
-        if (tool.effect === 'write') {
+        if (effect === 'write') {
           if (writeAttempt) writeAttempt.disposition = 'semantic_rejected';
           okFalseMutations.push({ tool: name, args, result });
         }
@@ -735,7 +760,7 @@ export async function runToolOrchestration(
         kind: preExecution ? 'rejected' : 'uncertain',
         error: err instanceof Error ? err.message : String(err),
       });
-      if (tool.effect === 'write') {
+      if (effect === 'write') {
         if (writeAttempt) writeAttempt.disposition = preExecution ? 'rejected' : 'uncertain';
         (preExecution ? rejectedMutations : uncertainMutations).push({
           tool: name,
@@ -759,7 +784,7 @@ export async function runToolOrchestration(
   // it was going to, so an undispatched write there was a branch not taken, not a stranding.
   const strandedWrites = run.ok
     ? []
-    : detectStrandedWrites(check.calls, tools, plannedMutations.map((m) => m.tool));
+    : detectStrandedWrites(check.calls, tools, dispatchedToolNames);
   const notDispatchedWrites: NotDispatchedWrite[] = strandedWrites.map((tool) => ({
     tool,
     executed: false,

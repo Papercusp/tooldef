@@ -911,6 +911,12 @@ export interface ProjectedTool {
    */
   effect?: 'read' | 'write';
   /**
+   * Optional argument-sensitive effect classifier. Orchestration callers
+   * resolve this once per facade call and fall back to effect when it returns
+   * an invalid value or throws.
+   */
+  effectForCall?: (args: unknown) => 'read' | 'write';
+  /**
    * Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6 / P-007). When
    * `true`, a handler that RAN TO COMPLETION but whose `ctx.signal` had already aborted
    * (the wall-clock/idle timeout fired mid-handler under load) surfaces its COMPLETED
