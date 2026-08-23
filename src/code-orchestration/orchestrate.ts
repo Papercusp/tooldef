@@ -21,7 +21,12 @@ import type { ProjectedTool, UnifiedToolContext } from '../tool-projection';
 import type { DispatchProjectedDeps } from '../dispatch-types';
 import { buildToolFacade, type FacadeDispatch } from './tool-facade';
 import { realDispatch, isPreExecutionFailure } from './dispatch-binding';
-import { runOrchestrationScript, type FieldMiss, type SleepCap } from './run-script';
+import {
+  runOrchestrationScript,
+  type FieldMiss,
+  type OrchestrationInputs,
+  type SleepCap,
+} from './run-script';
 import { checkScript, ensureParseCheckReady, type StaticToolCall } from './parse-check';
 
 /**
@@ -63,6 +68,8 @@ export interface OrchestrateOptions {
    * doesn't vary per call.
    */
   wrapDispatch?: WrapDispatch;
+  /** Optional JSON-only runtime inputs, exposed inside the VM as deeply frozen `inputs`. */
+  inputs?: OrchestrationInputs;
 }
 
 export interface PlannedMutation {
@@ -652,6 +659,7 @@ export async function runToolOrchestration(
   const run = await runOrchestrationScript(script, facade, {
     ...(timeoutMs ? { timeoutMs } : {}),
     onTimeout: abortFromParent,
+    ...(opts.inputs ? { inputs: opts.inputs } : {}),
   });
   ctx.signal?.removeEventListener('abort', abortFromParent);
   // P-020: only meaningful when the script ABORTED — a run that completed reached every line
