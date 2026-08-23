@@ -100,6 +100,8 @@ describe('facade-types (B-CX-API)', () => {
     );
     // The tool description rides as a JSDoc comment.
     expect(out).toContain('/** List work-items across kinds (feature/bug/change). */');
+    // Property descriptions survive the signature projection as actionable @param hints.
+    expect(out).toContain('/** @param args.status lifecycle state */');
   });
 
   it('always includes the call() escape hatch', () => {
@@ -169,6 +171,27 @@ describe('facade-types (B-CX-API)', () => {
     const { type, optional } = toolArgsType(odd);
     expect(type).toBe('Record<string, unknown>');
     expect(optional).toBe(true);
+  });
+
+  it('preserves units from a capability timeout property in the code:tools signature', () => {
+    const capabilityBash = mkTool(
+      'capability:bash',
+      {
+        type: 'object',
+        properties: {
+          timeout: {
+            type: 'integer',
+            description: 'Wall-clock timeout in milliseconds; 20 seconds = 20000.',
+          },
+        },
+        additionalProperties: false,
+      },
+      'Run bash commands.',
+    );
+
+    const out = generateToolFacadeTypes([capabilityBash]);
+    expect(out).toContain('/** @param args.timeout Wall-clock timeout in milliseconds; 20 seconds = 20000. */');
+    expect(out).toContain('bash(args?: { timeout?: number }): Promise<unknown>;');
   });
 
   it('emits balanced, well-formed TS (braces match)', () => {
