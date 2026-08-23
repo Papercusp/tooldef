@@ -36,6 +36,18 @@ const mkTool = (
   }) as unknown as ProjectedTool;
 
 describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', () => {
+  it('forwards frozen runtime inputs through the orchestration composition seam', async () => {
+    const r = await runToolOrchestration(
+      `return { value: inputs.query, frozen: Object.isFrozen(inputs) };`,
+      {
+        ctx: MAKE_CTX(),
+        deps: DEPS,
+        tools: [],
+        inputs: { query: 'open items' },
+      },
+    );
+    expect(r).toMatchObject({ ok: true, summary: { value: 'open items', frozen: true } });
+  });
   it('runs a multi-step script through the REAL dispatcher and returns only the summary', async () => {
     const items = [{ id: 1 }, { id: 2 }, { id: 3 }];
     const list = mkTool('wi:list', 'read', async () => json({ items }));
