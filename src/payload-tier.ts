@@ -427,6 +427,12 @@ function takePrimitive(state: ProjectionState, value: unknown, path: string): un
 const IDENTITY_FIELDS = new Set([
   'id', 'title', 'name', 'slug', 'ref', 'kind', 'state', 'status', 'ok', 'error',
   'item', 'itemId', 'plan', 'planSlug', 'rubricRef', 'workItemId',
+  // EI-21197620758075816: a rubric criterion's structured `check` is its
+  // executable identity. Dropping it makes a bound criterion indistinguishable
+  // from a fuzzy/unbound one. The value is handled as a bounded structured
+  // field below so its discriminated-union payload (files/instrument/scope)
+  // survives without promoting generic keys such as `files` globally.
+  'check',
   // EI-21058972492075433: the outcome-identity of a WRITE/LAUNCH receipt (a
   // singleton fire-and-can't-safely-retry call like release:checkpoint-run) —
   // "did it launch, and against what" is exactly as load-bearing as `ok`/`id`
@@ -434,6 +440,7 @@ const IDENTITY_FIELDS = new Set([
   'launched', 'candidate', 'unit', 'runId',
 ]);
 const IDENTITY_ENVELOPES = new Set(['results', 'items', 'workItem', 'counts']);
+const STRUCTURED_IDENTITY_FIELDS = new Set(['check']);
 const IDENTITY_PREVIEW_DEPTH = 4;
 
 function projectIdentityPreview(
@@ -505,7 +512,9 @@ function projectIdentityPreview(
         break;
       }
       state.remaining -= keyCost;
-      projected[key] = projectIdentityPreview(child, `${path}.${key}`, depth + 1, state);
+      projected[key] = STRUCTURED_IDENTITY_FIELDS.has(key)
+        ? projectValue(child, `${path}.${key}`, 0, state)
+        : projectIdentityPreview(child, `${path}.${key}`, depth + 1, state);
     }
     const dropped = entries.length - chosen.length;
     if (dropped > 0) {

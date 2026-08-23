@@ -367,6 +367,34 @@ describe('applyPayloadTier', () => {
     expect(projected._projection.next).not.toContain('narrower filters/ids');
   });
 
+  it('REGRESSION (EI-21197620758075816): rubric criterion check bindings survive the depth preview', () => {
+    const criteria = Array.from({ length: 8 }, (_, i) => ({
+      key: `criterion-${i}`,
+      title: `Criterion ${i}`,
+      model: 'm'.repeat(300),
+      method: 'n'.repeat(300),
+      driftMarkers: 'd'.repeat(200),
+      ...(i < 5
+        ? { check: { kind: 'tests', files: [`packages/example/criterion-${i}.test.ts`] } }
+        : {}),
+    }));
+
+    const projected = projectBoundedPayload(
+      { results: [{ ok: true, rubric: { rubricId: 'bound-rubric', criteria } }] },
+      { toolName: 'rubrics:get', tier: 'trimmed' },
+    );
+    const rows = ((projected.results as any[])[0].rubric.criteria) as Array<any>;
+
+    expect(rows).toHaveLength(8);
+    expect(rows.slice(0, 5).map((row) => row.check)).toEqual(
+      Array.from({ length: 5 }, (_, i) => ({
+        kind: 'tests',
+        files: [`packages/example/criterion-${i}.test.ts`],
+      })),
+    );
+    expect(rows.slice(5).every((row) => !Object.prototype.hasOwnProperty.call(row, 'check'))).toBe(true);
+  });
+
   it('sheds the omission SAMPLE list before it discards content (EI-21215297173311865)', () => {
     // The observed failure: coord:orient { afterCompaction:true } returned
     // `{ok:true}` plus a ~2.9KB manifest of 152 omissions and ZERO content fields.
