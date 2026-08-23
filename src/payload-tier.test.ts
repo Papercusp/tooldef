@@ -792,6 +792,42 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     expect(() => projectedRuns.map((row) => [row.startedAt, row.filePath, row.outputTail])).not.toThrow();
   });
 
+  it('REGRESSION (EI-21219452028880493): the marker matches the PROJECTED array, not the SOURCE — a non-object element beyond the shown window must not downgrade an object-row marker to a string', () => {
+    // Reported: locks:queue returned `active_locks` with a STRING truncation
+    // marker sitting among objects, so `jq group_by(.lock_id)` died with
+    // "Cannot index string with string lock_id".
+    //
+    // Root cause: arrayTruncationValue chose the marker's SHAPE by inspecting the
+    // SOURCE array, while the marker is appended to the PROJECTED one. Those two
+    // diverge, and the source is not the array the caller ends up iterating.
+    // Below, every element the caller can SEE is an object; only an element PAST
+    // the truncation window is not — which used to select the string form and
+    // hand back a heterogeneous array.
+    const rows: unknown[] = Array.from({ length: 16 }, (_, i) => ({
+      lock_id: `lock-${i}`,
+      owner: `su-${i}`,
+      intent: 'holding a path',
+    }));
+    rows.push('a stray non-object element past the shown window');
+
+    const out = projectBoundedPayload({ active_locks: rows }, { toolName: 'locks:queue', tier: 'trimmed' });
+    const projected = out.active_locks as unknown[];
+
+    const isRow = (r: unknown) => r !== null && typeof r === 'object' && !Array.isArray(r);
+    const shown = projected.slice(0, -1);
+    expect(shown.length).toBeGreaterThan(0);
+    expect(shown.every(isRow)).toBe(true);
+
+    // Every element the caller sees is an object, so the marker must be one too.
+    expect(projected.at(-1)).toMatchObject({ _truncated: true });
+
+    // The load-bearing property, stated directly. Deliberately NOT phrased as
+    // `expect(() => projected.map((r) => r.lock_id)).not.toThrow()`: unlike jq,
+    // JS indexes a string happily and returns undefined, so that form would pass
+    // even with the bug present — a vacuous guard.
+    expect(projected.some((r) => typeof r === 'string')).toBe(false);
+  });
+
   it('keeps the scalar in-band marker for primitive arrays', () => {
     const out = projectBoundedPayload(
       { values: Array.from({ length: 17 }, (_, i) => i) },

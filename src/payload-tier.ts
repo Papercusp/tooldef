@@ -338,15 +338,34 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
-/** Preserve an array's element contract while keeping truncation visible in band. */
+/**
+ * Preserve an array's element contract while keeping truncation visible in band.
+ *
+ * ⚠ `projectedRows` MUST be the array the marker is about to be APPENDED TO — not
+ * the source array it was projected from (EI-21219452028880493). The two diverge,
+ * and only the projected one is what the caller ends up iterating:
+ *
+ *  - a source element PAST the truncation window can be a non-object (a stray
+ *    string, a nested array, a marker left by an earlier shaping pass) while every
+ *    element the caller can SEE is an object. Judging by the source then picked the
+ *    string form and handed back a heterogeneous array — the reported failure, where
+ *    locks:queue returned `active_locks` with a string among objects and
+ *    `jq group_by(.lock_id)` died with "Cannot index string with string lock_id".
+ *  - symmetrically, a source of all plain objects can PROJECT to strings (an element
+ *    replaced by `omissionMarker(...)`, `'[circular]'`, or a depth-limit marker),
+ *    where judging by the source would append an object into an array of strings.
+ *
+ * The rule is simply that the marker must match the contract of the array it JOINS.
+ * An empty `projectedRows` carries no contract to preserve, so it keeps the string.
+ */
 function arrayTruncationValue(
-  source: unknown[],
+  projectedRows: unknown[],
   droppedCount: number,
   shownCount: number,
   totalCount: number,
 ): string | Record<string, unknown> {
   const note = arrayTruncationMarker(droppedCount, shownCount, totalCount);
-  if (source.length > 0 && source.every(isPlainObject)) {
+  if (projectedRows.length > 0 && projectedRows.every(isPlainObject)) {
     return {
       id: '(truncated)',
       _truncated: true,
@@ -466,7 +485,7 @@ function projectIdentityPreview(
           droppedCount,
           true,
         );
-        projected.push(arrayTruncationValue(value, droppedCount, projected.length, value.length));
+        projected.push(arrayTruncationValue(projected, droppedCount, projected.length, value.length));
       }
       return projected;
     }
@@ -546,7 +565,7 @@ function projectValue(value: unknown, path: string, depth: number, state: Projec
           droppedCount,
           true,
         );
-        projected.push(arrayTruncationValue(value, droppedCount, projected.length, value.length));
+        projected.push(arrayTruncationValue(projected, droppedCount, projected.length, value.length));
       }
       return projected;
     }
