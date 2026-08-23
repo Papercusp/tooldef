@@ -170,6 +170,7 @@ describe('applyPayloadTier', () => {
     ['negative', -1],
     ['Infinity', Number.POSITIVE_INFINITY],
   ])('ceilingChars: a %s override falls back to the shared ceiling', (_label, bad) => {
+    const log = vi.fn();
     const fat: ToolResponse = { data: { rows: [1, 2, 3], blob: 'x'.repeat(PAYLOAD_TIER_HARD_CEILING_CHARS + 500) } };
     const out = applyPayloadTier({
       toolName: 't',
@@ -178,8 +179,10 @@ describe('applyPayloadTier', () => {
       tier: 'full',
       args: {},
       ceilingChars: bad as number,
+      log,
     });
     expect((out.data as { payloadTierForced?: string }).payloadTierForced).toBe('trimmed');
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('hard ceiling'));
   });
 
   it('hard ceiling: an EXPLICIT payloadTier:full call skips the ceiling (the documented escape hatch, WI-5078)', () => {
@@ -206,8 +209,9 @@ describe('applyPayloadTier', () => {
   });
 
   it('hard ceiling: an over-ceiling payload with NO shaper gets a loud bounded projection', () => {
+    const log = vi.fn();
     const fat: ToolResponse = { data: { blob: 'y'.repeat(PAYLOAD_TIER_HARD_CEILING_CHARS + 500) } };
-    const out = applyPayloadTier({ toolName: 't', shape: undefined, response: fat, tier: 'full', args: {} });
+    const out = applyPayloadTier({ toolName: 't', shape: undefined, response: fat, tier: 'full', args: {}, log });
     const projected = out.data as ReturnType<typeof projectBoundedPayload>;
     expect(projected._projection).toMatchObject({
       kind: 'bounded-payload',
@@ -218,14 +222,17 @@ describe('applyPayloadTier', () => {
     });
     expect(projected._projection.next).toContain('_projection.cursor.args');
     expect(JSON.stringify(projected).length).toBeLessThan(PAYLOAD_TIER_HARD_CEILING_CHARS);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('hard ceiling'));
   });
 
   it('hard ceiling falls back to the generic projection when a custom shape does not shrink', () => {
+    const log = vi.fn();
     const identityShape = { trimmed: (d: unknown) => d };
     const fat: ToolResponse = { data: { blob: 'z'.repeat(PAYLOAD_TIER_HARD_CEILING_CHARS + 500) } };
-    const out = applyPayloadTier({ toolName: 't', shape: identityShape, response: fat, tier: 'full', args: {} });
+    const out = applyPayloadTier({ toolName: 't', shape: identityShape, response: fat, tier: 'full', args: {}, log });
     expect((out.data as ReturnType<typeof projectBoundedPayload>)._projection.forced).toBe(true);
     expect(JSON.stringify(out.data).length).toBeLessThan(PAYLOAD_TIER_HARD_CEILING_CHARS);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('hard ceiling'));
   });
 
   it('trimmed picks shape.trimmed; standard picks shape.standard', () => {
@@ -494,8 +501,9 @@ describe('payloadProjection meta (EI-13918)', () => {
   // `_meta.payloadProjection`.
 
   it('is stamped on the ratchet path, mirroring the inline `_projection` metadata', () => {
+    const log = vi.fn();
     const fat: ToolResponse = { data: { blob: 'x'.repeat(PAYLOAD_TIER_RATCHET_CHARS + 100) } };
-    const out = applyPayloadTier({ toolName: 'fat:tool', shape: undefined, response: fat, tier: 'trimmed', args: {} });
+    const out = applyPayloadTier({ toolName: 'fat:tool', shape: undefined, response: fat, tier: 'trimmed', args: {}, log });
     const projected = out.data as ReturnType<typeof projectBoundedPayload>;
     expect(out.payloadProjection).toEqual({
       truncated: true,
@@ -505,13 +513,16 @@ describe('payloadProjection meta (EI-13918)', () => {
       returnedChars: projected._projection.returnedChars,
       omittedCount: projected._projection.omittedCount,
     });
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('bounded'));
   });
 
   it('is stamped on the hard-ceiling generic-projection path', () => {
+    const log = vi.fn();
     const fat: ToolResponse = { data: { blob: 'y'.repeat(PAYLOAD_TIER_HARD_CEILING_CHARS + 500) } };
-    const out = applyPayloadTier({ toolName: 't', shape: undefined, response: fat, tier: 'full', args: {} });
+    const out = applyPayloadTier({ toolName: 't', shape: undefined, response: fat, tier: 'full', args: {}, log });
     expect(out.payloadProjection).toMatchObject({ truncated: true, forced: true });
     expect(out.payloadProjection?.omittedCount).toBeGreaterThan(0);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('hard ceiling'));
   });
 
   it('is stamped on the hard-ceiling forced-custom-shaper path (WI-2859), even though no inline `_projection` rides the shaped data', () => {
