@@ -425,6 +425,55 @@ describe('EI-19301148486657755: reading a field the tool result does not have', 
     expect(misses[0]?.available).toContain('claimableCount');
   });
 
+  // P-007 (EI-21163938645109933 / EI-21164455886001541): a miss is either a TYPO or a probe of a
+  // legitimately-OPTIONAL field, and reporting both identically is what made this signal read as
+  // noise. The Proxy cannot see the surrounding syntax — but the KEY can be judged by proximity.
+  it('classifies a near-miss key as a typo and names the key it resembles', async () => {
+    const r = await runOrchestrationScript(
+      `const c = await tools.work_items.claimable({});
+       return { count: c.count ?? null };`,
+      facade({ work_items: { claimable } }),
+    );
+    const miss = (r.fieldMisses ?? []).find((m) => m.read === 'count');
+
+    // The founding incident of this whole detector: `count` read off `claimableCount`. It is 9
+    // edits away, so containment — not edit distance — is what must catch it.
+    expect(miss?.likely).toBe('typo');
+    expect(miss?.didYouMean).toBe('claimableCount');
+  });
+
+  it('classifies a key resembling nothing on the shape as an absent optional field', async () => {
+    const r = await runOrchestrationScript(
+      `const c = await tools.work_items.claimable({});
+       return { cls: c.criterionClass ?? null };`,
+      facade({ work_items: { claimable } }),
+    );
+    const miss = (r.fieldMisses ?? []).find((m) => m.read === 'criterionClass');
+
+    // The EI-21164455886001541 shape: a legitimately-optional field, set on some rows of a
+    // collection and absent on others, resembling no key on the shape it was read from.
+    expect(miss?.likely).toBe('optional-field');
+    expect(miss?.didYouMean).toBeUndefined();
+  });
+
+  // CONTROL: the classifier must actually DISCRIMINATE. If both keys ever land in the same class,
+  // the split is decorative and the noise it was built to remove is back.
+  it('CONTROL: a typo and an optional probe do not land in the same class', async () => {
+    const r = await runOrchestrationScript(
+      `const c = await tools.work_items.claimable({});
+       return { a: c.count ?? null, b: c.criterionClass ?? null };`,
+      facade({ work_items: { claimable } }),
+    );
+    const classes = (r.fieldMisses ?? []).map((m) => [m.read, m.likely]);
+
+    expect(classes).toEqual(
+      expect.arrayContaining([
+        ['count', 'typo'],
+        ['criterionClass', 'optional-field'],
+      ]),
+    );
+  });
+
   it('stays SILENT for a correct script — the signal only fires when the author was already wrong', async () => {
     const r = await runOrchestrationScript(
       `const c = await tools.work_items.claimable({});

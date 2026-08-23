@@ -85,6 +85,18 @@ export interface FieldMiss {
   read: string;
   /** The keys that ARE present on that container — i.e. what the author probably meant. */
   available: string[];
+  /**
+   * EI-21163938645109933 / EI-21164455886001541: a miss is one of two very different things, and
+   * reporting both with the same warning is what made this signal read as noise. `typo` is the
+   * case this detector exists for (a misspelled field, silently undefined). `optional-field` is a
+   * read of a key that resembles nothing on the shape — almost always a legitimately-optional
+   * field that is simply not set on this result. The Proxy cannot see the surrounding syntax, so
+   * it cannot tell them apart from the READ; but the KEY ITSELF can, by proximity to what is
+   * actually there. Absent on results produced before this classification existed.
+   */
+  likely?: 'typo' | 'optional-field';
+  /** The available key this read most resembles. Only set when `likely` is `typo`. */
+  didYouMean?: string;
 }
 
 /**
@@ -327,6 +339,43 @@ const WORKER_SRC = `(() => {
   const PROBE_KEYS = new Set(['then', 'toJSON', 'constructor', 'inspect', 'nodeType', '$$typeof']);
   const ROOT_ENVELOPE_FIELDS = new Set(['content', 'text']);
   const SHAPE_HINT_LIMIT = 8;
+  // EI-21163938645109933 / EI-21164455886001541: classify a miss instead of warning uniformly.
+  // Bounded Levenshtein — bails as soon as every cell on a row exceeds max, so cost stays O(n*m)
+  // with a tiny constant and never runs on more than AVAIL_LIMIT keys.
+  const editWithin = (a, b, max) => {
+    if (Math.abs(a.length - b.length) > max) return false;
+    let prev = [];
+    for (let j = 0; j <= b.length; j++) prev[j] = j;
+    for (let i = 1; i <= a.length; i++) {
+      const cur = [i];
+      let best = i;
+      for (let j = 1; j <= b.length; j++) {
+        const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1;
+        cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+        if (cur[j] < best) best = cur[j];
+      }
+      if (best > max) return false;
+      prev = cur;
+    }
+    return prev[b.length] <= max;
+  };
+  // A typo is NEAR an available key; an optional-field probe resembles nothing on the shape.
+  // Case-insensitive so a casing slip (rowcount/rowCount) reads as the typo it is.
+  const nearestKey = (key, keys) => {
+    const k = String(key).toLowerCase();
+    for (const cand of keys) {
+      const c = String(cand).toLowerCase();
+      if (c === k) return cand;
+      const max = Math.min(k.length, c.length) >= 5 ? 2 : 1;
+      if (editWithin(k, c, max)) return cand;
+      // Containment either way, not just a shared prefix. The incident this detector was BUILT
+      // for is "count" read off a result whose key is "claimableCount" -- 9 edits apart, so a
+      // distance test alone would file the founding case as an optional-field probe.
+      // (No backticks in this comment: it lives INSIDE a template literal.)
+      if (k.length >= 4 && (c.indexOf(k) >= 0 || k.indexOf(c) >= 0)) return cand;
+    }
+    return null;
+  };
   const compactShapeHint = (target) => Object.keys(target)
     .sort()
     .slice(0, SHAPE_HINT_LIMIT)
@@ -370,7 +419,12 @@ const WORKER_SRC = `(() => {
           const sig = tool + '|' + path + '|' + key;
           if (!missSeen.has(sig) && fieldMisses.length < MISS_LIMIT) {
             missSeen.add(sig);
-            fieldMisses.push({ tool, path: path || '(root)', read: key, available: Object.keys(target).slice(0, AVAIL_LIMIT) });
+            const availableKeys = Object.keys(target).slice(0, AVAIL_LIMIT);
+            const near = nearestKey(key, availableKeys);
+            fieldMisses.push(Object.assign(
+              { tool, path: path || '(root)', read: key, available: availableKeys },
+              near ? { likely: 'typo', didYouMean: near } : { likely: 'optional-field' },
+            ));
           }
           if (!path && ROOT_ENVELOPE_FIELDS.has(key)) {
             throw new Error(structuredRootShapeError(tool, key, target));
