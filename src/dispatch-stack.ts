@@ -1333,6 +1333,21 @@ export async function runDispatchStack(
   stack: ReadonlyArray<DispatchStep> = DEFAULT_DISPATCH_STACK,
 ): Promise<DispatchProjectedResult> {
   const exec = initExecution(tool, toolName, input, ctx, deps);
+  // Notify the host before any gate or handler work begins. This is deliberately
+  // best-effort: a liveness marker must not be able to change dispatch behavior,
+  // and it must run before a long-lived handler becomes in-flight.
+  if (deps.onDispatchStart) {
+    try {
+      deps.onDispatchStart({
+        toolName,
+        pluginName: tool.pluginName,
+        args: input,
+        ctx,
+      });
+    } catch {
+      // Start observers are advisory and must never break their trigger.
+    }
+  }
   let result: DispatchProjectedResult | null = null;
   try {
     for (const step of stack) {

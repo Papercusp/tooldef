@@ -212,7 +212,26 @@ export interface PostInvokeEvent {
   envelopeVerdict?: CapabilityEnvelopeVerdict | null;
 }
 
+/**
+ * The event handed to `DispatchProjectedDeps.onDispatchStart` immediately after
+ * a dispatch execution is initialized and before any gate or handler step runs.
+ * Hosts use this best-effort seam for liveness that must be visible while a
+ * handler is still in flight, rather than only after it settles.
+ */
+export interface DispatchStartEvent {
+  toolName: string;
+  pluginName: string;
+  args: unknown;
+  ctx: UnifiedToolContext;
+}
+
 export interface DispatchProjectedDeps {
+  /**
+   * Best-effort observation point for the beginning of every projected dispatch.
+   * The dispatcher does not await this hook and swallows failures so a host's
+   * liveness/telemetry marker can never change the tool result.
+   */
+  onDispatchStart?(event: DispatchStartEvent): void;
   /**
    * Resolve the quota window (telemetry grouping + quota scope) and ceiling
    * for a call. Defaults to `defaultComputeQuotaWindow` (run-scoped, `perRun`

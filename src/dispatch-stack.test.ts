@@ -124,6 +124,44 @@ describe('withReplacedStep', () => {
 });
 
 describe('runDispatchStack — custom stack', () => {
+  it('notifies the host before a handler starts and while it remains in flight', async () => {
+    const activeDispatches = new Set<string>();
+    let handlerStarted = false;
+    let releaseHandler!: () => void;
+    const handlerCanFinish = new Promise<void>((resolve) => {
+      releaseHandler = resolve;
+    });
+
+    const pending = runDispatchStack(
+      makeTool({
+        fn: async () => {
+          handlerStarted = true;
+          expect(activeDispatches.has('fix.tool')).toBe(true);
+          await handlerCanFinish;
+          return { content: [{ type: 'text', text: 'ok' }] };
+        },
+      }),
+      'fix.tool',
+      { probe: true },
+      MAKE_CTX(),
+      {
+        onDispatchStart: ({ toolName }) => {
+          expect(handlerStarted).toBe(false);
+          activeDispatches.add(toolName);
+        },
+        postInvoke: ({ toolName }) => {
+          activeDispatches.delete(toolName);
+        },
+      },
+    );
+
+    await vi.waitFor(() => expect(handlerStarted).toBe(true));
+    expect(activeDispatches.has('fix.tool')).toBe(true);
+    releaseHandler();
+    expect((await pending).ok).toBe(true);
+    expect(activeDispatches.has('fix.tool')).toBe(false);
+  });
+
   it('accepts a customized stack and routes through it', async () => {
     let quotaRan = false;
     const custom = withReplacedStep(DEFAULT_DISPATCH_STACK, 'quota', async () => {
