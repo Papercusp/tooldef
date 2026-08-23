@@ -175,7 +175,7 @@ export interface ChildFailure {
  * `{ summary, media }` contract. Intermediate tool results never populate this array.
  */
 export type CodeRunMediaContent =
-  | { type: 'image'; data: string; mimeType: string }
+  | { type: 'image'; data: string; mimeType: string; _meta?: Record<string, unknown> }
   | { type: 'audio'; data: string; mimeType: string };
 
 export interface OrchestrateResult {
@@ -184,6 +184,8 @@ export interface OrchestrateResult {
   summary?: unknown;
   /** Validated image/audio blocks from an explicit final `{ summary, media }` result. */
   media?: CodeRunMediaContent[];
+  /** Explicit store/load state, suitable for replay as the next invocation's bindings.values. */
+  state?: OrchestrationInputs;
   logs: string[];
   error?: string;
   /** Set when the parse-check failed. */
@@ -460,6 +462,7 @@ function extractOutputReferences(value: unknown): OrchestrationOutputReference[]
 
 const STRICT_BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const MEDIA_MIME_RE = /^(image|audio)\/[A-Za-z0-9][A-Za-z0-9.+_-]*$/;
+const GENERATED_IMAGE_DATA_URL_RE = /^data:(image\/[A-Za-z0-9][A-Za-z0-9.+_-]*);base64,(.+)$/;
 
 interface ParsedFinalResult {
   summary: unknown;
@@ -491,6 +494,44 @@ function validateMediaItem(value: unknown, index: number): CodeRunMediaContent |
   // Copy only the validated MCP fields: arbitrary sibling properties from script data must not
   // hitch a ride around the authored summary/result-door contract.
   return { type, data: value.data, mimeType: value.mimeType };
+}
+
+function validateGeneratedImages(
+  values: readonly unknown[] | undefined,
+): { media: CodeRunMediaContent[]; error?: string } {
+  const media: CodeRunMediaContent[] = [];
+  for (let index = 0; index < (values?.length ?? 0); index += 1) {
+    const value = values![index];
+    if (!isPlainRecord(value)) {
+      return { media: [], error: `invalid_generated_image: generatedImages[${index}] must be an object` };
+    }
+    if (typeof value.image_url !== 'string') {
+      return { media: [], error: `invalid_generated_image: generatedImages[${index}].image_url must be a data URL` };
+    }
+    const match = GENERATED_IMAGE_DATA_URL_RE.exec(value.image_url);
+    if (!match || !STRICT_BASE64_RE.test(match[2]!)) {
+      return {
+        media: [],
+        error: `invalid_generated_image: generatedImages[${index}].image_url must be a canonical base64 image data URL`,
+      };
+    }
+    if (
+      value.output_hint !== undefined &&
+      (typeof value.output_hint !== 'string' || value.output_hint.length > 2_000)
+    ) {
+      return {
+        media: [],
+        error: `invalid_generated_image: generatedImages[${index}].output_hint must be a string of at most 2000 characters`,
+      };
+    }
+    media.push({
+      type: 'image',
+      data: match[2]!,
+      mimeType: match[1]!,
+      ...(value.output_hint === undefined ? {} : { _meta: { output_hint: value.output_hint } }),
+    });
+  }
+  return { media };
 }
 
 /**
@@ -660,6 +701,7 @@ export async function runToolOrchestration(
     ...(timeoutMs ? { timeoutMs } : {}),
     onTimeout: abortFromParent,
     ...(opts.inputs ? { inputs: opts.inputs } : {}),
+    ...(ctx.emit ? { emit: (name, data) => ctx.emit(name, data) } : {}),
   });
   ctx.signal?.removeEventListener('abort', abortFromParent);
   // P-020: only meaningful when the script ABORTED — a run that completed reached every line
@@ -672,13 +714,16 @@ export async function runToolOrchestration(
     executed: false,
   }));
   const finalResult = run.ok ? parseFinalResult(run.result) : { summary: run.result };
-  const effectiveOk = run.ok && !finalResult.error;
+  const generated = validateGeneratedImages(run.generatedImages);
+  const media = [...(finalResult.media ?? []), ...generated.media];
+  const effectiveOk = run.ok && !finalResult.error && !generated.error;
   return {
     ok: effectiveOk,
     summary: finalResult.summary,
-    ...(finalResult.media ? { media: finalResult.media } : {}),
+    ...(media.length ? { media } : {}),
+    ...(run.state ? { state: run.state } : {}),
     logs: run.logs,
-    error: finalResult.error ?? run.error,
+    error: finalResult.error ?? generated.error ?? run.error,
     ...(unknownRefs && unknownRefs.length ? { unknownRefs } : {}),
     dryRun,
     dispatchCount,
