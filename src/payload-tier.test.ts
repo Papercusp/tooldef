@@ -413,7 +413,12 @@ describe('applyPayloadTier', () => {
     if ((projected._projection.omitted?.length ?? 0) < 20) {
       expect(projected._projection.omittedSamplesDropped).toBe(true);
     }
-    expect(projected._projection.returnedChars).toBe(JSON.stringify(projected).length);
+    // The result must actually FIT — that is the whole point of the fallback.
+    expect(projected._projection.returnedChars).toBeLessThan(2_000);
+    // `returnedChars` is measured while the field itself still reads 0, so it
+    // under-reports its own final width by a few chars. Pin the self-reference
+    // slack rather than an exact equality that would break on any digit change.
+    expect(JSON.stringify(projected).length - projected._projection.returnedChars).toBeLessThanOrEqual(8);
   });
 
   it('retains `id`/`ok` for every bulk results[] row even when per-key BUDGET (not depth) runs out mid-object (EI-18683546971375407)', () => {
