@@ -164,8 +164,22 @@ export interface GeneratedImageRequest {
   output_hint?: string;
 }
 
+/**
+ * Default wall-clock budget for one orchestration script.
+ *
+ * EXPORTED because it is not only this function's default — it is the budget every caller who
+ * RECOMMENDS folding tool calls into a script is implicitly promising. EI-21254965187146713: the
+ * batch-hint told an agent to chain N `testing:run` calls inside one script, and the fold could
+ * not finish, because a single child tool is allowed 60s by the dispatch stack (`exec.tool
+ * .timeoutSec ?? 60`) while the script wrapping it had 30s. Nothing was wrong with either number
+ * in isolation; the advice restated the script budget from memory instead of reading it. Anything
+ * reasoning about whether a fold FITS must import this rather than repeat the literal.
+ */
+export const DEFAULT_SCRIPT_TIMEOUT_MS = 30_000;
+
 export interface RunScriptOptions {
-  /** Wall-clock budget for the whole script. Default 30s. Sync loops are killed at this bound. */
+  /** Wall-clock budget for the whole script. Defaults to {@link DEFAULT_SCRIPT_TIMEOUT_MS} (30s).
+   *  Sync loops are killed at this bound. */
   timeoutMs?: number;
   /**
    * Called immediately before the worker is terminated by the wall-clock budget. Host-side tool
@@ -691,7 +705,7 @@ export async function runOrchestrationScript(
   facade: ToolFacade,
   opts: RunScriptOptions = {},
 ): Promise<RunScriptResult> {
-  const timeoutMs = opts.timeoutMs ?? 30_000;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_SCRIPT_TIMEOUT_MS;
   const maxLogLines = opts.maxLogLines ?? 200;
   const logs: string[] = [];
   const inputs = opts.inputs ?? {};
