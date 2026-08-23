@@ -599,4 +599,59 @@ describe('EI-19301148486657755: reading a field the tool result does not have', 
     expect((r.fieldMisses ?? []).length).toBeGreaterThan(0);
     expect((r.fieldMisses ?? []).length).toBeLessThanOrEqual(12);
   });
+
+  it('seeds store/load from explicit inputs and returns replayable state without mutating inputs', async () => {
+    const r = await runOrchestrationScript(
+      `const before = load('cursor');
+       store('cursor', before + 1);
+       store('filters', [...load('filters'), 'urgent']);
+       return { before, immutable: inputs.cursor, after: load('cursor') };`,
+      facade({}),
+      { inputs: { cursor: 2, filters: ['open'] } },
+    );
+
+    expect(r).toMatchObject({
+      ok: true,
+      result: { before: 2, immutable: 2, after: 3 },
+      state: { cursor: 3, filters: ['open', 'urgent'] },
+    });
+  });
+
+  it('rejects non-JSON store values instead of silently changing their meaning', async () => {
+    const r = await runOrchestrationScript(`store('cursor', Number.NaN); return 'unreachable';`, facade({}));
+
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('state_not_serializable');
+    expect(r.error).toContain('finite number');
+  });
+
+  it('streams notify/yield_control and records generatedImage requests for host validation', async () => {
+    const emit = vi.fn();
+    const r = await runOrchestrationScript(
+      `notify({ phase: 'rendering', count: 1 });
+       yield_control();
+       generatedImage({ image_url: 'data:image/png;base64,aGVsbG8=', output_hint: 'preview' });
+       return 'done';`,
+      facade({}),
+      { emit },
+    );
+
+    expect(r.ok).toBe(true);
+    expect(emit).toHaveBeenNthCalledWith(1, 'notify', { phase: 'rendering', count: 1 });
+    expect(emit).toHaveBeenNthCalledWith(2, 'yield_control', null);
+    expect(r.generatedImages).toEqual([
+      { image_url: 'data:image/png;base64,aGVsbG8=', output_hint: 'preview' },
+    ]);
+  });
+
+  it('retains the latest explicit state when a later synchronous loop times out', async () => {
+    const r = await runOrchestrationScript(`store('cursor', 4); while (true) {}`, facade({}), {
+      inputs: { cursor: 3 },
+      timeoutMs: 100,
+    });
+
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('script_timeout');
+    expect(r.state).toEqual({ cursor: 4 });
+  });
 });
