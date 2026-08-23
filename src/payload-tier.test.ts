@@ -367,6 +367,55 @@ describe('applyPayloadTier', () => {
     expect(projected._projection.next).not.toContain('narrower filters/ids');
   });
 
+  it('sheds the omission SAMPLE list before it discards content (EI-21215297173311865)', () => {
+    // The observed failure: coord:orient { afterCompaction:true } returned
+    // `{ok:true}` plus a ~2.9KB manifest of 152 omissions and ZERO content fields.
+    // The metadata is what blew the bound, but the identity-only fallback discarded
+    // the whole preview and kept the metadata — so the caller received a result that
+    // is indistinguishable from a successful orient over an empty world (no peers,
+    // no claims, no unanswered messages), on the one path where it has the least
+    // independent state to notice. `omitted[]` holds per-path EXAMPLES nothing can be
+    // re-derived from; the preview is the only copy of the data. Diagnostics go first.
+    const deepLeaf = (n: number) => ({
+      leafIdentifierField: `leaf-${n}`,
+      nestedDetailObject: { alpha: { beta: { gamma: { delta: 'x'.repeat(200) } } } },
+    });
+    const coverage = Array.from({ length: 25 }, (_, i) => ({
+      workItemIdentifierField: `WI-${40_700 + i}`,
+      associatedLinkCollection: Array.from({ length: 4 }, (_, j) => deepLeaf(i * 10 + j)),
+    }));
+    const orientLike = {
+      ok: true,
+      me: { ownerIdentifier: 'su-7df316da', coverage },
+      claimable: Array.from({ length: 20 }, (_, i) => ({ id: `EI-${i}`, title: 't'.repeat(120) })),
+      codexLocks: { mode: 'automatic', heldPaths: [] },
+      inbox: { unread: 3 },
+    };
+
+    const projected = projectBoundedPayload(orientLike, {
+      toolName: 'coord:orient',
+      tier: 'trimmed',
+      targetChars: 2_000,
+      args: { afterCompaction: true },
+    });
+
+    const contentKeys = Object.keys(projected).filter((k) => k !== '_projection');
+    // THE regression, stated as the failure it was: `['ok']` alone — 100% envelope.
+    expect(contentKeys).not.toEqual(['ok']);
+    expect(contentKeys.length).toBeGreaterThan(1);
+    // The count stays EXACT even when its examples are shed: a bounded measurement
+    // must never read as a real zero.
+    expect(projected._projection.omittedCount).toBeGreaterThan(0);
+    // Recovery is never traded away — it is what makes the omission actionable.
+    expect(projected._projection.cursor).toBeTruthy();
+    expect(projected._projection.next).toBeTruthy();
+    // Shedding is DISCLOSED, so a short sample list is never mistaken for a complete one.
+    if ((projected._projection.omitted?.length ?? 0) < 20) {
+      expect(projected._projection.omittedSamplesDropped).toBe(true);
+    }
+    expect(projected._projection.returnedChars).toBe(JSON.stringify(projected).length);
+  });
+
   it('retains `id`/`ok` for every bulk results[] row even when per-key BUDGET (not depth) runs out mid-object (EI-18683546971375407)', () => {
     // Each row's bulky fields (workItem.summary, checkpoint) come AFTER id/ok in
     // insertion order — exactly the shape work_items:get returns — so a naive

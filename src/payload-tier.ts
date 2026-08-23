@@ -146,6 +146,11 @@ export interface BoundedPayloadProjection {
     returnedChars: number;
     omittedCount: number;
     omitted: Array<{ path: string; reason: string }>;
+    /** True when the `omitted` SAMPLE list was itself shortened to buy budget back
+     *  for real content (EI-21215297173311865). `omittedCount` remains exact — only
+     *  the per-path examples were shed. Absent means the sample list is as complete
+     *  as GENERIC_PROJECTION_OMISSION_SAMPLES allows. */
+    omittedSamplesDropped?: true;
     cursor: {
       /** Host-defined recovery cursors may page a durable spill instead of
        * re-running the producing tool. `full-detail` remains the default. */
@@ -724,11 +729,18 @@ export function projectBoundedPayload(
     // ask-for-LESS lead: for an oversized result, narrowing beats paging.
     next: opts.recovery?.next ?? buildDefaultRecoveryNext(opts, cursorArgs.truncated),
   };
-  let result: BoundedPayloadProjection = Array.isArray(preview)
-    ? { items: preview, _projection: metadata }
-    : preview && typeof preview === 'object'
-      ? { ...(preview as Record<string, unknown>), _projection: metadata }
-      : { value: preview, _projection: metadata };
+  const buildResultFrom = (
+    body: unknown,
+    meta: BoundedPayloadProjection['_projection'],
+  ): BoundedPayloadProjection =>
+    Array.isArray(body)
+      ? { items: body, _projection: meta }
+      : body && typeof body === 'object'
+        ? { ...(body as Record<string, unknown>), _projection: meta }
+        : { value: body, _projection: meta };
+  const buildResult = (meta: BoundedPayloadProjection['_projection']): BoundedPayloadProjection =>
+    buildResultFrom(preview, meta);
+  let result: BoundedPayloadProjection = buildResult(metadata);
   metadata.returnedChars = jsonLen(result);
 
   // Exact last-line defense: pathological keys/escaping must not defeat the
@@ -753,6 +765,98 @@ export function projectBoundedPayload(
   // payload) does this keep the old all-detail-erased summary — there is
   // nothing left to preserve.
   if (metadata.returnedChars >= Math.min(target, PAYLOAD_TIER_HARD_CEILING_CHARS)) {
+    // EI-21215297173311865: shed the DIAGNOSTIC manifest before sacrificing DATA.
+    // The block above correctly identifies the metadata as what usually blows the
+    // bound — but the identity-only fallback below then discards the whole preview
+    // while keeping that same oversized metadata intact, which inverts the value
+    // order: `omitted[]` is a list of per-path EXAMPLES a caller can re-derive
+    // nothing from, whereas the preview is the only copy of the data. Observed on
+    // coord:orient { afterCompaction:true } — a 131KB payload returned `{ok:true}`
+    // plus a ~2.9KB manifest of 152 omissions and ZERO content fields, which reads
+    // as a successful orient over an empty world (no peers, no claims, no unanswered
+    // messages) precisely on the post-compaction path where the caller has the least
+    // independent state to notice.
+    //
+    // `omittedCount` — the load-bearing number, and the marker that keeps a bounded
+    // measurement from reading as a real zero — is preserved at full precision in
+    // every branch; only the per-path samples are shed, disclosed via
+    // `omittedSamplesDropped`. Recovery (`cursor` + `next`) is never traded away:
+    // it is what makes the omission actionable.
+    const ceiling = Math.min(target, PAYLOAD_TIER_HARD_CEILING_CHARS);
+    let leanMetadata = metadata;
+    for (const sampleCap of [5, 0]) {
+      if (leanMetadata.omitted.length <= sampleCap) continue;
+      leanMetadata = {
+        ...metadata,
+        omitted: metadata.omitted.slice(0, sampleCap),
+        omittedSamplesDropped: true,
+        returnedChars: 0,
+      };
+      const candidate = buildResult(leanMetadata);
+      const candidateChars = jsonLen(candidate);
+      if (candidateChars < ceiling) {
+        candidate._projection.returnedChars = candidateChars;
+        return candidate;
+      }
+    }
+
+    // Shedding samples alone is not always enough, and the reason is structural: the
+    // preview above was budgeted against a FIXED metadata reserve (target - 1_600)
+    // that this call's metadata overran, so preview + metadata cannot fit however
+    // much of the manifest is shed. Re-project the DATA against the budget the lean
+    // metadata actually leaves, instead of dropping to an identity-only husk. A
+    // PARTIAL reading of the real payload beats a complete inventory of what was
+    // withheld — the caller can act on the former and can re-derive nothing from the
+    // latter.
+    // `state.remaining` is an APPROXIMATE recursion budget (see the "pathological
+    // keys/escaping" note above — it is exactly why this exact-measurement backstop
+    // exists), so a single sized attempt can still overshoot. Step the content
+    // budget down and take the first projection that measurably fits, rather than
+    // giving up on content after one miss.
+    const leanMetaChars = jsonLen({ ...leanMetadata, returnedChars: 0 });
+    const contentHeadroom = ceiling - leanMetaChars - 64;
+    // The walk's `remaining` under-counts the SERIALIZED size by a wide and
+    // payload-dependent factor (measured 3.5x-5.7x on an orient-shaped payload:
+    // a 1,129-char budget serialized to 3,927 chars), so a fixed fraction ladder
+    // misses unpredictably — one measured case landed 24 chars over a 3,000
+    // ceiling and fell through to the husk. Re-aim each attempt using the
+    // overshoot the previous attempt actually exhibited, and require a strict
+    // decrease so the loop always terminates.
+    let contentBudget = contentHeadroom;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      if (contentBudget < 200) break;
+      const reState: ProjectionState = {
+        remaining: contentBudget,
+        omittedCount: 0,
+        omitted: [],
+        priorityOmitted: [],
+        active: new WeakSet<object>(),
+        limits: { maxArray: 6, maxDepth: 4, maxKeys: 24, maxString: 300 },
+      };
+      const rePreview = projectValue(data, '$', 0, reState);
+      const reMetadata: BoundedPayloadProjection['_projection'] = {
+        ...leanMetadata,
+        // Count the omissions of the projection ACTUALLY RETURNED, and never
+        // under-report the fuller walk that was discarded: a bounded measurement
+        // that reads as a real zero is the failure mode this whole block exists to
+        // prevent.
+        omittedCount: Math.max(leanMetadata.omittedCount, reState.omittedCount),
+        returnedChars: 0,
+      };
+      const candidate = buildResultFrom(rePreview, reMetadata);
+      const candidateChars = jsonLen(candidate);
+      if (candidateChars < ceiling) {
+        candidate._projection.returnedChars = candidateChars;
+        return candidate;
+      }
+      const serializedContent = Math.max(1, candidateChars - leanMetaChars);
+      const overshoot = Math.max(1.1, serializedContent / contentBudget);
+      contentBudget = Math.min(
+        Math.floor(contentHeadroom / overshoot),
+        Math.floor(contentBudget * 0.7),
+      );
+    }
+
     const identityState: ProjectionState = {
       remaining: Math.max(400, Math.floor(target * 0.2)),
       omittedCount: 0,
@@ -778,10 +882,10 @@ export function projectBoundedPayload(
     }
     result =
       identityFields && Object.keys(identityFields).length > 0
-        ? { ...identityFields, _projection: { ...metadata, returnedChars: 0 } }
+        ? { ...identityFields, _projection: { ...leanMetadata, returnedChars: 0 } }
         : {
             summary: '[payload preview omitted: serialized projection exceeded transport budget]',
-            _projection: { ...metadata, returnedChars: 0 },
+            _projection: { ...leanMetadata, returnedChars: 0 },
           };
     result._projection.returnedChars = jsonLen(result);
   }
