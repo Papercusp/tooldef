@@ -15,7 +15,7 @@
 export interface ToolResult {
   content: Array<
     | { type: 'text'; text: string }
-    | { type: 'image'; data: string; mimeType: string }
+    | { type: 'image'; data: string; mimeType: string; _meta?: Record<string, unknown> }
     | { type: 'resource'; resource: { uri: string; mimeType?: string; text?: string } }
   >;
   /** Marks this tool call as failed for protocol purposes (handler may still throw). */
