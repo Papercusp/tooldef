@@ -131,6 +131,21 @@ export interface OrchestrationCallRecord {
   outputReferences: OrchestrationOutputReference[];
 }
 
+/**
+ * Runtime-owned safety evidence for one orchestration run. This is deliberately
+ * outside the script-authored summary: a script cannot prove its own authority
+ * invariants by returning `authorityUnchanged: true`.
+ *
+ * The server runtime cannot observe prompts injected into a native client while
+ * this call is in flight. Reporting that boundary explicitly is safer than
+ * manufacturing an `unchanged` verdict from the absence of a server signal.
+ */
+export interface OrchestrationRuntimeObservations {
+  authorizationObservationCount: number;
+  authorityWideningDetected: boolean;
+  midTurnPromptInjectionObservability: 'not-observable';
+}
+
 /** A statically ordered write that the script never reached after an earlier throw. */
 export interface NotDispatchedWrite {
   tool: string;
@@ -202,6 +217,8 @@ export interface OrchestrateResult {
   /** Exact UTF-8 bytes of every child result that settled and entered the script
    *  runtime. Thrown dispatches have no result body and therefore add zero. */
   intermediateBytes?: number;
+  /** Independent runtime evidence; never derived from the script's return value. */
+  runtimeObservations: OrchestrationRuntimeObservations;
   /** Write-effect calls the script made (recorded in dryRun, observed otherwise).
    *  NOTE: recorded at DISPATCH time, so this includes calls that then threw — subtract
    *  `rejectedMutations` + `uncertainMutations` for the set that actually landed. */
@@ -273,6 +290,31 @@ export interface OrchestrateResult {
    * from their model-facing payloads after persisting the normalized trace.
    */
   callRecords?: OrchestrationCallRecord[];
+}
+
+function setContainsAll<T>(superset: ReadonlySet<T> | undefined, subset: ReadonlySet<T> | undefined): boolean {
+  if (!subset || subset.size === 0) return true;
+  if (!superset) return false;
+  for (const value of subset) if (!superset.has(value)) return false;
+  return true;
+}
+
+/** True only when the actual inner-dispatch context has a grant the outer caller lacked. */
+function authorityWidened(
+  outer: UnifiedToolContext,
+  inner: UnifiedToolContext,
+): boolean {
+  if (inner.isSuperuser === true && outer.isSuperuser !== true) return true;
+  if (inner.role !== outer.role) return true;
+
+  const outerPrincipal = outer.principal;
+  const innerPrincipal = inner.principal;
+  if (!innerPrincipal) return false;
+  if (!outerPrincipal) return true;
+  if (innerPrincipal.slug !== outerPrincipal.slug) return true;
+  if (!setContainsAll(outerPrincipal.capabilities, innerPrincipal.capabilities)) return true;
+  if (!setContainsAll(outerPrincipal.roles, innerPrincipal.roles)) return true;
+  return false;
 }
 
 /**
@@ -593,6 +635,8 @@ export async function runToolOrchestration(
   const rejectedMutations: ThrownMutation[] = [];
   const uncertainMutations: ThrownMutation[] = [];
   const callRecords: OrchestrationCallRecord[] = [];
+  let authorizationObservationCount = 0;
+  let authorityWideningDetected = false;
   let dispatchCount = 0;
   let intermediateBytes = 0;
 
@@ -636,7 +680,14 @@ export async function runToolOrchestration(
     // what lets a wrapper tool (code:run / recipes:run) mark its own row as a dispatch
     // wrapper only when inner rows actually exist (census double-count, P-012).
     dispatchCount += 1;
-    const call: DispatchNext = (callCtx) => realDispatch(callCtx, deps)(tool, name, args);
+    const call: DispatchNext = (callCtx) => {
+      // Observe the exact context that enters the real dispatcher, after any
+      // per-call workspace/principal rebinding. This is the runtime-owned
+      // authorization entry; the script cannot forge or suppress it.
+      authorizationObservationCount += 1;
+      authorityWideningDetected ||= authorityWidened(ctx, callCtx);
+      return realDispatch(callCtx, deps)(tool, name, args);
+    };
     try {
       const result = await (wrapDispatch
         ? wrapDispatch(tool, name, args, dispatchCtx, call)
@@ -728,6 +779,11 @@ export async function runToolOrchestration(
     dryRun,
     dispatchCount,
     intermediateBytes,
+    runtimeObservations: {
+      authorizationObservationCount,
+      authorityWideningDetected,
+      midTurnPromptInjectionObservability: 'not-observable',
+    },
     plannedMutations,
     ...(!dryRun && writeAttempts.length
       ? { writeAttempts: writeAttempts.map((attempt) => ({ ...attempt })) }
