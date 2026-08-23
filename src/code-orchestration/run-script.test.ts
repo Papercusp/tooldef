@@ -158,6 +158,69 @@ describe('runOrchestrationScript (B-CX-1A)', () => {
     expect(b.result).toBe('undefined'); // a fresh worker per run — no cross-run global leak
   });
 
+  it('exposes JSON inputs as VM-realm values that are recursively frozen', async () => {
+    const r = await runOrchestrationScript(
+      `const nestedSet = Reflect.set(inputs.profile, 'name', 'changed');
+       const listSet = Reflect.set(inputs.ids, 0, 99);
+       return {
+         value: inputs,
+         rootFrozen: Object.isFrozen(inputs),
+         nestedFrozen: Object.isFrozen(inputs.profile),
+         listFrozen: Object.isFrozen(inputs.ids),
+         vmPrototype: Object.getPrototypeOf(inputs) === Object.prototype,
+         nestedSet,
+         listSet,
+       };`,
+      facade({}),
+      { inputs: { profile: { name: 'original' }, ids: [1, 2, 3] } },
+    );
+
+    expect(r).toMatchObject({
+      ok: true,
+      result: {
+        value: { profile: { name: 'original' }, ids: [1, 2, 3] },
+        rootFrozen: true,
+        nestedFrozen: true,
+        listFrozen: true,
+        vmPrototype: true,
+        nestedSet: false,
+        listSet: false,
+      },
+    });
+  });
+
+  it('structured-clones inputs before host-side work can mutate the source object', async () => {
+    const inputs = { profile: { name: 'before' } };
+    const mutateHost = vi.fn(async () => {
+      inputs.profile.name = 'after';
+      return { ok: true };
+    });
+    const r = await runOrchestrationScript(
+      `await tools.host.mutate(); return inputs.profile.name;`,
+      facade({ host: { mutate: mutateHost } }),
+      { inputs },
+    );
+
+    expect(mutateHost).toHaveBeenCalledOnce();
+    expect(inputs.profile.name).toBe('after');
+    expect(r).toMatchObject({ ok: true, result: 'before' });
+  });
+
+  it('rejects callable and host-prototyped input values before constructing the worker', async () => {
+    class HostValue {
+      value = 'host';
+    }
+    const callable = await runOrchestrationScript(`return inputs;`, facade({}), {
+      inputs: { leak: (() => 'host') as never },
+    });
+    const prototyped = await runOrchestrationScript(`return inputs;`, facade({}), {
+      inputs: { leak: new HostValue() as never },
+    });
+
+    expect(callable).toMatchObject({ ok: false, error: expect.stringContaining('non-JSON function') });
+    expect(prototyped).toMatchObject({ ok: false, error: expect.stringContaining('plain JSON object') });
+  });
+
   it('surfaces a thrown error from inside a tool call as ok=false', async () => {
     const boom = vi.fn(async () => {
       throw new Error('tool exploded');

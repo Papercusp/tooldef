@@ -106,6 +106,22 @@ export interface SleepCap {
   actualMs: number;
 }
 
+/** JSON-only values that may cross into the orchestration VM as frozen runtime inputs. */
+export type OrchestrationInputValue =
+  | null
+  | boolean
+  | number
+  | string
+  | readonly OrchestrationInputValue[]
+  | { readonly [key: string]: OrchestrationInputValue };
+
+/**
+ * Runtime recipe/script inputs. The host validates this shape before constructing the worker;
+ * the worker then structured-clones it and reconstructs it with the VM realm's own JSON/Object
+ * intrinsics before recursively freezing it. No host object prototype or callable crosses in.
+ */
+export type OrchestrationInputs = Readonly<Record<string, OrchestrationInputValue>>;
+
 export interface RunScriptResult {
   ok: boolean;
   /** The script's returned value — the summary that re-enters the model's context. */
@@ -150,6 +166,71 @@ export interface RunScriptOptions {
    * production callers should leave this at the default.
    */
   sleepMaxMs?: number;
+  /** Optional JSON-only runtime inputs exposed to the script as the deeply frozen `inputs` value. */
+  inputs?: OrchestrationInputs;
+}
+
+function jsonInputError(value: unknown, path: string, seen: Set<object>): string | null {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? null : `${path} must be a finite number`;
+  if (typeof value !== 'object') return `${path} contains non-JSON ${typeof value}`;
+  if (seen.has(value)) return `${path} contains a cycle`;
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    const ownKeys = Reflect.ownKeys(value);
+    for (const key of ownKeys) {
+      if (key === 'length') continue;
+      if (typeof key !== 'string' || !/^\d+$/.test(key)) {
+        seen.delete(value);
+        return `${path} contains a non-JSON array property`;
+      }
+    }
+    for (let index = 0; index < value.length; index += 1) {
+      if (!Object.prototype.hasOwnProperty.call(value, index)) {
+        seen.delete(value);
+        return `${path}[${index}] is a sparse array slot`;
+      }
+      const error = jsonInputError(value[index], `${path}[${index}]`, seen);
+      if (error) {
+        seen.delete(value);
+        return error;
+      }
+    }
+    seen.delete(value);
+    return null;
+  }
+
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    seen.delete(value);
+    return `${path} must be a plain JSON object`;
+  }
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== 'string') {
+      seen.delete(value);
+      return `${path} contains a symbol key`;
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor?.enumerable || !('value' in descriptor)) {
+      seen.delete(value);
+      return `${path}.${key} must be an enumerable data property`;
+    }
+    const error = jsonInputError(descriptor.value, `${path}.${key}`, seen);
+    if (error) {
+      seen.delete(value);
+      return error;
+    }
+  }
+  seen.delete(value);
+  return null;
+}
+
+function validateJsonInputs(inputs: unknown): string | null {
+  if (inputs === null || typeof inputs !== 'object' || Array.isArray(inputs)) {
+    return 'inputs must be a plain JSON object';
+  }
+  return jsonInputError(inputs, 'inputs', new Set());
 }
 
 /**
@@ -169,7 +250,7 @@ export interface RunScriptOptions {
 const WORKER_SRC = `(() => {
   const { parentPort, workerData } = require('node:worker_threads');
   const vm = require('node:vm');
-  const { script, maxLogLines, sleepMaxMs } = workerData;
+  const { script, maxLogLines, sleepMaxMs, inputs: workerInputs } = workerData;
 
   const stringify = (v) => {
     if (typeof v === 'string') return v;
@@ -352,7 +433,18 @@ const WORKER_SRC = `(() => {
   // "Identifier 'log' has already been declared". The global still preserves the documented
   // bare log(...) convenience while allowing function-local shadowing.
   const wrap = (body) =>
-    '(async (tools) => {\\n' +
+    '(() => {\\n' +
+    // Only the JSON string crosses the worker→VM context boundary. JSON.parse and Object.freeze
+    // below are resolved inside the VM realm, so the script receives no worker/host prototypes.
+    'const rawInputs = globalThis.__papercuspInputsJson;\\n' +
+    'delete globalThis.__papercuspInputsJson;\\n' +
+    'const freezeInputs = (value) => {\\n' +
+    "  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value;\\n" +
+    '  for (const child of Object.values(value)) freezeInputs(child);\\n' +
+    '  return Object.freeze(value);\\n' +
+    '};\\n' +
+    'const inputs = freezeInputs(JSON.parse(rawInputs));\\n' +
+    'return (async (tools) => {\\n' +
     // atob is deliberately defined in the VM realm. Passing Node's host atob into the
     // context would give the script its host Function constructor, which can escape the VM.
     // This forgiving-base64 implementation matches the byte-page use case while keeping Node
@@ -383,12 +475,18 @@ const WORKER_SRC = `(() => {
     "  return output;\\n" +
     '}\\n' +
     body +
-    '\\n})';
+    '\\n});\\n' +
+    '})()';
   let factory;
   try {
     factory = vm.runInNewContext(
       wrap(script),
-      { console: { log, error: log, warn: log }, log, sleep },
+      {
+        console: { log, error: log, warn: log },
+        log,
+        sleep,
+        __papercuspInputsJson: JSON.stringify(workerInputs),
+      },
       { displayErrors: true },
     );
   } catch (err) {
@@ -426,6 +524,11 @@ export async function runOrchestrationScript(
   const timeoutMs = opts.timeoutMs ?? 30_000;
   const maxLogLines = opts.maxLogLines ?? 200;
   const logs: string[] = [];
+  const inputs = opts.inputs ?? {};
+  const inputsError = validateJsonInputs(inputs);
+  if (inputsError) {
+    return { ok: false, error: `inputs_not_serializable: ${inputsError}`, logs };
+  }
 
   // Lazy: keeps the barrel browser-safe (see the header note on the type-only import above).
   const { Worker } = await import('node:worker_threads');
@@ -435,7 +538,9 @@ export async function runOrchestrationScript(
     const worker: NodeWorker = new Worker(WORKER_SRC, {
       eval: true,
       name: 'code-orchestration',
-      workerData: { script, maxLogLines, sleepMaxMs: opts.sleepMaxMs },
+      // Worker construction performs the host→worker structured clone. The worker serializes
+      // this validated JSON data and the VM parses it again with realm-local intrinsics.
+      workerData: { script, maxLogLines, sleepMaxMs: opts.sleepMaxMs, inputs },
       ...(opts.maxOldGenerationSizeMb
         ? { resourceLimits: { maxOldGenerationSizeMb: opts.maxOldGenerationSizeMb } }
         : {}),
