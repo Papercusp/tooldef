@@ -18,6 +18,8 @@ export {
   DEFAULT_SCRIPT_TIMEOUT_MS,
   type RunScriptResult,
   type RunScriptOptions,
+  type OrchestrationInputs,
+  type OrchestrationInputValue,
   type FieldMiss,
   type SleepCap,
 } from './run-script';
