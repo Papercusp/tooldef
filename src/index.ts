@@ -43,6 +43,8 @@ export {
   resetServerVintageResolver,
   readServerVintage,
   formatVintageAge,
+  serverVintageHint,
+  constraintVintageHint,
 } from './server-vintage';
 export type {
   AgentRole,
