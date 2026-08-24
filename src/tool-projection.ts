@@ -64,6 +64,7 @@ import type { StandardSchemaV1 } from './standard-schema';
 import type { Authorizer } from './authz';
 import type { EligibilityResult } from '@papercusp/result-encoding';
 import type { DeltaCapability } from './delta-protocol';
+import type { Principal } from './types';
 
 /* ─── Event schema types ─────────────────────────────────────────────── */
 
@@ -498,8 +499,16 @@ export interface UnifiedToolContext {
   }>;
 
   /* ── Auth / db (typically built-in tools) ─────────────────────────── */
-  /** Auth principal resolved from bearer. Null when caller is anonymous. */
-  principal?: { slug: string; workspaceId: string; capabilities: Set<string>; roles?: ReadonlySet<string> } | null;
+  /**
+   * Auth principal resolved by the transport. The legacy identity fields stay
+   * required for compatibility with in-process callers; transport adapters
+   * should populate the provenance fields from the canonical Principal record.
+   * Null when caller is anonymous.
+   */
+  principal?:
+    | (Pick<Principal, 'slug' | 'workspaceId' | 'capabilities'> &
+        Partial<Pick<Principal, 'kind' | 'authMethod' | 'trust' | 'roles' | 'label'>>)
+    | null;
   /**
    * Transaction-bound Sql client with `app.workspace_id` GUC set. Built-in
    * tools rely on this; plugin tools may use it. Null when call wasn't

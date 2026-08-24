@@ -24,6 +24,7 @@ import {
   ToolRegistrationError,
   _resetProjectionRegistryForTests,
   type ProjectedTool,
+  type UnifiedToolContext,
 } from './tool-projection';
 
 const noop: ProjectedTool['fn'] = async () => ({
@@ -41,6 +42,24 @@ const baseTool = (over: Partial<ProjectedTool> = {}): ProjectedTool => ({
 });
 
 afterEach(() => _resetProjectionRegistryForTests());
+
+describe('UnifiedToolContext principal provenance', () => {
+  it('accepts the canonical metadata carried by transport adapters', () => {
+    const principal: NonNullable<UnifiedToolContext['principal']> = {
+      kind: 'harness',
+      slug: 'system:worker',
+      workspaceId: 'ws',
+      authMethod: 'spawn-url',
+      trust: 'trusted',
+      capabilities: new Set(),
+    };
+    expect(principal).toMatchObject({
+      kind: 'harness',
+      authMethod: 'spawn-url',
+      trust: 'trusted',
+    });
+  });
+});
 
 describe('normalizeMcpName (WI-3930)', () => {
   it('collapses the colon, underscore, and fully-mangled forms to ONE key', () => {
