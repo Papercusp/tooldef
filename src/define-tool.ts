@@ -82,8 +82,68 @@ import type {
 import type { ToolResult } from './wire';
 
 /**
- * Walk up the call stack to find the file that called defineTool, then
- * derive a tool name from that file's path. Convention:
+ * The absolute path of the file that called `defineTool` — a tool's DEFINITION
+ * SITE, captured from the call stack at registration time.
+ *
+ * Derived, never declared: a tool that had to hand-write its own source path
+ * would be a second copy of a truth the module graph already owns, and it would
+ * drift the first time a file moved (derived-truth-ladder rung 1). Nothing here
+ * is host-specific — "where was this tool defined" is a property of any tool
+ * registry, so it stays in the generic lib; what a HOST then does with the path
+ * (resolve it against a repo, ask git whether it is stale) is the host's policy.
+ *
+ * ## Why the frame is SEARCHED rather than indexed
+ *
+ * The previous implementation took frame `[2]` with the comment
+ * "[0]=this fn, [1]=defineTool, [2]=caller". That was off by one: this helper is
+ * called from inside `definePrincipalGatedTool` / `defineRoleGatedTool`, which
+ * `defineTool` delegates to, so the real caller sits at `[3]`. Frame `[2]` is
+ * `defineTool` itself, whose path (`.../tooldef/src/define-tool.ts`) never
+ * matches the `/tools/<group>/<verb>` convention below — so the derivation
+ * silently returned `null` for every tool instead of throwing. It went unnoticed
+ * because every first-party tool passes an explicit `name`.
+ *
+ * A hardcoded index is the wrong shape for a stack whose depth is an
+ * implementation detail of this file. So: skip every frame belonging to THIS
+ * file (identified from frame `[0]`, which is always this function — no
+ * `import.meta.url`, which the CJS preflight seam can render differently) and
+ * take the first frame outside it. Correct at any delegation depth, and it stays
+ * correct when this file is refactored again.
+ */
+function captureDefinitionSite(): string | null {
+  const ErrorAny = Error as unknown as {
+    prepareStackTrace?: (err: Error, stack: unknown[]) => unknown;
+  };
+  const orig = ErrorAny.prepareStackTrace;
+  const origLimit = Error.stackTraceLimit;
+  try {
+    ErrorAny.prepareStackTrace = (_err: Error, stack: unknown[]) => stack;
+    // Bounded: we need the nearest few frames, not a full trace. Keeps the
+    // per-definition cost negligible across a ~550-tool boot.
+    Error.stackTraceLimit = 12;
+    const raw = new Error().stack as unknown as Array<{ getFileName?: () => string }>;
+    if (!Array.isArray(raw) || raw.length === 0) return null;
+    // Frame [0] is this function, so its file IS this file.
+    const selfFile = raw[0]?.getFileName?.() ?? null;
+    for (const frame of raw) {
+      const file = frame?.getFileName?.();
+      if (!file) continue;
+      if (selfFile && file === selfFile) continue;
+      // Node internals ('node:internal/...') are never a definition site.
+      if (file.startsWith('node:')) continue;
+      return file;
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    ErrorAny.prepareStackTrace = orig;
+    Error.stackTraceLimit = origLimit;
+  }
+}
+
+/**
+ * Derive a tool name from its definition site's path. Convention:
  *   .../tools/tasks/list.ts    → tasks:list
  *   .../tools/harness/get.ts   → harness:get
  *   .../tools/search/query.ts  → search:query
@@ -91,31 +151,17 @@ import type { ToolResult } from './wire';
  * If the file is `index.ts`, the parent directory contributes the verb;
  * useful for tools that need a directory of helpers.
  */
-function deriveNameFromCallSite(): string | null {
-  const ErrorAny = Error as unknown as {
-    prepareStackTrace?: (err: Error, stack: unknown[]) => unknown;
-  };
-  const orig = ErrorAny.prepareStackTrace;
-  try {
-    ErrorAny.prepareStackTrace = (_err: Error, stack: unknown[]) => stack;
-    const raw = new Error().stack as unknown as Array<{ getFileName?: () => string }>;
-    // [0]=this fn, [1]=defineTool, [2]=caller (the tool file).
-    const callerFile = raw?.[2]?.getFileName?.();
-    if (!callerFile) return null;
-    // Find the segment after 'tools/'.
-    const match = /\/tools\/([^/]+)\/([^/]+)\.[mc]?[jt]s$/.exec(callerFile);
-    if (!match) return null;
-    const group = match[1];
-    let verb = match[2];
-    if (verb === 'index') {
-      verb = 'default';
-    }
-    return `${group}:${verb}`;
-  } catch {
-    return null;
-  } finally {
-    ErrorAny.prepareStackTrace = orig;
+function deriveNameFromCallSite(site: string | null): string | null {
+  if (!site) return null;
+  // Find the segment after 'tools/'.
+  const match = /\/tools\/([^/]+)\/([^/]+)\.[mc]?[jt]s$/.exec(site);
+  if (!match) return null;
+  const group = match[1];
+  let verb = match[2];
+  if (verb === 'index') {
+    verb = 'default';
   }
+  return `${group}:${verb}`;
 }
 
 /**
@@ -772,7 +818,8 @@ export function inferCapabilityEffect(capability: string, explicit?: 'read' | 'w
 function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
   input: ToolDefinitionInput<TArgs>,
 ): ToolDefinition<TArgs> {
-  const name = input.name ?? deriveNameFromCallSite();
+  const definitionSite = captureDefinitionSite();
+  const name = input.name ?? deriveNameFromCallSite(definitionSite);
   if (!name) {
     throw new Error(
       'defineTool: could not derive tool name from call site. ' +
@@ -846,7 +893,7 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
   // The catalog stores defs with their schema type erased (handlers run on
   // post-validation values); a specific TArgs isn't assignable to the
   // unknown-output base under Standard Schema's variance, so widen explicitly.
-  registerLegacyAsProjected(def, input.expose);
+  registerLegacyAsProjected(def, input.expose, definitionSite);
   register(def as unknown as ToolDefinition);
   // Co-located intrinsic emissions → the generic collector; the operator-core
   // desugar registers them as event-reaction rules at load (D-002).
@@ -868,7 +915,8 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
 function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
   input: RoleToolDefinitionInput<TArgs>,
 ): RoleToolDefinition<TArgs> {
-  const name = input.name ?? deriveNameFromCallSite();
+  const definitionSite = captureDefinitionSite();
+  const name = input.name ?? deriveNameFromCallSite(definitionSite);
   if (!name) {
     throw new Error(
       'defineTool: could not derive tool name from call site. ' +
@@ -931,7 +979,7 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
     requires: input.requires,
   };
 
-  registerRoleGatedAsProjected(def, input.expose);
+  registerRoleGatedAsProjected(def, input.expose, definitionSite);
   // Co-located intrinsic emissions → the generic collector; the operator-core
   // desugar registers them as event-reaction rules at load (D-002).
   collectToolEmits(name, input.emits);
@@ -1671,6 +1719,7 @@ export function toArgsJsonSchema(toolName: string, args: StandardSchemaV1): Reco
 function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
   def: ToolDefinition<TArgs>,
   expose?: ToolExposure,
+  sourceFile?: string | null,
 ): void {
   // tasks:list → /api/agent-tools/tasks/list
   const httpPath = `/api/agent-tools/${def.name.replaceAll(':', '/')}`;
@@ -1815,6 +1864,9 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
   registerProjectedTool({
     pluginName: 'agent-mcp',
     description: def.description,
+    // Where this tool was defined (absolute, captured from the call stack).
+    // Null when the stack was unreadable — never guessed.
+    sourceFile: sourceFile ?? undefined,
     inputSchema,
     // Keep the complete branch requirements for discovery/introspection while
     // retaining the flattened schema above for strict OpenAI/MCP callers.
@@ -1885,6 +1937,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
 function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
   def: RoleToolDefinition<TArgs>,
   expose?: ToolExposure,
+  sourceFile?: string | null,
 ): void {
   const httpPath = `/api/agent-tools/${def.name.replaceAll(':', '/')}`;
   const rawSchema = toArgsJsonSchema(def.name, def.args);
@@ -1977,6 +2030,9 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
   registerProjectedTool({
     pluginName: 'agent-mcp',
     description: def.description,
+    // Where this tool was defined (absolute, captured from the call stack).
+    // Null when the stack was unreadable — never guessed.
+    sourceFile: sourceFile ?? undefined,
     inputSchema,
     // Keep the complete branch requirements for discovery/introspection while
     // retaining the flattened schema above for strict OpenAI/MCP callers.
