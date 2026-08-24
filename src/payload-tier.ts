@@ -442,6 +442,11 @@ const IDENTITY_FIELDS = new Set([
 const IDENTITY_ENVELOPES = new Set(['results', 'items', 'workItem', 'counts']);
 const STRUCTURED_IDENTITY_FIELDS = new Set(['check']);
 const IDENTITY_PREVIEW_DEPTH = 4;
+/** Announces, ON a depth-compacted object, that non-identity fields were withheld —
+ *  so a partial object is never read as a complete one (EI-21364503818966104).
+ *  Underscore-prefixed to match `_projection` and stay clear of real payload keys. */
+const PARTIAL_MARKER_KEY = '_omitted';
+const PARTIAL_MARKER_MAX_KEYS = 6;
 
 function projectIdentityPreview(
   value: unknown,
@@ -519,6 +524,28 @@ function projectIdentityPreview(
     const dropped = entries.length - chosen.length;
     if (dropped > 0) {
       recordOmission(state, `${path}.*`, `${dropped} non-identity fields omitted at projection depth limit`, dropped);
+      // EI-21364503818966104: the surviving identity fields make this object look
+      // WHOLE. A reader cannot tell "the field is empty in the store" from "the
+      // projection withheld it", and the global _projection.omitted[] list is both
+      // easy to read past and sample-capped — so the object must announce its own
+      // partialness. This cost a false major bug filing plus wrong findings
+      // delivered to two rubric authors: `rubrics:get` renders each criterion down
+      // to title+check, and populated model/method/driftMarkers read as absent.
+      // Naming the dropped keys is what makes it actionable (you can see WHICH
+      // falsifier is missing), so spend the bytes on names when the budget allows.
+      const droppedKeys = entries
+        .filter(([key]) => !IDENTITY_FIELDS.has(key) && !IDENTITY_ENVELOPES.has(key))
+        .map(([key]) => key);
+      const shownKeys = droppedKeys.slice(0, PARTIAL_MARKER_MAX_KEYS);
+      const named = shownKeys.length < droppedKeys.length
+        ? `${shownKeys.join(', ')}, +${droppedKeys.length - shownKeys.length} more`
+        : shownKeys.join(', ');
+      const marker = `[omitted: ${dropped} non-identity field(s) at projection depth limit: ${named} — recover: re-call with payloadTier:'full']`;
+      const markerCost = jsonLen(PARTIAL_MARKER_KEY) + jsonLen(marker) + 4;
+      if (state.remaining >= markerCost) {
+        state.remaining -= markerCost;
+        projected[PARTIAL_MARKER_KEY] = marker;
+      }
     }
     return projected;
   } finally {
