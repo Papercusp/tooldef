@@ -890,6 +890,18 @@ export interface ProjectedTool {
   /** One-line description shown in tool listings. */
   description: string;
   /**
+   * Absolute path of the file that called `defineTool` for this tool, captured
+   * from the call stack at registration time (see `captureDefinitionSite`).
+   * Absent when the stack was unreadable, or for registrations that do not come
+   * through `defineTool` (JSON-manifest plugin tools have no defining module).
+   *
+   * Deliberately ABSOLUTE and host-agnostic: this lib cannot know what a "repo
+   * root" is. A host that wants a repo-relative path resolves it against its own
+   * root — see `toolSchemaStaleness` in operator-core, which uses it to answer
+   * "is the schema this process is serving older than the tree?".
+   */
+  sourceFile?: string;
+  /**
    * OpenAI/MCP-safe JSON Schema for tool input. Validated before invocation
    * and advertised to strict function-calling clients. Built-in `defineTool`
    * registrations flatten root unions here because those clients reject a
@@ -1568,6 +1580,25 @@ export function lookupByHttpPath(path: string): ProjectedTool | undefined {
 /** Snapshot of all registered projected tools. */
 export function listAllProjectedTools(): readonly ProjectedTool[] {
   return Array.from(REGISTRY.values());
+}
+
+/**
+ * The absolute file that defined `toolName` (its MCP-exposed name, e.g.
+ * `improvements:capture`), or `null` when the tool is unknown, was registered
+ * without a readable call stack, or has no defining module at all.
+ *
+ * Three-valued by omission on purpose: `null` means UNKNOWN, never "this tool
+ * has no source". A caller that treats a null as a negative verdict would turn
+ * an unreadable stack into a confident claim about the code — the same
+ * absence-reads-as-positive failure `candidate-contains.ts` is built to avoid.
+ */
+export function projectedToolSourceFile(toolName: string): string | null {
+  // Tolerant on purpose: a caller reporting a tool failure copies whatever
+  // spelling it saw — the canonical colon form from the docs, the underscore
+  // form, or its client's fully-mangled `mcp__<server>__<verb>` id. resolveMcpName
+  // accepts all three and returns undefined rather than guessing when a
+  // normalized name is ambiguous.
+  return resolveMcpName(toolName)?.sourceFile ?? null;
 }
 
 /**
