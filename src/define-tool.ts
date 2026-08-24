@@ -1472,8 +1472,18 @@ function compactSchemaExampleValue(node: unknown, depth = 0): unknown {
       return 0;
     case 'boolean':
       return false;
-    case 'array':
-      return [];
+    case 'array': {
+      // An empty teaching example is not accepted by schemas with minItems.
+      // Keep optional/unbounded arrays compact, but include the minimum number
+      // of item examples whenever the schema requires a non-empty array.
+      const minItems =
+        typeof rec.minItems === 'number' && Number.isFinite(rec.minItems)
+          ? Math.max(0, Math.ceil(rec.minItems))
+          : 0;
+      if (minItems === 0) return [];
+      const itemExample = compactSchemaExampleValue(rec.items, depth + 1);
+      return Array.from({ length: minItems }, () => itemExample);
+    }
     case 'object':
       return hasProperties(node) ? compactAcceptedObjectExample(node, depth + 1) : {};
     default:
