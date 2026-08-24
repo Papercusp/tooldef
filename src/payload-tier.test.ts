@@ -894,6 +894,53 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     }
   });
 
+  // EI-21364503818966104 — a depth-compacted object keeps its identity fields and
+  // so still LOOKS whole. On a rubric criterion that is actively dangerous: the
+  // survivors are `title`+`check` while `model`/`method`/`driftMarkers` — the
+  // falsifier the meta-acceptance rubric grades — vanish, and a reviewer cannot
+  // tell a withheld field from an empty one. That misread produced a false major
+  // bug filing and wrong findings delivered to two rubric authors before a peer
+  // falsified it, so the object must now announce its own partialness.
+  it('a depth-compacted object announces ON ITSELF which non-identity fields were withheld', () => {
+    const criterion = (key: string) => ({
+      key,
+      title: `criterion ${key}`,
+      check: { kind: 'tests', files: [`packages/x/${key}.test.ts`] },
+      model: `MODEL PROSE ${'m'.repeat(400)}`,
+      method: `METHOD PROSE ${'t'.repeat(600)}`,
+      driftMarkers: `DRIFT PROSE ${'d'.repeat(300)}`,
+      replication: `REPLICATION DRILL ${'r'.repeat(300)}`,
+    });
+    const fat = {
+      results: [
+        {
+          ok: true,
+          rubricId: 'acceptance-example',
+          rubric: {
+            rubricId: 'acceptance-example',
+            kind: 'acceptance',
+            criteria: Array.from({ length: 7 }, (_, i) => criterion(`c${i}`)),
+          },
+        },
+      ],
+    };
+
+    const out = projectBoundedPayload(fat, { toolName: 'rubrics:get', tier: 'trimmed' });
+    const text = JSON.stringify(out);
+
+    // Precondition: the payload really did get compacted — otherwise this test
+    // would vacuously pass on a result that was never budget-clipped.
+    expect(text).toContain('non-identity fields omitted at projection depth limit');
+
+    // Every criterion that LOST its prose must say so on the object itself, and
+    // name the lost field — a reader must never see a bare {title, check} and
+    // conclude the rubric was authored without a falsifier.
+    const partials = text.match(/\[omitted: \d+ non-identity field\(s\) at projection depth limit:[^\]]*\]/g) ?? [];
+    expect(partials.length).toBeGreaterThan(0);
+    expect(partials.some((m) => m.includes('model'))).toBe(true);
+    for (const m of partials) expect(m).toContain("payloadTier:'full'");
+  });
+
   // EI-21058972492075433 — release:checkpoint-run's own launch receipt, once its
   // diagnostics (excludedCommits, a repair queue, callerEditsInCandidate, a long
   // prose `note`) are rich enough to fill the 20-slot omission sample and the
