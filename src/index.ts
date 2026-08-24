@@ -301,6 +301,7 @@ export {
   normalizeMcpName,
   lookupByHttpPath,
   listAllProjectedTools,
+  projectedToolSourceFile,
   listDeclaredToolShapers,
   recordToolShapers,
   PROJECTED_TOOL_REGISTRY_SOURCE,
