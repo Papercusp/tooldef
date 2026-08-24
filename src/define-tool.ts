@@ -38,7 +38,7 @@ import {
   type InvalidInputCorrection,
   type InvalidInputMetadata,
 } from './dispatch-projected';
-import { serverVintageHint } from './server-vintage';
+import { serverVintageHint, constraintVintageHint } from './server-vintage';
 import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
 import { applyPayloadTier, extractPayloadTier, resolvePayloadTier } from './payload-tier';
 import {
@@ -1442,8 +1442,13 @@ function makeInvalidInputError(
   };
   return new InvalidInputError(
     `invalid_args: ${formatIssues(issues, input)}${unknownArgHint(issues, rawSchema, argRedirects)}` +
+      // EI-21353729155349111: the value-level branch appends no SCHEMA (EI-10943 — a
+      // caller who knows the shape and sent a bad value learns nothing from a 1,800-char
+      // dump), but "the constraint that just refused you may not exist in the tree any
+      // more" is the one thing it cannot work out for itself. One conditional sentence,
+      // and only when the host registered a vintage resolver.
       (issuesAreValueLevel(issues)
-        ? ''
+        ? constraintVintageHint()
         : failingFieldSchemaHint(issues, rawSchema) || argsSchemaHint(rawSchema, schemaHintCache)),
     metadata,
   );
