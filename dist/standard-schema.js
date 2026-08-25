@@ -12,17 +12,154 @@
  * JSON-Schema generation is a *separate* pluggable concern (Standard Schema has
  * no JSON-Schema export) — see `schema-adapter.ts` (P-021).
  */
+const UNKNOWN_KEY_CODES = new Set(['unrecognized_key', 'unrecognized_keys', 'unknown_key', 'unknown_keys']);
+function issuePathSegments(issue) {
+    return (issue.path ?? []).map((segment) => typeof segment === 'object' && segment !== null
+        ? segment.key
+        : segment);
+}
+function isUnknownKeyIssue(issue) {
+    const code = issue.code;
+    if (code && UNKNOWN_KEY_CODES.has(code))
+        return true;
+    // `code` is not part of Standard Schema's portable issue contract. Keep a
+    // conservative message fallback so another validator can still participate
+    // when it reports the same ordinary-language diagnosis.
+    return /\b(?:unrecognized|unrecognised|unknown)\s+keys?\b/i.test(issue.message);
+}
+function messageUnknownKeys(message) {
+    // Standard Schema only guarantees `message`; validators without Zod's
+    // `keys` extension can still be revalidated when they quote the offending
+    // names in the conventional `... key: "name"` form.
+    const afterColon = message.slice(message.indexOf(':') + 1);
+    const keys = [];
+    for (const match of afterColon.matchAll(/["'`]([^"'`]+)["'`]/g)) {
+        const key = match[1];
+        if (key !== undefined)
+            keys.push(key);
+    }
+    return keys;
+}
+function unknownKeysForIssue(issue) {
+    if (!isUnknownKeyIssue(issue))
+        return [];
+    const keys = issue.keys;
+    if (Array.isArray(keys))
+        return keys.filter((key) => isPropertyKey(key));
+    return messageUnknownKeys(issue.message);
+}
+function isPropertyKey(value) {
+    return typeof value === 'string' || typeof value === 'number' || typeof value === 'symbol';
+}
+function newUnknownKeyNode() {
+    return { remove: new Set(), children: new Map() };
+}
+function unknownKeyTree(issues) {
+    const root = newUnknownKeyNode();
+    let found = false;
+    for (const issue of issues) {
+        const keys = unknownKeysForIssue(issue);
+        if (keys.length === 0)
+            continue;
+        found = true;
+        let node = root;
+        for (const segment of issuePathSegments(issue)) {
+            let child = node.children.get(segment);
+            if (!child) {
+                child = newUnknownKeyNode();
+                node.children.set(segment, child);
+            }
+            node = child;
+        }
+        for (const key of keys)
+            node.remove.add(key);
+    }
+    return found ? root : null;
+}
+function stripUnknownKeys(input, issues) {
+    const tree = unknownKeyTree(issues);
+    if (!tree)
+        return input;
+    const strip = (value, node) => {
+        if (value === null || typeof value !== 'object')
+            return { value, changed: false };
+        let copy = value;
+        let changed = false;
+        const ensureCopy = () => {
+            if (!changed) {
+                copy = Array.isArray(value) ? value.slice() : { ...value };
+                changed = true;
+            }
+            return copy;
+        };
+        for (const key of node.remove) {
+            // `length` is an array implementation detail, never an input field.
+            if (Array.isArray(value) && key === 'length')
+                continue;
+            if (Object.prototype.hasOwnProperty.call(value, key)) {
+                delete ensureCopy()[key];
+            }
+        }
+        for (const [key, child] of node.children) {
+            if (!Object.prototype.hasOwnProperty.call(value, key))
+                continue;
+            const nested = strip(value[key], child);
+            if (nested.changed)
+                ensureCopy()[key] = nested.value;
+        }
+        return { value: copy, changed };
+    };
+    const stripped = strip(input, tree);
+    return stripped.changed ? stripped.value : input;
+}
+function issueKey(issue) {
+    const code = issue.code ?? '';
+    return `${issuePathSegments(issue).map(String).join('.')}\u0000${code}\u0000${issue.message}`;
+}
+function mergeUniqueIssues(first, second) {
+    const merged = [];
+    const seen = new Set();
+    for (const issue of [...first, ...second]) {
+        const key = issueKey(issue);
+        if (seen.has(key))
+            continue;
+        seen.add(key);
+        merged.push(issue);
+    }
+    return merged;
+}
+function validateOnce(schema, input) {
+    return Promise.resolve(schema['~standard'].validate(input)).then((result) => result.issues ? { ok: false, issues: result.issues } : { ok: true, value: result.value });
+}
+function validateOnceSync(schema, input) {
+    const result = schema['~standard'].validate(input);
+    if (result instanceof Promise) {
+        throw new Error('Standard Schema validate() returned a Promise on a synchronous path. ' +
+            'Async validators are not supported here (e.g. ctx.publishState); use a synchronous validator like Zod.');
+    }
+    return result.issues ? { ok: false, issues: result.issues } : { ok: true, value: result.value };
+}
 /**
  * Validate `input` against a Standard Schema, awaiting async validators (Zod's
  * is synchronous; Valibot/ArkType may be async). Use from an async context.
+ *
+ * Strict object validators can report an unknown-key issue before running
+ * object-level required checks or refinements. Revalidate once after removing
+ * only the reported unknown keys, then merge the new issues back into the
+ * original result. The original input is never mutated, and the first pass is
+ * retained so the caller still learns about the undeclared keys.
  */
 export async function standardValidate(schema, input) {
-    const result = await schema['~standard'].validate(input);
-    // SuccessResult has `issues?: undefined`; FailureResult has a non-empty
-    // `issues`. Truthy-check (not `'issues' in r`) is the correct narrowing.
-    if (result.issues)
-        return { ok: false, issues: result.issues };
-    return { ok: true, value: result.value };
+    const first = await validateOnce(schema, input);
+    if (first.ok)
+        return first;
+    const sanitized = stripUnknownKeys(input, first.issues);
+    if (sanitized === input)
+        return first;
+    const second = await validateOnce(schema, sanitized);
+    return second.ok
+        ? first
+        : { ok: false, issues: mergeUniqueIssues(first.issues, second.issues) };
 }
 /**
  * Synchronous validation for call paths that cannot await (e.g. the
@@ -31,14 +168,16 @@ export async function standardValidate(schema, input) {
  * silently dropping validation.
  */
 export function validateSync(schema, input) {
-    const result = schema['~standard'].validate(input);
-    if (result instanceof Promise) {
-        throw new Error('Standard Schema validate() returned a Promise on a synchronous path. ' +
-            'Async validators are not supported here (e.g. ctx.publishState); use a synchronous validator like Zod.');
-    }
-    if (result.issues)
-        return { ok: false, issues: result.issues };
-    return { ok: true, value: result.value };
+    const first = validateOnceSync(schema, input);
+    if (first.ok)
+        return first;
+    const sanitized = stripUnknownKeys(input, first.issues);
+    if (sanitized === input)
+        return first;
+    const second = validateOnceSync(schema, sanitized);
+    return second.ok
+        ? first
+        : { ok: false, issues: mergeUniqueIssues(first.issues, second.issues) };
 }
 /**
  * EI-19968462161677390: an `invalid_union` issue's own top-level message is Zod's
