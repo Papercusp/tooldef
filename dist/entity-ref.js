@@ -279,21 +279,83 @@ export async function resolveEntityRefs(sites, args) {
 export const DEFAULT_MAX_ENUM_VALUES = 60;
 const ENUMS = new Map();
 /**
+ * How long one successfully-loaded enum fragment is reused by tools/list.
+ *
+ * The host calls {@link applyEntityRefEnums} once PER TOOL while building a
+ * catalog. Without a cache, 29 entity-ref sites in Papercusp's current catalog
+ * each reload their kind independently; a reconnect herd multiplies those DB
+ * reads across every request worker. Keep the window aligned with the host's
+ * dispatch-time entity cache: short enough that a newly-created entity appears
+ * quickly, long enough to collapse one catalog build and a reconnect burst.
+ */
+export const ENTITY_ENUM_CACHE_TTL_MS = 30_000;
+const ENUM_FRAGMENT_CACHE = new Map();
+const ENUM_FRAGMENT_IN_FLIGHT = new Map();
+/**
  * Register the publishable vocabulary for a kind. Independent of
  * {@link setEntityResolver} on purpose: a kind can be ENFORCED without being
  * publishable (too large — the common case here) and, in principle,
  * publishable without being enforced.
  */
 export function setEntityEnum(kind, load, opts = {}) {
-    ENUMS.set(kind, {
+    const entry = {
         load,
         maxValues: opts.maxValues ?? DEFAULT_MAX_ENUM_VALUES,
         ...(opts.openPattern ? { openPattern: opts.openPattern } : {}),
-    });
+    };
+    ENUMS.set(kind, entry);
+    // Re-registering a kind is the explicit invalidation seam used by hosts and
+    // tests. An older in-flight load may still settle, but its registration
+    // identity check below prevents it from populating this new entry's cache.
+    ENUM_FRAGMENT_CACHE.delete(kind);
+    ENUM_FRAGMENT_IN_FLIGHT.delete(kind);
 }
 /** Drop registered enums (tests, teardown). */
 export function clearEntityEnums() {
     ENUMS.clear();
+    ENUM_FRAGMENT_CACHE.clear();
+    ENUM_FRAGMENT_IN_FLIGHT.clear();
+}
+async function loadFragment(kind, entry, useCache) {
+    const now = Date.now();
+    if (useCache) {
+        const hit = ENUM_FRAGMENT_CACHE.get(kind);
+        if (hit && hit.entry === entry && now - hit.loadedAt < ENTITY_ENUM_CACHE_TTL_MS) {
+            return hit.fragment;
+        }
+    }
+    // Single-flight even for a forced revision read: joining the current load is
+    // always fresher than starting a duplicate against the same registration.
+    const pending = ENUM_FRAGMENT_IN_FLIGHT.get(kind);
+    if (pending?.entry === entry)
+        return pending.promise;
+    const promise = (async () => {
+        const raw = await entry.load();
+        if (!raw)
+            return null;
+        const values = [...new Set(raw.filter((v) => typeof v === 'string' && v !== ''))].sort();
+        if (!values.length || values.length > entry.maxValues)
+            return null;
+        const fragment = entry.openPattern
+            ? { anyOf: [{ enum: values }, { type: 'string', pattern: entry.openPattern }] }
+            : { enum: values };
+        return { kind, fragment, values };
+    })();
+    ENUM_FRAGMENT_IN_FLIGHT.set(kind, { entry, promise });
+    try {
+        const fragment = await promise;
+        // A caller may have re-registered this kind while the load was pending.
+        // Never let that stale completion overwrite the replacement loader's cache.
+        if (ENUMS.get(kind) === entry) {
+            ENUM_FRAGMENT_CACHE.set(kind, { entry, loadedAt: Date.now(), fragment });
+        }
+        return fragment;
+    }
+    finally {
+        if (ENUM_FRAGMENT_IN_FLIGHT.get(kind)?.promise === promise) {
+            ENUM_FRAGMENT_IN_FLIGHT.delete(kind);
+        }
+    }
 }
 /**
  * Ask every registered kind for its fragment. Failures and over-cap sets both
@@ -301,28 +363,21 @@ export function clearEntityEnums() {
  * enumerator must not take down tool discovery (the same fail-open contract as
  * {@link resolveEntityRefs}).
  */
-async function loadFragments(kinds) {
+async function loadFragments(kinds, opts = {}) {
     const out = new Map();
     await Promise.all([...new Set(kinds)].map(async (kind) => {
         const entry = ENUMS.get(kind);
         if (!entry)
             return;
-        let raw;
+        let fragment;
         try {
-            raw = await entry.load();
+            fragment = await loadFragment(kind, entry, opts.useCache !== false);
         }
         catch {
             return; // enumerator unavailable → publish nothing
         }
-        if (!raw)
-            return;
-        const values = [...new Set(raw.filter((v) => typeof v === 'string' && v !== ''))].sort();
-        if (!values.length || values.length > entry.maxValues)
-            return;
-        const fragment = entry.openPattern
-            ? { anyOf: [{ enum: values }, { type: 'string', pattern: entry.openPattern }] }
-            : { enum: values };
-        out.set(kind, { kind, fragment, values });
+        if (fragment)
+            out.set(kind, fragment);
     }));
     return out;
 }
@@ -404,7 +459,10 @@ export async function applyEntityRefEnums(argsSchema, jsonSchema) {
  * does NOT re-fetch (busting its prompt cache) when they did not.
  */
 export async function entityEnumRevision() {
-    const fragments = await loadFragments(ENUMS.keys());
+    // The revision reader is the freshness detector, so it deliberately bypasses
+    // the TTL (while still joining a same-kind in-flight load). A fresh revision
+    // also refreshes the cache used by subsequent tools/list calls.
+    const fragments = await loadFragments(ENUMS.keys(), { useCache: false });
     const parts = [...fragments.values()]
         .sort((a, b) => (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0))
         .map((f) => `${f.kind}:${f.values.join(',')}`);
