@@ -11,10 +11,10 @@
  * threaded in through `DispatchProjectedDeps` by the host.
  */
 
-import type { RolesQuota, ToolResult } from './wire';
-import type { UnifiedToolContext } from './tool-projection';
-import type { AuthAuditEvent } from './authz';
-import type { PreconditionFireRequest } from './requires';
+import type { RolesQuota, ToolResult } from "./wire";
+import type { UnifiedToolContext } from "./tool-projection";
+import type { AuthAuditEvent } from "./authz";
+import type { PreconditionFireRequest } from "./requires";
 
 /* ─── Quota windowing ────────────────────────────────────────────────── */
 
@@ -57,20 +57,20 @@ export function defaultComputeQuotaWindow(
 /* ─── Dispatcher result ──────────────────────────────────────────────── */
 
 export type DispatchProjectedErrorCode =
-  | 'unknown_tool'
-  | 'unauthorized'
-  | 'role_not_allowed'
-  | 'missing_capability'
-  | 'capability_denied'
-  | 'missing_role'
-  | 'harness_required'
-  | 'quota_exceeded'
-  | 'invalid_input'
-  | 'handler_error'
-  | 'authorization_denied'
-  | 'precondition_failed'
-  | 'ungated'
-  | 'timeout';
+  | "unknown_tool"
+  | "unauthorized"
+  | "role_not_allowed"
+  | "missing_capability"
+  | "capability_denied"
+  | "missing_role"
+  | "harness_required"
+  | "quota_exceeded"
+  | "invalid_input"
+  | "handler_error"
+  | "authorization_denied"
+  | "precondition_failed"
+  | "ungated"
+  | "timeout";
 
 /**
  * Throw to signal that the request lacks the authentication the tool
@@ -79,7 +79,7 @@ export type DispatchProjectedErrorCode =
  * instead of a generic 500.
  */
 export class UnauthorizedToolError extends Error {
-  override readonly name = 'UnauthorizedToolError';
+  override readonly name = "UnauthorizedToolError";
 }
 
 /**
@@ -92,7 +92,7 @@ export class UnauthorizedToolError extends Error {
  * `apps/operator/lib/agent-tools/_harness-scope.ts`.
  */
 export class HarnessRequiredError extends Error {
-  override readonly name = 'HarnessRequiredError';
+  override readonly name = "HarnessRequiredError";
 }
 
 /**
@@ -102,12 +102,12 @@ export class HarnessRequiredError extends Error {
  * attributable even across duplicate module instances.
  */
 export class WorkspaceTxNotDeclaredError extends Error {
-  override readonly name = 'WorkspaceTxNotDeclaredError';
+  override readonly name = "WorkspaceTxNotDeclaredError";
 
   constructor(toolName: string) {
     super(
       `workspace_tx_not_declared: tool "${toolName}" accessed ctx.tx without ` +
-        '`needsWorkspaceTx: true`',
+        "`needsWorkspaceTx: true`",
     );
   }
 }
@@ -119,12 +119,12 @@ export class WorkspaceTxNotDeclaredError extends Error {
  * without paying for a transaction it never reads.
  */
 export class WorkspaceTxUnavailableError extends Error {
-  override readonly name = 'WorkspaceTxUnavailableError';
+  override readonly name = "WorkspaceTxUnavailableError";
 
   constructor(toolName: string) {
     super(
       `workspace_tx_unavailable: tool "${toolName}" declared ` +
-        '`needsWorkspaceTx: true`, but no transaction was bound',
+        "`needsWorkspaceTx: true`, but no transaction was bound",
     );
   }
 }
@@ -132,17 +132,17 @@ export class WorkspaceTxUnavailableError extends Error {
 export interface InvalidInputCorrection {
   rejectedArg: string;
   target: string;
-  kind: 'authored-redirect' | 'nested-path' | 'near-name';
+  kind: "authored-redirect" | "nested-path" | "near-name";
   call?: {
     tool: string;
     args: Record<string, unknown>;
-    source: 'projected-tool-registry';
+    source: "projected-tool-registry";
     registryRevision: string;
   };
 }
 
 export interface InvalidInputMetadata {
-  source: 'projected-tool-registry';
+  source: "projected-tool-registry";
   registryRevision: string;
   toolName: string;
   corrections: InvalidInputCorrection[];
@@ -157,7 +157,7 @@ export interface InvalidInputMetadata {
  * an oversized cup:spawn `brief` fired the structural watchdog key).
  */
 export class InvalidInputError extends Error {
-  override readonly name = 'InvalidInputError';
+  override readonly name = "InvalidInputError";
 
   constructor(
     message: string,
@@ -170,13 +170,17 @@ export class InvalidInputError extends Error {
 export interface DispatchProjectedResult {
   ok: boolean;
   result?: ToolResult;
-  error?: { code: DispatchProjectedErrorCode; message: string; meta?: Record<string, unknown> };
+  error?: {
+    code: DispatchProjectedErrorCode;
+    message: string;
+    meta?: Record<string, unknown>;
+  };
 }
 
 /* ─── Dispatch deps (DI surface) ─────────────────────────────────────── */
 
 /** Sentinel — return this from overrideTool to let the real handler run. */
-export const PASS_THROUGH = Symbol('PASS_THROUGH');
+export const PASS_THROUGH = Symbol("PASS_THROUGH");
 
 /**
  * Per-call dispatcher override. When set, the dispatcher consults this
@@ -189,8 +193,17 @@ export type ToolDispatchOverrideFn = (
   args: unknown,
   ctx: UnifiedToolContext,
 ) =>
-  | Promise<{ content: Array<{ text?: string; [k: string]: unknown }>; isError?: boolean } | typeof PASS_THROUGH>
-  | { content: Array<{ text?: string; [k: string]: unknown }>; isError?: boolean }
+  | Promise<
+      | {
+          content: Array<{ text?: string; [k: string]: unknown }>;
+          isError?: boolean;
+        }
+      | typeof PASS_THROUGH
+    >
+  | {
+      content: Array<{ text?: string; [k: string]: unknown }>;
+      isError?: boolean;
+    }
   | typeof PASS_THROUGH;
 
 /**
@@ -207,9 +220,9 @@ export interface CapabilityEnvelopeVerdict {
    *             ledger records the would-deny ('gated' posture).
    * 'deny'    — beyond the envelope and enforcement is ON: short-circuit (capability_denied).
    */
-  decision: 'allow' | 'observe' | 'deny';
+  decision: "allow" | "observe" | "deny";
   /** Ledger posture: 'auto' (allowed) · 'gated' (observed would-deny) · 'rejected' (denied). */
-  posture: 'auto' | 'gated' | 'rejected';
+  posture: "auto" | "gated" | "rejected";
   /** false ⇒ the caller was EXEMPT (SU / power-user / non-fleet / roleless): envelope did not apply. */
   applied: boolean;
   /** Why, when beyond-envelope — feeds the deny message + the ledger `why`. */
@@ -334,14 +347,14 @@ export interface DispatchProjectedDeps {
      * free, which is a different bug in the same place.
      */
     status:
-      | 'ok'
-      | 'error'
-      | 'quota-exceeded'
-      | 'role-not-allowed'
-      | 'timeout'
-      | 'invalid-input'
-      | 'refused'
-      | 'replayed';
+      | "ok"
+      | "error"
+      | "quota-exceeded"
+      | "role-not-allowed"
+      | "timeout"
+      | "invalid-input"
+      | "refused"
+      | "replayed";
     outputRef?: string | null;
     outputSize?: number | null;
     errorMessage?: string | null;
@@ -409,7 +422,9 @@ export interface DispatchProjectedDeps {
     capabilities: readonly string[];
     ctx: UnifiedToolContext;
     args: unknown;
-  }): Promise<CapabilityEnvelopeVerdict | null> | (CapabilityEnvelopeVerdict | null);
+  }):
+    | Promise<CapabilityEnvelopeVerdict | null>
+    | (CapabilityEnvelopeVerdict | null);
   /**
    * The PRECONDITION FIRE PORT (autoloop-pot-operator-rebuild D-006). When a
    * `requires:` spec with `{ fire, then: 'retry' }` fails, the dispatcher's

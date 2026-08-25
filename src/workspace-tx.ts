@@ -9,10 +9,12 @@
 import {
   WorkspaceTxNotDeclaredError,
   WorkspaceTxUnavailableError,
-} from './dispatch-types';
-import type { ProjectedTool, UnifiedToolContext } from './tool-projection';
+} from "./dispatch-types";
+import type { ProjectedTool, UnifiedToolContext } from "./tool-projection";
 
-const GUARDED_TX_GETTER = Symbol.for('@papercusp/tooldef/guarded-workspace-tx-getter');
+const GUARDED_TX_GETTER = Symbol.for(
+  "@papercusp/tooldef/guarded-workspace-tx-getter",
+);
 
 type GuardedGetter = (() => never) & { [GUARDED_TX_GETTER]?: true };
 
@@ -22,9 +24,9 @@ type GuardedGetter = (() => never) & { [GUARDED_TX_GETTER]?: true };
  * transaction can be reused.
  */
 export function boundWorkspaceTx(ctx: UnifiedToolContext): unknown | undefined {
-  const descriptor = Object.getOwnPropertyDescriptor(ctx, 'tx');
+  const descriptor = Object.getOwnPropertyDescriptor(ctx, "tx");
   if (!descriptor) return undefined;
-  if ('value' in descriptor) return descriptor.value ?? undefined;
+  if ("value" in descriptor) return descriptor.value ?? undefined;
   const getter = descriptor.get as GuardedGetter | undefined;
   if (!getter || getter[GUARDED_TX_GETTER] === true) return undefined;
   return getter.call(ctx) ?? undefined;
@@ -37,17 +39,20 @@ export function boundWorkspaceTx(ctx: UnifiedToolContext): unknown | undefined {
  * helper after its final decorator spread before the handler runs.
  */
 export function applyWorkspaceTxContract(
-  tool: Pick<ProjectedTool, 'needsWorkspaceTx'>,
+  tool: Pick<ProjectedTool, "needsWorkspaceTx">,
   toolName: string,
   ctx: UnifiedToolContext,
 ): UnifiedToolContext {
   const tx = boundWorkspaceTx(ctx);
   const descriptors = Object.getOwnPropertyDescriptors(ctx);
   delete descriptors.tx;
-  const guarded = Object.defineProperties({}, descriptors) as UnifiedToolContext;
+  const guarded = Object.defineProperties(
+    {},
+    descriptors,
+  ) as UnifiedToolContext;
 
   if (tool.needsWorkspaceTx === true && tx !== undefined) {
-    Object.defineProperty(guarded, 'tx', {
+    Object.defineProperty(guarded, "tx", {
       value: tx,
       enumerable: true,
       configurable: true,
@@ -57,11 +62,12 @@ export function applyWorkspaceTxContract(
   }
 
   const getTx: GuardedGetter = (() => {
-    if (tool.needsWorkspaceTx === true) throw new WorkspaceTxUnavailableError(toolName);
+    if (tool.needsWorkspaceTx === true)
+      throw new WorkspaceTxUnavailableError(toolName);
     throw new WorkspaceTxNotDeclaredError(toolName);
   }) as GuardedGetter;
   getTx[GUARDED_TX_GETTER] = true;
-  Object.defineProperty(guarded, 'tx', {
+  Object.defineProperty(guarded, "tx", {
     get: getTx,
     enumerable: false,
     configurable: true,
