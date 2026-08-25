@@ -127,14 +127,14 @@ function stripUnknownKeys(input: unknown, issues: ReadonlyArray<StandardSchemaV1
       // `length` is an array implementation detail, never an input field.
       if (Array.isArray(value) && key === 'length') continue;
       if (Object.prototype.hasOwnProperty.call(value, key)) {
-        delete ensureCopy()[key];
+        delete (ensureCopy() as Record<PropertyKey, unknown>)[key];
       }
     }
 
     for (const [key, child] of node.children) {
       if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
       const nested = strip((value as Record<PropertyKey, unknown>)[key], child);
-      if (nested.changed) ensureCopy()[key] = nested.value;
+      if (nested.changed) (ensureCopy() as Record<PropertyKey, unknown>)[key] = nested.value;
     }
 
     return { value: copy, changed };
