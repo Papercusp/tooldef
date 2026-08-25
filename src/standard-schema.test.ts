@@ -55,6 +55,82 @@ describe('standardValidate (validator-agnostic)', () => {
   });
 });
 
+describe('standardValidate unknown-key revalidation', () => {
+  it('merges deferred required issues with a top-level unknown-key issue', async () => {
+    const schema = z.object({ id: z.string(), phase: z.string() }).strict();
+    const input = { id: 'plan', verify: true };
+    const result = await standardValidate(schema, input);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues).toHaveLength(2);
+      expect(formatIssues(result.issues)).toContain('Unrecognized key: "verify"');
+      expect(formatIssues(result.issues)).toContain('phase:');
+    }
+    // Revalidation must not mutate the caller's object while removing the key.
+    expect(input).toEqual({ id: 'plan', verify: true });
+  });
+
+  it('merges a deferred object refinement with a top-level unknown-key issue', async () => {
+    const schema = z
+      .object({ id: z.string() })
+      .strict()
+      .refine((value) => value.id.startsWith('ok-'), { message: 'id must start with ok-' });
+    const result = await standardValidate(schema, { id: 'bad', typo: 1 });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues).toHaveLength(2);
+      expect(formatIssues(result.issues)).toContain('Unrecognized key: "typo"');
+      expect(formatIssues(result.issues)).toContain('id must start with ok-');
+    }
+  });
+
+  it('revalidates nested unknown keys without dropping nested required issues', async () => {
+    const schema = z
+      .object({
+        rows: z.array(z.object({ name: z.string(), required: z.string() }).strict()),
+      })
+      .strict();
+    const input = { rows: [{ name: 'first', extra: true }] };
+    const result = await standardValidate(schema, input);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues).toHaveLength(2);
+      expect(formatIssues(result.issues)).toContain('rows.0: Unrecognized key: "extra"');
+      expect(formatIssues(result.issues)).toContain('rows.0.required:');
+    }
+    expect(input).toEqual({ rows: [{ name: 'first', extra: true }] });
+  });
+
+  it('merges duplicate issues only once when a validator repeats an unknown-key issue', async () => {
+    const schema: StandardSchemaV1<unknown, unknown> = {
+      '~standard': {
+        version: 1,
+        vendor: 'handrolled-test-duplicate-unknown',
+        validate(input) {
+          const value = input as Record<string, unknown>;
+          return {
+            issues: [
+              { code: 'unrecognized_keys', keys: ['typo'], message: 'Unrecognized key: "typo"' },
+              ...(!('required' in value) ? [{ message: 'required', path: ['required'] }] : []),
+            ],
+          };
+        },
+      },
+    };
+    const result = await standardValidate(schema, { typo: true });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues).toHaveLength(2);
+      expect(result.issues.filter((issue) => issue.message === 'Unrecognized key: "typo"')).toHaveLength(1);
+      expect(result.issues.filter((issue) => issue.message === 'required')).toHaveLength(1);
+    }
+  });
+});
+
 /**
  * EI-10943 — the value-level classifier that decides whether an invalid_args error
  * should carry the full args-schema dump. A pure over-length (or bad-enum) value means

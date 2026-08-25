@@ -22,19 +22,195 @@ export type ValidationResult<T> =
   | { ok: true; value: T }
   | { ok: false; issues: ReadonlyArray<StandardSchemaV1.Issue> };
 
+interface IssueExtras {
+  code?: string;
+  origin?: string;
+  maximum?: number;
+  minimum?: number;
+  /** Zod's per-branch sub-issues on an `invalid_union` issue. */
+  errors?: ReadonlyArray<ReadonlyArray<StandardSchemaV1.Issue>>;
+  /** Zod's names for an `unrecognized_keys` issue. */
+  keys?: ReadonlyArray<PropertyKey>;
+}
+
+type UnknownKeyNode = {
+  remove: Set<PropertyKey>;
+  children: Map<PropertyKey, UnknownKeyNode>;
+};
+
+const UNKNOWN_KEY_CODES = new Set(['unrecognized_key', 'unrecognized_keys', 'unknown_key', 'unknown_keys']);
+
+function issuePathSegments(issue: StandardSchemaV1.Issue): PropertyKey[] {
+  return (issue.path ?? []).map((segment) =>
+    typeof segment === 'object' && segment !== null
+      ? (segment as { key: PropertyKey }).key
+      : (segment as PropertyKey),
+  );
+}
+
+function isUnknownKeyIssue(issue: StandardSchemaV1.Issue): boolean {
+  const code = (issue as IssueExtras).code;
+  if (code && UNKNOWN_KEY_CODES.has(code)) return true;
+  // `code` is not part of Standard Schema's portable issue contract. Keep a
+  // conservative message fallback so another validator can still participate
+  // when it reports the same ordinary-language diagnosis.
+  return /\b(?:unrecognized|unrecognised|unknown)\s+keys?\b/i.test(issue.message);
+}
+
+function messageUnknownKeys(message: string): PropertyKey[] {
+  // Standard Schema only guarantees `message`; validators without Zod's
+  // `keys` extension can still be revalidated when they quote the offending
+  // names in the conventional `... key: "name"` form.
+  const afterColon = message.slice(message.indexOf(':') + 1);
+  const keys: PropertyKey[] = [];
+  for (const match of afterColon.matchAll(/["'`]([^"'`]+)["'`]/g)) {
+    const key = match[1];
+    if (key !== undefined) keys.push(key);
+  }
+  return keys;
+}
+
+function unknownKeysForIssue(issue: StandardSchemaV1.Issue): PropertyKey[] {
+  if (!isUnknownKeyIssue(issue)) return [];
+  const keys = (issue as IssueExtras).keys;
+  if (Array.isArray(keys)) return keys.filter((key): key is PropertyKey => isPropertyKey(key));
+  return messageUnknownKeys(issue.message);
+}
+
+function isPropertyKey(value: unknown): value is PropertyKey {
+  return typeof value === 'string' || typeof value === 'number' || typeof value === 'symbol';
+}
+
+function newUnknownKeyNode(): UnknownKeyNode {
+  return { remove: new Set(), children: new Map() };
+}
+
+function unknownKeyTree(issues: ReadonlyArray<StandardSchemaV1.Issue>): UnknownKeyNode | null {
+  const root = newUnknownKeyNode();
+  let found = false;
+  for (const issue of issues) {
+    const keys = unknownKeysForIssue(issue);
+    if (keys.length === 0) continue;
+    found = true;
+    let node = root;
+    for (const segment of issuePathSegments(issue)) {
+      let child = node.children.get(segment);
+      if (!child) {
+        child = newUnknownKeyNode();
+        node.children.set(segment, child);
+      }
+      node = child;
+    }
+    for (const key of keys) node.remove.add(key);
+  }
+  return found ? root : null;
+}
+
+function stripUnknownKeys(input: unknown, issues: ReadonlyArray<StandardSchemaV1.Issue>): unknown {
+  const tree = unknownKeyTree(issues);
+  if (!tree) return input;
+
+  const strip = (value: unknown, node: UnknownKeyNode): { value: unknown; changed: boolean } => {
+    if (value === null || typeof value !== 'object') return { value, changed: false };
+
+    let copy: Record<PropertyKey, unknown> | unknown[] = value as Record<PropertyKey, unknown>;
+    let changed = false;
+    const ensureCopy = (): Record<PropertyKey, unknown> | unknown[] => {
+      if (!changed) {
+        copy = Array.isArray(value) ? value.slice() : { ...(value as Record<PropertyKey, unknown>) };
+        changed = true;
+      }
+      return copy;
+    };
+
+    for (const key of node.remove) {
+      // `length` is an array implementation detail, never an input field.
+      if (Array.isArray(value) && key === 'length') continue;
+      if (Object.prototype.hasOwnProperty.call(value, key)) {
+        delete ensureCopy()[key];
+      }
+    }
+
+    for (const [key, child] of node.children) {
+      if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+      const nested = strip((value as Record<PropertyKey, unknown>)[key], child);
+      if (nested.changed) ensureCopy()[key] = nested.value;
+    }
+
+    return { value: copy, changed };
+  };
+
+  const stripped = strip(input, tree);
+  return stripped.changed ? stripped.value : input;
+}
+
+function issueKey(issue: StandardSchemaV1.Issue): string {
+  const code = (issue as IssueExtras).code ?? '';
+  return `${issuePathSegments(issue).map(String).join('.')}\u0000${code}\u0000${issue.message}`;
+}
+
+function mergeUniqueIssues(
+  first: ReadonlyArray<StandardSchemaV1.Issue>,
+  second: ReadonlyArray<StandardSchemaV1.Issue>,
+): ReadonlyArray<StandardSchemaV1.Issue> {
+  const merged: StandardSchemaV1.Issue[] = [];
+  const seen = new Set<string>();
+  for (const issue of [...first, ...second]) {
+    const key = issueKey(issue);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(issue);
+  }
+  return merged;
+}
+
+function validateOnce<S extends StandardSchemaV1>(
+  schema: S,
+  input: unknown,
+): Promise<ValidationResult<StandardSchemaV1.InferOutput<S>>> {
+  return Promise.resolve(schema['~standard'].validate(input)).then((result) =>
+    result.issues ? { ok: false, issues: result.issues } : { ok: true, value: result.value },
+  );
+}
+
+function validateOnceSync<S extends StandardSchemaV1>(
+  schema: S,
+  input: unknown,
+): ValidationResult<StandardSchemaV1.InferOutput<S>> {
+  const result = schema['~standard'].validate(input);
+  if (result instanceof Promise) {
+    throw new Error(
+      'Standard Schema validate() returned a Promise on a synchronous path. ' +
+        'Async validators are not supported here (e.g. ctx.publishState); use a synchronous validator like Zod.',
+    );
+  }
+  return result.issues ? { ok: false, issues: result.issues } : { ok: true, value: result.value };
+}
+
 /**
  * Validate `input` against a Standard Schema, awaiting async validators (Zod's
  * is synchronous; Valibot/ArkType may be async). Use from an async context.
+ *
+ * Strict object validators can report an unknown-key issue before running
+ * object-level required checks or refinements. Revalidate once after removing
+ * only the reported unknown keys, then merge the new issues back into the
+ * original result. The original input is never mutated, and the first pass is
+ * retained so the caller still learns about the undeclared keys.
  */
 export async function standardValidate<S extends StandardSchemaV1>(
   schema: S,
   input: unknown,
 ): Promise<ValidationResult<StandardSchemaV1.InferOutput<S>>> {
-  const result = await schema['~standard'].validate(input);
-  // SuccessResult has `issues?: undefined`; FailureResult has a non-empty
-  // `issues`. Truthy-check (not `'issues' in r`) is the correct narrowing.
-  if (result.issues) return { ok: false, issues: result.issues };
-  return { ok: true, value: result.value };
+  const first = await validateOnce(schema, input);
+  if (first.ok) return first;
+
+  const sanitized = stripUnknownKeys(input, first.issues);
+  if (sanitized === input) return first;
+
+  const second = await validateOnce(schema, sanitized);
+  return second.ok
+    ? first
+    : { ok: false, issues: mergeUniqueIssues(first.issues, second.issues) };
 }
 
 /**
@@ -47,34 +223,16 @@ export function validateSync<S extends StandardSchemaV1>(
   schema: S,
   input: unknown,
 ): ValidationResult<StandardSchemaV1.InferOutput<S>> {
-  const result = schema['~standard'].validate(input);
-  if (result instanceof Promise) {
-    throw new Error(
-      'Standard Schema validate() returned a Promise on a synchronous path. ' +
-        'Async validators are not supported here (e.g. ctx.publishState); use a synchronous validator like Zod.',
-    );
-  }
-  if (result.issues) return { ok: false, issues: result.issues };
-  return { ok: true, value: result.value };
-}
+  const first = validateOnceSync(schema, input);
+  if (first.ok) return first;
 
-/**
- * A validation issue's ZOD-flavoured extras. StandardSchemaV1.Issue only promises
- * `{ message, path? }`, but a Zod issue carries `code`/`origin`/`maximum` at runtime
- * and that is what every validator in this repo actually produces. Read them
- * defensively (all optional): a host plugging in a non-Zod validator simply loses the
- * enrichment and falls back to the plain `path: message` rendering.
- *
- * `errors` is Zod v4's per-branch sub-issues on an `invalid_union` issue — one array
- * per union member, each holding that branch's own issues. See `bestUnionBranch` below
- * for why this needs to be read.
- */
-interface IssueExtras {
-  code?: string;
-  origin?: string;
-  maximum?: number;
-  minimum?: number;
-  errors?: ReadonlyArray<ReadonlyArray<StandardSchemaV1.Issue>>;
+  const sanitized = stripUnknownKeys(input, first.issues);
+  if (sanitized === input) return first;
+
+  const second = validateOnceSync(schema, sanitized);
+  return second.ok
+    ? first
+    : { ok: false, issues: mergeUniqueIssues(first.issues, second.issues) };
 }
 
 /**
