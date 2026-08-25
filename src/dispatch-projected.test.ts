@@ -145,6 +145,19 @@ describe('dispatchProjectedTool', () => {
     expect(bypassed.ok).toBe(true);
   });
 
+  it("treats '*' as the canonical wildcard capability", async () => {
+    const tool = makeTool({ capabilities: ['secrets:read'] });
+    const principal = {
+      kind: 'system' as const, slug: 'system:operator', workspaceId: 'default',
+      authMethod: 'process-internal' as const, trust: 'trusted' as const,
+      capabilities: new Set(['*']),
+    };
+    const result = await dispatchProjectedTool(
+      tool, 'fix.tool', {}, MAKE_CTX({ principal }), MAKE_DEPS(),
+    );
+    expect(result.ok).toBe(true);
+  });
+
   it('gateBypass.quota skips the quota gate', async () => {
     const tool = makeTool({ rolesQuota: { worker: { perRun: 1 } } });
     const deps = MAKE_DEPS({ readQuotaState: vi.fn(async () => ({ count: 1 })) });

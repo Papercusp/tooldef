@@ -241,7 +241,10 @@ const capabilityCheckStep: DispatchStep = {
     const { tool, ctx, toolName } = exec;
     if (!ctx.principal || ctx.gateBypass?.capability || tool.capabilities.length === 0) return null;
     for (const cap of tool.capabilities) {
-      if (!ctx.principal.capabilities.has(cap)) {
+      if (
+        !ctx.principal.capabilities.has(cap) &&
+        !ctx.principal.capabilities.has('*')
+      ) {
         return {
           ok: false,
           error: {
