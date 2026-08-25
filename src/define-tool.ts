@@ -861,6 +861,8 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
     // already threads this; the principal-gated path previously dropped it, so a
     // principal-gated cross-workspace tool failed `workspace_required`. See the field doc.
     crossWorkspace: input.crossWorkspace,
+    // EI-18808330244321407: transaction retention is explicit opt-in.
+    needsWorkspaceTx: input.needsWorkspaceTx,
     // EI-18666279107998059: see ToolDefinition.skipWorkspaceTx.
     skipWorkspaceTx: input.skipWorkspaceTx,
     // EI-19386201256023240: see ToolDefinition.skipResultDoor.
@@ -955,6 +957,8 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
     idleTimeoutSec: input.idleTimeoutSec,
     replayBufferSize: input.replayBufferSize,
     crossWorkspace: input.crossWorkspace,
+    // EI-18808330244321407: see RoleToolDefinition.needsWorkspaceTx.
+    needsWorkspaceTx: input.needsWorkspaceTx,
     // EI-18666279107998059: see RoleToolDefinition.skipWorkspaceTx.
     skipWorkspaceTx: input.skipWorkspaceTx,
     // EI-19386201256023240: see RoleToolDefinition.skipResultDoor.
@@ -1897,6 +1901,8 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     // parity. crossWorkspace tools self-derive workspaceId (never rely on the tx's
     // RLS), so the admin-handle path is behavior-preserving for concrete callers.
     crossWorkspace: def.crossWorkspace,
+    // EI-18808330244321407: host transaction retention is explicit opt-in.
+    needsWorkspaceTx: def.needsWorkspaceTx,
     // EI-18666279107998059: thread skipWorkspaceTx the same way — read by the
     // host's dispatchWithSynthesizedTx seam. See ProjectedTool.skipWorkspaceTx.
     skipWorkspaceTx: def.skipWorkspaceTx,
@@ -2065,6 +2071,8 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     idleTimeoutSec: def.idleTimeoutSec,
     replayBufferSize: def.replayBufferSize,
     crossWorkspace: def.crossWorkspace,
+    // EI-18808330244321407: see ProjectedTool.needsWorkspaceTx.
+    needsWorkspaceTx: def.needsWorkspaceTx,
     // EI-18666279107998059: see ProjectedTool.skipWorkspaceTx.
     skipWorkspaceTx: def.skipWorkspaceTx,
     // EI-19386201256023240: see ProjectedTool.skipResultDoor.

@@ -348,6 +348,8 @@ export {
   defaultComputeQuotaWindow,
   UnauthorizedToolError,
   HarnessRequiredError,
+  WorkspaceTxNotDeclaredError,
+  WorkspaceTxUnavailableError,
   InvalidInputError,
   PASS_THROUGH,
   type QuotaWindow,
@@ -361,6 +363,9 @@ export {
   type CapabilityEnvelopeVerdict,
   type ToolDispatchOverrideFn,
 } from './dispatch-projected';
+
+/** Explicit workspace-transaction contract helpers for host/nested adapters. */
+export { boundWorkspaceTx, applyWorkspaceTxContract } from './workspace-tx';
 
 /* ─── Resource authorization (RFC tooldef-auth-rfc Phase 1 — contract only) ─── */
 export { ownerOnly } from './authz';

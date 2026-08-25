@@ -95,6 +95,40 @@ export class HarnessRequiredError extends Error {
   override readonly name = 'HarnessRequiredError';
 }
 
+/**
+ * Thrown when a tool touches `ctx.tx` without declaring
+ * `needsWorkspaceTx: true`. This is a tool-contract defect, not an auth or
+ * infrastructure failure; keeping a stable name makes the miss immediately
+ * attributable even across duplicate module instances.
+ */
+export class WorkspaceTxNotDeclaredError extends Error {
+  override readonly name = 'WorkspaceTxNotDeclaredError';
+
+  constructor(toolName: string) {
+    super(
+      `workspace_tx_not_declared: tool "${toolName}" accessed ctx.tx without ` +
+        '`needsWorkspaceTx: true`',
+    );
+  }
+}
+
+/**
+ * Thrown when a tool declared the transaction contract but the host could not
+ * bind one (normally because no concrete workspace was in scope). Access is
+ * guarded lazily so a conditional handler can still return its own scope error
+ * without paying for a transaction it never reads.
+ */
+export class WorkspaceTxUnavailableError extends Error {
+  override readonly name = 'WorkspaceTxUnavailableError';
+
+  constructor(toolName: string) {
+    super(
+      `workspace_tx_unavailable: tool "${toolName}" declared ` +
+        '`needsWorkspaceTx: true`, but no transaction was bound',
+    );
+  }
+}
+
 export interface InvalidInputCorrection {
   rejectedArg: string;
   target: string;

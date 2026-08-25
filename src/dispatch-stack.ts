@@ -60,6 +60,7 @@ import {
 } from './dispatch-types';
 import { evaluateDataCondition } from '@papercusp/rules';
 import type { ToolPreInvokeEvent, ToolRequireSpec } from './requires';
+import { applyWorkspaceTxContract } from './workspace-tx';
 
 /* ─── Step names ─────────────────────────────────────────────────────── */
 
@@ -138,18 +139,22 @@ function initExecution(
   ctx: UnifiedToolContext,
   deps: DispatchProjectedDeps,
 ): DispatchExecution {
+  // EI-18808330244321407: enforce the tx contract before ANY gate or
+  // authorizer can observe ctx. The final handler-decorator spread below
+  // reapplies the guard because its getter is deliberately non-enumerable.
+  const contractCtx = applyWorkspaceTxContract(tool, toolName, ctx);
   // Resolve the quota window + ceiling once, up front: the window key feeds
   // both the quota gate and telemetry, so it must be computed for every call
   // (not just quota'd ones). `roleQuota` is the tool's entry for this role.
-  const roleQuota = ctx.role ? tool.rolesQuota?.[ctx.role] : undefined;
+  const roleQuota = contractCtx.role ? tool.rolesQuota?.[contractCtx.role] : undefined;
   const { key: windowKey, limit: quotaLimit } = (
     deps.computeQuotaWindow ?? defaultComputeQuotaWindow
-  )(ctx, roleQuota, toolName);
+  )(contractCtx, roleQuota, toolName);
   return {
     tool,
     toolName,
     input,
-    ctx,
+    ctx: contractCtx,
     deps,
     startedAt: Date.now(),
     windowKey,
@@ -163,7 +168,7 @@ function initExecution(
     bufferWriter: null,
     eventCount: 0,
     metadataJson: null,
-    handlerCtx: ctx,
+    handlerCtx: contractCtx,
     handlerResult: null,
     envelopeVerdict: null,
   };
@@ -473,7 +478,7 @@ const replayBufferStep: DispatchStep = {
 const ctxBindingsStep: DispatchStep = {
   name: 'ctx-bindings',
   async run(exec) {
-    const { ctx, tool } = exec;
+    const { ctx, tool, toolName } = exec;
 
     // wrappedEmit — refreshes idle deadline + pushes into replay buffer
     // + bumps eventCount. Always installed; both features are conditional
@@ -557,15 +562,15 @@ const ctxBindingsStep: DispatchStep = {
       exec.metadataJson = { ...data };
     };
 
-    exec.handlerCtx = {
-      ...ctx,
-      signal: exec.abort.signal,
-      emit: wrappedEmit,
-      progress: wrappedProgress,
-      metadata: metadataCallback,
-      ...(askUser ? { askUser } : {}),
-      ...(publishState ? { publishState } : {}),
-    };
+    exec.handlerCtx = applyWorkspaceTxContract(tool, toolName, {
+        ...ctx,
+        signal: exec.abort.signal,
+        emit: wrappedEmit,
+        progress: wrappedProgress,
+        metadata: metadataCallback,
+        ...(askUser ? { askUser } : {}),
+        ...(publishState ? { publishState } : {}),
+      });
 
     return null;
   },

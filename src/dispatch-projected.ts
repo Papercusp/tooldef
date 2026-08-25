@@ -32,6 +32,8 @@ export {
   PASS_THROUGH,
   UnauthorizedToolError,
   HarnessRequiredError,
+  WorkspaceTxNotDeclaredError,
+  WorkspaceTxUnavailableError,
   InvalidInputError,
   type QuotaWindow,
   type DispatchProjectedDeps,

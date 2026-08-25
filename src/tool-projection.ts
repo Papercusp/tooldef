@@ -1045,13 +1045,12 @@ export interface ProjectedTool {
    */
   crossWorkspace?: boolean;
   /**
-   * EI-18666279107998059: read by the HTTP host's `dispatchWithSynthesizedTx`
-   * seam — when true, the ambient workspace transaction is committed right
-   * after principal synthesis instead of being held open for this tool's whole
-   * handler execution. See `RoleToolDefinition.skipWorkspaceTx` for the full
-   * rationale (a long-blocking, no-`ctx.tx` handler otherwise sits idle in a
-   * transaction until Postgres's `idle_in_transaction_session_timeout` kills it).
+   * EI-18808330244321407: explicit opt-in for a handler that reads `ctx.tx`.
+   * Absent/false means the handler is transaction-free; the host may still use
+   * a short transaction for principal synthesis and commit it before dispatch.
    */
+  needsWorkspaceTx?: boolean;
+  /** @deprecated Transaction-free is now the default; retained for legacy plugin compatibility only. */
   skipWorkspaceTx?: boolean;
   /**
    * EI-19386201256023240: read by the HTTP host's `tools/call` result path —
