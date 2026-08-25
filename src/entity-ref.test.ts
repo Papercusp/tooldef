@@ -13,6 +13,7 @@ import {
   clearEntityEnums,
   clearEntityResolvers,
   collectEntityRefs,
+  ENTITY_ENUM_CACHE_TTL_MS,
   entityEnumRevision,
   entityRef,
   entityRefMeta,
@@ -27,6 +28,7 @@ import { toJsonSchema } from './schema-adapter';
 afterEach(() => {
   clearEntityResolvers();
   clearEntityEnums();
+  vi.restoreAllMocks();
 });
 
 describe('entityRef marker', () => {
@@ -284,6 +286,74 @@ describe('applyEntityRefEnums', () => {
     const schema = z.object({ pot: entityRef('pot') });
     const out = await applyEntityRefEnums(schema, json(schema));
     expect((out.properties as Record<string, Record<string, unknown>>).pot.enum).toBeUndefined();
+  });
+
+  it('single-flights one kind across a concurrent tools/list catalog walk', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const load = vi.fn(async () => {
+      await gate;
+      return ['a'];
+    });
+    setEntityEnum('pot', load);
+
+    // Papercusp currently calls applyEntityRefEnums once per visible tool. A
+    // reconnect herd used to turn N pot-ref tools into N simultaneous DB loads
+    // per session; every caller for the same kind must join one load instead.
+    const schemas = Array.from({ length: 40 }, () => z.object({ pot: entityRef('pot') }));
+    const pending = Promise.all(schemas.map((schema) => applyEntityRefEnums(schema, json(schema))));
+    await Promise.resolve();
+    expect(load).toHaveBeenCalledTimes(1);
+
+    release();
+    const results = await pending;
+    for (const out of results) {
+      expect((out.properties as Record<string, Record<string, unknown>>).pot.enum).toEqual(['a']);
+    }
+  });
+
+  it('reuses a successful fragment within the TTL and refreshes after it expires', async () => {
+    let now = 1_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    let values = ['a'];
+    const load = vi.fn(async () => [...values]);
+    setEntityEnum('pot', load);
+    const schema = z.object({ pot: entityRef('pot') });
+
+    const first = await applyEntityRefEnums(schema, json(schema));
+    values = ['b'];
+    const cached = await applyEntityRefEnums(schema, json(schema));
+    expect(load).toHaveBeenCalledTimes(1);
+    expect((first.properties as Record<string, Record<string, unknown>>).pot.enum).toEqual(['a']);
+    expect((cached.properties as Record<string, Record<string, unknown>>).pot.enum).toEqual(['a']);
+
+    now += ENTITY_ENUM_CACHE_TTL_MS + 1;
+    const refreshed = await applyEntityRefEnums(schema, json(schema));
+    expect(load).toHaveBeenCalledTimes(2);
+    expect((refreshed.properties as Record<string, Record<string, unknown>>).pot.enum).toEqual(['b']);
+  });
+
+  it('does not cache a failed load and invalidates when a kind is re-registered', async () => {
+    const firstLoad = vi
+      .fn<() => Promise<string[]>>()
+      .mockRejectedValueOnce(new Error('db down'))
+      .mockResolvedValue(['a']);
+    setEntityEnum('pot', firstLoad);
+    const schema = z.object({ pot: entityRef('pot') });
+
+    const failed = await applyEntityRefEnums(schema, json(schema));
+    const recovered = await applyEntityRefEnums(schema, json(schema));
+    expect((failed.properties as Record<string, Record<string, unknown>>).pot.enum).toBeUndefined();
+    expect((recovered.properties as Record<string, Record<string, unknown>>).pot.enum).toEqual(['a']);
+    expect(firstLoad).toHaveBeenCalledTimes(2);
+
+    const replacement = vi.fn(async () => ['b']);
+    setEntityEnum('pot', replacement);
+    const replaced = await applyEntityRefEnums(schema, json(schema));
+    expect(replacement).toHaveBeenCalledTimes(1);
+    expect((replaced.properties as Record<string, Record<string, unknown>>).pot.enum).toEqual(['b']);
   });
 
   it('leaves the schema untouched when the marked arg is not in the advertised surface', async () => {
