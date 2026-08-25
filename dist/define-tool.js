@@ -24,6 +24,7 @@ import { UnauthorizedToolError, InvalidInputError, } from './dispatch-projected'
 import { serverVintageHint, constraintVintageHint } from './server-vintage';
 import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
 import { applyPayloadTier, extractPayloadTier, resolvePayloadTier } from './payload-tier';
+import { boundWorkspaceTx } from './workspace-tx';
 import { parseDeltaRequest, computeViewFingerprint, contentRevision, negotiateDelta, decodeDeltaCursor, computeRowDigest, computeViewChecksum, diffFromDigest, deltaCounts, isSemanticDeltaEnabled, DELTA_SMALL_RESPONSE_BYTES, computeRowDigestUncapped, } from './delta-protocol';
 import { putRowDigest, getRowDigest } from './delta-digest-store';
 import { analyzeSchema, projectReadColumns, projectWriteColumns, reconstructArgs, isWritePositional, getPrePromptEntry, isObjectWithArrayField, } from '@papercusp/result-encoding';
@@ -1607,12 +1608,16 @@ function registerLegacyAsProjected(def, expose, sourceFile) {
     const readColumns = projectReadColumns(outputJsonSchema);
     const schemaHintCache = {};
     const projectedFn = async (input, ctx) => {
-        if (!ctx.principal || !ctx.tx) {
+        // The dispatch stack may expose `tx` as a fail-loud getter for tools that
+        // did not declare `needsWorkspaceTx`. Never probe that property directly:
+        // the descriptor-aware helper returns only a real bound transaction.
+        const workspaceTx = boundWorkspaceTx(ctx);
+        if (!ctx.principal || (def.needsWorkspaceTx === true && workspaceTx === undefined)) {
             // Almost always this is a workspace-SCOPING gap, not an auth failure:
-            // the caller is bearer-authenticated but the session carries no
-            // concrete workspace, so the host synthesized no workspace
-            // transaction. Say so — "requires authenticated request" sent
-            // authenticated callers down the wrong debugging path (EI-30).
+            // either the principal is missing or a declared transaction consumer
+            // has no concrete workspace from which the host can bind a transaction.
+            // Say so — "requires authenticated request" sent authenticated callers
+            // down the wrong debugging path (EI-30).
             throw new UnauthorizedToolError(`built-in tool "${def.name}" requires a workspace-scoped call — this session has no workspace transaction. ` +
                 `Scope the session to a workspace, or pass a per-call workspace where the host/tool supports one.`);
         }
@@ -1623,7 +1628,11 @@ function registerLegacyAsProjected(def, expose, sourceFile) {
         const { input: tierlessInput, callTier } = extractPayloadTier(unwrapUnparsedToolInput(input));
         const legacyCtx = {
             principal: ctx.principal,
-            tx: ctx.tx,
+            // EI-18808330244321407: transaction-free tools receive no `tx` key at
+            // all. A declared consumer reaches this point only with a real bound tx.
+            ...(def.needsWorkspaceTx === true
+                ? { tx: workspaceTx }
+                : {}),
             log: (level, msg, meta) => ctx.log(`[${level}] ${msg}${meta ? ` ${JSON.stringify(meta)}` : ''}`),
             // Thread the RESOLVED payload tier so principal-gated tools that keep a
             // hand-rolled JSON ToolResult (byte-stable contracts — memory:search)

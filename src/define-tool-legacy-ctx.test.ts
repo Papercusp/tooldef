@@ -89,6 +89,84 @@ describe('registerLegacyAsProjected — role/uiClientId threading (EI-10358)', (
   });
 });
 
+describe('registerLegacyAsProjected — explicit workspace transaction contract (EI-18808330244321407)', () => {
+  it('omits tx from a default transaction-free handler context without touching the guard getter', async () => {
+    let received: ToolContext | undefined;
+    defineTool({
+      name: 'test:legacy-ctx-no-workspace-tx',
+      capability: 'test:read',
+      description: 'fixture',
+      args: z.object({}),
+      async handler(_args, handlerCtx) {
+        received = handlerCtx;
+        return { content: [{ type: 'text', text: 'ok' }] };
+      },
+    });
+
+    const result = await dispatchProjectedTool(
+      lookupByMcpName('test:legacy-ctx-no-workspace-tx')!,
+      'test:legacy-ctx-no-workspace-tx',
+      {},
+      ctx({ tx: { marker: 'must-stay-hidden' } }),
+      DEPS,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(received && 'tx' in received).toBe(false);
+  });
+
+  it('passes the real bound tx only to a declared consumer', async () => {
+    const workspaceTx = { marker: 'bound-workspace-tx' };
+    let receivedTx: unknown;
+    defineTool({
+      name: 'test:legacy-ctx-needs-workspace-tx',
+      capability: 'test:read',
+      description: 'fixture',
+      needsWorkspaceTx: true,
+      args: z.object({}),
+      async handler(_args, handlerCtx) {
+        receivedTx = handlerCtx.tx;
+        return { content: [{ type: 'text', text: 'ok' }] };
+      },
+    });
+
+    const result = await dispatchProjectedTool(
+      lookupByMcpName('test:legacy-ctx-needs-workspace-tx')!,
+      'test:legacy-ctx-needs-workspace-tx',
+      {},
+      ctx({ tx: workspaceTx }),
+      DEPS,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(receivedTx).toBe(workspaceTx);
+  });
+
+  it('rejects a declared consumer when the host bound no workspace tx', async () => {
+    const handler = vi.fn(async () => ({ content: [{ type: 'text' as const, text: 'ok' }] }));
+    defineTool({
+      name: 'test:legacy-ctx-missing-workspace-tx',
+      capability: 'test:read',
+      description: 'fixture',
+      needsWorkspaceTx: true,
+      args: z.object({}),
+      handler,
+    });
+
+    const result = await dispatchProjectedTool(
+      lookupByMcpName('test:legacy-ctx-missing-workspace-tx')!,
+      'test:legacy-ctx-missing-workspace-tx',
+      {},
+      ctx({ tx: undefined }),
+      DEPS,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error?.message).toContain('requires a workspace-scoped call');
+    expect(handler).not.toHaveBeenCalled();
+  });
+});
+
 describe('payloadTier override threading for raw ToolResult handlers', () => {
   it('keeps an explicit full override distinct in the legacy handler context', async () => {
     let received: (ToolContext & { contextTier?: string }) | undefined;
