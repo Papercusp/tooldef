@@ -15,18 +15,12 @@
  * dropping a file; no manual list to maintain.
  */
 
-import { type ZodTypeAny } from "zod";
-import { tierFor } from "./capability-tiers";
-import { toJsonSchema } from "./schema-adapter";
-import {
-  standardValidate,
-  formatIssues,
-  issuesAreValueLevel,
-  issueLeaves,
-  type StandardSchemaV1,
-} from "./standard-schema";
-import { register } from "./registry";
-import { collectToolEmits } from "./emits-registry";
+import { type ZodTypeAny } from 'zod';
+import { tierFor } from './capability-tiers';
+import { toJsonSchema } from './schema-adapter';
+import { standardValidate, formatIssues, issuesAreValueLevel, issueLeaves, type StandardSchemaV1 } from './standard-schema';
+import { register } from './registry';
+import { collectToolEmits } from './emits-registry';
 import {
   PROJECTED_TOOL_REGISTRY_SOURCE,
   projectedToolRegistryRevision,
@@ -37,20 +31,16 @@ import {
   type ToolFn,
   type ToolExposure,
   type UnifiedToolContext,
-} from "./tool-projection";
+} from './tool-projection';
 import {
   UnauthorizedToolError,
   InvalidInputError,
   type InvalidInputCorrection,
   type InvalidInputMetadata,
-} from "./dispatch-projected";
-import { serverVintageHint, constraintVintageHint } from "./server-vintage";
-import { serializeToolResponse, formatOptsFromCtx } from "./serialize-result";
-import {
-  applyPayloadTier,
-  extractPayloadTier,
-  resolvePayloadTier,
-} from "./payload-tier";
+} from './dispatch-projected';
+import { serverVintageHint, constraintVintageHint } from './server-vintage';
+import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
+import { applyPayloadTier, extractPayloadTier, resolvePayloadTier } from './payload-tier';
 import {
   parseDeltaRequest,
   computeViewFingerprint,
@@ -66,8 +56,8 @@ import {
   computeRowDigestUncapped,
   type DeltaCapability,
   type DeltaNegotiation,
-} from "./delta-protocol";
-import { putRowDigest, getRowDigest } from "./delta-digest-store";
+} from './delta-protocol';
+import { putRowDigest, getRowDigest } from './delta-digest-store';
 import {
   analyzeSchema,
   projectReadColumns,
@@ -78,7 +68,7 @@ import {
   isObjectWithArrayField,
   type ColumnSpec,
   type EligibilityResult,
-} from "@papercusp/result-encoding";
+} from '@papercusp/result-encoding';
 import type {
   RoleToolDefinition,
   RoleToolDefinitionInput,
@@ -88,8 +78,8 @@ import type {
   ToolDefinitionInput,
   ToolGuidance,
   ToolResponse,
-} from "./types";
-import type { ToolResult } from "./wire";
+} from './types';
+import type { ToolResult } from './wire';
 
 /**
  * The absolute path of the file that called `defineTool` — a tool's DEFINITION
@@ -131,9 +121,7 @@ function captureDefinitionSite(): string | null {
     // Bounded: we need the nearest few frames, not a full trace. Measured at
     // ~10.6µs per capture, ~8.7ms across a full 820-tool catalog boot.
     Error.stackTraceLimit = 12;
-    const raw = new Error().stack as unknown as Array<{
-      getFileName?: () => string;
-    }>;
+    const raw = new Error().stack as unknown as Array<{ getFileName?: () => string }>;
     if (!Array.isArray(raw) || raw.length === 0) return null;
     // Frame [0] is this function, so its file IS this file.
     const selfFile = raw[0]?.getFileName?.() ?? null;
@@ -142,7 +130,7 @@ function captureDefinitionSite(): string | null {
       if (!file) continue;
       if (selfFile && file === selfFile) continue;
       // Node internals ('node:internal/...') are never a definition site.
-      if (file.startsWith("node:")) continue;
+      if (file.startsWith('node:')) continue;
       return file;
     }
     return null;
@@ -170,8 +158,8 @@ function deriveNameFromCallSite(site: string | null): string | null {
   if (!match) return null;
   const group = match[1];
   let verb = match[2];
-  if (verb === "index") {
-    verb = "default";
+  if (verb === 'index') {
+    verb = 'default';
   }
   return `${group}:${verb}`;
 }
@@ -189,15 +177,13 @@ function deriveNameFromCallSite(site: string | null): string | null {
  * role system-prompt assembly — this only fills the `description` slot,
  * which is the only field the MCP `tools/list` wire actually carries.
  */
-function describeFromGuidance(
-  guidance: ToolGuidance | undefined,
-): string | null {
+function describeFromGuidance(guidance: ToolGuidance | undefined): string | null {
   if (!guidance) return null;
   const parts: string[] = [];
   if (guidance.when) parts.push(`When to use: ${guidance.when}`);
   if (guidance.notWhen) parts.push(`When NOT to use: ${guidance.notWhen}`);
   if (guidance.chaining) parts.push(`Chaining: ${guidance.chaining}`);
-  return parts.length > 0 ? parts.join("\n\n") : null;
+  return parts.length > 0 ? parts.join('\n\n') : null;
 }
 
 /**
@@ -206,10 +192,9 @@ function describeFromGuidance(
  * empties when the tool declared no output schema or the projection fails —
  * such tools fall back to the TOON runtime auto-encoder at serialize time.
  */
-function computeOutputEligibility(resultSchema: StandardSchemaV1 | undefined): {
-  jsonSchema?: Record<string, unknown>;
-  eligibility?: EligibilityResult;
-} {
+function computeOutputEligibility(
+  resultSchema: StandardSchemaV1 | undefined,
+): { jsonSchema?: Record<string, unknown>; eligibility?: EligibilityResult } {
   if (!resultSchema) return {};
   try {
     const js = toJsonSchema(resultSchema);
@@ -256,34 +241,17 @@ async function negotiateToolDelta(
 
   const cap = def.delta;
   const scope = cap.scope?.(args, ctx);
-  const fingerprint = computeViewFingerprint({
-    toolName: def.name,
-    args: args ?? null,
-    scope,
-    format: ctx.requestedFormat,
-  });
-  const body =
-    response && typeof response === "object"
-      ? (response as ToolResponse).data
-      : undefined;
+  const fingerprint = computeViewFingerprint({ toolName: def.name, args: args ?? null, scope, format: ctx.requestedFormat });
+  const body = response && typeof response === 'object' ? (response as ToolResponse).data : undefined;
   const fullJsonLen = JSON.stringify(body ?? null).length;
   if (fullJsonLen < DELTA_SMALL_RESPONSE_BYTES) {
-    return negotiateDelta({
-      request,
-      capabilityDeclared: true,
-      currentFingerprint: fingerprint,
-      bypass: true,
-    });
+    return negotiateDelta({ request, capabilityDeclared: true, currentFingerprint: fingerprint, bypass: true });
   }
 
   // Semantic surface active when the tool can produce a diffable row array — via
   // the `rows` selector (e.g. flatten groups) or because the body IS the array —
   // AND declared `itemKey`. Otherwise it's a Lane-B (full | not_modified) tool.
-  const rows = cap.rows
-    ? (cap.rows(body) ?? null)
-    : Array.isArray(body)
-      ? (body as unknown[])
-      : null;
+  const rows = cap.rows ? cap.rows(body) ?? null : Array.isArray(body) ? (body as unknown[]) : null;
   const itemKey = cap.itemKey;
   let digest: Record<string, string> | null = null;
   let checksum: string | undefined;
@@ -303,10 +271,8 @@ async function negotiateToolDelta(
         ? checksum
         : contentRevision(body ?? null);
   } catch (err) {
-    ctx.log(
-      `[delta] ${def.name} revision() threw; serving full: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return { mode: "full", supported: true, reason: "revision_error" };
+    ctx.log(`[delta] ${def.name} revision() threw; serving full: ${err instanceof Error ? err.message : String(err)}`);
+    return { mode: 'full', supported: true, reason: 'revision_error' };
   }
 
   const nowMs = Date.now();
@@ -339,7 +305,7 @@ async function negotiateToolDelta(
   });
   // A semantic full/not_modified response carries the view checksum so the harness
   // can verify a later merge (and store it with the base).
-  if (checksum && base.mode !== "delta") base.checksum = checksum;
+  if (checksum && base.mode !== 'delta') base.checksum = checksum;
 
   // P-024: SAY that this endpoint can never serve a row-level delta, rather than
   // answering a bare `full` that is indistinguishable from "nothing changed" and
@@ -347,36 +313,25 @@ async function negotiateToolDelta(
   // reason (large views park their digest server-side above) — only a missing semantic
   // surface is permanent.
   if (!rows || !itemKey) {
-    base.semanticUnavailable = {
-      reason: "no_semantic_surface",
-      needs: itemKey ? "rows" : "itemKey",
-    };
+    base.semanticUnavailable = { reason: 'no_semantic_surface', needs: itemKey ? 'rows' : 'itemKey' };
   }
 
   // Convey the itemKey FIELD NAME so an OUT-OF-PROCESS client (the MCP proxy) can merge
   // a delta generically (`row[itemKeyField]`); in-process clients read `itemKey` from the
   // registry and ignore it. Only meaningful for a semantic (itemKey-declared) tool.
-  if (cap.itemKeyField && itemKey && base.supported)
-    base.itemKeyField = cap.itemKeyField;
+  if (cap.itemKeyField && itemKey && base.supported) base.itemKeyField = cap.itemKeyField;
 
   // Upgrade `changed` → `delta` only when the harness wants a delta body (mode
   // `auto`; an explicit `not_modified`/`full` is honored as-is) and it's safe.
-  const wantsDelta =
-    !!request && request.mode !== "full" && request.mode !== "not_modified";
-  if (
-    rows &&
-    itemKey &&
-    base.mode === "full" &&
-    base.reason === "changed" &&
-    wantsDelta
-  ) {
+  const wantsDelta = !!request && request.mode !== 'full' && request.mode !== 'not_modified';
+  if (rows && itemKey && base.mode === 'full' && base.reason === 'changed' && wantsDelta) {
     // The semantic-delta upgrade is host-gated (FLAGS.TOOL_DELTA_PROTOCOL). The
     // flag read sits HERE — after the structural narrowing — so it runs only on a
     // changed-view + delta-request call (never per-call) and degrades to the
     // unconditionally-safe Lane-B `full` (reason `flag_off`) when off, never a
     // semantic delta. dormant-safe: OFF is byte-identical to a delta-unaware host.
     if (!(await isSemanticDeltaEnabled(ctx))) {
-      base.reason = "flag_off";
+      base.reason = 'flag_off';
       return base;
     }
     // reason 'changed' ⇒ the request cursor decoded and its fp+sv matched.
@@ -384,47 +339,29 @@ async function negotiateToolDelta(
     // The prior state is either embedded (`dg`, small views) or parked server-side
     // (`di`, large views — P-024). A `di` miss (evicted, restarted, or a fingerprint
     // mismatch) is an ordinary miss: degrade to full, never to a wrong delta.
-    const priorDigest =
-      decoded?.dg ??
-      (decoded?.di ? getRowDigest(decoded.di, fingerprint) : undefined);
+    const priorDigest = decoded?.dg ?? (decoded?.di ? getRowDigest(decoded.di, fingerprint) : undefined);
     if (!decoded || !priorDigest) {
       // Distinguish CAUSE from SYMPTOM (P-024). `no_digest` says only "the prior cursor
       // carried none", which is also what a first delta-capable call looks like.
       // `digest_expired` is the large-view path losing its parked digest — recoverable,
       // and the very next response re-parks one, unlike the old permanent degradation.
-      base.reason = decoded?.di ? "digest_expired" : "no_digest";
-    } else if (
-      cap.maxDeltaAge !== undefined &&
-      decoded.ts !== undefined &&
-      nowMs - decoded.ts > cap.maxDeltaAge
-    ) {
-      base.reason = "max_age";
+      base.reason = decoded?.di ? 'digest_expired' : 'no_digest';
+    } else if (cap.maxDeltaAge !== undefined && decoded.ts !== undefined && nowMs - decoded.ts > cap.maxDeltaAge) {
+      base.reason = 'max_age';
     } else {
       try {
         const changes = cap.changesSince
           ? await cap.changesSince(args, decoded, ctx)
-          : diffFromDigest(priorDigest, rows, itemKey, {
-              rowRevision: cap.rowRevision,
-              rowType: cap.rowType,
-            });
+          : diffFromDigest(priorDigest, rows, itemKey, { rowRevision: cap.rowRevision, rowType: cap.rowType });
         // The delta must actually be smaller than a full resend, else just send full.
         if (JSON.stringify(changes).length >= fullJsonLen) {
-          base.reason = "delta_too_large";
+          base.reason = 'delta_too_large';
         } else {
-          return {
-            mode: "delta",
-            supported: true,
-            cursor: base.cursor,
-            changes,
-            checksum,
-            counts: deltaCounts(changes),
-          };
+          return { mode: 'delta', supported: true, cursor: base.cursor, changes, checksum, counts: deltaCounts(changes) };
         }
       } catch (err) {
-        ctx.log(
-          `[delta] ${def.name} changesSince() threw; serving full: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        base.reason = "changesSince_error";
+        ctx.log(`[delta] ${def.name} changesSince() threw; serving full: ${err instanceof Error ? err.message : String(err)}`);
+        base.reason = 'changesSince_error';
       }
     }
   }
@@ -441,17 +378,15 @@ async function serializeProjectedResult(
 ): Promise<ToolResult> {
   if (
     def.result &&
-    process.env.PAPERCUSP_VALIDATE_TOOL_OUTPUT === "1" &&
+    process.env.PAPERCUSP_VALIDATE_TOOL_OUTPUT === '1' &&
     response &&
-    typeof response === "object" &&
+    typeof response === 'object' &&
     response.data !== undefined
   ) {
     try {
       const v = await standardValidate(def.result, response.data);
       if (!v.ok) {
-        ctx.log(
-          `[output-schema] ${def.name} returned data not matching its declared result schema: ${formatIssues(v.issues)}`,
-        );
+        ctx.log(`[output-schema] ${def.name} returned data not matching its declared result schema: ${formatIssues(v.issues)}`);
       }
     } catch {
       /* validation is best-effort; never fail the call on it */
@@ -472,8 +407,7 @@ async function serializeProjectedResult(
   });
   const result: ToolResult = { content: serialized.content as never };
   if (Object.keys(serialized._meta).length > 0) result._meta = serialized._meta;
-  if (serialized.structuredContent !== undefined)
-    result.structuredContent = serialized.structuredContent;
+  if (serialized.structuredContent !== undefined) result.structuredContent = serialized.structuredContent;
   return result;
 }
 
@@ -500,18 +434,14 @@ async function serializeProjectedResult(
  *   - only array / object-with-array-field payloads (a scalar / plain object round-trips
  *     to identical JSON — no win — so leave it untouched).
  */
-function reencodableJsonPayload(
-  out: ToolResult,
-  ctx: UnifiedToolContext,
-): unknown | undefined {
-  if (ctx.transport !== "mcp") return undefined;
+function reencodableJsonPayload(out: ToolResult, ctx: UnifiedToolContext): unknown | undefined {
+  if (ctx.transport !== 'mcp') return undefined;
   if (out.isError) return undefined;
   if (out.structuredContent !== undefined) return undefined;
   const content = out.content;
   if (!Array.isArray(content) || content.length !== 1) return undefined;
   const item = content[0] as { type?: unknown; text?: unknown } | undefined;
-  if (!item || item.type !== "text" || typeof item.text !== "string")
-    return undefined;
+  if (!item || item.type !== 'text' || typeof item.text !== 'string') return undefined;
   const text = item.text;
   // Already a compact-encoded body (a `{data}` tool, or a hand-marked payload).
   if (/^format: (?:toon|csv|tsv|md)\n/.test(text)) return undefined;
@@ -521,8 +451,7 @@ function reencodableJsonPayload(
   } catch {
     return undefined; // non-JSON text (a plain string / human message) — leave as-is
   }
-  if (!Array.isArray(parsed) && !isObjectWithArrayField(parsed))
-    return undefined;
+  if (!Array.isArray(parsed) && !isObjectWithArrayField(parsed)) return undefined;
   return parsed;
 }
 
@@ -545,18 +474,15 @@ async function attachRequestedStructuredContent(
   def: { name: string; result?: StandardSchemaV1 },
 ): Promise<ToolResult> {
   if (
-    ctx.transport !== "mcp" ||
+    ctx.transport !== 'mcp' ||
     ctx.requestedStructured !== true ||
     !def.result ||
     out.structuredContent !== undefined
   ) {
     return out;
   }
-  const first = out.content?.[0] as
-    | { type?: unknown; text?: unknown }
-    | undefined;
-  if (!first || first.type !== "text" || typeof first.text !== "string")
-    return out;
+  const first = out.content?.[0] as { type?: unknown; text?: unknown } | undefined;
+  if (!first || first.type !== 'text' || typeof first.text !== 'string') return out;
 
   let parsed: unknown;
   try {
@@ -618,13 +544,13 @@ export function stripUndefinedArgKeys(input: unknown): unknown {
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
-  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
   const proto = Object.getPrototypeOf(v);
   return proto === Object.prototype || proto === null;
 }
 
 function stripUndefinedDeep(input: unknown, active: Set<object>): unknown {
-  if (!input || typeof input !== "object") return input;
+  if (!input || typeof input !== 'object') return input;
   // Cycle guard: an args object built by a script can legitimately self-reference.
   if (active.has(input as object)) return input;
 
@@ -674,15 +600,11 @@ function stripUndefinedDeep(input: unknown, active: Set<object>): unknown {
  * sent keyed args. Throws on a guard failure so a mis-emitted row fails LOUDLY
  * rather than writing wrong-but-valid data (Zod checks shape, not alignment).
  */
-function applyPositionalWriteShim(
-  name: string,
-  argsJsonSchema: Record<string, unknown>,
-  input: unknown,
-): unknown {
+function applyPositionalWriteShim(name: string, argsJsonSchema: Record<string, unknown>, input: unknown): unknown {
   if (!isWritePositional(name)) return input;
-  if (!input || typeof input !== "object" || Array.isArray(input)) return input;
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
   const row = (input as Record<string, unknown>).row;
-  if (typeof row !== "string") return input; // keyed args (or no row) — leave as-is
+  if (typeof row !== 'string') return input; // keyed args (or no row) — leave as-is
   const entry = getPrePromptEntry(name);
   const cols = projectWriteColumns(argsJsonSchema, {
     freeTextName: entry?.freeTextArg,
@@ -719,17 +641,12 @@ function applyPositionalWriteShim(
  * overrides an explicit value, and it is a no-op for every tool that already declares
  * `harness` itself (the common case).
  */
-export function applyHarnessArgAlias(
-  argsJsonSchema: Record<string, unknown>,
-  input: unknown,
-): unknown {
-  if (!input || typeof input !== "object" || Array.isArray(input)) return input;
+export function applyHarnessArgAlias(argsJsonSchema: Record<string, unknown>, input: unknown): unknown {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
   const rec = input as Record<string, unknown>;
-  if (!("harness" in rec) || "harness_slug" in rec) return input;
-  const props = (
-    argsJsonSchema as { properties?: Record<string, unknown> } | undefined
-  )?.properties;
-  if (!props || !("harness_slug" in props) || "harness" in props) return input;
+  if (!('harness' in rec) || 'harness_slug' in rec) return input;
+  const props = (argsJsonSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
+  if (!props || !('harness_slug' in props) || 'harness' in props) return input;
   const { harness, ...rest } = rec;
   return { ...rest, harness_slug: harness };
 }
@@ -754,12 +671,12 @@ export function applyHarnessArgAlias(
  * is about the actual args, not the framework envelope key. Never throws.
  */
 export function unwrapUnparsedToolInput(input: unknown): unknown {
-  if (!input || typeof input !== "object" || Array.isArray(input)) return input;
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
   const rec = input as Record<string, unknown>;
-  if (!("__unparsedToolInput" in rec)) return input;
+  if (!('__unparsedToolInput' in rec)) return input;
   const { __unparsedToolInput: raw, ...rest } = rec;
   let recovered: unknown = raw;
-  if (typeof raw === "string") {
+  if (typeof raw === 'string') {
     try {
       recovered = JSON.parse(raw);
     } catch {
@@ -768,7 +685,7 @@ export function unwrapUnparsedToolInput(input: unknown): unknown {
       return rest;
     }
   }
-  if (recovered && typeof recovered === "object" && !Array.isArray(recovered)) {
+  if (recovered && typeof recovered === 'object' && !Array.isArray(recovered)) {
     return { ...(recovered as Record<string, unknown>), ...rest };
   }
   // Recovered a scalar / array — cannot be a tool-args object; strip the key.
@@ -808,33 +725,23 @@ export function defineTool<TArgs extends StandardSchemaV1>(
 // from. Without the default it falls back to the constraint
 // (`ZodTypeAny | undefined`) → `RouteContext<unknown>`, which the
 // handler's `RouteContext<undefined>` param then rejects.
-export function defineTool<
-  TInputSchema extends ZodTypeAny | undefined = undefined,
->(input: RouteDefinition<TInputSchema>): RouteDefinition<TInputSchema>;
+export function defineTool<TInputSchema extends ZodTypeAny | undefined = undefined>(
+  input: RouteDefinition<TInputSchema>,
+): RouteDefinition<TInputSchema>;
 export function defineTool(
   input:
     | ToolDefinitionInput<StandardSchemaV1>
     | RoleToolDefinitionInput<StandardSchemaV1>
     | RouteDefinition<ZodTypeAny | undefined>,
-):
-  | ToolDefinition<StandardSchemaV1>
-  | RoleToolDefinition<StandardSchemaV1>
-  | RouteDefinition<ZodTypeAny | undefined> {
+): ToolDefinition<StandardSchemaV1> | RoleToolDefinition<StandardSchemaV1> | RouteDefinition<ZodTypeAny | undefined> {
   // Route-shaped — discriminated by `method` (tool inputs never carry it).
-  if ("method" in input && "path" in input) {
+  if ('method' in input && 'path' in input) {
     return defineRouteShaped(input as RouteDefinition<ZodTypeAny | undefined>);
   }
-  if (
-    (input as RoleToolDefinitionInput<StandardSchemaV1>).requirePrincipal ===
-    false
-  ) {
-    return defineRoleGatedTool(
-      input as RoleToolDefinitionInput<StandardSchemaV1>,
-    );
+  if ((input as RoleToolDefinitionInput<StandardSchemaV1>).requirePrincipal === false) {
+    return defineRoleGatedTool(input as RoleToolDefinitionInput<StandardSchemaV1>);
   }
-  return definePrincipalGatedTool(
-    input as ToolDefinitionInput<StandardSchemaV1>,
-  );
+  return definePrincipalGatedTool(input as ToolDefinitionInput<StandardSchemaV1>);
 }
 
 /**
@@ -858,13 +765,7 @@ function defineRouteShaped<TInputSchema extends ZodTypeAny | undefined>(
  * `:manage`/`:execute`) ⇒ 'write'; everything else ⇒ 'read'. An explicit `effect` always
  * wins. Consumed by the code-execution sandbox's dry-run/confirm gate (read-only ⇒ no gate).
  */
-export const WRITE_CAPABILITY_SUFFIXES = [
-  ":write",
-  ":admin",
-  ":delete",
-  ":manage",
-  ":execute",
-] as const;
+export const WRITE_CAPABILITY_SUFFIXES = [':write', ':admin', ':delete', ':manage', ':execute'] as const;
 /**
  * Known-mutating capabilities whose names don't end in a write-suffix — the
  * `capability:*` host-capability family (bash/fs-write/edit/write/git/computer/net) plus
@@ -880,20 +781,20 @@ export const WRITE_CAPABILITY_SUFFIXES = [
  * this set (which would wrongly flip its read siblings). B-CX-EFFECT audit (2026-06-20).
  */
 export const WRITE_CAPABILITIES = new Set<string>([
-  "capability:bash",
-  "capability:fs-write",
-  "capability:edit",
-  "capability:write",
-  "capability:git",
-  "capability:computer",
-  "capability:net", // outbound HTTP (capability:fetch) — can POST/PUT/DELETE → external mutation
-  "processes:kill",
-  "processes:control", // freezes/thaws or re-budgets a live task's cgroup
-  "turn:interrupt", // ends a peer agent's current turn
-  "ui:dispatch", // performs a UI intent (click/navigate/submit) in a browser tab
-  "tui:dispatch", // performs a control intent against a running pui workbench
-  "operator:converse", // brain turn: spawns agents, records spend, mem0.add, dispatches <spawn>
-  "activity:report", // inserts an agent-activity row
+  'capability:bash',
+  'capability:fs-write',
+  'capability:edit',
+  'capability:write',
+  'capability:git',
+  'capability:computer',
+  'capability:net', // outbound HTTP (capability:fetch) — can POST/PUT/DELETE → external mutation
+  'processes:kill',
+  'processes:control', // freezes/thaws or re-budgets a live task's cgroup
+  'turn:interrupt', // ends a peer agent's current turn
+  'ui:dispatch', // performs a UI intent (click/navigate/submit) in a browser tab
+  'tui:dispatch', // performs a control intent against a running pui workbench
+  'operator:converse', // brain turn: spawns agents, records spend, mem0.add, dispatches <spawn>
+  'activity:report', // inserts an agent-activity row
 ]);
 /**
  * THE effect oracle. Exported (not merely used here) because it is the only
@@ -907,16 +808,11 @@ export const WRITE_CAPABILITIES = new Set<string>([
  * Anything re-deriving effect from naming is a second, drifting answer to a
  * question this owns. Consult it instead.
  */
-export function inferCapabilityEffect(
-  capability: string,
-  explicit?: "read" | "write",
-): "read" | "write" {
+export function inferCapabilityEffect(capability: string, explicit?: 'read' | 'write'): 'read' | 'write' {
   if (explicit) return explicit;
   const cap = capability.toLowerCase();
-  if (WRITE_CAPABILITIES.has(cap)) return "write";
-  return WRITE_CAPABILITY_SUFFIXES.some((s) => cap.endsWith(s))
-    ? "write"
-    : "read";
+  if (WRITE_CAPABILITIES.has(cap)) return 'write';
+  return WRITE_CAPABILITY_SUFFIXES.some((s) => cap.endsWith(s)) ? 'write' : 'read';
 }
 
 function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
@@ -926,12 +822,14 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
   const name = input.name ?? deriveNameFromCallSite(definitionSite);
   if (!name) {
     throw new Error(
-      "defineTool: could not derive tool name from call site. " +
-        "Pass `name` explicitly or place the file under `tools/<group>/<verb>.ts`.",
+      'defineTool: could not derive tool name from call site. ' +
+      'Pass `name` explicitly or place the file under `tools/<group>/<verb>.ts`.',
     );
   }
   const description =
-    input.description ?? describeFromGuidance(input.guidance) ?? `Tool ${name}`;
+    input.description ??
+    describeFromGuidance(input.guidance) ??
+    `Tool ${name}`;
   const tier = tierFor(input.capability);
 
   const def: ToolDefinition<TArgs> = {
@@ -943,7 +841,7 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
     effectForCall: input.effectForCall,
     idempotent: input.idempotent,
     replaces: input.replaces,
-    composition: (input.replaces?.length ?? 0) > 0 ? "composite" : "primitive",
+    composition: (input.replaces?.length ?? 0) > 0 ? 'composite' : 'primitive',
     // EI-10883: closed shape — an undeclared arg errors instead of being silently dropped.
     args: strictArgs(input.args),
     result: input.result ?? input.output,
@@ -965,7 +863,7 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
     crossWorkspace: input.crossWorkspace,
     // EI-18808330244321407: transaction retention is explicit opt-in.
     needsWorkspaceTx: input.needsWorkspaceTx,
-    // EI-18666279107998059: see ToolDefinition.skipWorkspaceTx.
+    // Legacy no-op metadata retained for older plugin/source compatibility.
     skipWorkspaceTx: input.skipWorkspaceTx,
     // EI-19386201256023240: see ToolDefinition.skipResultDoor.
     skipResultDoor: input.skipResultDoor,
@@ -1023,8 +921,8 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
   const name = input.name ?? deriveNameFromCallSite(definitionSite);
   if (!name) {
     throw new Error(
-      "defineTool: could not derive tool name from call site. " +
-        "Pass `name` explicitly or place the file under `tools/<group>/<verb>.ts`.",
+      'defineTool: could not derive tool name from call site. ' +
+      'Pass `name` explicitly or place the file under `tools/<group>/<verb>.ts`.',
     );
   }
   // EI-20803112372029993 — see the twin call in `definePrincipalGatedTool`.
@@ -1034,7 +932,9 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
   // guard exists for (routines:list among them) all take this branch.
   recordToolShapers(name, input.shape, input.guidance?.returns);
   const description =
-    input.description ?? describeFromGuidance(input.guidance) ?? `Tool ${name}`;
+    input.description ??
+    describeFromGuidance(input.guidance) ??
+    `Tool ${name}`;
   const tier = tierFor(input.capability);
 
   const def: RoleToolDefinition<TArgs> = {
@@ -1046,7 +946,7 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
     effectForCall: input.effectForCall,
     idempotent: input.idempotent,
     replaces: input.replaces,
-    composition: (input.replaces?.length ?? 0) > 0 ? "composite" : "primitive",
+    composition: (input.replaces?.length ?? 0) > 0 ? 'composite' : 'primitive',
     requirePrincipal: false,
     authorize: input.authorize,
     requireRoles: input.requireRoles,
@@ -1059,7 +959,7 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
     crossWorkspace: input.crossWorkspace,
     // EI-18808330244321407: see RoleToolDefinition.needsWorkspaceTx.
     needsWorkspaceTx: input.needsWorkspaceTx,
-    // EI-18666279107998059: see RoleToolDefinition.skipWorkspaceTx.
+    // Legacy no-op metadata retained for older plugin/source compatibility.
     skipWorkspaceTx: input.skipWorkspaceTx,
     // EI-19386201256023240: see RoleToolDefinition.skipResultDoor.
     skipResultDoor: input.skipResultDoor,
@@ -1131,20 +1031,18 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
  * Schemas that already have `type: "object"` and no problematic
  * top-level keys pass through unchanged.
  */
-function flattenForOpenAi(
-  schema: Record<string, unknown>,
-): Record<string, unknown> {
+function flattenForOpenAi(schema: Record<string, unknown>): Record<string, unknown> {
   // Already shaped right.
-  const PROHIBITED_AT_ROOT = ["oneOf", "anyOf", "allOf", "not"];
+  const PROHIBITED_AT_ROOT = ['oneOf', 'anyOf', 'allOf', 'not'];
   const hasProhibited = PROHIBITED_AT_ROOT.some((k) => k in schema);
-  if (schema.type === "object" && !hasProhibited) return schema;
+  if (schema.type === 'object' && !hasProhibited) return schema;
 
   // Pull the discriminator unions out of root.
   const variants: Array<Record<string, unknown>> = [];
-  for (const key of ["oneOf", "anyOf"]) {
+  for (const key of ['oneOf', 'anyOf']) {
     if (Array.isArray(schema[key])) {
       for (const v of schema[key] as Array<Record<string, unknown>>) {
-        if (v && typeof v === "object") variants.push(v);
+        if (v && typeof v === 'object') variants.push(v);
       }
     }
   }
@@ -1153,7 +1051,7 @@ function flattenForOpenAi(
     // No unions — just ensure type:"object" + strip problematic keys.
     const out = { ...schema };
     for (const k of PROHIBITED_AT_ROOT) delete out[k];
-    if (out.type !== "object") out.type = "object";
+    if (out.type !== 'object') out.type = 'object';
     return out;
   }
 
@@ -1167,9 +1065,7 @@ function flattenForOpenAi(
     for (const [pk, pv] of Object.entries(props)) {
       if (!(pk in mergedProps)) mergedProps[pk] = pv;
     }
-    const req = Array.isArray(v.required)
-      ? new Set(v.required as string[])
-      : new Set<string>();
+    const req = Array.isArray(v.required) ? new Set(v.required as string[]) : new Set<string>();
     requiredSets.push(req);
   }
   const required = [...requiredSets[0]].filter((p) =>
@@ -1177,12 +1073,11 @@ function flattenForOpenAi(
   );
 
   return {
-    type: "object",
+    type: 'object',
     properties: mergedProps,
     ...(required.length > 0 ? { required } : {}),
     additionalProperties: false,
-    description:
-      typeof schema.description === "string" ? schema.description : undefined,
+    description: typeof schema.description === 'string' ? schema.description : undefined,
   };
 }
 
@@ -1234,7 +1129,7 @@ function flattenForOpenAi(
  * is closed instead of discovering it by accident.
  */
 function deepStrictifyInPlace(schema: unknown, active: Set<object>): unknown {
-  if (!schema || typeof schema !== "object") return schema;
+  if (!schema || typeof schema !== 'object') return schema;
   // Stack-based (enter/exit) cycle guard, NOT a permanent "ever visited" set:
   // a sub-schema legitimately gets reused BY REFERENCE across multiple sibling
   // fields (e.g. the same row schema wrapped by both .optional() and
@@ -1245,46 +1140,41 @@ function deepStrictifyInPlace(schema: unknown, active: Set<object>): unknown {
   if (active.has(schema as object)) return schema;
   active.add(schema as object);
   try {
-    const s = schema as {
-      strict?: () => unknown;
-      _zod?: { def?: Record<string, unknown> };
-    };
+    const s = schema as { strict?: () => unknown; _zod?: { def?: Record<string, unknown> } };
     const def = s._zod?.def;
-    if (!def || typeof def.type !== "string") return schema;
+    if (!def || typeof def.type !== 'string') return schema;
 
     switch (def.type) {
-      case "object": {
+      case 'object': {
         const shape = def.shape as Record<string, unknown> | undefined;
         if (shape) {
           for (const key of Object.keys(shape)) {
             shape[key] = deepStrictifyInPlace(shape[key], active);
           }
         }
-        return typeof s.strict === "function" ? s.strict() : schema;
+        return typeof s.strict === 'function' ? s.strict() : schema;
       }
-      case "array":
+      case 'array':
         def.element = deepStrictifyInPlace(def.element, active);
         return schema;
-      case "optional":
-      case "nullable":
-      case "default":
-      case "readonly":
-      case "catch":
-      case "prefault":
+      case 'optional':
+      case 'nullable':
+      case 'default':
+      case 'readonly':
+      case 'catch':
+      case 'prefault':
         def.innerType = deepStrictifyInPlace(def.innerType, active);
         return schema;
-      case "record":
+      case 'record':
         def.valueType = deepStrictifyInPlace(def.valueType, active);
         return schema;
-      case "union":
+      case 'union':
         // Covers z.union AND z.discriminatedUnion (same def.type in Zod 4) — each
         // variant gets strictified too, closing the same class one level further
         // than the pre-existing top-level-union pass-through did.
-        def.options = (def.options as unknown[]).map((o) =>
-          deepStrictifyInPlace(o, active),
-        );
+        def.options = (def.options as unknown[]).map((o) => deepStrictifyInPlace(o, active));
         return schema;
-      case "pipe":
+      case 'pipe':
         // z.preprocess(fn, target) compiles to a pipe { in: <transform>, out: <target> };
         // `out` is what actually gets validated post-transform.
         def.out = deepStrictifyInPlace(def.out, active);
@@ -1324,26 +1214,26 @@ const ARGS_SCHEMA_HINT_MAX = 1800;
  * costs one loud, self-correcting error.
  */
 const COMMON_ARG_ALIASES: Readonly<Record<string, readonly string[]>> = {
-  assignee: ["assign_to", "assignTo", "owner", "ownerId"],
-  assignto: ["assign_to", "assignee", "owner", "ownerId"],
-  body: ["content", "summary", "comment", "text"],
-  code: ["script"],
-  comment: ["body", "summary", "text"],
-  content: ["body", "description", "summary", "text"],
-  completionref: ["completionRef", "completion_ref", "completion"],
-  description: ["content", "summary", "body", "text"],
-  foundduring: ["foundDuring", "found_during"],
-  harness: ["scope", "harnessSlug", "harness_slug"],
-  itemid: ["item"],
-  linkedfeatureid: ["linkedFeatureId", "linked_feature_id"],
-  owner: ["ownerEmail", "ownerId", "assignee", "assign_to"],
-  ownerid: ["ownerEmail", "owner", "assignee", "assign_to"],
-  planitem: ["plan_item", "itemId", "item"],
-  rubricid: ["rubricRef"],
-  rubricids: ["rubricRefs"],
-  scope: ["harness"],
-  script: ["code"],
-  summary: ["body", "comment", "text", "content"],
+  assignee: ['assign_to', 'assignTo', 'owner', 'ownerId'],
+  assignto: ['assign_to', 'assignee', 'owner', 'ownerId'],
+  body: ['content', 'summary', 'comment', 'text'],
+  code: ['script'],
+  comment: ['body', 'summary', 'text'],
+  content: ['body', 'description', 'summary', 'text'],
+  completionref: ['completionRef', 'completion_ref', 'completion'],
+  description: ['content', 'summary', 'body', 'text'],
+  foundduring: ['foundDuring', 'found_during'],
+  harness: ['scope', 'harnessSlug', 'harness_slug'],
+  itemid: ['item'],
+  linkedfeatureid: ['linkedFeatureId', 'linked_feature_id'],
+  owner: ['ownerEmail', 'ownerId', 'assignee', 'assign_to'],
+  ownerid: ['ownerEmail', 'owner', 'assignee', 'assign_to'],
+  planitem: ['plan_item', 'itemId', 'item'],
+  rubricid: ['rubricRef'],
+  rubricids: ['rubricRefs'],
+  scope: ['harness'],
+  script: ['code'],
+  summary: ['body', 'comment', 'text', 'content'],
   // ── Additions from a MEASURED rejection burst (WI-38059 / EI-20204653748131789):
   // eight arg-shape rejections in ~35 min of one agent's ordinary work, every one
   // correct-intent/wrong-spelling. These four were each verified to fall OUTSIDE
@@ -1351,14 +1241,14 @@ const COMMON_ARG_ALIASES: Readonly<Record<string, readonly string[]>> = {
   // the caller had to re-read a schema. e.g. compact('ttldays') vs compact('ttlsec')
   // = distance 3, threshold 2. They are the obvious natural-language names for the
   // concept, which is exactly why agents reach for them.
-  category: ["kind", "type", "lane"],
-  kind: ["category", "type"],
-  text: ["content", "body", "summary", "comment"],
-  ttl: ["ttlSec", "ttl_sec", "ttlMs", "ttl_ms"],
-  ttldays: ["ttlSec", "ttl_sec", "ttlMs"],
-  ttlseconds: ["ttlSec", "ttl_sec"],
-  type: ["kind", "category"],
-  value: ["body", "content", "summary"],
+  category: ['kind', 'type', 'lane'],
+  kind: ['category', 'type'],
+  text: ['content', 'body', 'summary', 'comment'],
+  ttl: ['ttlSec', 'ttl_sec', 'ttlMs', 'ttl_ms'],
+  ttldays: ['ttlSec', 'ttl_sec', 'ttlMs'],
+  ttlseconds: ['ttlSec', 'ttl_sec'],
+  type: ['kind', 'category'],
+  value: ['body', 'content', 'summary'],
   // ── EI-20246935995110683: `q` vs `query` is a CROSS-TOOL near-synonym, not a typo —
   // both spellings are live in this catalogue (`issues:list` declares `q`,
   // `search:fulltext`/`search:semantic` declare `query`), so a caller that learned one
@@ -1368,13 +1258,13 @@ const COMMON_ARG_ALIASES: Readonly<Record<string, readonly string[]>> = {
   // Both directions are listed because the confusion runs both ways; the exact-declared-match
   // precedence in `suggestArgName` means a tool that genuinely declares `q` (or `query`) still
   // wins over its own alias entry, so neither line can override a tool's real vocabulary.
-  q: ["query", "search", "text"],
-  query: ["q", "search", "text"],
-  search: ["query", "q"],
+  q: ['query', 'search', 'text'],
+  query: ['q', 'search', 'text'],
+  search: ['query', 'q'],
 };
 
 function compactArgName(value: string): string {
-  return value.replace(/[^a-z0-9]/gi, "").toLowerCase();
+  return value.replace(/[^a-z0-9]/gi, '').toLowerCase();
 }
 
 function editDistance(a: string, b: string): number {
@@ -1397,10 +1287,7 @@ function editDistance(a: string, b: string): number {
 }
 
 /** Return the closest declared field for an unknown arg, when confidence is high. */
-export function suggestArgName(
-  unknown: string,
-  accepted: readonly string[],
-): string | null {
+export function suggestArgName(unknown: string, accepted: readonly string[]): string | null {
   const compactUnknown = compactArgName(unknown);
   // An EXACT declared match outranks every alias. Latent via `unknownArgHint`
   // (which filters declared keys before asking), but `suggestArgName` is exported
@@ -1408,45 +1295,22 @@ export function suggestArgName(
   // `value` would be told to use `content`/`body` instead — the alias map
   // confidently overriding the tool's own vocabulary. Widening the alias map in
   // WI-38059 is what made that reachable enough to matter.
-  const exact = accepted.find(
-    (candidate) => compactArgName(candidate) === compactUnknown,
-  );
+  const exact = accepted.find((candidate) => compactArgName(candidate) === compactUnknown);
   if (exact) return exact;
   const semanticAliases = COMMON_ARG_ALIASES[compactUnknown] ?? [];
   const semantic = semanticAliases.find((alias) =>
-    accepted.some(
-      (candidate) => compactArgName(candidate) === compactArgName(alias),
-    ),
+    accepted.some((candidate) => compactArgName(candidate) === compactArgName(alias)),
   );
   if (semantic) {
-    return (
-      accepted.find(
-        (candidate) => compactArgName(candidate) === compactArgName(semantic),
-      ) ?? semantic
-    );
+    return accepted.find((candidate) => compactArgName(candidate) === compactArgName(semantic)) ?? semantic;
   }
 
   const ranked = accepted
-    .map((candidate) => ({
-      candidate,
-      distance: editDistance(compactUnknown, compactArgName(candidate)),
-    }))
-    .sort(
-      (a, b) =>
-        a.distance - b.distance || a.candidate.localeCompare(b.candidate),
-    );
+    .map((candidate) => ({ candidate, distance: editDistance(compactUnknown, compactArgName(candidate)) }))
+    .sort((a, b) => a.distance - b.distance || a.candidate.localeCompare(b.candidate));
   const best = ranked[0];
   if (!best) return null;
-  const threshold = Math.max(
-    1,
-    Math.min(
-      3,
-      Math.floor(
-        Math.max(compactUnknown.length, compactArgName(best.candidate).length) /
-          3,
-      ),
-    ),
-  );
+  const threshold = Math.max(1, Math.min(3, Math.floor(Math.max(compactUnknown.length, compactArgName(best.candidate).length) / 3)));
   return best.distance <= threshold ? best.candidate : null;
 }
 
@@ -1467,15 +1331,11 @@ export function suggestArgName(
  * name an obvious relocation, not to search a schema tree. A deeper or
  * ambiguous match is left to the full schema hint that follows it.
  */
-export function nestedArgPaths(
-  props: Record<string, unknown> | undefined,
-): Map<string, string> {
+export function nestedArgPaths(props: Record<string, unknown> | undefined): Map<string, string> {
   const out = new Map<string, string>();
   if (!props) return out;
   for (const [parent, rawChild] of Object.entries(props)) {
-    const childProps = (
-      rawChild as { properties?: Record<string, unknown> } | undefined
-    )?.properties;
+    const childProps = (rawChild as { properties?: Record<string, unknown> } | undefined)?.properties;
     if (!childProps) continue;
     for (const child of Object.keys(childProps)) {
       if (!out.has(child)) out.set(child, `${parent}.${child}`);
@@ -1485,17 +1345,13 @@ export function nestedArgPaths(
 }
 
 export function invalidInputCorrections(
-  issues:
-    | ReadonlyArray<{ message?: string; keys?: readonly string[] }>
-    | undefined,
+  issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
   rawSchema: unknown,
   argRedirects?: Record<string, string | ProjectedToolCorrectiveCall>,
 ): InvalidInputCorrection[] {
-  const msgs = (issues ?? []).map((i) => i?.message ?? "").join(" ");
+  const msgs = (issues ?? []).map((i) => i?.message ?? '').join(' ');
   if (!/nrecognized key/i.test(msgs)) return [];
-  const props = (
-    rawSchema as { properties?: Record<string, unknown> } | undefined
-  )?.properties;
+  const props = (rawSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
   const keys = props ? Object.keys(props) : [];
   if (keys.length === 0) return [];
   const nested = nestedArgPaths(props);
@@ -1514,73 +1370,56 @@ export function invalidInputCorrections(
   // draw a string-distance guess that contradicts the authored answer.
   return unknownKeys.flatMap((rejectedArg): InvalidInputCorrection[] => {
     const redirect = argRedirects?.[rejectedArg];
-    if (typeof redirect === "string" && redirect.length > 0) {
-      return [{ rejectedArg, target: redirect, kind: "authored-redirect" }];
+    if (typeof redirect === 'string' && redirect.length > 0) {
+      return [{ rejectedArg, target: redirect, kind: 'authored-redirect' }];
     }
-    if (redirect && typeof redirect === "object") {
+    if (redirect && typeof redirect === 'object') {
       const registryRevision = projectedToolRegistryRevision();
       const rendered = renderProjectedToolCall(redirect.tool, redirect.args);
-      return [
-        {
-          rejectedArg,
-          target: `${rendered}${redirect.note ? ` — ${redirect.note}` : ""}`,
-          kind: "authored-redirect",
-          call: {
-            tool: redirect.tool,
-            args: redirect.args,
-            source: PROJECTED_TOOL_REGISTRY_SOURCE,
-            registryRevision,
-          },
+      return [{
+        rejectedArg,
+        target: `${rendered}${redirect.note ? ` — ${redirect.note}` : ''}`,
+        kind: 'authored-redirect',
+        call: {
+          tool: redirect.tool,
+          args: redirect.args,
+          source: PROJECTED_TOOL_REGISTRY_SOURCE,
+          registryRevision,
         },
-      ];
+      }];
     }
     const nestedTarget = nested.get(rejectedArg);
-    if (nestedTarget)
-      return [{ rejectedArg, target: nestedTarget, kind: "nested-path" }];
+    if (nestedTarget) return [{ rejectedArg, target: nestedTarget, kind: 'nested-path' }];
     const nearName = suggestArgName(rejectedArg, keys);
-    return nearName
-      ? [{ rejectedArg, target: nearName, kind: "near-name" }]
-      : [];
+    return nearName ? [{ rejectedArg, target: nearName, kind: 'near-name' }] : [];
   });
 }
 
 // Exported for direct unit test alongside its sibling correction sources
 // (`nestedArgPaths`, `suggestArgName`) — see strict-args.test.ts.
 export function unknownArgHint(
-  issues:
-    | ReadonlyArray<{ message?: string; keys?: readonly string[] }>
-    | undefined,
+  issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
   rawSchema: unknown,
   argRedirects?: Record<string, string | ProjectedToolCorrectiveCall>,
 ): string {
-  const msgs = (issues ?? []).map((i) => i?.message ?? "").join(" ");
-  if (!/nrecognized key/i.test(msgs)) return "";
-  const props = (
-    rawSchema as { properties?: Record<string, unknown> } | undefined
-  )?.properties;
+  const msgs = (issues ?? []).map((i) => i?.message ?? '').join(' ');
+  if (!/nrecognized key/i.test(msgs)) return '';
+  const props = (rawSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
   const keys = props ? Object.keys(props) : [];
-  if (keys.length === 0) return "";
+  if (keys.length === 0) return '';
   const corrections = invalidInputCorrections(issues, rawSchema, argRedirects);
-  const redirected = corrections.filter(
-    (correction) => correction.kind === "authored-redirect",
-  );
+  const redirected = corrections.filter((correction) => correction.kind === 'authored-redirect');
   const redirectText = redirected
-    .map(
-      ({ rejectedArg, target }) =>
-        ` \`${rejectedArg}\` is not an arg of this tool — it is written by ${target}.`,
-    )
-    .join("");
-  const localCorrections = corrections.filter(
-    (correction) => correction.kind !== "authored-redirect",
-  );
-  const correctionText =
-    localCorrections.length > 0
-      ? ` Did you mean ${localCorrections.map(({ rejectedArg, target }) => `\`${target}\` for \`${rejectedArg}\``).join("; ")}?`
-      : "";
+    .map(({ rejectedArg, target }) => ` \`${rejectedArg}\` is not an arg of this tool — it is written by ${target}.`)
+    .join('');
+  const localCorrections = corrections.filter((correction) => correction.kind !== 'authored-redirect');
+  const correctionText = localCorrections.length > 0
+    ? ` Did you mean ${localCorrections.map(({ rejectedArg, target }) => `\`${target}\` for \`${rejectedArg}\``).join('; ')}?`
+    : '';
   return (
-    ` — this tool accepts ONLY: ${keys.join(", ")}.${redirectText}${correctionText}` +
-    " An undeclared arg is REJECTED, not silently ignored (EI-10883): passing an arg a tool does not declare used to return ok:true" +
-    " while quietly doing something else, which is indistinguishable from success. Re-send using only the keys above." +
+    ` — this tool accepts ONLY: ${keys.join(', ')}.${redirectText}${correctionText}` +
+    ' An undeclared arg is REJECTED, not silently ignored (EI-10883): passing an arg a tool does not declare used to return ok:true' +
+    ' while quietly doing something else, which is indistinguishable from success. Re-send using only the keys above.' +
     // EI-19953470656367880: an unrecognized-key rejection is ALSO the exact shape a
     // caller sees when it (or the UI sending on its behalf) is newer than the server
     // it's talking to — a long-lived process (e.g. a Tauri desktop's own spawned
@@ -1596,9 +1435,7 @@ function makeInvalidInputError(
   issues: ReadonlyArray<StandardSchemaV1.Issue>,
   input: unknown,
   rawSchema: unknown,
-  argRedirects:
-    | Record<string, string | ProjectedToolCorrectiveCall>
-    | undefined,
+  argRedirects: Record<string, string | ProjectedToolCorrectiveCall> | undefined,
   schemaHintCache: { hint?: string },
 ): InvalidInputError {
   const metadata: InvalidInputMetadata = {
@@ -1616,8 +1453,7 @@ function makeInvalidInputError(
       // and only when the host registered a vintage resolver.
       (issuesAreValueLevel(issues)
         ? constraintVintageHint()
-        : failingFieldSchemaHint(issues, rawSchema) ||
-          argsSchemaHint(rawSchema, schemaHintCache)),
+        : failingFieldSchemaHint(issues, rawSchema) || argsSchemaHint(rawSchema, schemaHintCache)),
     metadata,
   );
 }
@@ -1658,10 +1494,10 @@ const FIELD_SCHEMA_HINT_MAX = 700;
 const FIELD_SCHEMA_HINT_MAX_FIELDS = 3;
 
 function schemaUnionBranches(node: unknown): unknown[] {
-  if (!node || typeof node !== "object") return [];
+  if (!node || typeof node !== 'object') return [];
   const rec = node as Record<string, unknown>;
   const out: unknown[] = [];
-  for (const key of ["anyOf", "oneOf", "allOf"] as const) {
+  for (const key of ['anyOf', 'oneOf', 'allOf'] as const) {
     const branch = rec[key];
     if (Array.isArray(branch)) out.push(...branch);
   }
@@ -1675,44 +1511,40 @@ function schemaUnionBranches(node: unknown): unknown[] {
  * result cap can cut off the only field the caller needs to discover.
  */
 function compactSchemaExampleValue(node: unknown, depth = 0): unknown {
-  if (!node || typeof node !== "object" || depth > 4) return "<value>";
+  if (!node || typeof node !== 'object' || depth > 4) return '<value>';
   const rec = node as Record<string, unknown>;
-  if (Object.prototype.hasOwnProperty.call(rec, "const")) return rec.const;
+  if (Object.prototype.hasOwnProperty.call(rec, 'const')) return rec.const;
   if (Array.isArray(rec.enum) && rec.enum.length > 0) return rec.enum[0];
 
   for (const branch of schemaUnionBranches(node)) {
     const value = compactSchemaExampleValue(branch, depth + 1);
-    if (value !== "<value>") return value;
+    if (value !== '<value>') return value;
   }
 
   switch (rec.type) {
-    case "string":
-      return "<string>";
-    case "number":
-    case "integer":
+    case 'string':
+      return '<string>';
+    case 'number':
+    case 'integer':
       return 0;
-    case "boolean":
+    case 'boolean':
       return false;
-    case "array": {
+    case 'array': {
       // An empty teaching example is not accepted by schemas with minItems.
       // Keep optional/unbounded arrays compact, but include the minimum number
       // of item examples whenever the schema requires a non-empty array.
       const minItems =
-        typeof rec.minItems === "number" && Number.isFinite(rec.minItems)
+        typeof rec.minItems === 'number' && Number.isFinite(rec.minItems)
           ? Math.max(0, Math.ceil(rec.minItems))
           : 0;
       if (minItems === 0) return [];
       const itemExample = compactSchemaExampleValue(rec.items, depth + 1);
       return Array.from({ length: minItems }, () => itemExample);
     }
-    case "object":
-      return hasProperties(node)
-        ? compactAcceptedObjectExample(node, depth + 1)
-        : {};
+    case 'object':
+      return hasProperties(node) ? compactAcceptedObjectExample(node, depth + 1) : {};
     default:
-      return hasProperties(node)
-        ? compactAcceptedObjectExample(node, depth + 1)
-        : "<value>";
+      return hasProperties(node) ? compactAcceptedObjectExample(node, depth + 1) : '<value>';
   }
 }
 
@@ -1723,11 +1555,10 @@ function compactSchemaExampleValue(node: unknown, depth = 0): unknown {
  * `checks[].verified`).
  */
 function compactAcceptedObjectExample(node: unknown, depth = 0): unknown {
-  if (!node || typeof node !== "object" || depth > 4) return "<value>";
+  if (!node || typeof node !== 'object' || depth > 4) return '<value>';
   const rec = node as Record<string, unknown>;
   const props = rec.properties;
-  if (!props || typeof props !== "object" || Array.isArray(props))
-    return "<value>";
+  if (!props || typeof props !== 'object' || Array.isArray(props)) return '<value>';
 
   const properties = props as Record<string, unknown>;
   const example: Record<string, unknown> = {};
@@ -1738,61 +1569,47 @@ function compactAcceptedObjectExample(node: unknown, depth = 0): unknown {
 }
 
 function compactAcceptedObjectHint(node: unknown): string | null {
-  if (!node || typeof node !== "object") return null;
+  if (!node || typeof node !== 'object') return null;
   const rec = node as Record<string, unknown>;
   const props = rec.properties;
-  if (!props || typeof props !== "object" || Array.isArray(props)) return null;
+  if (!props || typeof props !== 'object' || Array.isArray(props)) return null;
   const properties = props as Record<string, unknown>;
   const keys = Object.keys(properties);
   if (keys.length === 0) return null;
 
   const example = compactAcceptedObjectExample(node);
-  if (!example || typeof example !== "object") return null;
-  const required = Array.isArray(rec.required)
-    ? rec.required.filter((key): key is string => typeof key === "string")
-    : [];
+  if (!example || typeof example !== 'object') return null;
+  const required = Array.isArray(rec.required) ? rec.required.filter((key): key is string => typeof key === 'string') : [];
   const optional = keys.filter((key) => !required.includes(key));
   const qualifiers = [
-    required.length > 0 ? `required: ${required.join(", ")}` : "",
-    optional.length > 0 ? `optional: ${optional.join(", ")}` : "",
+    required.length > 0 ? `required: ${required.join(', ')}` : '',
+    optional.length > 0 ? `optional: ${optional.join(', ')}` : '',
   ].filter(Boolean);
-  return `${JSON.stringify(example)}${qualifiers.length > 0 ? ` (${qualifiers.join("; ")})` : ""}`;
+  return `${JSON.stringify(example)}${qualifiers.length > 0 ? ` (${qualifiers.join('; ')})` : ''}`;
 }
 
 function hasProperties(node: unknown): boolean {
-  if (!node || typeof node !== "object") return false;
+  if (!node || typeof node !== 'object') return false;
   const props = (node as Record<string, unknown>).properties;
-  return (
-    !!props &&
-    typeof props === "object" &&
-    Object.keys(props as object).length > 0
-  );
+  return !!props && typeof props === 'object' && Object.keys(props as object).length > 0;
 }
 
 /** Step one path segment, descending through any union branches. Returns every candidate. */
 function stepSchema(nodes: readonly unknown[], seg: PropertyKey): unknown[] {
-  const key =
-    typeof seg === "object" && seg !== null
-      ? String((seg as { key: PropertyKey }).key)
-      : String(seg);
+  const key = typeof seg === 'object' && seg !== null ? String((seg as { key: PropertyKey }).key) : String(seg);
   const isIndex = /^\d+$/.test(key);
   const next: unknown[] = [];
   const visit = (node: unknown, depth: number): void => {
-    if (!node || typeof node !== "object" || depth > 4) return;
+    if (!node || typeof node !== 'object' || depth > 4) return;
     const rec = node as Record<string, unknown>;
     if (isIndex) {
       const prefixItems = rec.prefixItems;
-      if (Array.isArray(prefixItems) && prefixItems[Number(key)])
-        next.push(prefixItems[Number(key)]);
+      if (Array.isArray(prefixItems) && prefixItems[Number(key)]) next.push(prefixItems[Number(key)]);
       else if (rec.items) next.push(rec.items);
     } else {
       const props = rec.properties as Record<string, unknown> | undefined;
-      if (props && Object.prototype.hasOwnProperty.call(props, key))
-        next.push(props[key]);
-      else if (
-        rec.additionalProperties &&
-        typeof rec.additionalProperties === "object"
-      ) {
+      if (props && Object.prototype.hasOwnProperty.call(props, key)) next.push(props[key]);
+      else if (rec.additionalProperties && typeof rec.additionalProperties === 'object') {
         next.push(rec.additionalProperties);
       }
     }
@@ -1822,67 +1639,54 @@ function failingFieldSchemaHint(
     // Walk the path, remembering the deepest prefix whose node actually lists properties.
     let nodes: unknown[] = [rawSchema];
     let bestNode: unknown;
-    let bestLabel = "";
+    let bestLabel = '';
     const labelParts: string[] = [];
     for (const seg of path) {
       nodes = stepSchema(nodes, seg);
       if (nodes.length === 0) break;
-      const segKey =
-        typeof seg === "object" && seg !== null
-          ? String((seg as { key: PropertyKey }).key)
-          : String(seg);
-      labelParts.push(/^\d+$/.test(segKey) ? "[]" : segKey);
-      const objectish =
-        nodes.find((node) => hasProperties(node)) ??
-        nodes
-          .flatMap((node) => schemaUnionBranches(node))
-          .find((node) => hasProperties(node));
+      const segKey = typeof seg === 'object' && seg !== null ? String((seg as { key: PropertyKey }).key) : String(seg);
+      labelParts.push(/^\d+$/.test(segKey) ? '[]' : segKey);
+      const objectish = nodes.find((node) => hasProperties(node))
+        ?? nodes.flatMap((node) => schemaUnionBranches(node)).find((node) => hasProperties(node));
       if (objectish) {
         bestNode = objectish;
-        bestLabel = labelParts.join(".").replace(/\.\[\]/g, "[]");
+        bestLabel = labelParts.join('.').replace(/\.\[\]/g, '[]');
       }
     }
     if (bestNode === undefined || rendered.has(bestLabel)) continue;
 
-    let json = "";
+    let json = '';
     try {
-      json = JSON.stringify(bestNode) ?? "";
+      json = JSON.stringify(bestNode) ?? '';
     } catch {
-      json = "";
+      json = '';
     }
     if (json.length === 0) continue;
-    if (json.length > FIELD_SCHEMA_HINT_MAX)
-      json = `${json.slice(0, FIELD_SCHEMA_HINT_MAX)} …(truncated)`;
+    if (json.length > FIELD_SCHEMA_HINT_MAX) json = `${json.slice(0, FIELD_SCHEMA_HINT_MAX)} …(truncated)`;
     // Keep a complete accepted example ahead of the verbose descriptions. A
     // nested object such as loop:checkpoint's checks[] row has a long
     // `verified` description; serializing the raw schema first can hit the
     // bounded hint before that optional field appears, leaving the caller to
     // guess the contract (EI-20232348713050420).
     const compact = compactAcceptedObjectHint(bestNode);
-    rendered.set(
-      bestLabel,
-      compact ? `e.g. ${compact}; verbose schema: ${json}` : json,
-    );
+    rendered.set(bestLabel, compact ? `e.g. ${compact}; verbose schema: ${json}` : json);
     if (rendered.size >= FIELD_SCHEMA_HINT_MAX_FIELDS) break;
   }
-  if (rendered.size === 0) return "";
-  const body = [...rendered.entries()]
-    .map(([label, json]) => `\`${label}\` accepts ${json}`)
-    .join(" · ");
+  if (rendered.size === 0) return '';
+  const body = [...rendered.entries()].map(([label, json]) => `\`${label}\` accepts ${json}`).join(' · ');
   return ` — the field(s) that failed, in full: ${body}`;
 }
 
 function argsSchemaHint(rawSchema: unknown, cache: { hint?: string }): string {
   if (cache.hint === undefined) {
-    let json = "";
+    let json = '';
     try {
-      json = JSON.stringify(rawSchema) ?? "";
+      json = JSON.stringify(rawSchema) ?? '';
     } catch {
-      json = "";
+      json = '';
     }
-    if (json.length > ARGS_SCHEMA_HINT_MAX)
-      json = `${json.slice(0, ARGS_SCHEMA_HINT_MAX)} …(truncated)`;
-    cache.hint = json.length > 0 ? ` — full args schema: ${json}` : "";
+    if (json.length > ARGS_SCHEMA_HINT_MAX) json = `${json.slice(0, ARGS_SCHEMA_HINT_MAX)} …(truncated)`;
+    cache.hint = json.length > 0 ? ` — full args schema: ${json}` : '';
   }
   return cache.hint;
 }
@@ -1905,10 +1709,7 @@ function argsSchemaHint(rawSchema: unknown, cache: { hint?: string }): string {
  * output type JSON Schema cannot express. Refinements (`.refine` / `.superRefine`) and
  * `preprocess` are all representable and fine.
  */
-export function toArgsJsonSchema(
-  toolName: string,
-  args: StandardSchemaV1,
-): Record<string, unknown> {
+export function toArgsJsonSchema(toolName: string, args: StandardSchemaV1): Record<string, unknown> {
   try {
     return toJsonSchema(args);
   } catch (err) {
@@ -1930,15 +1731,14 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
   sourceFile?: string | null,
 ): void {
   // tasks:list → /api/agent-tools/tasks/list
-  const httpPath = `/api/agent-tools/${def.name.replaceAll(":", "/")}`;
+  const httpPath = `/api/agent-tools/${def.name.replaceAll(':', '/')}`;
   // Pluggable schema→JSON-Schema (P-021); default adapter is Zod 4's
   // toJSONSchema. zod-to-json-schema@3 returned just `{ $schema }` for zod 4
   // schemas (empty input schemas) — the built-in path fixed that.
   const rawSchema = toArgsJsonSchema(def.name, def.args);
   delete (rawSchema as Record<string, unknown>).$schema;
   const inputSchema = flattenForOpenAi(rawSchema);
-  const { jsonSchema: outputJsonSchema, eligibility } =
-    computeOutputEligibility(def.result);
+  const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
   const readColumns = projectReadColumns(outputJsonSchema);
   const schemaHintCache: { hint?: string } = {};
 
@@ -1958,25 +1758,20 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     // per-call tier extraction + closed-shape validation see the intended args.
     // Framework-reserved per-call tier override is stripped next — BEFORE
     // validation (context-trimming-tiers D-004; not part of any tool's schema).
-    const { input: tierlessInput, callTier } = extractPayloadTier(
-      unwrapUnparsedToolInput(input),
-    );
+    const { input: tierlessInput, callTier } = extractPayloadTier(unwrapUnparsedToolInput(input));
     const legacyCtx: ToolContext & {
       contextTier?: string;
       payloadTierOverride?: string;
       telemetrySurface?: string;
     } = {
-      principal: ctx.principal as unknown as ToolContext["principal"],
+      principal: ctx.principal as unknown as ToolContext['principal'],
       tx: ctx.tx,
-      log: (level, msg, meta) =>
-        ctx.log(`[${level}] ${msg}${meta ? ` ${JSON.stringify(meta)}` : ""}`),
+      log: (level, msg, meta) => ctx.log(`[${level}] ${msg}${meta ? ` ${JSON.stringify(meta)}` : ''}`),
       // Thread the RESOLVED payload tier so principal-gated tools that keep a
       // hand-rolled JSON ToolResult (byte-stable contracts — memory:search)
       // can adapt their defaults off ctx.contextTier, same as the role-gated
       // wrapper below (context-trimming-tiers P-024).
-      ...((callTier ?? ctx.contextTier)
-        ? { contextTier: callTier ?? ctx.contextTier }
-        : {}),
+      ...(callTier ?? ctx.contextTier ? { contextTier: callTier ?? ctx.contextTier } : {}),
       // Keep the explicit-vs-ambient distinction available to raw ToolResult
       // handlers. `contextTier` alone cannot tell a caller's `full` override
       // from the default session tier.
@@ -2009,17 +1804,11 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       // a test that calls `handler(input, ctxLiteral)` directly proves only that
       // the handler READS the field, never that dispatch DELIVERS it. That gap is
       // exactly why this shipped green.
-      ...(ctx.telemetrySurface
-        ? { telemetrySurface: ctx.telemetrySurface }
-        : {}),
+      ...(ctx.telemetrySurface ? { telemetrySurface: ctx.telemetrySurface } : {}),
     };
     const shimmed = applyHarnessArgAlias(
       rawSchema,
-      applyPositionalWriteShim(
-        def.name,
-        rawSchema,
-        stripUndefinedArgKeys(tierlessInput),
-      ),
+      applyPositionalWriteShim(def.name, rawSchema, stripUndefinedArgKeys(tierlessInput)),
     );
     const parsed = await standardValidate(def.args, shimmed);
     if (!parsed.ok) {
@@ -2042,21 +1831,10 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     // handler's own JSON over a non-mcp transport) are byte-for-byte unchanged
     // — preserving the contract a past blanket re-encode broke
     // (memory-taxonomy-and-debt-followups P-006).
-    if (
-      response &&
-      typeof response === "object" &&
-      Array.isArray((response as ToolResult).content)
-    ) {
+    if (response && typeof response === 'object' && Array.isArray((response as ToolResult).content)) {
       const reencodable = reencodableJsonPayload(response as ToolResult, ctx);
       if (reencodable !== undefined) {
-        return serializeProjectedResult(
-          { data: reencodable } as ToolResponse,
-          ctx,
-          eligibility,
-          def,
-          readColumns,
-          parsed.value,
-        );
+        return serializeProjectedResult({ data: reencodable } as ToolResponse, ctx, eligibility, def, readColumns, parsed.value);
       }
       return attachRequestedStructuredContent(response as ToolResult, ctx, def);
     }
@@ -2078,8 +1856,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       // never a defaulted/session 'full'. A ctx-borne `transportCapExempt`
       // consumer (code:run's inner dispatch — the result never reaches an
       // agent's context) gets the same exemption (EI-18719561823587590).
-      explicitFullRequest:
-        callTier === "full" || ctx.transportCapExempt === true,
+      explicitFullRequest: callTier === 'full' || ctx.transportCapExempt === true,
       // WI-37843: a tool may raise its OWN hard ceiling (coord:orient, the
       // session-bootstrap read, whose full payload IS the value). Absent ⇒ the
       // shared PAYLOAD_TIER_HARD_CEILING_CHARS, unchanged for every other tool.
@@ -2090,18 +1867,11 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       // the recovery `next` — absent ⇒ the generic host-neutral wording.
       rawDispatchTemplate: ctx.rawDispatchTemplate,
     });
-    return serializeProjectedResult(
-      shaped,
-      ctx,
-      eligibility,
-      def,
-      readColumns,
-      parsed.value,
-    );
+    return serializeProjectedResult(shaped, ctx, eligibility, def, readColumns, parsed.value);
   };
 
   registerProjectedTool({
-    pluginName: "agent-mcp",
+    pluginName: 'agent-mcp',
     description: def.description,
     // Where this tool was defined (absolute, captured from the call stack).
     // Null when the stack was unreadable — never guessed.
@@ -2112,9 +1882,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     discoveryInputSchema: rawSchema,
     capabilities: [def.capability as never],
     effect: def.effect,
-    effectForCall: def.effectForCall as
-      | ((args: unknown) => "read" | "write")
-      | undefined,
+    effectForCall: def.effectForCall as ((args: unknown) => 'read' | 'write') | undefined,
     idempotent: def.idempotent,
     replaces: def.replaces,
     composition: def.composition,
@@ -2135,8 +1903,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     crossWorkspace: def.crossWorkspace,
     // EI-18808330244321407: host transaction retention is explicit opt-in.
     needsWorkspaceTx: def.needsWorkspaceTx,
-    // EI-18666279107998059: thread skipWorkspaceTx the same way — read by the
-    // host's dispatchWithSynthesizedTx seam. See ProjectedTool.skipWorkspaceTx.
+    // Legacy no-op metadata: projected for compatibility, ignored by hosts.
     skipWorkspaceTx: def.skipWorkspaceTx,
     // EI-19386201256023240: thread skipResultDoor the same way — read by the
     // host's result-door choke point. See ProjectedTool.skipResultDoor.
@@ -2153,7 +1920,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     delta: def.delta,
     expose: {
       mcp: { name: def.name },
-      http: { path: httpPath, methods: ["POST"] },
+      http: { path: httpPath, methods: ['POST'] },
       // IPC-eligibility (the typed endpoint_invoke / sys:http allowlist) is
       // opt-in per tool via `expose: { ipc: true }` in defineTool — read off
       // the projected registry by the host's IPC server (Phase E8).
@@ -2182,12 +1949,11 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
   expose?: ToolExposure,
   sourceFile?: string | null,
 ): void {
-  const httpPath = `/api/agent-tools/${def.name.replaceAll(":", "/")}`;
+  const httpPath = `/api/agent-tools/${def.name.replaceAll(':', '/')}`;
   const rawSchema = toArgsJsonSchema(def.name, def.args);
   delete (rawSchema as Record<string, unknown>).$schema;
   const inputSchema = flattenForOpenAi(rawSchema);
-  const { jsonSchema: outputJsonSchema, eligibility } =
-    computeOutputEligibility(def.result);
+  const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
   const readColumns = projectReadColumns(outputJsonSchema);
   const schemaHintCache: { hint?: string } = {};
 
@@ -2196,16 +1962,10 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     // per-call tier extraction + closed-shape validation see the intended args.
     // Framework-reserved per-call tier override is stripped next — BEFORE
     // validation (context-trimming-tiers D-004; not part of any tool's schema).
-    const { input: tierlessInput, callTier } = extractPayloadTier(
-      unwrapUnparsedToolInput(input),
-    );
+    const { input: tierlessInput, callTier } = extractPayloadTier(unwrapUnparsedToolInput(input));
     const shimmed = applyHarnessArgAlias(
       rawSchema,
-      applyPositionalWriteShim(
-        def.name,
-        rawSchema,
-        stripUndefinedArgKeys(tierlessInput),
-      ),
+      applyPositionalWriteShim(def.name, rawSchema, stripUndefinedArgKeys(tierlessInput)),
     );
     const parsed = await standardValidate(def.args, shimmed);
     if (!parsed.ok) {
@@ -2236,27 +1996,12 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     // the MCP transport, a single-text JSON body whose shape TOON shrinks is
     // re-encoded for the token win (P-002); see `reencodableJsonPayload` — it is
     // a no-op on every non-mcp transport, so verbatim-content consumers are safe.
-    if (
-      out &&
-      typeof out === "object" &&
-      Array.isArray((out as ToolResult).content)
-    ) {
+    if (out && typeof out === 'object' && Array.isArray((out as ToolResult).content)) {
       const reencodable = reencodableJsonPayload(out as ToolResult, handlerCtx);
       if (reencodable !== undefined) {
-        return serializeProjectedResult(
-          { data: reencodable } as ToolResponse,
-          handlerCtx,
-          eligibility,
-          def,
-          readColumns,
-          parsed.value,
-        );
+        return serializeProjectedResult({ data: reencodable } as ToolResponse, handlerCtx, eligibility, def, readColumns, parsed.value);
       }
-      return attachRequestedStructuredContent(
-        out as ToolResult,
-        handlerCtx,
-        def,
-      );
+      return attachRequestedStructuredContent(out as ToolResult, handlerCtx, def);
     }
 
     // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
@@ -2277,8 +2022,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
       // never a defaulted/session 'full'. A ctx-borne `transportCapExempt`
       // consumer (code:run's inner dispatch — the result never reaches an
       // agent's context) gets the same exemption (EI-18719561823587590).
-      explicitFullRequest:
-        callTier === "full" || handlerCtx.transportCapExempt === true,
+      explicitFullRequest: callTier === 'full' || handlerCtx.transportCapExempt === true,
       // WI-37843: a tool may raise its OWN hard ceiling (coord:orient, the
       // session-bootstrap read, whose full payload IS the value). Absent ⇒ the
       // shared PAYLOAD_TIER_HARD_CEILING_CHARS, unchanged for every other tool.
@@ -2290,18 +2034,11 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
       rawDispatchTemplate: handlerCtx.rawDispatchTemplate,
     });
     // ToolResponse envelope → format-aware MCP content[] + _meta.
-    return serializeProjectedResult(
-      shaped,
-      handlerCtx,
-      eligibility,
-      def,
-      readColumns,
-      parsed.value,
-    );
+    return serializeProjectedResult(shaped, handlerCtx, eligibility, def, readColumns, parsed.value);
   };
 
   registerProjectedTool({
-    pluginName: "agent-mcp",
+    pluginName: 'agent-mcp',
     description: def.description,
     // Where this tool was defined (absolute, captured from the call stack).
     // Null when the stack was unreadable — never guessed.
@@ -2312,9 +2049,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     discoveryInputSchema: rawSchema,
     capabilities: [def.capability as never],
     effect: def.effect,
-    effectForCall: def.effectForCall as
-      | ((args: unknown) => "read" | "write")
-      | undefined,
+    effectForCall: def.effectForCall as ((args: unknown) => 'read' | 'write') | undefined,
     idempotent: def.idempotent,
     replaces: def.replaces,
     composition: def.composition,
@@ -2337,7 +2072,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     crossWorkspace: def.crossWorkspace,
     // EI-18808330244321407: see ProjectedTool.needsWorkspaceTx.
     needsWorkspaceTx: def.needsWorkspaceTx,
-    // EI-18666279107998059: see ProjectedTool.skipWorkspaceTx.
+    // Legacy no-op metadata: projected for compatibility, ignored by hosts.
     skipWorkspaceTx: def.skipWorkspaceTx,
     // EI-19386201256023240: see ProjectedTool.skipResultDoor.
     skipResultDoor: def.skipResultDoor,
@@ -2350,7 +2085,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     state: def.state,
     expose: {
       mcp: { name: def.name },
-      http: { path: httpPath, methods: ["POST"] },
+      http: { path: httpPath, methods: ['POST'] },
       // IPC-eligibility (the typed endpoint_invoke / sys:http allowlist) is
       // opt-in per tool via `expose: { ipc: true }` in defineTool — read off
       // the projected registry by the host's IPC server (Phase E8).

@@ -2,27 +2,22 @@
  * Core types for the Agent MCP server.
  */
 
-import type { RolesQuota, ToolResult } from "./wire";
-import type { AgentRole } from "./host-types";
-import type { z, ZodTypeAny } from "zod";
-import type { StandardSchemaV1 } from "./standard-schema";
-import type {
-  EventsSchema,
-  ResultDoorSkipReason,
-  UnifiedToolContext,
-  UserEvents,
-} from "./tool-projection";
-import type { Authorizer } from "./authz";
-import type { ToolRequireSpec } from "./requires";
-import type { DeltaCapability } from "./delta-protocol";
-import type { SeeAlso } from "./see-also";
+import type { RolesQuota, ToolResult } from './wire';
+import type { AgentRole } from './host-types';
+import type { z, ZodTypeAny } from 'zod';
+import type { StandardSchemaV1 } from './standard-schema';
+import type { EventsSchema, ResultDoorSkipReason, UnifiedToolContext, UserEvents } from './tool-projection';
+import type { Authorizer } from './authz';
+import type { ToolRequireSpec } from './requires';
+import type { DeltaCapability } from './delta-protocol';
+import type { SeeAlso } from './see-also';
 import type {
   OpenCardSnapshot as WireOpenCardSnapshot,
   ReportBlock,
-} from "@papercusp/chat-protocol";
+} from '@papercusp/chat-protocol';
 
 /** A Papercusp capability tier per spec/capabilities §10.6.1. */
-export type CapabilityTier = "low" | "medium" | "high";
+export type CapabilityTier = 'low' | 'medium' | 'high';
 
 /**
  * Principal kinds — who the caller is.
@@ -33,13 +28,13 @@ export type CapabilityTier = "low" | "medium" | "high";
  * and the legacy loopback-only trust path.
  */
 export type PrincipalKind =
-  | "harness" // sealed harness spawn URL (orchestrator-minted)
-  | "system" // operator self-issued (e.g. background sweepers, superuser shell)
-  | "pi" // shell-launched agent, bearer file
-  | "user" // cookie-bearing browser session
-  | "device" // JWT-bearing paired device (phone, CLI, kiosk, …)
-  | "service" // bearer-token external integration (future webapp services)
-  | "loopback"; // host header is local; no token (legacy desktop-only gate)
+  | 'harness'   // sealed harness spawn URL (orchestrator-minted)
+  | 'system'    // operator self-issued (e.g. background sweepers, superuser shell)
+  | 'pi'        // shell-launched agent, bearer file
+  | 'user'      // cookie-bearing browser session
+  | 'device'    // JWT-bearing paired device (phone, CLI, kiosk, …)
+  | 'service'   // bearer-token external integration (future webapp services)
+  | 'loopback'; // host header is local; no token (legacy desktop-only gate)
 
 /**
  * How the principal was authenticated. Orthogonal to `PrincipalKind` —
@@ -49,12 +44,12 @@ export type PrincipalKind =
  * and `authMethod` describe *how we know*.
  */
 export type PrincipalAuthMethod =
-  | "bearer-token" // ~/.papercusp/superuser-token or external bearer
-  | "cookie-session" // browser cookie
-  | "jwt" // mobile JWT, future webapp tokens
-  | "spawn-url" // HMAC-signed orchestrator URL
-  | "host-loopback" // Host header is local; no token (legacy)
-  | "process-internal"; // in-process call (e.g. background sweeper)
+  | 'bearer-token'     // ~/.papercusp/superuser-token or external bearer
+  | 'cookie-session'   // browser cookie
+  | 'jwt'              // mobile JWT, future webapp tokens
+  | 'spawn-url'        // HMAC-signed orchestrator URL
+  | 'host-loopback'    // Host header is local; no token (legacy)
+  | 'process-internal'; // in-process call (e.g. background sweeper)
 
 /**
  * Trust ladder. Middleware reads this without having to know the full
@@ -68,7 +63,7 @@ export type PrincipalAuthMethod =
  *                                 bans these at boot when bindHost ≠
  *                                 127.0.0.1).
  */
-export type PrincipalTrust = "trusted" | "verified" | "unverified-loopback";
+export type PrincipalTrust = 'trusted' | 'verified' | 'unverified-loopback';
 
 /** Resolved caller identity. */
 export interface Principal<TKind extends string = PrincipalKind> {
@@ -125,7 +120,7 @@ export interface PrincipalRequirements {
    * Query-string tokens leak into access logs, so this is opt-in per
    * route and never a silent global fallback.
    */
-  tokenIn?: ReadonlyArray<"header" | "query">;
+  tokenIn?: ReadonlyArray<'header' | 'query'>;
 }
 
 /**
@@ -136,7 +131,7 @@ export interface PrincipalRequirements {
  * address (enforcement lives host-side; this type is the contract).
  * Otherwise a `PrincipalRequirements` object gates the call.
  */
-export type RouteAuth = "public" | "loopback" | PrincipalRequirements;
+export type RouteAuth = 'public' | 'loopback' | PrincipalRequirements;
 
 /* ─── Route projection (Phase E6, endpoint-unification-2026-05-21) ─────
  *
@@ -153,13 +148,7 @@ export type RouteAuth = "public" | "loopback" | PrincipalRequirements;
  * with the package primitive and *mounted* by the host.
  */
 
-export type RouteMethod =
-  | "GET"
-  | "POST"
-  | "PUT"
-  | "PATCH"
-  | "DELETE"
-  | "OPTIONS";
+export type RouteMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'OPTIONS';
 
 /**
  * Per-call context handed to a route handler. Host-neutral: `req` and
@@ -174,11 +163,7 @@ export interface RouteContext<TInput = undefined> {
   /** Path parameters (`/harness/:slug` → `{ slug }`). */
   params: Record<string, string>;
   /** Telemetry-bound logger. */
-  log: (
-    level: "info" | "warn" | "error",
-    msg: string,
-    meta?: Record<string, unknown>,
-  ) => void;
+  log: (level: 'info' | 'warn' | 'error', msg: string, meta?: Record<string, unknown>) => void;
   /** Abort signal — fires at `timeoutSec`. Handlers racing I/O should pass it through. */
   signal: AbortSignal;
 }
@@ -188,9 +173,7 @@ export interface RouteContext<TInput = undefined> {
  * is handed a route-shaped input (discriminated by the `method` field);
  * mounted onto the Hono app by `registerRoute` in the host.
  */
-export interface RouteDefinition<
-  TInputSchema extends ZodTypeAny | undefined = undefined,
-> {
+export interface RouteDefinition<TInputSchema extends ZodTypeAny | undefined = undefined> {
   method: RouteMethod;
   /**
    * Hono path. The Hono app's `.basePath('/api')` is implicit, so
@@ -231,9 +214,7 @@ export interface RouteDefinition<
   /** The handler. Web-standard in, Web-standard out. */
   handler: (
     req: Request,
-    ctx: RouteContext<
-      TInputSchema extends ZodTypeAny ? z.infer<TInputSchema> : undefined
-    >,
+    ctx: RouteContext<TInputSchema extends ZodTypeAny ? z.infer<TInputSchema> : undefined>,
   ) => Response | Promise<Response>;
 }
 
@@ -257,16 +238,12 @@ export interface ToolContext<Tx = any> {
    */
   tx: Tx;
   /** Logger bound to the tool name + principal. */
-  log: (
-    level: "info" | "warn" | "error",
-    msg: string,
-    meta?: Record<string, unknown>,
-  ) => void;
+  log: (level: 'info' | 'warn' | 'error', msg: string, meta?: Record<string, unknown>) => void;
   /**
    * The explicit per-call `payloadTier` override, when supplied by the
    * caller. This is distinct from any ambient/session tier.
    */
-  payloadTierOverride?: import("./payload-tier").PayloadTier;
+  payloadTierOverride?: import('./payload-tier').PayloadTier;
   /**
    * Calling agent role, when the transport carries one (EI-10358). Threaded
    * through from the outer `UnifiedToolContext.role` by
@@ -293,7 +270,7 @@ export interface ToolContext<Tx = any> {
  * transport without rewriting.
  */
 export interface UIResourceContent {
-  type: "resource";
+  type: 'resource';
   resource: {
     uri: string;
     mimeType: string;
@@ -323,7 +300,7 @@ export interface ToolResponse<T = unknown> {
    */
   payloadProjection?: {
     truncated: true;
-    tier: "trimmed" | "standard" | "full";
+    tier: 'trimmed' | 'standard' | 'full';
     forced: boolean;
     originalChars: number;
     returnedChars: number;
@@ -443,7 +420,7 @@ export interface ToolGuidance {
    * and by worker as "find the chunk I'm assigned to" — same tool,
    * different framing.
    */
-  byRole?: Partial<Record<AgentRole, Partial<Omit<ToolGuidance, "byRole">>>>;
+  byRole?: Partial<Record<AgentRole, Partial<Omit<ToolGuidance, 'byRole'>>>>;
 }
 
 /**
@@ -523,7 +500,7 @@ export interface ToolEmitSpec {
    * default) or `'sync'` (in-process await; only when the trigger needs the
    * value). Desugars to `ReactionRule.mode`.
    */
-  mode?: "durable" | "sync";
+  mode?: 'durable' | 'sync';
   /**
    * Optional explicit id suffix for the generated rule. Defaults to the
    * entry's index in the `emits` array; the full rule id is
@@ -533,17 +510,11 @@ export interface ToolEmitSpec {
 }
 
 /** Tool definition produced by `defineTool`. */
-export interface ToolDefinition<
-  TArgs extends StandardSchemaV1 = StandardSchemaV1,
-> {
+export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV1> {
   /** Tool name, e.g. `"tasks:list"`. Defaults to file-path-derived. */
   name: string;
   /** Resource-authorization hook (RFC tooldef-auth Phase 1b) — see `Authorizer`. */
-  authorize?: Authorizer<
-    StandardSchemaV1.InferOutput<TArgs>,
-    UnifiedToolContext,
-    UnifiedToolContext["principal"]
-  >;
+  authorize?: Authorizer<StandardSchemaV1.InferOutput<TArgs>, UnifiedToolContext, UnifiedToolContext['principal']>;
   /** RBAC role requirement (RFC tooldef-auth Phase 2): caller's `principal.roles` must include one of these (any-of). See `ProjectedTool.requireRoles`. */
   requireRoles?: readonly string[];
   /** Opt out of default-deny (RFC tooldef-auth Phase 3): a tool that intentionally needs no auth gate (the `[AllowAnonymous]` equivalent). See `ProjectedTool.public`. */
@@ -559,15 +530,13 @@ export interface ToolDefinition<
    * explicitly to override. Threaded onto `ProjectedTool`; consumed by the code-execution
    * sandbox's dry-run/confirm gate (a read-only tool needs no gate).
    */
-  effect?: "read" | "write";
+  effect?: 'read' | 'write';
   /**
    * Optional argument-sensitive effect classifier for union-shaped tools. The
    * static effect remains the safe fallback when this classifier is absent or
    * cannot classify a call.
    */
-  effectForCall?: (
-    args: StandardSchemaV1.InferOutput<TArgs>,
-  ) => "read" | "write";
+  effectForCall?: (args: StandardSchemaV1.InferOutput<TArgs>) => 'read' | 'write';
   /** Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): when
    *  true, a handler that COMPLETED but whose `ctx.signal` had already aborted (the
    *  wall-clock/idle timeout fired mid-handler under load) surfaces its completed result as
@@ -585,7 +554,7 @@ export interface ToolDefinition<
    */
   replaces?: readonly string[];
   /** Derived at defineTool time: 'composite' when `replaces` is non-empty, else 'primitive'. */
-  composition?: "primitive" | "composite";
+  composition?: 'primitive' | 'composite';
   /** Tier looked up from the capability per §10.6.1's table. */
   tier: CapabilityTier;
   /** Argument schema (any Standard Schema validator). Runtime validation + JSON-schema source. */
@@ -608,10 +577,7 @@ export interface ToolDefinition<
    * (control rides the MCP `_meta` ENVELOPE). Semantic added/updated/removed
    * deltas are a separate endpoint layer (Lane E) NOT enabled by this field.
    */
-  delta?: DeltaCapability<
-    StandardSchemaV1.InferOutput<TArgs>,
-    UnifiedToolContext
-  >;
+  delta?: DeltaCapability<StandardSchemaV1.InferOutput<TArgs>, UnifiedToolContext>;
   /**
    * Implementation. PREFER returning a `ToolResponse` envelope (`{ data }`)
    * — it gets format-aware serialization. A raw `ToolResult` (MCP content
@@ -619,10 +585,7 @@ export interface ToolDefinition<
    * role-gated wrapper; the memory:* family + the TUI Memory tab depend on
    * it — memory-taxonomy-and-debt-followups P-006).
    */
-  handler: (
-    args: StandardSchemaV1.InferOutput<TArgs>,
-    ctx: ToolContext,
-  ) => Promise<ToolResponse | ToolResult>;
+  handler: (args: StandardSchemaV1.InferOutput<TArgs>, ctx: ToolContext) => Promise<ToolResponse | ToolResult>;
   /**
    * Optional per-tool guidance for the role's system prompt.
    * Projected into the prompt assembly by `assembleRolePrompt`.
@@ -636,11 +599,11 @@ export interface ToolDefinition<
    * responses remain byte-identical; oversized default-tier results receive
    * a loud generic bounded projection. See `payload-tier.ts`.
    */
-  shape?: import("./payload-tier").PayloadShapers;
+  shape?: import('./payload-tier').PayloadShapers;
   /** See `ToolDefinitionInput.profile`. */
-  profile?: "engineer" | "all";
+  profile?: 'engineer' | 'all';
   /** See `ToolDefinitionInput.papercusp`. */
-  harness?: "required" | "optional" | "none";
+  harness?: 'required' | 'optional' | 'none';
   /** Intrinsic lifecycle emissions — see `ToolEmitSpec`. Desugared to event rules at load. */
   emits?: readonly ToolEmitSpec[];
   /** Declarative preconditions — see `ToolRequireSpec`. Evaluated by the dispatcher's `preconditions` step. */
@@ -674,17 +637,11 @@ export interface ToolDefinition<
 }
 
 /** Input shape for `defineTool` — same as ToolDefinition minus derived fields. */
-export interface ToolDefinitionInput<
-  TArgs extends StandardSchemaV1 = StandardSchemaV1,
-> {
+export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSchemaV1> {
   /** Optional explicit name; defaults to file-path-derived. */
   name?: string;
   /** Resource-authorization hook (RFC tooldef-auth Phase 1b) — see `Authorizer`. */
-  authorize?: Authorizer<
-    StandardSchemaV1.InferOutput<TArgs>,
-    UnifiedToolContext,
-    UnifiedToolContext["principal"]
-  >;
+  authorize?: Authorizer<StandardSchemaV1.InferOutput<TArgs>, UnifiedToolContext, UnifiedToolContext['principal']>;
   /** RBAC role requirement (RFC tooldef-auth Phase 2): caller's `principal.roles` must include one of these (any-of). See `ProjectedTool.requireRoles`. */
   requireRoles?: readonly string[];
   /** Opt out of default-deny (RFC tooldef-auth Phase 3): a tool that intentionally needs no auth gate (the `[AllowAnonymous]` equivalent). See `ProjectedTool.public`. */
@@ -693,11 +650,9 @@ export interface ToolDefinitionInput<
   description?: string;
   capability: string;
   /** Read/write effect (B-CX-PRE); inferred from the capability suffix when omitted. See ToolDefinition.effect. */
-  effect?: "read" | "write";
+  effect?: 'read' | 'write';
   /** Optional argument-sensitive effect classifier; see ToolDefinition.effectForCall. */
-  effectForCall?: (
-    args: StandardSchemaV1.InferOutput<TArgs>,
-  ) => "read" | "write";
+  effectForCall?: (args: StandardSchemaV1.InferOutput<TArgs>) => 'read' | 'write';
   /** Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): when
    *  true, a handler that COMPLETED but whose `ctx.signal` had already aborted (the
    *  wall-clock/idle timeout fired mid-handler under load) surfaces its completed result as
@@ -710,10 +665,7 @@ export interface ToolDefinitionInput<
   replaces?: readonly string[];
   args: TArgs;
   /** See `ToolDefinition.handler` — ToolResponse preferred; a raw ToolResult passes through untouched. */
-  handler: (
-    args: StandardSchemaV1.InferOutput<TArgs>,
-    ctx: ToolContext,
-  ) => Promise<ToolResponse | ToolResult>;
+  handler: (args: StandardSchemaV1.InferOutput<TArgs>, ctx: ToolContext) => Promise<ToolResponse | ToolResult>;
   /** See `ToolGuidance`. */
   guidance?: ToolGuidance;
   /**
@@ -723,7 +675,7 @@ export interface ToolDefinitionInput<
    * responses remain byte-identical; oversized default-tier results receive
    * a loud generic bounded projection. See `payload-tier.ts`.
    */
-  shape?: import("./payload-tier").PayloadShapers;
+  shape?: import('./payload-tier').PayloadShapers;
   /* ─── Unified-primitive forward-compat fields (Phase E1, no behavior change) ─────
    * These accept the future `defineTool`-collapsed shape without changing
    * runtime behavior. Phase E2 wires them into dispatch. Phase E1 just makes
@@ -760,10 +712,7 @@ export interface ToolDefinitionInput<
    * (agent-tool-delta-protocol-2026-06-22, D-001/D-002). Endpoints declare a
    * `revision` source; the framework handles cursor + `not_modified` plumbing.
    */
-  delta?: DeltaCapability<
-    StandardSchemaV1.InferOutput<TArgs>,
-    UnifiedToolContext
-  >;
+  delta?: DeltaCapability<StandardSchemaV1.InferOutput<TArgs>, UnifiedToolContext>;
   /**
    * Telemetry sample rate, 0..1. Default 1 (record every call). High-
    * frequency tools set this < 1 so `tool_invocations` doesn't flood.
@@ -776,13 +725,13 @@ export interface ToolDefinitionInput<
    * Setting `expose` here lets a tool declare arbitrary path/methods,
    * or expose itself over IPC.
    */
-  expose?: import("./tool-projection").ToolExposure;
+  expose?: import('./tool-projection').ToolExposure;
   /**
    * Profile gate. `'engineer'` = Group A (Papercusp-only, hidden from
    * power-engineer sessions). Omit / `'all'` = visible to every profile.
    * See `ProjectedTool.profile` and omp-profile-system-2026-05-24 plan.
    */
-  profile?: "engineer" | "all";
+  profile?: 'engineer' | 'all';
   /**
    * Harness-scope requirement. `'required'` makes the dispatcher return a
    * uniform `harness_required` error when `ctx.harnessSlug` is absent or
@@ -790,7 +739,7 @@ export interface ToolDefinitionInput<
    * slug self-resolve; leave them `'optional'` (default) or `'none'`.
    * See `ProjectedTool.papercusp` (su-prompt-audit-fixes P-020 / D-007).
    */
-  harness?: "required" | "optional" | "none";
+  harness?: 'required' | 'optional' | 'none';
   /**
    * Intrinsic lifecycle emissions (coord-lifecycle-automation D-002). Each
    * entry desugars to an event-reaction rule registered at load — co-location
@@ -843,11 +792,7 @@ export interface RoleToolDefinition<
 > {
   name: string;
   /** Resource-authorization hook (RFC tooldef-auth Phase 1b) — see `Authorizer`. */
-  authorize?: Authorizer<
-    StandardSchemaV1.InferOutput<TArgs>,
-    UnifiedToolContext,
-    UnifiedToolContext["principal"]
-  >;
+  authorize?: Authorizer<StandardSchemaV1.InferOutput<TArgs>, UnifiedToolContext, UnifiedToolContext['principal']>;
   /** RBAC role requirement (RFC tooldef-auth Phase 2): caller's `principal.roles` must include one of these (any-of). See `ProjectedTool.requireRoles`. */
   requireRoles?: readonly string[];
   /** Opt out of default-deny (RFC tooldef-auth Phase 3): a tool that intentionally needs no auth gate (the `[AllowAnonymous]` equivalent). See `ProjectedTool.public`. */
@@ -856,11 +801,9 @@ export interface RoleToolDefinition<
   /** Capability string for tier classification + descriptive listings. Not enforced. */
   capability: string;
   /** Read/write effect (B-CX-PRE); inferred from the capability suffix when omitted. See ToolDefinition.effect. */
-  effect?: "read" | "write";
+  effect?: 'read' | 'write';
   /** Optional argument-sensitive effect classifier; see ToolDefinition.effectForCall. */
-  effectForCall?: (
-    args: StandardSchemaV1.InferOutput<TArgs>,
-  ) => "read" | "write";
+  effectForCall?: (args: StandardSchemaV1.InferOutput<TArgs>) => 'read' | 'write';
   /** Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): when
    *  true, a handler that COMPLETED but whose `ctx.signal` had already aborted (the
    *  wall-clock/idle timeout fired mid-handler under load) surfaces its completed result as
@@ -872,16 +815,16 @@ export interface RoleToolDefinition<
   /** Canonical tool names this composite tool bundles. Omitted for primitives. See ToolDefinition.replaces. */
   replaces?: readonly string[];
   /** Derived at defineTool time: 'composite' when `replaces` is non-empty, else 'primitive'. */
-  composition?: "primitive" | "composite";
+  composition?: 'primitive' | 'composite';
   tier: CapabilityTier;
   /**
    * Visibility profile gate. 'engineer' = engineer-only surfaces (hidden +
    * rejected for the 'all' profile); 'all'/undefined = visible everywhere.
    * Read by registerRoleGatedAsProjected → the projection profile filter.
    */
-  profile?: "engineer" | "all";
+  profile?: 'engineer' | 'all';
   /** See `ToolDefinitionInput.papercusp`. */
-  harness?: "required" | "optional" | "none";
+  harness?: 'required' | 'optional' | 'none';
   /** Marker — read by the projection wrapper to skip the principal check. */
   requirePrincipal: false;
   /** Allowed agent roles. Empty/undefined means any role. */
@@ -1024,7 +967,7 @@ export interface RoleToolDefinition<
    * `['voice']` only when the tool genuinely doesn't make sense in
    * the other surface.
    */
-  modality?: ReadonlyArray<"text" | "voice">;
+  modality?: ReadonlyArray<'text' | 'voice'>;
   args: TArgs;
   /** Typed event channel. See ProjectedTool.events. */
   events?: TEvents;
@@ -1048,10 +991,7 @@ export interface RoleToolDefinition<
    * Opt into framework freshness negotiation — see `ToolDefinition.delta`
    * (agent-tool-delta-protocol-2026-06-22, D-001/D-002).
    */
-  delta?: DeltaCapability<
-    StandardSchemaV1.InferOutput<TArgs>,
-    UnifiedToolContext
-  >;
+  delta?: DeltaCapability<StandardSchemaV1.InferOutput<TArgs>, UnifiedToolContext>;
   /**
    * Handler receives the unified context (no principal). May return either
    * a raw `ToolResult` (MCP shape) or a `ToolResponse` envelope; the
@@ -1070,7 +1010,7 @@ export interface RoleToolDefinition<
    * responses remain byte-identical; oversized default-tier results receive
    * a loud generic bounded projection. See `payload-tier.ts`.
    */
-  shape?: import("./payload-tier").PayloadShapers;
+  shape?: import('./payload-tier').PayloadShapers;
   /** Intrinsic lifecycle emissions — see `ToolEmitSpec`. Desugared to event rules at load. */
   emits?: readonly ToolEmitSpec[];
   /** Declarative preconditions — see `ToolRequireSpec`. Evaluated by the dispatcher's `preconditions` step. */
@@ -1084,11 +1024,7 @@ export interface RoleToolDefinitionInput<
 > {
   name?: string;
   /** Resource-authorization hook (RFC tooldef-auth Phase 1b) — see `Authorizer`. */
-  authorize?: Authorizer<
-    StandardSchemaV1.InferOutput<TArgs>,
-    UnifiedToolContext,
-    UnifiedToolContext["principal"]
-  >;
+  authorize?: Authorizer<StandardSchemaV1.InferOutput<TArgs>, UnifiedToolContext, UnifiedToolContext['principal']>;
   /** RBAC role requirement (RFC tooldef-auth Phase 2): caller's `principal.roles` must include one of these (any-of). See `ProjectedTool.requireRoles`. */
   requireRoles?: readonly string[];
   /** Opt out of default-deny (RFC tooldef-auth Phase 3): a tool that intentionally needs no auth gate (the `[AllowAnonymous]` equivalent). See `ProjectedTool.public`. */
@@ -1096,11 +1032,9 @@ export interface RoleToolDefinitionInput<
   description?: string;
   capability: string;
   /** Read/write effect (B-CX-PRE); inferred from the capability suffix when omitted. See ToolDefinition.effect. */
-  effect?: "read" | "write";
+  effect?: 'read' | 'write';
   /** Optional argument-sensitive effect classifier; see RoleToolDefinition.effectForCall. */
-  effectForCall?: (
-    args: StandardSchemaV1.InferOutput<TArgs>,
-  ) => "read" | "write";
+  effectForCall?: (args: StandardSchemaV1.InferOutput<TArgs>) => 'read' | 'write';
   /** Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): when
    *  true, a handler that COMPLETED but whose `ctx.signal` had already aborted (the
    *  wall-clock/idle timeout fired mid-handler under load) surfaces its completed result as
@@ -1112,9 +1046,9 @@ export interface RoleToolDefinitionInput<
   /** Canonical tool names this composite tool bundles. Omitted for primitives. See ToolDefinition.replaces. */
   replaces?: readonly string[];
   /** Visibility profile gate — see RoleToolDefinition.profile. */
-  profile?: "engineer" | "all";
+  profile?: 'engineer' | 'all';
   /** Harness-scope requirement — see `ToolDefinitionInput.papercusp`. */
-  harness?: "required" | "optional" | "none";
+  harness?: 'required' | 'optional' | 'none';
   requirePrincipal: false;
   agentRoles?: AgentRole[];
   rolesQuota?: Partial<Record<AgentRole, RolesQuota>>;
@@ -1136,7 +1070,7 @@ export interface RoleToolDefinitionInput<
   /** See RoleToolDefinition.ignoreSessionPayloadTier (WI-37843). */
   ignoreSessionPayloadTier?: boolean;
   /** See RoleToolDefinition.modality. */
-  modality?: ReadonlyArray<"text" | "voice">;
+  modality?: ReadonlyArray<'text' | 'voice'>;
   /** See RoleToolDefinition.state. */
   state?: StandardSchemaV1;
   args: TArgs;
@@ -1159,7 +1093,7 @@ export interface RoleToolDefinitionInput<
    * responses remain byte-identical; oversized default-tier results receive
    * a loud generic bounded projection. See `payload-tier.ts`.
    */
-  shape?: import("./payload-tier").PayloadShapers;
+  shape?: import('./payload-tier').PayloadShapers;
   /* ─── Unified-primitive forward-compat fields (Phase E1) — see ToolDefinitionInput. */
   /** See `ToolDefinitionInput.auth`. Phase E2 wiring. */
   auth?: RouteAuth;
@@ -1168,7 +1102,7 @@ export interface RoleToolDefinitionInput<
   /** Telemetry sample rate, 0..1. */
   sampleRate?: number;
   /** Explicit exposure override. See `ToolDefinitionInput.expose`. */
-  expose?: import("./tool-projection").ToolExposure;
+  expose?: import('./tool-projection').ToolExposure;
   /**
    * Optional output-`data` schema (D-003) — see `ToolDefinitionInput.result`.
    * `output` is an accepted alias; when both are set `result` wins.
@@ -1181,10 +1115,7 @@ export interface RoleToolDefinitionInput<
    * (agent-tool-delta-protocol-2026-06-22, D-001/D-002). Endpoints declare a
    * `revision` source; the framework handles cursor + `not_modified` plumbing.
    */
-  delta?: DeltaCapability<
-    StandardSchemaV1.InferOutput<TArgs>,
-    UnifiedToolContext
-  >;
+  delta?: DeltaCapability<StandardSchemaV1.InferOutput<TArgs>, UnifiedToolContext>;
   /**
    * Intrinsic lifecycle emissions (coord-lifecycle-automation D-002). Each
    * entry desugars to an event-reaction rule registered at load. See
@@ -1280,8 +1211,8 @@ export interface PromptArgumentSchema {
 }
 
 export interface PromptMessage {
-  role: "user" | "assistant" | "system";
-  content: { type: "text"; text: string };
+  role: 'user' | 'assistant' | 'system';
+  content: { type: 'text'; text: string };
 }
 
 export interface PromptResult {
@@ -1330,8 +1261,8 @@ export type { UIResourceContent as UIResource };
  * answering). All other kinds stay announce-only for voice.
  */
 export type CardPresentation =
-  | { kind: "radio"; options: CardOption[]; voiceAnswerable?: boolean }
-  | { kind: "checkbox"; options: CardOption[] }
+  | { kind: 'radio'; options: CardOption[]; voiceAnswerable?: boolean }
+  | { kind: 'checkbox'; options: CardOption[] }
   /**
    * Single-choice, rendered COMPACT (a dropdown) rather than one row per
    * option. Same answer shape as `radio` — the difference is purely how much
@@ -1347,16 +1278,16 @@ export type CardPresentation =
    *
    * `placeholder` is the trigger's resting text before a choice is made.
    */
-  | { kind: "select"; options: CardOption[]; placeholder?: string }
-  | { kind: "text"; placeholder?: string; multiline?: boolean }
-  | { kind: "date"; min?: string; max?: string }
-  | { kind: "slider"; min: number; max: number; step?: number };
+  | { kind: 'select'; options: CardOption[]; placeholder?: string }
+  | { kind: 'text'; placeholder?: string; multiline?: boolean }
+  | { kind: 'date'; min?: string; max?: string }
+  | { kind: 'slider'; min: number; max: number; step?: number };
 
 export interface CardOption {
   id: string;
   label: string;
   hint?: string;
-  style?: "default" | "primary" | "danger";
+  style?: 'default' | 'primary' | 'danger';
 }
 
 /** Card specification passed to `ctx.askUser`. */
@@ -1383,11 +1314,7 @@ export interface CardSpec<TSchema extends StandardSchemaV1 = StandardSchemaV1> {
    * live card resolve each other. Optional; existing callers are unaffected.
    * NOT called on an idempotency-cache hit (no card is registered).
    */
-  onCard?: (info: {
-    correlationId: string;
-    runId: string;
-    workspaceId: string;
-  }) => void;
+  onCard?: (info: { correlationId: string; runId: string; workspaceId: string }) => void;
   /**
    * Optional structured body block (the shared `ReportBlock` two-tier
    * plan→item shape from `@papercusp/chat-protocol`) rendered between the
@@ -1405,9 +1332,9 @@ export interface CardSpec<TSchema extends StandardSchemaV1 = StandardSchemaV1> {
  *   cancel  — run was cancelled OR user dismissed OR timeoutMs fired.
  */
 export type CardResponse<TSchema extends StandardSchemaV1 = StandardSchemaV1> =
-  | { action: "submit"; payload: StandardSchemaV1.InferOutput<TSchema> }
-  | { action: "decline"; reason?: string }
-  | { action: "cancel" };
+  | { action: 'submit'; payload: StandardSchemaV1.InferOutput<TSchema> }
+  | { action: 'decline'; reason?: string }
+  | { action: 'cancel' };
 
 /**
  * The streaming-chat wire event union — re-exported from the shared
@@ -1416,7 +1343,7 @@ export type CardResponse<TSchema extends StandardSchemaV1 = StandardSchemaV1> =
  * `scout-convergence-papercup-2026-05-30` D-002). papercup's richer server-side
  * card types stay internal; only the wire contract is shared.
  */
-export type { ChatEvent } from "@papercusp/chat-protocol";
+export type { ChatEvent } from '@papercusp/chat-protocol';
 
 /**
  * The wire-serializable form of an open card, included in `state-snapshot`
@@ -1431,10 +1358,8 @@ export type { ChatEvent } from "@papercusp/chat-protocol";
  * can parse papercup's card payloads (`_assertOpenCardSnapshotIsWireCompatible`
  * below proves it at compile time; a diff that breaks wire-compat fails here).
  */
-export interface OpenCardSnapshot extends Omit<
-  WireOpenCardSnapshot,
-  "presentation" | "dataSchemaJson"
-> {
+export interface OpenCardSnapshot
+  extends Omit<WireOpenCardSnapshot, 'presentation' | 'dataSchemaJson'> {
   presentation?: CardPresentation;
   dataSchemaJson: Record<string, unknown>;
 }
@@ -1445,8 +1370,7 @@ export interface OpenCardSnapshot extends Omit<
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 type _AssertWireCompatible<_T extends WireOpenCardSnapshot> = never;
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-type _assertOpenCardSnapshotIsWireCompatible =
-  _AssertWireCompatible<OpenCardSnapshot>;
+type _assertOpenCardSnapshotIsWireCompatible = _AssertWireCompatible<OpenCardSnapshot>;
 
 export interface PromptDefinitionInput {
   name?: string;

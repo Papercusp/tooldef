@@ -17,18 +17,15 @@
  * Spec: apps/operator/docs/plugin-mcp-host-design.md.
  */
 
-import type { ToolResult } from "./wire";
-import type { ProjectedTool, UnifiedToolContext } from "./tool-projection";
+import type { ToolResult } from './wire';
+import type { ProjectedTool, UnifiedToolContext } from './tool-projection';
 import {
   DEFAULT_DISPATCH_STACK,
   runDispatchStack,
   type DispatchStep,
   type DispatchStepName,
-} from "./dispatch-stack";
-import type {
-  DispatchProjectedDeps,
-  DispatchProjectedResult,
-} from "./dispatch-types";
+} from './dispatch-stack';
+import type { DispatchProjectedDeps, DispatchProjectedResult } from './dispatch-types';
 
 export {
   defaultComputeQuotaWindow,
@@ -47,7 +44,7 @@ export {
   type PostInvokeEvent,
   type CapabilityEnvelopeVerdict,
   type ToolDispatchOverrideFn,
-} from "./dispatch-types";
+} from './dispatch-types';
 
 export {
   DEFAULT_DISPATCH_STACK,
@@ -55,7 +52,7 @@ export {
   type DispatchExecution,
   type DispatchStep,
   type DispatchStepName,
-} from "./dispatch-stack";
+} from './dispatch-stack';
 
 /* ─── Dispatcher entrypoint ──────────────────────────────────────────── */
 
@@ -84,9 +81,9 @@ export async function dispatchProjectedTool(
  * - `error`: dispatch/handler failed (role gate, quota, timeout, throw).
  */
 export type DispatchStreamEvent =
-  | { kind: "event"; name: string; data: unknown }
-  | { kind: "done"; result: ToolResult }
-  | { kind: "error"; error: NonNullable<DispatchProjectedResult["error"]> };
+  | { kind: 'event'; name: string; data: unknown }
+  | { kind: 'done'; result: ToolResult }
+  | { kind: 'error'; error: NonNullable<DispatchProjectedResult['error']> };
 
 /**
  * In-process streaming wrapper around `dispatchProjectedTool` for
@@ -119,12 +116,12 @@ export async function* dispatchProjectedToolStream(
   // dispatcher will wrap our emit with its idle-timeout watchdog (if
   // tool.idleTimeoutSec is set), so wake() still fires correctly.
   const streamEmit = (name: string, data: unknown): void => {
-    queue.push({ kind: "event", name, data });
+    queue.push({ kind: 'event', name, data });
     wake();
   };
   const streamProgress = (pct: number | undefined, msg?: string): void => {
-    streamEmit("progress", {
-      progress: typeof pct === "number" ? pct : 0,
+    streamEmit('progress', {
+      progress: typeof pct === 'number' ? pct : 0,
       total: 100,
       ...(msg ? { message: msg } : {}),
     });
@@ -135,30 +132,17 @@ export async function* dispatchProjectedToolStream(
     progress: streamProgress,
   };
 
-  const dispatchPromise = dispatchProjectedTool(
-    tool,
-    toolName,
-    input,
-    streamCtx,
-    deps,
-  ).then(
+  const dispatchPromise = dispatchProjectedTool(tool, toolName, input, streamCtx, deps).then(
     (r) => {
-      if (r.ok && r.result) queue.push({ kind: "done", result: r.result });
-      else if (r.ok) queue.push({ kind: "done", result: { content: [] } });
-      else
-        queue.push({
-          kind: "error",
-          error: r.error ?? { code: "handler_error", message: "" },
-        });
+      if (r.ok && r.result) queue.push({ kind: 'done', result: r.result });
+      else if (r.ok) queue.push({ kind: 'done', result: { content: [] } });
+      else queue.push({ kind: 'error', error: r.error ?? { code: 'handler_error', message: '' } });
       wake();
     },
     (err) => {
       queue.push({
-        kind: "error",
-        error: {
-          code: "handler_error",
-          message: err instanceof Error ? err.message : String(err),
-        },
+        kind: 'error',
+        error: { code: 'handler_error', message: err instanceof Error ? err.message : String(err) },
       });
       wake();
     },
@@ -174,7 +158,7 @@ export async function* dispatchProjectedToolStream(
       while (queue.length > 0) {
         const ev = queue.shift()!;
         yield ev;
-        if (ev.kind === "done" || ev.kind === "error") return;
+        if (ev.kind === 'done' || ev.kind === 'error') return;
       }
     }
   } finally {

@@ -20,34 +20,33 @@
  * so it stays co-located with the steps it observes.
  */
 
-import type { ToolResult } from "./wire";
-import { applySeeAlso } from "./see-also";
-import { applyResultAnnotator } from "./result-annotator";
-import type { AgentRole } from "./host-types";
+import type { ToolResult } from './wire';
+import { applySeeAlso } from './see-also';
+import { applyResultAnnotator } from './result-annotator';
+import type { AgentRole } from './host-types';
 import {
   PROJECTED_TOOL_REGISTRY_SOURCE,
   toolDeclaresGate,
   type ProjectedTool,
   type UnifiedToolContext,
-} from "./tool-projection";
+} from './tool-projection';
 import {
   openBuffer as openReplayBuffer,
   type ReplayBufferWriter,
-} from "./replay-buffer";
-import { cancelPendingCardsForRun, registerCard } from "./card-correlator";
-import { openRun, closeRun, setToolState } from "./state-channel";
-import type { CardResponse, CardSpec } from "./types";
+} from './replay-buffer';
 import {
-  validateSync,
-  formatIssues,
-  type StandardSchemaV1,
-} from "./standard-schema";
-import { tierFor } from "./capability-tiers";
+  cancelPendingCardsForRun,
+  registerCard,
+} from './card-correlator';
+import { openRun, closeRun, setToolState } from './state-channel';
+import type { CardResponse, CardSpec } from './types';
+import { validateSync, formatIssues, type StandardSchemaV1 } from './standard-schema';
+import { tierFor } from './capability-tiers';
 import {
   collectEntityRefs,
   formatEntityRefViolations,
   resolveEntityRefs,
-} from "./entity-ref";
+} from './entity-ref';
 import {
   PASS_THROUGH,
   HarnessRequiredError,
@@ -58,29 +57,29 @@ import {
   type DispatchProjectedDeps,
   type DispatchProjectedErrorCode,
   type DispatchProjectedResult,
-} from "./dispatch-types";
-import { evaluateDataCondition } from "@papercusp/rules";
-import type { ToolPreInvokeEvent, ToolRequireSpec } from "./requires";
-import { applyWorkspaceTxContract } from "./workspace-tx";
+} from './dispatch-types';
+import { evaluateDataCondition } from '@papercusp/rules';
+import type { ToolPreInvokeEvent, ToolRequireSpec } from './requires';
+import { applyWorkspaceTxContract } from './workspace-tx';
 
 /* ─── Step names ─────────────────────────────────────────────────────── */
 
 export type DispatchStepName =
-  | "default-deny"
-  | "role-allowlist"
-  | "capability-check"
-  | "capability-envelope"
-  | "role-requirement"
-  | "harness-check"
-  | "quota"
-  | "authorize"
-  | "preconditions"
-  | "entity-check"
-  | "timeout"
-  | "idle-watchdog"
-  | "replay-buffer"
-  | "ctx-bindings"
-  | "invoke";
+  | 'default-deny'
+  | 'role-allowlist'
+  | 'capability-check'
+  | 'capability-envelope'
+  | 'role-requirement'
+  | 'harness-check'
+  | 'quota'
+  | 'authorize'
+  | 'preconditions'
+  | 'entity-check'
+  | 'timeout'
+  | 'idle-watchdog'
+  | 'replay-buffer'
+  | 'ctx-bindings'
+  | 'invoke';
 
 /* ─── Per-call mutable state ─────────────────────────────────────────── */
 
@@ -147,9 +146,7 @@ function initExecution(
   // Resolve the quota window + ceiling once, up front: the window key feeds
   // both the quota gate and telemetry, so it must be computed for every call
   // (not just quota'd ones). `roleQuota` is the tool's entry for this role.
-  const roleQuota = contractCtx.role
-    ? tool.rolesQuota?.[contractCtx.role]
-    : undefined;
+  const roleQuota = contractCtx.role ? tool.rolesQuota?.[contractCtx.role] : undefined;
   const { key: windowKey, limit: quotaLimit } = (
     deps.computeQuotaWindow ?? defaultComputeQuotaWindow
   )(contractCtx, roleQuota, toolName);
@@ -206,7 +203,7 @@ export interface DispatchStep {
  * are plugin / direct registrations.
  */
 const defaultDenyStep: DispatchStep = {
-  name: "default-deny",
+  name: 'default-deny',
   async run(exec) {
     const { tool, toolName, deps } = exec;
     if (!deps.defaultDeny || tool.public) return null;
@@ -214,7 +211,7 @@ const defaultDenyStep: DispatchStep = {
     return {
       ok: false,
       error: {
-        code: "ungated" as DispatchProjectedErrorCode,
+        code: 'ungated' as DispatchProjectedErrorCode,
         message: `Tool "${toolName}" declares no auth gate (capability/roles/requireRoles/authorize) and is not marked public; denied under default-deny`,
         meta: { tool: toolName },
       },
@@ -223,7 +220,7 @@ const defaultDenyStep: DispatchStep = {
 };
 
 const roleAllowlistStep: DispatchStep = {
-  name: "role-allowlist",
+  name: 'role-allowlist',
   async run(exec) {
     const { tool, ctx, toolName } = exec;
     if (!tool.agentRoles || !ctx.role || ctx.gateBypass?.role) return null;
@@ -231,35 +228,26 @@ const roleAllowlistStep: DispatchStep = {
     return {
       ok: false,
       error: {
-        code: "role_not_allowed" as DispatchProjectedErrorCode,
-        message: `Role "${ctx.role}" cannot call tool "${toolName}" (allowed roles: ${tool.agentRoles.join(", ")})`,
+        code: 'role_not_allowed' as DispatchProjectedErrorCode,
+        message: `Role "${ctx.role}" cannot call tool "${toolName}" (allowed roles: ${tool.agentRoles.join(', ')})`,
       },
     };
   },
 };
 
 const capabilityCheckStep: DispatchStep = {
-  name: "capability-check",
+  name: 'capability-check',
   async run(exec) {
     const { tool, ctx, toolName } = exec;
-    if (
-      !ctx.principal ||
-      ctx.gateBypass?.capability ||
-      tool.capabilities.length === 0
-    )
-      return null;
+    if (!ctx.principal || ctx.gateBypass?.capability || tool.capabilities.length === 0) return null;
     for (const cap of tool.capabilities) {
       if (!ctx.principal.capabilities.has(cap)) {
         return {
           ok: false,
           error: {
-            code: "missing_capability" as DispatchProjectedErrorCode,
+            code: 'missing_capability' as DispatchProjectedErrorCode,
             message: `Principal "${ctx.principal.slug}" lacks capability "${cap}" (tool: ${toolName})`,
-            meta: {
-              tool: toolName,
-              principal: ctx.principal.slug,
-              missing: cap,
-            },
+            meta: { tool: toolName, principal: ctx.principal.slug, missing: cap },
           },
         };
       }
@@ -284,19 +272,14 @@ const capabilityCheckStep: DispatchStep = {
  * authorize/precondition gates.
  */
 const capabilityEnvelopeStep: DispatchStep = {
-  name: "capability-envelope",
+  name: 'capability-envelope',
   async run(exec) {
     const { tool, toolName, input, ctx, deps } = exec;
     const port = deps.checkCapabilityEnvelope;
     if (!port) return null; // no policy wired ⇒ no-op (behavior-neutral)
     let verdict: CapabilityEnvelopeVerdict | null;
     try {
-      verdict = await port({
-        toolName,
-        capabilities: tool.capabilities,
-        ctx,
-        args: input,
-      });
+      verdict = await port({ toolName, capabilities: tool.capabilities, ctx, args: input });
     } catch (err) {
       // FAIL-OPEN (D-006): an evaluator bug must never wedge the fleet; the OS sandbox is the
       // containment backstop. Matches the quota gate's fail-open-on-error posture.
@@ -308,14 +291,14 @@ const capabilityEnvelopeStep: DispatchStep = {
     }
     if (!verdict) return null;
     exec.envelopeVerdict = verdict; // threaded into PostInvokeEvent for the decision-ledger emit
-    if (verdict.decision === "deny") {
+    if (verdict.decision === 'deny') {
       return {
         ok: false,
         error: {
-          code: "capability_denied" as DispatchProjectedErrorCode,
+          code: 'capability_denied' as DispatchProjectedErrorCode,
           message:
             verdict.reason ??
-            `Tool "${toolName}" is outside role "${ctx.role ?? "(none)"}" capability envelope`,
+            `Tool "${toolName}" is outside role "${ctx.role ?? '(none)'}" capability envelope`,
           meta: { tool: toolName, role: ctx.role ?? null },
         },
       };
@@ -336,7 +319,7 @@ const capabilityEnvelopeStep: DispatchStep = {
  * the other gates (gate:'role').
  */
 const roleRequirementStep: DispatchStep = {
-  name: "role-requirement",
+  name: 'role-requirement',
   async run(exec) {
     const { tool, ctx, toolName, deps } = exec;
     const required = tool.requireRoles;
@@ -345,25 +328,19 @@ const roleRequirementStep: DispatchStep = {
     if (have && required.some((r) => have.has(r))) return null;
     deps.auditAuth?.({
       ts: Date.now(),
-      principal: ctx.principal
-        ? { slug: ctx.principal.slug, workspaceId: ctx.principal.workspaceId }
-        : null,
+      principal: ctx.principal ? { slug: ctx.principal.slug, workspaceId: ctx.principal.workspaceId } : null,
       tool: toolName,
       action: toolName,
-      decision: "deny",
-      gate: "role",
-      reason: `requires one of role(s): ${required.join(", ")}`,
+      decision: 'deny',
+      gate: 'role',
+      reason: `requires one of role(s): ${required.join(', ')}`,
     });
     return {
       ok: false,
       error: {
-        code: "missing_role" as DispatchProjectedErrorCode,
-        message: `Principal ${ctx.principal ? `"${ctx.principal.slug}"` : "(anonymous)"} lacks a required role for tool "${toolName}" (needs one of: ${required.join(", ")})`,
-        meta: {
-          tool: toolName,
-          required,
-          principal: ctx.principal?.slug ?? null,
-        },
+        code: 'missing_role' as DispatchProjectedErrorCode,
+        message: `Principal ${ctx.principal ? `"${ctx.principal.slug}"` : '(anonymous)'} lacks a required role for tool "${toolName}" (needs one of: ${required.join(', ')})`,
+        meta: { tool: toolName, required, principal: ctx.principal?.slug ?? null },
       },
     };
   },
@@ -386,16 +363,16 @@ const roleRequirementStep: DispatchStep = {
  * bypass it. `gateBypass.papercusp` is an explicit per-call escape hatch only.
  */
 const harnessCheckStep: DispatchStep = {
-  name: "harness-check",
+  name: 'harness-check',
   async run(exec) {
     const { tool, ctx, toolName } = exec;
-    if (tool.harness !== "required" || ctx.gateBypass?.harness) return null;
+    if (tool.harness !== 'required' || ctx.gateBypass?.harness) return null;
     const slug = ctx.harnessSlug?.trim();
-    if (slug && slug !== "*") return null;
+    if (slug && slug !== '*') return null;
     return {
       ok: false,
       error: {
-        code: "harness_required" as DispatchProjectedErrorCode,
+        code: 'harness_required' as DispatchProjectedErrorCode,
         message:
           `Tool "${toolName}" requires a harness. Pass a harness slug (e.g. via ` +
           `the spawn's ?harness= / X-Papercusp-Harness), or run \`harness:list\` ` +
@@ -407,7 +384,7 @@ const harnessCheckStep: DispatchStep = {
 };
 
 const quotaStep: DispatchStep = {
-  name: "quota",
+  name: 'quota',
   async run(exec) {
     const { ctx, toolName, deps, windowKey, quotaLimit } = exec;
     // The host decides quota bypass (Papercusp: superuser yes, power-user no —
@@ -417,13 +394,7 @@ const quotaStep: DispatchStep = {
     // The window key + ceiling were resolved at init by the host's
     // `computeQuotaWindow` policy (worker→chunk, power-user→session, …);
     // this step only enforces the count against the resolved limit.
-    if (
-      !windowKey ||
-      quotaLimit == null ||
-      quotaLimit <= 0 ||
-      !deps.readQuotaState ||
-      quotaBypass
-    ) {
+    if (!windowKey || quotaLimit == null || quotaLimit <= 0 || !deps.readQuotaState || quotaBypass) {
       return null;
     }
     try {
@@ -432,15 +403,9 @@ const quotaStep: DispatchStep = {
         return {
           ok: false,
           error: {
-            code: "quota_exceeded" as DispatchProjectedErrorCode,
+            code: 'quota_exceeded' as DispatchProjectedErrorCode,
             message: `Tool "${toolName}" exceeded quota (${state.count}/${quotaLimit}) in window "${windowKey}"`,
-            meta: {
-              tool: toolName,
-              role: ctx.role,
-              windowKey,
-              used: state.count,
-              limit: quotaLimit,
-            },
+            meta: { tool: toolName, role: ctx.role, windowKey, used: state.count, limit: quotaLimit },
           },
         };
       }
@@ -452,25 +417,23 @@ const quotaStep: DispatchStep = {
 };
 
 const timeoutStep: DispatchStep = {
-  name: "timeout",
+  name: 'timeout',
   async run(exec) {
     exec.timeoutSec = exec.tool.timeoutSec ?? 60;
     const timer = setTimeout(() => exec.abort.abort(), exec.timeoutSec * 1000);
-    if (typeof timer.unref === "function") timer.unref();
+    if (typeof timer.unref === 'function') timer.unref();
     exec.timeoutTimer = timer;
     // Compose any caller-supplied signal — caller-side aborts must still
     // propagate to the dispatcher's controller.
     if (exec.ctx.signal && !exec.ctx.signal.aborted) {
-      exec.ctx.signal.addEventListener("abort", () => exec.abort.abort(), {
-        once: true,
-      });
+      exec.ctx.signal.addEventListener('abort', () => exec.abort.abort(), { once: true });
     }
     return null;
   },
 };
 
 const idleWatchdogStep: DispatchStep = {
-  name: "idle-watchdog",
+  name: 'idle-watchdog',
   async run(exec) {
     exec.idleSec = exec.tool.idleTimeoutSec ?? 0;
     exec.lastEmitMs = Date.now();
@@ -478,10 +441,9 @@ const idleWatchdogStep: DispatchStep = {
       const checkMs = Math.max(1_000, Math.floor((exec.idleSec * 1000) / 4));
       const timer = setInterval(() => {
         if (exec.abort.signal.aborted) return;
-        if (Date.now() - exec.lastEmitMs > exec.idleSec * 1000)
-          exec.abort.abort();
+        if (Date.now() - exec.lastEmitMs > exec.idleSec * 1000) exec.abort.abort();
       }, checkMs);
-      if (typeof timer.unref === "function") timer.unref();
+      if (typeof timer.unref === 'function') timer.unref();
       exec.idleTimer = timer;
     }
     return null;
@@ -489,7 +451,7 @@ const idleWatchdogStep: DispatchStep = {
 };
 
 const replayBufferStep: DispatchStep = {
-  name: "replay-buffer",
+  name: 'replay-buffer',
   async run(exec) {
     const { tool, ctx, toolName } = exec;
     // State-shaped tools skip the ring buffer — their reconnect strategy
@@ -514,7 +476,7 @@ const replayBufferStep: DispatchStep = {
 };
 
 const ctxBindingsStep: DispatchStep = {
-  name: "ctx-bindings",
+  name: 'ctx-bindings',
   async run(exec) {
     const { ctx, tool, toolName } = exec;
 
@@ -524,13 +486,12 @@ const ctxBindingsStep: DispatchStep = {
     const wrappedEmit = (name: string, data: unknown): void => {
       if (exec.idleSec > 0) exec.lastEmitMs = Date.now();
       exec.eventCount += 1;
-      if (exec.bufferWriter)
-        exec.bufferWriter.push({ id: exec.eventCount, name, data });
+      if (exec.bufferWriter) exec.bufferWriter.push({ id: exec.eventCount, name, data });
       ctx.emit(name, data);
     };
     const wrappedProgress = (pct: number | undefined, msg?: string): void => {
-      wrappedEmit("progress", {
-        progress: typeof pct === "number" ? pct : 0,
+      wrappedEmit('progress', {
+        progress: typeof pct === 'number' ? pct : 0,
         total: 100,
         ...(msg ? { message: msg } : {}),
       });
@@ -538,7 +499,7 @@ const ctxBindingsStep: DispatchStep = {
 
     // askUser — installed only when ctx has a workspaceId + runId for
     // card-correlator to scope cleanup against.
-    let askUser: UnifiedToolContext["askUser"] | undefined;
+    let askUser: UnifiedToolContext['askUser'] | undefined;
     if (ctx.workspaceId && ctx.runId) {
       const wsId = ctx.workspaceId;
       const runId = ctx.runId;
@@ -546,15 +507,11 @@ const ctxBindingsStep: DispatchStep = {
       askUser = async <TSchema extends StandardSchemaV1>(
         spec: CardSpec<TSchema>,
       ): Promise<CardResponse<TSchema>> => {
-        const { correlationId, result } = registerCard({
-          workspaceId: wsId,
-          runId,
-          spec,
-        });
+        const { correlationId, result } = registerCard({ workspaceId: wsId, runId, spec });
         // Surface the freshly-minted id so a caller can link an external
         // durable record (Phase D). Skip an idempotency-cache hit (no card was
         // registered — correlationId is the 'idempotent' sentinel).
-        if (spec.onCard && correlationId !== "idempotent") {
+        if (spec.onCard && correlationId !== 'idempotent') {
           try {
             spec.onCard({ correlationId, runId, workspaceId: wsId });
           } catch {
@@ -563,13 +520,13 @@ const ctxBindingsStep: DispatchStep = {
         }
         return await new Promise<CardResponse<TSchema>>((resolve) => {
           const onAbort = () => {
-            exec.abort.signal.removeEventListener("abort", onAbort);
-            resolve({ action: "cancel" } as CardResponse<TSchema>);
+            exec.abort.signal.removeEventListener('abort', onAbort);
+            resolve({ action: 'cancel' } as CardResponse<TSchema>);
           };
           if (exec.abort.signal.aborted) return onAbort();
-          exec.abort.signal.addEventListener("abort", onAbort);
+          exec.abort.signal.addEventListener('abort', onAbort);
           void result.then((r) => {
-            exec.abort.signal.removeEventListener("abort", onAbort);
+            exec.abort.signal.removeEventListener('abort', onAbort);
             resolve(r);
           });
         });
@@ -578,14 +535,14 @@ const ctxBindingsStep: DispatchStep = {
 
     // publishState — installed only when (a) tool declared `state` and
     // (b) ctx has a workspaceId + runId.
-    let publishState: UnifiedToolContext["publishState"] | undefined;
+    let publishState: UnifiedToolContext['publishState'] | undefined;
     if (tool.state && ctx.workspaceId && ctx.runId) {
       const stateSchema = tool.state;
       const runIdLocal = ctx.runId;
       publishState = (snapshot: unknown) => {
         if (Array.isArray(snapshot)) {
           throw new Error(
-            "ctx.publishState v1 is snapshot-only; pass a full state object, not a JSON-Patch array",
+            'ctx.publishState v1 is snapshot-only; pass a full state object, not a JSON-Patch array',
           );
         }
         // Validate synchronously — publishState is fire-and-forget (tools call
@@ -620,7 +577,7 @@ const ctxBindingsStep: DispatchStep = {
 };
 
 const invokeStep: DispatchStep = {
-  name: "invoke",
+  name: 'invoke',
   async run(exec) {
     const { tool, toolName, input, handlerCtx, deps } = exec;
     try {
@@ -639,12 +596,7 @@ const invokeStep: DispatchStep = {
       // into the envelope (_meta._seeAlso + a one-line "See also:" text block).
       // Self-gates (unchanged result) when the tool declares none / emits none /
       // errored; never fails the underlying tool call.
-      result = applySeeAlso(
-        result,
-        exec.tool.guidance?.seeAlso,
-        input,
-        handlerCtx,
-      );
+      result = applySeeAlso(result, exec.tool.guidance?.seeAlso, input, handlerCtx);
       // Host ambient annotator (agent-managed-compaction P-013): the host may append a
       // banded context-usage gauge to EVERY result so a heads-down session that never
       // calls a coord tool still sees its usage. Default no-op; never throws.
@@ -671,8 +623,7 @@ const invokeStep: DispatchStep = {
         // capability ⇒ treat as non-low (don't assume an ungated utility is a safe
         // read). `ProjectedTool` carries `capabilities`, not a precomputed `tier`.
         const caps = exec.tool.capabilities;
-        const isLowTierRead =
-          caps.length > 0 && caps.every((c) => tierFor(c) === "low");
+        const isLowTierRead = caps.length > 0 && caps.every((c) => tierFor(c) === 'low');
         // Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): a
         // MUTATION the tool DECLARES idempotent whose handler RAN TO COMPLETION is safe to
         // surface past the deadline — the write committed (the handler returned a result),
@@ -687,7 +638,7 @@ const invokeStep: DispatchStep = {
           return {
             ok: false,
             error: {
-              code: "timeout",
+              code: 'timeout',
               message: `tool "${toolName}" exceeded timeout of ${exec.timeoutSec}s (handler returned but signal had aborted)`,
             },
           };
@@ -702,11 +653,9 @@ const invokeStep: DispatchStep = {
       // outputRef auto-emit — the framework injects a `chunk` event
       // when the handler declared outputRef on its result.
       if (result.outputRef) {
-        handlerCtx.emit("chunk", {
+        handlerCtx.emit('chunk', {
           ref: result.outputRef,
-          ...(typeof result.outputSize === "number"
-            ? { byteSize: result.outputSize }
-            : {}),
+          ...(typeof result.outputSize === 'number' ? { byteSize: result.outputSize } : {}),
         });
       }
       exec.handlerResult = result;
@@ -716,10 +665,7 @@ const invokeStep: DispatchStep = {
       if (isTimeout) {
         return {
           ok: false,
-          error: {
-            code: "timeout",
-            message: `tool "${toolName}" exceeded timeout of ${exec.timeoutSec}s`,
-          },
+          error: { code: 'timeout', message: `tool "${toolName}" exceeded timeout of ${exec.timeoutSec}s` },
         };
       }
       // Match by stable `name` as well as instanceof: when the host loads a
@@ -728,34 +674,22 @@ const invokeStep: DispatchStep = {
       // false — without the name check the clean 401/precondition codes
       // degrade to a generic handler_error 500.
       const errName = (err as Error | null)?.name;
-      if (
-        err instanceof UnauthorizedToolError ||
-        errName === "UnauthorizedToolError"
-      ) {
-        return {
-          ok: false,
-          error: { code: "unauthorized", message: (err as Error).message },
-        };
+      if (err instanceof UnauthorizedToolError || errName === 'UnauthorizedToolError') {
+        return { ok: false, error: { code: 'unauthorized', message: (err as Error).message } };
       }
-      if (
-        err instanceof HarnessRequiredError ||
-        errName === "HarnessRequiredError"
-      ) {
-        return {
-          ok: false,
-          error: { code: "harness_required", message: (err as Error).message },
-        };
+      if (err instanceof HarnessRequiredError || errName === 'HarnessRequiredError') {
+        return { ok: false, error: { code: 'harness_required', message: (err as Error).message } };
       }
       // Schema-validation failure thrown by defineTool's projected fn (or any
       // handler-level input check). Coding it `invalid_input` (400) instead of
       // `handler_error` (500) keeps caller mistakes out of the structural
       // tool-error telemetry class (EI-334's false-fire leg).
-      if (err instanceof InvalidInputError || errName === "InvalidInputError") {
+      if (err instanceof InvalidInputError || errName === 'InvalidInputError') {
         const meta = extractInvalidInputErrorMetadata(err);
         return {
           ok: false,
           error: {
-            code: "invalid_input",
+            code: 'invalid_input',
             message: (err as Error).message,
             ...(meta ? { meta } : {}),
           },
@@ -765,7 +699,7 @@ const invokeStep: DispatchStep = {
       return {
         ok: false,
         error: {
-          code: "handler_error",
+          code: 'handler_error',
           message: err instanceof Error ? err.message : String(err),
           ...(postgresMeta ? { meta: postgresMeta } : {}),
         },
@@ -777,21 +711,17 @@ const invokeStep: DispatchStep = {
 const POSTGRES_SQLSTATE_RE = /^[0-9A-Z]{5}$/;
 const POSTGRES_METADATA_STRING_MAX = 256;
 
-function extractInvalidInputErrorMetadata(
-  error: unknown,
-): Record<string, unknown> | undefined {
-  if (!error || typeof error !== "object") return undefined;
+function extractInvalidInputErrorMetadata(error: unknown): Record<string, unknown> | undefined {
+  if (!error || typeof error !== 'object') return undefined;
   const metadata = (error as { metadata?: unknown }).metadata;
-  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata))
-    return undefined;
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return undefined;
   const row = metadata as Record<string, unknown>;
   if (
     row.source !== PROJECTED_TOOL_REGISTRY_SOURCE ||
-    typeof row.registryRevision !== "string" ||
-    typeof row.toolName !== "string" ||
+    typeof row.registryRevision !== 'string' ||
+    typeof row.toolName !== 'string' ||
     !Array.isArray(row.corrections)
-  )
-    return undefined;
+  ) return undefined;
   return { invalidInput: metadata };
 }
 
@@ -804,18 +734,14 @@ function extractInvalidInputErrorMetadata(
  * have to parse the human-facing error message. Do not copy the complete error
  * object: it may contain query text, values, or driver internals.
  */
-function extractPostgresErrorMetadata(
-  error: unknown,
-): Record<string, unknown> | undefined {
-  if (error === null || typeof error !== "object") return undefined;
+function extractPostgresErrorMetadata(error: unknown): Record<string, unknown> | undefined {
+  if (error === null || typeof error !== 'object') return undefined;
   const fields = error as Record<string, unknown>;
-  const rawCode =
-    typeof fields.code === "string" ? fields.code.toUpperCase() : undefined;
-  const sqlState =
-    rawCode && POSTGRES_SQLSTATE_RE.test(rawCode) ? rawCode : undefined;
+  const rawCode = typeof fields.code === 'string' ? fields.code.toUpperCase() : undefined;
+  const sqlState = rawCode && POSTGRES_SQLSTATE_RE.test(rawCode) ? rawCode : undefined;
   const rawConstraint = fields.constraint ?? fields.constraint_name;
   const constraintName =
-    typeof rawConstraint === "string" && rawConstraint.length > 0
+    typeof rawConstraint === 'string' && rawConstraint.length > 0
       ? rawConstraint.slice(0, POSTGRES_METADATA_STRING_MAX)
       : undefined;
   if (!sqlState && !constraintName) return undefined;
@@ -841,13 +767,13 @@ function extractPostgresErrorMetadata(
  * bypass emits an `AuthAuditEvent` via `deps.auditAuth`.
  */
 const authorizeStep: DispatchStep = {
-  name: "authorize",
+  name: 'authorize',
   async run(exec) {
     const { tool, toolName, input, ctx, deps } = exec;
     const authorize = tool.authorize;
     if (!authorize) return null; // no resource gate on this tool
 
-    const audit = (decision: "allow" | "deny", reason?: string) => {
+    const audit = (decision: 'allow' | 'deny', reason?: string) => {
       deps.auditAuth?.({
         ts: Date.now(),
         principal: ctx.principal
@@ -856,7 +782,7 @@ const authorizeStep: DispatchStep = {
         tool: toolName,
         action: toolName,
         decision,
-        gate: "authorize",
+        gate: 'authorize',
         reason,
       });
     };
@@ -864,7 +790,7 @@ const authorizeStep: DispatchStep = {
     const deny = (reason: string | undefined): DispatchProjectedResult => ({
       ok: false,
       error: {
-        code: "authorization_denied" as DispatchProjectedErrorCode,
+        code: 'authorization_denied' as DispatchProjectedErrorCode,
         message: reason ?? `Not authorized to call tool "${toolName}"`,
         meta: { tool: toolName, principal: ctx.principal?.slug ?? null },
       },
@@ -872,7 +798,7 @@ const authorizeStep: DispatchStep = {
 
     // Audited break-glass: skip the hook, but record the bypass.
     if (ctx.gateBypass?.policy) {
-      audit("allow", "gateBypass.policy");
+      audit('allow', 'gateBypass.policy');
       return null;
     }
 
@@ -881,14 +807,14 @@ const authorizeStep: DispatchStep = {
       decision = await authorize({ principal: ctx.principal, input, ctx });
     } catch (err) {
       const reason = `authorize threw: ${err instanceof Error ? err.message : String(err)}`;
-      audit("deny", reason);
+      audit('deny', reason);
       return deny(reason);
     }
     if (!decision.allow) {
-      audit("deny", decision.reason);
+      audit('deny', decision.reason);
       return deny(decision.reason);
     }
-    audit("allow", decision.reason);
+    audit('allow', decision.reason);
     return null;
   },
 };
@@ -913,23 +839,16 @@ const authorizeStep: DispatchStep = {
  * functional preconditions only. See `ToolRequireSpec`.
  */
 const preconditionsStep: DispatchStep = {
-  name: "preconditions",
+  name: 'preconditions',
   async run(exec) {
     const { tool, toolName, input, ctx, deps } = exec;
     const requires = tool.requires;
     if (!requires || requires.length === 0) return null;
 
-    const args = (input && typeof input === "object" ? input : {}) as Record<
-      string,
-      unknown
-    >;
-    const eventCtx = ctx as unknown as ToolPreInvokeEvent["ctx"];
+    const args = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
+    const eventCtx = ctx as unknown as ToolPreInvokeEvent['ctx'];
 
-    const audit = (
-      decision: "allow" | "deny",
-      requireId: string,
-      reason: string,
-    ) => {
+    const audit = (decision: 'allow' | 'deny', requireId: string, reason: string) => {
       deps.auditAuth?.({
         ts: Date.now(),
         principal: ctx.principal
@@ -938,19 +857,15 @@ const preconditionsStep: DispatchStep = {
         tool: toolName,
         action: toolName,
         decision,
-        gate: "precondition",
+        gate: 'precondition',
         reason: `[require:${requireId}] ${reason}`,
       });
     };
 
-    const deny = (
-      requireId: string,
-      message: string,
-      meta?: Record<string, unknown>,
-    ): DispatchProjectedResult => ({
+    const deny = (requireId: string, message: string, meta?: Record<string, unknown>): DispatchProjectedResult => ({
       ok: false,
       error: {
-        code: "precondition_failed" as DispatchProjectedErrorCode,
+        code: 'precondition_failed' as DispatchProjectedErrorCode,
         message,
         meta: { tool: toolName, require: requireId, ...meta },
       },
@@ -964,18 +879,10 @@ const preconditionsStep: DispatchStep = {
 
       // Evaluate once: resolve state (fail-closed on a throw), then run the
       // declarative condition over the pre-invoke event.
-      const evaluate = async (): Promise<{
-        holds: boolean;
-        event: ToolPreInvokeEvent;
-      }> => {
+      const evaluate = async (): Promise<{ holds: boolean; event: ToolPreInvokeEvent }> => {
         let state: Record<string, unknown> = {};
         if (spec.state) state = await spec.state(args, eventCtx);
-        const event: ToolPreInvokeEvent = {
-          tool: toolName,
-          args,
-          ctx: eventCtx,
-          state,
-        };
+        const event: ToolPreInvokeEvent = { tool: toolName, args, ctx: eventCtx, state };
         return { holds: evaluateDataCondition(spec.when, event), event };
       };
 
@@ -984,7 +891,7 @@ const preconditionsStep: DispatchStep = {
         first = await evaluate();
       } catch (err) {
         const reason = `precondition evaluation threw: ${err instanceof Error ? err.message : String(err)}`;
-        audit("deny", requireId, reason);
+        audit('deny', requireId, reason);
         return deny(requireId, `${failMessage} (${reason})`);
       }
       if (first.holds) continue;
@@ -993,10 +900,8 @@ const preconditionsStep: DispatchStep = {
       if (spec.fire) {
         if (!deps.firePrecondition) {
           const reason = `auto-correct fire "${spec.fire}" declared but host wired no firePrecondition port`;
-          audit("deny", requireId, reason);
-          return deny(requireId, `${failMessage} (${reason})`, {
-            fire: spec.fire,
-          });
+          audit('deny', requireId, reason);
+          return deny(requireId, `${failMessage} (${reason})`, { fire: spec.fire });
         }
         try {
           const fireArgs = spec.render ? spec.render(first.event) : {};
@@ -1009,10 +914,8 @@ const preconditionsStep: DispatchStep = {
           });
         } catch (err) {
           const reason = `auto-correct fire "${spec.fire}" failed: ${err instanceof Error ? err.message : String(err)}`;
-          audit("deny", requireId, reason);
-          return deny(requireId, `${failMessage} (${reason})`, {
-            fire: spec.fire,
-          });
+          audit('deny', requireId, reason);
+          return deny(requireId, `${failMessage} (${reason})`, { fire: spec.fire });
         }
         // then: 'retry' — re-resolve state, re-evaluate once.
         let retry;
@@ -1020,29 +923,21 @@ const preconditionsStep: DispatchStep = {
           retry = await evaluate();
         } catch (err) {
           const reason = `retry evaluation threw after auto-correct "${spec.fire}": ${err instanceof Error ? err.message : String(err)}`;
-          audit("deny", requireId, reason);
-          return deny(requireId, `${failMessage} (${reason})`, {
-            fire: spec.fire,
-          });
+          audit('deny', requireId, reason);
+          return deny(requireId, `${failMessage} (${reason})`, { fire: spec.fire });
         }
         if (retry.holds) {
           // Visible success: the call proceeds, but the correction is audited.
-          audit(
-            "allow",
-            requireId,
-            `auto-corrected via "${spec.fire}" + retry`,
-          );
+          audit('allow', requireId, `auto-corrected via "${spec.fire}" + retry`);
           continue;
         }
         const reason = `still failing after auto-correct "${spec.fire}"`;
-        audit("deny", requireId, reason);
-        return deny(requireId, `${failMessage} (${reason})`, {
-          fire: spec.fire,
-        });
+        audit('deny', requireId, reason);
+        return deny(requireId, `${failMessage} (${reason})`, { fire: spec.fire });
       }
 
       // Plain reject.
-      audit("deny", requireId, "condition not met");
+      audit('deny', requireId, 'condition not met');
       return deny(requireId, failMessage);
     }
     return null;
@@ -1055,14 +950,9 @@ const preconditionsStep: DispatchStep = {
  * first call for a tool and reused for every later one — the per-call cost is
  * then just the resolver lookups, which are themselves batched per kind.
  */
-const ENTITY_SITES = new WeakMap<
-  object,
-  ReturnType<typeof collectEntityRefs>
->();
+const ENTITY_SITES = new WeakMap<object, ReturnType<typeof collectEntityRefs>>();
 
-function entitySitesFor(tool: {
-  args?: unknown;
-}): ReturnType<typeof collectEntityRefs> {
+function entitySitesFor(tool: { args?: unknown }): ReturnType<typeof collectEntityRefs> {
   const key = (tool.args ?? tool) as object;
   const cached = ENTITY_SITES.get(key);
   if (cached) return cached;
@@ -1101,7 +991,7 @@ function entitySitesFor(tool: {
  * reject, so a host can adopt the type broadly before its data is clean.
  */
 const entityCheckStep: DispatchStep = {
-  name: "entity-check",
+  name: 'entity-check',
   async run(exec) {
     const { tool, toolName, input } = exec;
     const sites = entitySitesFor(tool as { args?: unknown });
@@ -1131,15 +1021,11 @@ const entityCheckStep: DispatchStep = {
     return {
       ok: false,
       error: {
-        code: "invalid_input" as DispatchProjectedErrorCode,
+        code: 'invalid_input' as DispatchProjectedErrorCode,
         message: `${toolName}: ${formatEntityRefViolations(hard)}`,
         meta: {
           tool: toolName,
-          violations: hard.map((v) => ({
-            path: v.path,
-            kind: v.kind,
-            value: v.value,
-          })),
+          violations: hard.map((v) => ({ path: v.path, kind: v.kind, value: v.value })),
         },
       },
     };
@@ -1176,24 +1062,23 @@ const entityCheckStep: DispatchStep = {
  *   - `ctx-bindings` is the last decorator before `invoke`.
  *   - `invoke` is always terminal.
  */
-export const DEFAULT_DISPATCH_STACK: ReadonlyArray<DispatchStep> =
-  Object.freeze([
-    defaultDenyStep,
-    roleAllowlistStep,
-    capabilityCheckStep,
-    capabilityEnvelopeStep,
-    roleRequirementStep,
-    harnessCheckStep,
-    quotaStep,
-    authorizeStep,
-    preconditionsStep,
-    entityCheckStep,
-    timeoutStep,
-    idleWatchdogStep,
-    replayBufferStep,
-    ctxBindingsStep,
-    invokeStep,
-  ]);
+export const DEFAULT_DISPATCH_STACK: ReadonlyArray<DispatchStep> = Object.freeze([
+  defaultDenyStep,
+  roleAllowlistStep,
+  capabilityCheckStep,
+  capabilityEnvelopeStep,
+  roleRequirementStep,
+  harnessCheckStep,
+  quotaStep,
+  authorizeStep,
+  preconditionsStep,
+  entityCheckStep,
+  timeoutStep,
+  idleWatchdogStep,
+  replayBufferStep,
+  ctxBindingsStep,
+  invokeStep,
+]);
 
 /* ─── Customization ──────────────────────────────────────────────────── */
 
@@ -1211,7 +1096,7 @@ export const DEFAULT_DISPATCH_STACK: ReadonlyArray<DispatchStep> =
 export function withReplacedStep(
   stack: ReadonlyArray<DispatchStep>,
   name: DispatchStepName,
-  replacement: DispatchStep["run"],
+  replacement: DispatchStep['run'],
 ): ReadonlyArray<DispatchStep> {
   let found = false;
   const out = stack.map((s) => {
@@ -1233,9 +1118,8 @@ export function withReplacedStep(
 const REFUSAL_CODE_MAX = 80;
 /** Max chars of a self-reported refusal message persisted to error_message. */
 const REFUSAL_MESSAGE_MAX = 512;
-const REFUSAL_FALLBACK_CODE = "handler_refusal";
-const REFUSAL_FALLBACK_MESSAGE =
-  "tool returned isError=true without a structured refusal message";
+const REFUSAL_FALLBACK_CODE = 'handler_refusal';
+const REFUSAL_FALLBACK_MESSAGE = 'tool returned isError=true without a structured refusal message';
 
 /**
  * Lift a self-reported refusal's own error code out of its payload.
@@ -1247,31 +1131,21 @@ const REFUSAL_FALLBACK_MESSAGE =
  * (it would group cleanly and silently mislead, which is the exact failure mode
  * this whole change exists to remove).
  */
-function extractRefusalDetails(r: {
-  content?: Array<{ text?: string; [k: string]: unknown }>;
-}): {
+function extractRefusalDetails(r: { content?: Array<{ text?: string; [k: string]: unknown }> }): {
   code: string | null;
   message: string | null;
 } {
   const text = r.content?.[0]?.text;
-  if (typeof text !== "string" || text.length === 0)
-    return { code: null, message: null };
+  if (typeof text !== 'string' || text.length === 0) return { code: null, message: null };
   try {
     const parsed: unknown = JSON.parse(text);
-    if (parsed && typeof parsed === "object") {
+    if (parsed && typeof parsed === 'object') {
       const fields = parsed as Record<string, unknown>;
-      const code = [
-        fields.error,
-        fields.reason,
-        fields.code,
-        fields.errorCode,
-      ].find(
-        (value): value is string =>
-          typeof value === "string" && value.length > 0,
+      const code = [fields.error, fields.reason, fields.code, fields.errorCode].find(
+        (value): value is string => typeof value === 'string' && value.length > 0,
       );
       const message = [fields.message, fields.errorMessage, fields.detail].find(
-        (value): value is string =>
-          typeof value === "string" && value.length > 0,
+        (value): value is string => typeof value === 'string' && value.length > 0,
       );
       return {
         code: code ? code.slice(0, REFUSAL_CODE_MAX) : null,
@@ -1294,38 +1168,33 @@ async function recordTelemetry(
   exec: DispatchExecution,
   result: DispatchProjectedResult,
 ): Promise<void> {
-  const { deps, tool, toolName, ctx, windowKey, input, startedAt, eventCount } =
-    exec;
+  const { deps, tool, toolName, ctx, windowKey, input, startedAt, eventCount } = exec;
   if (!deps.recordInvocation) return;
   // Gate denials (no windowKey required); successes + handler errors
   // require windowKey to match pre-refactor behavior (was guarded by
   // `if (deps.recordInvocation && windowKey)`).
   const code = result.ok ? null : result.error?.code;
-  const status = result.ok
-    ? "ok"
-    : code === "role_not_allowed" ||
-        code === "missing_capability" ||
-        code === "capability_denied"
-      ? "role-not-allowed"
-      : code === "quota_exceeded"
-        ? "quota-exceeded"
-        : code === "timeout"
-          ? "timeout"
-          : code === "invalid_input"
-            ? "invalid-input"
-            : "error";
+  const status =
+    result.ok
+      ? 'ok'
+      : code === 'role_not_allowed' || code === 'missing_capability' || code === 'capability_denied'
+        ? 'role-not-allowed'
+        : code === 'quota_exceeded'
+          ? 'quota-exceeded'
+          : code === 'timeout'
+            ? 'timeout'
+            : code === 'invalid_input'
+              ? 'invalid-input'
+              : 'error';
   const isGateDenial =
     !result.ok &&
-    (code === "role_not_allowed" ||
-      code === "missing_capability" ||
-      code === "capability_denied" ||
-      code === "quota_exceeded");
+    (code === 'role_not_allowed' ||
+      code === 'missing_capability' ||
+      code === 'capability_denied' ||
+      code === 'quota_exceeded');
   if (!isGateDenial && !windowKey) return;
 
-  const metadataJson = mergeDispatchErrorMetadata(
-    finalizeMetadata(exec),
-    result,
-  );
+  const metadataJson = mergeDispatchErrorMetadata(finalizeMetadata(exec), result);
 
   try {
     if (result.ok && result.result) {
@@ -1336,26 +1205,20 @@ async function recordTelemetry(
       // for the token-optimization rollout (definetool-usage-insights-tab P-002 / D-002).
       // It rides metadata_json (jsonb) — no DDL. Absent _meta.format ⇒ not recorded
       // (the consumer reads absent as the unmarked JSON default).
-      const servedFormat = (r._meta as { format?: unknown } | undefined)
-        ?.format;
+      const servedFormat = (r._meta as { format?: unknown } | undefined)?.format;
       // The negotiated freshness mode (full | not_modified), when the call went
       // through delta negotiation (agent-tool-delta-protocol-2026-06-22, P-005).
       // Captured into metadata_json so `metadata_json->>'deltaMode'` GROUP BY gives
       // the not_modified hit-rate per tool over time — the success metric for the
       // delta rollout (mirrors the `format` capture; rides jsonb, no DDL). Absent
       // _meta.delta ⇒ not recorded (the tool wasn't delta-negotiated).
-      const servedDeltaMode = (
-        r._meta as { delta?: { mode?: unknown } } | undefined
-      )?.delta?.mode;
+      const servedDeltaMode = (r._meta as { delta?: { mode?: unknown } } | undefined)?.delta?.mode;
       let metaWithFormat = metadataJson;
-      if (typeof servedFormat === "string") {
+      if (typeof servedFormat === 'string') {
         metaWithFormat = { ...(metaWithFormat ?? {}), format: servedFormat };
       }
-      if (typeof servedDeltaMode === "string") {
-        metaWithFormat = {
-          ...(metaWithFormat ?? {}),
-          deltaMode: servedDeltaMode,
-        };
+      if (typeof servedDeltaMode === 'string') {
+        metaWithFormat = { ...(metaWithFormat ?? {}), deltaMode: servedDeltaMode };
       }
       // EI-9130: a generic, queryable "was this response served as a delta?" breadcrumb.
       // `metadata_json->>'deltaMode'` (above) only fires for tools riding the FORMAL
@@ -1369,19 +1232,10 @@ async function recordTelemetry(
       // the formal protocol's mode (anything but 'full' is a delta). Absent ⇒ no delta
       // mechanism was in play at all (never recorded as `false` — mirrors the `format` /
       // `deltaMode` absent-means-unmarked convention above).
-      if (
-        (metaWithFormat as { deltaServed?: unknown } | null)?.deltaServed ===
-        undefined
-      ) {
-        const derivedDeltaServed =
-          typeof servedDeltaMode === "string"
-            ? servedDeltaMode !== "full"
-            : undefined;
+      if ((metaWithFormat as { deltaServed?: unknown } | null)?.deltaServed === undefined) {
+        const derivedDeltaServed = typeof servedDeltaMode === 'string' ? servedDeltaMode !== 'full' : undefined;
         if (derivedDeltaServed !== undefined) {
-          metaWithFormat = {
-            ...(metaWithFormat ?? {}),
-            deltaServed: derivedDeltaServed,
-          };
+          metaWithFormat = { ...(metaWithFormat ?? {}), deltaServed: derivedDeltaServed };
         }
       }
       // A handler can fail in TWO ways, and only one of them throws. Dispatch-level
@@ -1399,9 +1253,9 @@ async function recordTelemetry(
         toolName,
         pluginName: tool.pluginName,
         ctx,
-        windowKey: windowKey ?? "",
+        windowKey: windowKey ?? '',
         durationMs: Date.now() - startedAt,
-        status: selfReportedFailure ? "refused" : "ok",
+        status: selfReportedFailure ? 'refused' : 'ok',
         // Lift the refusal's OWN code/reason onto the first-class column so a
         // consumer can group refusals without LIKE-matching a payload blob. The
         // bounded fallback keeps malformed/plain-text refusals auditable too.
@@ -1422,14 +1276,14 @@ async function recordTelemetry(
         toolName,
         pluginName: tool.pluginName,
         ctx,
-        windowKey: windowKey ?? "",
+        windowKey: windowKey ?? '',
         durationMs: Date.now() - startedAt,
         status,
         // Persist the dispatcher error CLASS (computed above, then historically
         // discarded) so the watchdog can tell a deterministic config bug from a
         // transient crash without LIKE-matching errorMessage (P-007 / D-009).
         errorCode: code ?? null,
-        errorMessage: result.error?.message ?? "",
+        errorMessage: result.error?.message ?? '',
         args: input,
         eventCount,
         metadataJson,
@@ -1440,9 +1294,7 @@ async function recordTelemetry(
   }
 }
 
-function finalizeMetadata(
-  exec: DispatchExecution,
-): Record<string, unknown> | null {
+function finalizeMetadata(exec: DispatchExecution): Record<string, unknown> | null {
   if (exec.ctx.uiClientId) {
     const base = exec.metadataJson ?? {};
     if (base.uiClientId === undefined) {
@@ -1459,12 +1311,8 @@ function mergeDispatchErrorMetadata(
   const errorMeta = !result.ok ? result.error?.meta : undefined;
   const postgres = errorMeta?.postgres;
   const invalidInput = errorMeta?.invalidInput;
-  const hasPostgres =
-    !!postgres && typeof postgres === "object" && !Array.isArray(postgres);
-  const hasInvalidInput =
-    !!invalidInput &&
-    typeof invalidInput === "object" &&
-    !Array.isArray(invalidInput);
+  const hasPostgres = !!postgres && typeof postgres === 'object' && !Array.isArray(postgres);
+  const hasInvalidInput = !!invalidInput && typeof invalidInput === 'object' && !Array.isArray(invalidInput);
   if (!hasPostgres && !hasInvalidInput) return metadataJson;
   return {
     ...(metadataJson ?? {}),
@@ -1517,7 +1365,7 @@ export async function runDispatchStack(
       result = {
         ok: false,
         error: {
-          code: "handler_error",
+          code: 'handler_error',
           message: `dispatch stack completed without a result (missing 'invoke' step?)`,
         },
       };
@@ -1526,7 +1374,7 @@ export async function runDispatchStack(
   } finally {
     const settled = result ?? {
       ok: false,
-      error: { code: "handler_error" as const, message: "no result" },
+      error: { code: 'handler_error' as const, message: 'no result' },
     };
     await recordTelemetry(exec, settled);
     // Event-reaction observation point (D-001). Fired AFTER telemetry, on every

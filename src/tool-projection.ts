@@ -18,15 +18,15 @@
  * Spec: apps/operator/docs/plugin-mcp-host-design.md.
  */
 
-import { type ZodTypeAny } from "zod";
+import { type ZodTypeAny } from 'zod';
 import type {
   EmitCallback,
   ProgressCallback,
   RolesQuota,
   ToolResult,
-} from "./wire";
-import type { AgentRole, Capability, PluginSpawn } from "./host-types";
-import type { PayloadShapers } from "./payload-tier";
+} from './wire';
+import type { AgentRole, Capability, PluginSpawn } from './host-types';
+import type { PayloadShapers } from './payload-tier';
 
 /**
  * WHY a tool's result skips the per-result door (`applyResultDoor`). This is a
@@ -58,13 +58,13 @@ import type { PayloadShapers } from "./payload-tier";
  * the door's spill-to-scratch + pointer remains correct for anything whose size
  * is incidental rather than the point. Absent ⇒ the door applies as normal.
  */
-export type ResultDoorSkipReason = "programmatic-caller" | "oversize-by-design";
-import { toJsonSchema } from "./schema-adapter";
-import type { StandardSchemaV1 } from "./standard-schema";
-import type { Authorizer } from "./authz";
-import type { EligibilityResult } from "@papercusp/result-encoding";
-import type { DeltaCapability } from "./delta-protocol";
-import type { Principal } from "./types";
+export type ResultDoorSkipReason = 'programmatic-caller' | 'oversize-by-design';
+import { toJsonSchema } from './schema-adapter';
+import type { StandardSchemaV1 } from './standard-schema';
+import type { Authorizer } from './authz';
+import type { EligibilityResult } from '@papercusp/result-encoding';
+import type { DeltaCapability } from './delta-protocol';
+import type { Principal } from './types';
 
 /* ─── Event schema types ─────────────────────────────────────────────── */
 
@@ -90,17 +90,10 @@ export type EventsSchema = Record<string, ZodTypeAny>;
  * errors (dual-mode; canonical example is runAgentChat's mid-stream
  * 'error' yields). See ToolContext.emit doc for the contract.
  */
-export type ReservedEventNames =
-  | "done"
-  | "heartbeat"
-  | "result"
-  | "chunk"
-  | "card";
+export type ReservedEventNames = 'done' | 'heartbeat' | 'result' | 'chunk' | 'card';
 
 /** Compile-time guard: a user-declared events schema cannot contain reserved names. */
-export type UserEvents<T extends EventsSchema> = T & {
-  [K in ReservedEventNames]?: never;
-};
+export type UserEvents<T extends EventsSchema> = T & { [K in ReservedEventNames]?: never };
 
 /**
  * Runtime list of reserved event names. The compile-time `UserEvents<T>`
@@ -110,14 +103,14 @@ export type UserEvents<T extends EventsSchema> = T & {
  */
 export const RESERVED_EVENT_NAMES: readonly ReservedEventNames[] = [
   // Truly framework-only events. Tools MUST NOT redeclare them.
-  "done", // dispatcher emits at successful completion with ToolResult.content
-  "heartbeat", // transport pings to keep idle connections alive
-  "result", // MCP-shaped result envelope on the wire
-  "chunk", // framework-emitted binary-stream chunks for tools with largeOutput:true
-  "card", // framework-emitted card payloads (ctx.askUser flow — bespoke-card-improvements H1).
-  // Cards ride the STATE channel, not the event channel; reserving the name here
-  // prevents a plugin from declaring events:{card} and intercepting other tools'
-  // askUser flow on the wire.
+  'done',       // dispatcher emits at successful completion with ToolResult.content
+  'heartbeat',  // transport pings to keep idle connections alive
+  'result',     // MCP-shaped result envelope on the wire
+  'chunk',      // framework-emitted binary-stream chunks for tools with largeOutput:true
+  'card',       // framework-emitted card payloads (ctx.askUser flow — bespoke-card-improvements H1).
+                // Cards ride the STATE channel, not the event channel; reserving the name here
+                // prevents a plugin from declaring events:{card} and intercepting other tools'
+                // askUser flow on the wire.
   // NOTE: 'error' and 'progress' are NOT reserved.
   // 'progress' is documented as user-emittable via ctx.progress(pct, msg) sugar,
   // which itself routes through ctx.emit('progress', ...). Tools declare a
@@ -162,7 +155,7 @@ export const RESERVED_EVENT_NAMES: readonly ReservedEventNames[] = [
  * See `apps/operator/content/docs/endpoint-system/transports.mdx`
  * § "Schema-inferred wire format".
  */
-export type EventWireKind = "string" | "json" | "binary";
+export type EventWireKind = 'string' | 'json' | 'binary';
 
 /**
  * Inspect a Zod schema and decide whether the wire payload for events
@@ -180,11 +173,11 @@ export function classifyEventWire(schema: ZodTypeAny): EventWireKind {
   //
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const def = (schema as any)?._def;
-  if (def?.type === "custom") {
+  if (def?.type === 'custom') {
     try {
       const probe = schema.safeParse(new Uint8Array(0));
       const rejectsObject = !schema.safeParse({}).success;
-      if (probe.success && rejectsObject) return "binary";
+      if (probe.success && rejectsObject) return 'binary';
     } catch {
       /* fall through to JSON */
     }
@@ -193,11 +186,11 @@ export function classifyEventWire(schema: ZodTypeAny): EventWireKind {
   try {
     // Pluggable schema→JSON-Schema (P-021); same path as inputSchema serialization.
     const json = toJsonSchema(schema) as { type?: string };
-    return json.type === "string" ? "string" : "json";
+    return json.type === 'string' ? 'string' : 'json';
   } catch {
     // Schema rejected json conversion; default to JSON on the wire so
     // the dispatcher never produces an under-defined string fallback.
-    return "json";
+    return 'json';
   }
 }
 
@@ -248,32 +241,30 @@ export interface MinimalEventSink {
  */
 export interface PapercuspBinaryEnvelope {
   $papercuspBinary: true;
-  encoding: "base64";
+  encoding: 'base64';
   /** Base64-encoded payload bytes. */
   data: string;
 }
 
-export function isPapercuspBinaryEnvelope(
-  v: unknown,
-): v is PapercuspBinaryEnvelope {
+export function isPapercuspBinaryEnvelope(v: unknown): v is PapercuspBinaryEnvelope {
   return (
-    typeof v === "object" &&
+    typeof v === 'object' &&
     v !== null &&
     (v as { $papercuspBinary?: unknown }).$papercuspBinary === true &&
-    typeof (v as { data?: unknown }).data === "string"
+    typeof (v as { data?: unknown }).data === 'string'
   );
 }
 
 export function emitToSseSink(
   sink: MinimalEventSink,
-  tool: Pick<ProjectedTool, "eventWireKinds">,
+  tool: Pick<ProjectedTool, 'eventWireKinds'>,
   name: string,
   data: unknown,
 ): void {
   const kind = tool.eventWireKinds?.[name];
-  if (kind === "string") {
-    sink.eventRaw(name, typeof data === "string" ? data : String(data));
-  } else if (kind === "binary" && data instanceof Uint8Array) {
+  if (kind === 'string') {
+    sink.eventRaw(name, typeof data === 'string' ? data : String(data));
+  } else if (kind === 'binary' && data instanceof Uint8Array) {
     // Emit the same self-describing envelope as the MCP transport
     // (notifications/papercusp/event params.data). Consumers see a
     // uniform shape regardless of wire; HTTP consumer detects via
@@ -282,8 +273,8 @@ export function emitToSseSink(
     // schema info to know it's binary.
     const envelope: PapercuspBinaryEnvelope = {
       $papercuspBinary: true,
-      encoding: "base64",
-      data: Buffer.from(data).toString("base64"),
+      encoding: 'base64',
+      data: Buffer.from(data).toString('base64'),
     };
     sink.event(name, envelope);
   } else {
@@ -369,7 +360,7 @@ export interface UnifiedToolContext {
    * projection; absent ⇒ 'full' (the unshaped response). A per-call
    * `payloadTier` arg outranks it.
    */
-  contextTier?: import("./payload-tier").PayloadTier;
+  contextTier?: import('./payload-tier').PayloadTier;
   /**
    * The per-call `payloadTier` override, when the caller supplied one.
    * Unlike `contextTier`, absence means that no call-level override was
@@ -377,7 +368,7 @@ export interface UnifiedToolContext {
    * framework's generic payload shaper does not run for self-serialized
    * results.
    */
-  payloadTierOverride?: import("./payload-tier").PayloadTier;
+  payloadTierOverride?: import('./payload-tier').PayloadTier;
   /**
    * True when this call's result does NOT cross the agent-facing transport and
    * therefore must not be force-shaped by `applyPayloadTier`'s hard ceiling
@@ -515,10 +506,8 @@ export interface UnifiedToolContext {
    * Null when caller is anonymous.
    */
   principal?:
-    | (Pick<Principal, "slug" | "workspaceId" | "capabilities"> &
-        Partial<
-          Pick<Principal, "kind" | "authMethod" | "trust" | "roles" | "label">
-        >)
+    | (Pick<Principal, 'slug' | 'workspaceId' | 'capabilities'> &
+        Partial<Pick<Principal, 'kind' | 'authMethod' | 'trust' | 'roles' | 'label'>>)
     | null;
   /**
    * Transaction-bound Sql client with `app.workspace_id` GUC set. Built-in
@@ -578,7 +567,7 @@ export interface UnifiedToolContext {
    *
    * See: apps/operator/docs/plans/omp-profile-system-2026-05-24.md
    */
-  profile?: "engineer" | "power";
+  profile?: 'engineer' | 'power';
 
   /**
    * Which transport adapter built this context. Recorded on the
@@ -589,7 +578,7 @@ export interface UnifiedToolContext {
    * in-process / shim callers that build a ctx directly without going
    * through an adapter — `recordInvocation` writes null in that case.
    */
-  transport?: "http" | "mcp" | "ipc" | "in_process";
+  transport?: 'http' | 'mcp' | 'ipc' | 'in_process';
 
   /**
    * Sanitized transport request provenance. Adapters populate only non-secret
@@ -803,8 +792,8 @@ export type PublishStateCallback = (snapshot: unknown) => void;
  * shaped per the discriminated union in `./types`.
  */
 export type AskUserCallback = <TSchema extends StandardSchemaV1>(
-  spec: import("./types").CardSpec<TSchema>,
-) => Promise<import("./types").CardResponse<TSchema>>;
+  spec: import('./types').CardSpec<TSchema>,
+) => Promise<import('./types').CardResponse<TSchema>>;
 
 /** A tool function — one shape for every transport. */
 export type ToolFn<TInput = unknown> = (
@@ -818,9 +807,7 @@ export interface ToolExposureHttp {
   /** Path the catch-all HTTP route serves; e.g. '/api/plugins/repomix/pack'. */
   path: string;
   /** Allowed methods. Default: ['POST']. */
-  methods?: ReadonlyArray<
-    "POST" | "GET" | "PUT" | "PATCH" | "DELETE" | "OPTIONS"
-  >;
+  methods?: ReadonlyArray<'POST' | 'GET' | 'PUT' | 'PATCH' | 'DELETE' | 'OPTIONS'>;
   /**
    * Single-method sugar. Equivalent to `methods: [method]`. Accepted alongside
    * `methods` for ergonomics — the route-shaped callsites prefer the singular
@@ -829,7 +816,7 @@ export interface ToolExposureHttp {
    *
    * Phase E1 (endpoint-unification-2026-05-21).
    */
-  method?: "POST" | "GET" | "PUT" | "PATCH" | "DELETE" | "OPTIONS";
+  method?: 'POST' | 'GET' | 'PUT' | 'PATCH' | 'DELETE' | 'OPTIONS';
 }
 
 export interface ToolExposureMcp {
@@ -943,13 +930,13 @@ export interface ProjectedTool {
    * whether a tool call needs a dry-run/confirm gate (read-only ⇒ no gate). Optional for
    * back-compat; absent ⇒ unknown (the gate may default-deny a mutating call).
    */
-  effect?: "read" | "write";
+  effect?: 'read' | 'write';
   /**
    * Optional argument-sensitive effect classifier. Orchestration callers
    * resolve this once per facade call and fall back to effect when it returns
    * an invalid value or throws.
    */
-  effectForCall?: (args: unknown) => "read" | "write";
+  effectForCall?: (args: unknown) => 'read' | 'write';
   /**
    * Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6 / P-007). When
    * `true`, a handler that RAN TO COMPLETION but whose `ctx.signal` had already aborted
@@ -974,7 +961,7 @@ export interface ProjectedTool {
   replaces?: readonly string[];
   /** Composition tag derived from `replaces` at defineTool time: 'composite' when
    *  `replaces` is non-empty, else 'primitive'. Queryable via agent_tools:list. */
-  composition?: "primitive" | "composite";
+  composition?: 'primitive' | 'composite';
   /**
    * Allowed agent roles. Empty/undefined means any role can call. Used
    * primarily by the MCP transport (agent calls); HTTP callers gate via
@@ -996,11 +983,7 @@ export interface ProjectedTool {
    * bypassable only via `GateBypass.policy`. Unset = no resource gate (the legacy
    * default; default-deny is RFC Phase 3). See `Authorizer`.
    */
-  authorize?: Authorizer<
-    unknown,
-    UnifiedToolContext,
-    UnifiedToolContext["principal"]
-  >;
+  authorize?: Authorizer<unknown, UnifiedToolContext, UnifiedToolContext['principal']>;
   /**
    * RBAC role requirement (RFC tooldef-auth Phase 2). The caller's `principal.roles`
    * must include at least ONE of these (any-of). Checked by the dispatcher's
@@ -1029,7 +1012,7 @@ export interface ProjectedTool {
    * `deps.firePrecondition`). Functional preconditions ONLY — safety
    * invariants stay imperative code (D-007). See `ToolRequireSpec`.
    */
-  requires?: readonly import("./requires").ToolRequireSpec[];
+  requires?: readonly import('./requires').ToolRequireSpec[];
   /** Per-call wall-clock timeout, default 60s. */
   timeoutSec?: number;
   /**
@@ -1100,7 +1083,7 @@ export interface ProjectedTool {
    * (e.g. chat:ask_choice renders clickable buttons that are
    * invisible to a voice user).
    */
-  modality?: ReadonlyArray<"text" | "voice">;
+  modality?: ReadonlyArray<'text' | 'voice'>;
   /**
    * Profile gate. Controls which caller profile sees this tool in
    * `tools/list` and can invoke it via `tools/call`.
@@ -1117,7 +1100,7 @@ export interface ProjectedTool {
    *
    * See: apps/operator/docs/plans/omp-profile-system-2026-05-24.md
    */
-  profile?: "engineer" | "all";
+  profile?: 'engineer' | 'all';
   /**
    * Harness-scope requirement (su-prompt-audit-fixes P-020 / D-007).
    *
@@ -1134,7 +1117,7 @@ export interface ProjectedTool {
    * The gate fails closed even for superuser/power callers (it's a functional
    * requirement, not a permission) — see `GateBypass.papercusp`.
    */
-  harness?: "required" | "optional" | "none";
+  harness?: 'required' | 'optional' | 'none';
   /**
    * State-shaped tool schema (bespoke-card-improvements #1 / T4.3).
    *
@@ -1245,11 +1228,8 @@ export interface ProjectedTool {
     returns?: string;
     /** Authored rejected-key → canonical field/tool correction map. */
     argRedirects?: Record<string, string | ProjectedToolCorrectiveCall>;
-    seeAlso?: import("./see-also").SeeAlso;
-    byRole?: Record<
-      string,
-      { when?: string; notWhen?: string; chaining?: string }
-    >;
+    seeAlso?: import('./see-also').SeeAlso;
+    byRole?: Record<string, { when?: string; notWhen?: string; chaining?: string }>;
   };
 }
 
@@ -1300,7 +1280,7 @@ interface RegistryStore {
   CONTRACT_EPOCH?: number;
   CONTRACT_REVISION_CACHE?: { epoch: number; revision: string };
 }
-const __PAPERCUSP_PROJECTED_TOOL_REGISTRY = "__papercuspProjectedToolRegistry";
+const __PAPERCUSP_PROJECTED_TOOL_REGISTRY = '__papercuspProjectedToolRegistry';
 const __g = globalThis as unknown as Record<string, RegistryStore>;
 if (!__g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY]) {
   __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY] = {
@@ -1362,7 +1342,7 @@ function entryKey(tool: ProjectedTool): string {
 export class ToolRegistrationError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = "ToolRegistrationError";
+    this.name = 'ToolRegistrationError';
   }
 }
 
@@ -1386,7 +1366,7 @@ export class ToolRegistrationError extends Error {
  */
 function projectedToolSignature(tool: ProjectedTool): string {
   return JSON.stringify({
-    description: tool.description ?? "",
+    description: tool.description ?? '',
     capabilities: [...(tool.capabilities ?? [])].sort(),
     inputSchema: tool.inputSchema ?? null,
     discoveryInputSchema: tool.discoveryInputSchema ?? null,
@@ -1400,7 +1380,7 @@ function projectedToolSignature(tool: ProjectedTool): string {
  * benign case and returns silently so the caller replaces as before.
  */
 function assertNotShadowingCollision(
-  kind: "MCP tool name" | "HTTP path",
+  kind: 'MCP tool name' | 'HTTP path',
   key: string,
   prior: ProjectedTool,
   tool: ProjectedTool,
@@ -1411,8 +1391,8 @@ function assertNotShadowingCollision(
     `${kind} "${key}" registered twice within plugin "${tool.pluginName}" by two DIFFERENT tools — ` +
       `the second silently shadows the first (last import wins), so a real tool would vanish with no error. ` +
       `Rename one: two distinct tools cannot share a name. ` +
-      `prior description: ${JSON.stringify((prior.description ?? "").slice(0, 100))}; ` +
-      `new description: ${JSON.stringify((tool.description ?? "").slice(0, 100))}.`,
+      `prior description: ${JSON.stringify((prior.description ?? '').slice(0, 100))}; ` +
+      `new description: ${JSON.stringify((tool.description ?? '').slice(0, 100))}.`,
   );
 }
 
@@ -1441,10 +1421,8 @@ export function registerProjectedTool(tool: ProjectedTool): void {
     if (RESERVED_EVENT_NAMES.includes(name as ReservedEventNames)) {
       throw new ToolRegistrationError(
         `tool "${tool.expose.mcp?.name ?? tool.expose.http?.path}" declared the reserved event name "${name}". ` +
-          `Reserved names (auto-emitted by the framework): ${RESERVED_EVENT_NAMES.join(", ")}.` +
-          (name === "chunk"
-            ? " Declare `largeOutput: true` instead and return outputRef from the handler."
-            : ""),
+          `Reserved names (auto-emitted by the framework): ${RESERVED_EVENT_NAMES.join(', ')}.` +
+          (name === 'chunk' ? ' Declare `largeOutput: true` instead and return outputRef from the handler.' : ''),
       );
     }
   }
@@ -1472,9 +1450,9 @@ export function registerProjectedTool(tool: ProjectedTool): void {
     // with bare names. Both conventions in use:
     //   - dotted (plugin tools, our preference): 'repomix.pack'
     //   - colon (built-in agent-mcp tools): 'tasks:list', 'audit:list'
-    if (!name || (!name.includes(".") && !name.includes(":"))) {
+    if (!name || (!name.includes('.') && !name.includes(':'))) {
       throw new ToolRegistrationError(
-        `MCP tool name "${name}" must include a namespace separator ("." or ":") — e.g. "${tool.pluginName.replace(/^@.*\//, "")}.verb"`,
+        `MCP tool name "${name}" must include a namespace separator ("." or ":") — e.g. "${tool.pluginName.replace(/^@.*\//, '')}.verb"`,
       );
     }
     const prior = BY_MCP_NAME.get(name);
@@ -1483,12 +1461,12 @@ export function registerProjectedTool(tool: ProjectedTool): void {
         `MCP tool name "${name}" claimed by plugins "${prior.pluginName}" and "${tool.pluginName}"`,
       );
     }
-    if (prior) assertNotShadowingCollision("MCP tool name", name, prior, tool);
+    if (prior) assertNotShadowingCollision('MCP tool name', name, prior, tool);
     BY_MCP_NAME.set(name, tool);
   }
   if (tool.expose.http) {
     const p = tool.expose.http.path;
-    if (!p.startsWith("/")) {
+    if (!p.startsWith('/')) {
       throw new ToolRegistrationError(`HTTP path "${p}" must start with "/"`);
     }
     const prior = BY_HTTP_PATH.get(p);
@@ -1497,7 +1475,7 @@ export function registerProjectedTool(tool: ProjectedTool): void {
         `HTTP path "${p}" claimed by plugins "${prior.pluginName}" and "${tool.pluginName}"`,
       );
     }
-    if (prior) assertNotShadowingCollision("HTTP path", p, prior, tool);
+    if (prior) assertNotShadowingCollision('HTTP path', p, prior, tool);
     BY_HTTP_PATH.set(p, tool);
   }
   REGISTRY.set(entryKey(tool), tool);
@@ -1556,8 +1534,8 @@ export function lookupByMcpName(name: string): ProjectedTool | undefined {
 export function normalizeMcpName(name: string): string {
   return name
     .toLowerCase()
-    .replace(/^mcp__[^_]+(?:[^_]|_(?!_))*__/, "") // mcp__<server>__<tool> → <tool>
-    .replace(/[:_.\-]+/g, ":");
+    .replace(/^mcp__[^_]+(?:[^_]|_(?!_))*__/, '') // mcp__<server>__<tool> → <tool>
+    .replace(/[:_.\-]+/g, ':');
 }
 
 /**
@@ -1630,19 +1608,12 @@ export function projectedToolSourceFile(toolName: string): string | null {
  * revision so callers can detect guidance produced from a different contract.
  * Registration order is deliberately excluded; executable content is not.
  */
-export const PROJECTED_TOOL_REGISTRY_SOURCE =
-  "projected-tool-registry" as const;
+export const PROJECTED_TOOL_REGISTRY_SOURCE = 'projected-tool-registry' as const;
 
 export function projectedToolRegistryRevision(
   tools?: readonly Pick<
     ProjectedTool,
-    | "expose"
-    | "inputSchema"
-    | "discoveryInputSchema"
-    | "agentRoles"
-    | "profile"
-    | "modality"
-    | "guidance"
+    'expose' | 'inputSchema' | 'discoveryInputSchema' | 'agentRoles' | 'profile' | 'modality' | 'guidance'
   >[],
 ): string {
   if (!tools) {
@@ -1654,29 +1625,26 @@ export function projectedToolRegistryRevision(
     return revision;
   }
   const canonical = (value: unknown): string => {
-    if (value === null || typeof value !== "object")
-      return JSON.stringify(value) ?? "null";
-    if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+    if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+    if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
     const row = value as Record<string, unknown>;
     return `{${Object.keys(row)
       .sort()
       .map((key) => `${JSON.stringify(key)}:${canonical(row[key])}`)
-      .join(",")}}`;
+      .join(',')}}`;
   };
   const contracts = tools
     .flatMap((tool) => {
       const name = tool.expose.mcp?.name;
       if (!name) return [];
-      return [
-        {
-          name,
-          inputSchema: tool.discoveryInputSchema ?? tool.inputSchema,
-          agentRoles: [...(tool.agentRoles ?? [])].sort(),
-          profile: tool.profile ?? "all",
-          modality: [...(tool.modality ?? ["text", "voice"])].sort(),
-          argRedirects: tool.guidance?.argRedirects ?? {},
-        },
-      ];
+      return [{
+        name,
+        inputSchema: tool.discoveryInputSchema ?? tool.inputSchema,
+        agentRoles: [...(tool.agentRoles ?? [])].sort(),
+        profile: tool.profile ?? 'all',
+        modality: [...(tool.modality ?? ['text', 'voice'])].sort(),
+        argRedirects: tool.guidance?.argRedirects ?? {},
+      }];
     })
     .sort((a, b) => a.name.localeCompare(b.name));
 
@@ -1687,13 +1655,13 @@ export function projectedToolRegistryRevision(
     hash ^= BigInt(byte);
     hash = BigInt.asUintN(64, hash * 0x100000001b3n);
   }
-  return `projected-tool-registry-v1:${hash.toString(16).padStart(16, "0")}`;
+  return `projected-tool-registry-v1:${hash.toString(16).padStart(16, '0')}`;
 }
 
 export interface ProjectedToolAvailability {
   role?: AgentRole;
-  profile?: "engineer" | "power";
-  modality?: "text" | "voice";
+  profile?: 'engineer' | 'power';
+  modality?: 'text' | 'voice';
 }
 
 export interface ProjectedToolCallContract {
@@ -1701,33 +1669,19 @@ export interface ProjectedToolCallContract {
   revision: string;
   name: string;
   inputSchema: Record<string, unknown>;
-  aliases: Record<
-    string,
-    { target: string; provenance: "authored-tool-guidance" }
-  >;
+  aliases: Record<string, { target: string; provenance: 'authored-tool-guidance' }>;
 }
 
 export class ProjectedToolContractError extends Error {
-  override readonly name = "ProjectedToolContractError";
+  override readonly name = 'ProjectedToolContractError';
 }
 
-function availabilityProblem(
-  tool: ProjectedTool,
-  context: ProjectedToolAvailability,
-): string | null {
-  if (
-    context.role &&
-    tool.agentRoles?.length &&
-    !tool.agentRoles.includes(context.role)
-  ) {
+function availabilityProblem(tool: ProjectedTool, context: ProjectedToolAvailability): string | null {
+  if (context.role && tool.agentRoles?.length && !tool.agentRoles.includes(context.role)) {
     return `role ${context.role} is not admitted`;
   }
-  if (context.profile === "power" && tool.profile === "engineer")
-    return "power profile is not admitted";
-  if (
-    context.modality &&
-    !(tool.modality ?? ["text", "voice"]).includes(context.modality)
-  ) {
+  if (context.profile === 'power' && tool.profile === 'engineer') return 'power profile is not admitted';
+  if (context.modality && !(tool.modality ?? ['text', 'voice']).includes(context.modality)) {
     return `modality ${context.modality} is not admitted`;
   }
   return null;
@@ -1739,13 +1693,9 @@ export function projectedToolCallContract(
   context: ProjectedToolAvailability = {},
 ): ProjectedToolCallContract {
   const tool = lookupByMcpName(name);
-  if (!tool?.expose.mcp)
-    throw new ProjectedToolContractError(`tool contract unavailable: ${name}`);
+  if (!tool?.expose.mcp) throw new ProjectedToolContractError(`tool contract unavailable: ${name}`);
   const unavailable = availabilityProblem(tool, context);
-  if (unavailable)
-    throw new ProjectedToolContractError(
-      `tool contract unavailable: ${name} (${unavailable})`,
-    );
+  if (unavailable) throw new ProjectedToolContractError(`tool contract unavailable: ${name} (${unavailable})`);
   return {
     source: PROJECTED_TOOL_REGISTRY_SOURCE,
     revision: projectedToolRegistryRevision(),
@@ -1753,12 +1703,10 @@ export function projectedToolCallContract(
     inputSchema: tool.discoveryInputSchema ?? tool.inputSchema,
     aliases: Object.fromEntries(
       Object.entries(tool.guidance?.argRedirects ?? {})
-        .filter(
-          (entry): entry is [string, string] => typeof entry[1] === "string",
-        )
+        .filter((entry): entry is [string, string] => typeof entry[1] === 'string')
         .map(([key, target]) => [
-          key,
-          { target, provenance: "authored-tool-guidance" as const },
+        key,
+        { target, provenance: 'authored-tool-guidance' as const },
         ]),
     ),
   };
@@ -1766,11 +1714,7 @@ export function projectedToolCallContract(
 
 type ContractSchema = Record<string, unknown>;
 
-function contractProblems(
-  schema: ContractSchema,
-  value: unknown,
-  path = "$",
-): string[] {
+function contractProblems(schema: ContractSchema, value: unknown, path = '$'): string[] {
   const alternatives = Array.isArray(schema.anyOf)
     ? schema.anyOf
     : Array.isArray(schema.oneOf)
@@ -1778,93 +1722,52 @@ function contractProblems(
       : null;
   if (alternatives) {
     const attempts = alternatives
-      .filter(
-        (branch): branch is ContractSchema =>
-          !!branch && typeof branch === "object" && !Array.isArray(branch),
-      )
+      .filter((branch): branch is ContractSchema => !!branch && typeof branch === 'object' && !Array.isArray(branch))
       .map((branch) => contractProblems(branch, value, path));
     if (attempts.some((problems) => problems.length === 0)) return [];
-    return (
-      attempts.sort((a, b) => a.length - b.length)[0] ?? [
-        `${path}: no declared schema branch matched`,
-      ]
-    );
+    return attempts.sort((a, b) => a.length - b.length)[0] ?? [`${path}: no declared schema branch matched`];
   }
   if (Array.isArray(schema.allOf)) {
     return schema.allOf.flatMap((branch) =>
-      branch && typeof branch === "object" && !Array.isArray(branch)
+      branch && typeof branch === 'object' && !Array.isArray(branch)
         ? contractProblems(branch as ContractSchema, value, path)
         : [],
     );
   }
-  if (
-    Array.isArray(schema.enum) &&
-    !schema.enum.some((candidate) => Object.is(candidate, value))
-  ) {
-    return [
-      `${path}: ${JSON.stringify(value)} is not one of ${schema.enum.map(String).join("|")}`,
-    ];
+  if (Array.isArray(schema.enum) && !schema.enum.some((candidate) => Object.is(candidate, value))) {
+    return [`${path}: ${JSON.stringify(value)} is not one of ${schema.enum.map(String).join('|')}`];
   }
-  if ("const" in schema && !Object.is(schema.const, value))
-    return [`${path}: expected ${JSON.stringify(schema.const)}`];
-  if (schema.type === "object" || schema.properties) {
-    if (!value || typeof value !== "object" || Array.isArray(value))
-      return [`${path}: expected object`];
+  if ('const' in schema && !Object.is(schema.const, value)) return [`${path}: expected ${JSON.stringify(schema.const)}`];
+  if (schema.type === 'object' || schema.properties) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return [`${path}: expected object`];
     const row = value as Record<string, unknown>;
-    const properties =
-      schema.properties &&
-      typeof schema.properties === "object" &&
-      !Array.isArray(schema.properties)
-        ? (schema.properties as Record<string, unknown>)
-        : {};
+    const properties = schema.properties && typeof schema.properties === 'object' && !Array.isArray(schema.properties)
+      ? schema.properties as Record<string, unknown>
+      : {};
     const problems: string[] = [];
     for (const key of Array.isArray(schema.required) ? schema.required : []) {
-      if (typeof key === "string" && !(key in row))
-        problems.push(`${path}.${key}: required`);
+      if (typeof key === 'string' && !(key in row)) problems.push(`${path}.${key}: required`);
     }
     if (schema.additionalProperties === false) {
-      for (const key of Object.keys(row))
-        if (!(key in properties))
-          problems.push(`${path}.${key}: undeclared key`);
+      for (const key of Object.keys(row)) if (!(key in properties)) problems.push(`${path}.${key}: undeclared key`);
     }
     for (const [key, child] of Object.entries(properties)) {
-      if (
-        !(key in row) ||
-        !child ||
-        typeof child !== "object" ||
-        Array.isArray(child)
-      )
-        continue;
-      problems.push(
-        ...contractProblems(
-          child as ContractSchema,
-          row[key],
-          `${path}.${key}`,
-        ),
-      );
+      if (!(key in row) || !child || typeof child !== 'object' || Array.isArray(child)) continue;
+      problems.push(...contractProblems(child as ContractSchema, row[key], `${path}.${key}`));
     }
     return problems;
   }
-  if (schema.type === "array") {
+  if (schema.type === 'array') {
     if (!Array.isArray(value)) return [`${path}: expected array`];
     const item = schema.items;
-    return item && typeof item === "object" && !Array.isArray(item)
-      ? value.flatMap((entry, index) =>
-          contractProblems(item as ContractSchema, entry, `${path}[${index}]`),
-        )
+    return item && typeof item === 'object' && !Array.isArray(item)
+      ? value.flatMap((entry, index) => contractProblems(item as ContractSchema, entry, `${path}[${index}]`))
       : [];
   }
-  if (schema.type === "string" && typeof value !== "string")
-    return [`${path}: expected string`];
-  if (
-    (schema.type === "number" || schema.type === "integer") &&
-    typeof value !== "number"
-  )
-    return [`${path}: expected ${schema.type}`];
-  if (schema.type === "boolean" && typeof value !== "boolean")
-    return [`${path}: expected boolean`];
-  if (schema.type === "null" && value !== null)
-    return [`${path}: expected null`];
+  if (schema.type === 'string' && typeof value !== 'string') return [`${path}: expected string`];
+  if ((schema.type === 'number' || schema.type === 'integer') && typeof value !== 'number') return [`${path}: expected ${schema.type}`];
+  if (schema.type === 'boolean' && typeof value !== 'boolean') return [`${path}: expected boolean`];
+  if (schema.type === 'null' && value !== null) return [`${path}: expected null`];
   return [];
 }
 
@@ -1876,10 +1779,7 @@ export function assertProjectedToolCallContract(
 ): ProjectedToolCallContract {
   const contract = projectedToolCallContract(name, context);
   const problems = contractProblems(contract.inputSchema, args);
-  if (problems.length > 0)
-    throw new ProjectedToolContractError(
-      `invalid generated call for ${name}: ${problems.join("; ")}`,
-    );
+  if (problems.length > 0) throw new ProjectedToolContractError(`invalid generated call for ${name}: ${problems.join('; ')}`);
   return contract;
 }
 
@@ -1900,27 +1800,19 @@ export function projectedToolCorrectiveCalls(
 ): ValidatedProjectedToolCorrectiveCall[] {
   projectedToolCallContract(name, context);
   const tool = lookupByMcpName(name)!;
-  return Object.entries(tool.guidance?.argRedirects ?? {}).flatMap(
-    ([rejectedArg, redirect]) => {
-      if (typeof redirect === "string") return [];
-      const rendered = renderProjectedToolCall(
-        redirect.tool,
-        redirect.args,
-        context,
-      );
-      return [
-        {
-          rejectedArg,
-          tool: redirect.tool,
-          args: redirect.args,
-          ...(redirect.note ? { note: redirect.note } : {}),
-          source: PROJECTED_TOOL_REGISTRY_SOURCE,
-          registryRevision: projectedToolRegistryRevision(),
-          rendered,
-        },
-      ];
-    },
-  );
+  return Object.entries(tool.guidance?.argRedirects ?? {}).flatMap(([rejectedArg, redirect]) => {
+    if (typeof redirect === 'string') return [];
+    const rendered = renderProjectedToolCall(redirect.tool, redirect.args, context);
+    return [{
+      rejectedArg,
+      tool: redirect.tool,
+      args: redirect.args,
+      ...(redirect.note ? { note: redirect.note } : {}),
+      source: PROJECTED_TOOL_REGISTRY_SOURCE,
+      registryRevision: projectedToolRegistryRevision(),
+      rendered,
+    }];
+  });
 }
 
 export interface ProjectedToolGuidanceConformance {
@@ -1942,26 +1834,19 @@ export function assertProjectedToolGuidanceConformance(): ProjectedToolGuidanceC
     const name = tool.expose.mcp?.name;
     if (!name) continue;
     const hasStructured = Object.values(tool.guidance?.argRedirects ?? {}).some(
-      (redirect) => typeof redirect === "object" && redirect !== null,
+      (redirect) => typeof redirect === 'object' && redirect !== null,
     );
     if (!hasStructured) continue;
     toolsChecked += 1;
-    const roles: Array<AgentRole | undefined> = tool.agentRoles?.length
-      ? [...tool.agentRoles]
-      : [undefined];
-    const profiles: Array<"engineer" | "power"> =
-      tool.profile === "engineer" ? ["engineer"] : ["engineer", "power"];
-    const modalities: Array<"text" | "voice"> = [
-      ...(tool.modality ?? ["text", "voice"]),
-    ];
+    const roles: Array<AgentRole | undefined> = tool.agentRoles?.length ? [...tool.agentRoles] : [undefined];
+    const profiles: Array<'engineer' | 'power'> = tool.profile === 'engineer'
+      ? ['engineer']
+      : ['engineer', 'power'];
+    const modalities: Array<'text' | 'voice'> = [...(tool.modality ?? ['text', 'voice'])];
     for (const role of roles) {
       for (const profile of profiles) {
         for (const modality of modalities) {
-          correctiveCallsChecked += projectedToolCorrectiveCalls(name, {
-            role,
-            profile,
-            modality,
-          }).length;
+          correctiveCallsChecked += projectedToolCorrectiveCalls(name, { role, profile, modality }).length;
         }
       }
     }
@@ -1981,10 +1866,7 @@ export function assertProjectedToolGuidanceConformance(): ProjectedToolGuidanceC
  * so the enforcement and the migration aid can't drift.
  */
 export function toolDeclaresGate(
-  tool: Pick<
-    ProjectedTool,
-    "capabilities" | "agentRoles" | "requireRoles" | "authorize"
-  >,
+  tool: Pick<ProjectedTool, 'capabilities' | 'agentRoles' | 'requireRoles' | 'authorize'>,
 ): boolean {
   return (
     tool.capabilities.length > 0 ||
@@ -2001,9 +1883,7 @@ export function toolDeclaresGate(
  * (declare a gate or mark `public`), then flip. Empty result = safe to flip.
  */
 export function listUngatedProjectedTools(): readonly ProjectedTool[] {
-  return Array.from(REGISTRY.values()).filter(
-    (t) => !t.public && !toolDeclaresGate(t),
-  );
+  return Array.from(REGISTRY.values()).filter((t) => !t.public && !toolDeclaresGate(t));
 }
 
 /**
@@ -2037,7 +1917,7 @@ export interface McpToolListing {
    * tool fields during validation — `_meta` is the spec's passthrough slot, so
    * that copy is the one that actually reaches a strict client.
    */
-  resultFormats?: ReadonlyArray<"json" | "toon" | "csv" | "tsv" | "md">;
+  resultFormats?: ReadonlyArray<'json' | 'toon' | 'csv' | 'tsv' | 'md'>;
   /**
    * MCP `_meta` passthrough — survives strict SDK validation (unlike unknown
    * top-level fields). Carries `papercusp/resultFormats` (the capability set).
@@ -2051,7 +1931,7 @@ export interface McpToolListing {
    * catalog. Phase 4 T3.1; clients can filter by their caller
    * modality.
    */
-  modality?: ReadonlyArray<"text" | "voice">;
+  modality?: ReadonlyArray<'text' | 'voice'>;
 }
 
 /**
@@ -2060,28 +1940,22 @@ export interface McpToolListing {
  * weak-keyed cache avoids re-running `z.toJSONSchema` on every
  * `tools/list` call.
  */
-const EVENTS_JSON_CACHE = new WeakMap<
-  EventsSchema,
-  Record<string, Record<string, unknown>>
->();
+const EVENTS_JSON_CACHE = new WeakMap<EventsSchema, Record<string, Record<string, unknown>>>();
 
-function serializeEventsSchema(
-  events: EventsSchema,
-): Record<string, Record<string, unknown>> {
+function serializeEventsSchema(events: EventsSchema): Record<string, Record<string, unknown>> {
   const cached = EVENTS_JSON_CACHE.get(events);
   if (cached) return cached;
   const out: Record<string, Record<string, unknown>> = {};
   for (const [name, schema] of Object.entries(events)) {
     const kind = classifyEventWire(schema);
-    if (kind === "binary") {
+    if (kind === 'binary') {
       // z.toJSONSchema throws on z.instanceof(Uint8Array) ("Custom types
       // cannot be represented in JSON Schema"). Surface binary events
       // explicitly so MCP clients can decode the EVENT_BIN wire frame.
       out[name] = {
-        type: "string",
-        contentEncoding: "base64",
-        description:
-          "Binary payload — base64 over JSON transports; raw bytes over IPC EVENT_BIN.",
+        type: 'string',
+        contentEncoding: 'base64',
+        description: 'Binary payload — base64 over JSON transports; raw bytes over IPC EVENT_BIN.',
       };
       continue;
     }
@@ -2096,17 +1970,14 @@ function serializeEventsSchema(
       // Any other unrepresentable schema (custom check, lazy refs to
       // self, etc.) → emit a permissive placeholder so tools/list never
       // 500s. The tool still works; clients just lose the typed view.
-      out[name] = { description: "Schema not representable in JSON Schema." };
+      out[name] = { description: 'Schema not representable in JSON Schema.' };
     }
   }
   EVENTS_JSON_CACHE.set(events, out);
   return out;
 }
 
-export function listMcpProjections(
-  role?: AgentRole,
-  profile?: "engineer" | "power",
-): McpToolListing[] {
+export function listMcpProjections(role?: AgentRole, profile?: 'engineer' | 'power'): McpToolListing[] {
   const out: McpToolListing[] = [];
   const registryRevision = projectedToolRegistryRevision();
   for (const tool of REGISTRY.values()) {
@@ -2116,14 +1987,14 @@ export function listMcpProjections(
     // power-profile callers. Untagged tools (undefined / 'all') are visible
     // to everyone — backward-compatible for tools not yet tagged.
     // eslint-disable-next-line no-console
-    if (profile === "power" && tool.profile === "engineer") continue;
+    if (profile === 'power' && tool.profile === 'engineer') continue;
     const listing: McpToolListing = {
       name: tool.expose.mcp.name,
       description: tool.description,
       inputSchema: tool.inputSchema,
       _meta: {
-        "papercusp/toolRegistryRevision": registryRevision,
-        "papercusp/toolRegistrySource": PROJECTED_TOOL_REGISTRY_SOURCE,
+        'papercusp/toolRegistryRevision': registryRevision,
+        'papercusp/toolRegistrySource': PROJECTED_TOOL_REGISTRY_SOURCE,
       },
     };
     // Advertise the output schema + negotiable formats when the tool declared
@@ -2136,27 +2007,19 @@ export function listMcpProjections(
     // arrays, so we only emit the spec-standard `outputSchema` for object-rooted
     // shapes; the array/list case advertises capability via the `resultFormats`
     // extension below (which the SDK tolerates as an unknown field).
-    if (tool.outputJsonSchema && tool.outputJsonSchema.type === "object") {
+    if (tool.outputJsonSchema && tool.outputJsonSchema.type === 'object') {
       listing.outputSchema = tool.outputJsonSchema;
     }
     if (tool.resultEligibility) {
-      const formats = [
-        ...tool.resultEligibility.capabilities,
-      ] as McpToolListing["resultFormats"];
+      const formats = [...tool.resultEligibility.capabilities] as McpToolListing['resultFormats'];
       listing.resultFormats = formats;
       // Mirror onto `_meta` — the spec passthrough slot — so it survives the
       // strict MCP SDK tools/list validation that strips unknown top-level fields.
-      listing._meta = {
-        ...(listing._meta ?? {}),
-        "papercusp/resultFormats": formats,
-      };
+      listing._meta = { ...(listing._meta ?? {}), 'papercusp/resultFormats': formats };
     }
     if (tool.events && Object.keys(tool.events).length > 0) {
       listing.events = serializeEventsSchema(tool.events);
-    } else if (
-      tool.eventsJsonSchema &&
-      Object.keys(tool.eventsJsonSchema).length > 0
-    ) {
+    } else if (tool.eventsJsonSchema && Object.keys(tool.eventsJsonSchema).length > 0) {
       // Plugin tools (T3.2): the JSON-Schema is the source of truth;
       // no conversion needed.
       listing.events = tool.eventsJsonSchema;
