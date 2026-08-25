@@ -1776,7 +1776,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       // hand-rolled JSON ToolResult (byte-stable contracts — memory:search)
       // can adapt their defaults off ctx.contextTier, same as the role-gated
       // wrapper below (context-trimming-tiers P-024).
-      ...(callTier ?? ctx.contextTier ? { contextTier: callTier ?? ctx.contextTier } : {}),
+      ...((callTier ?? ctx.contextTier) ? { contextTier: callTier ?? ctx.contextTier } : {}),
       // Keep the explicit-vs-ambient distinction available to raw ToolResult
       // handlers. `contextTier` alone cannot tell a caller's `full` override
       // from the default session tier.
