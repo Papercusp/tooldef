@@ -1,3 +1,15 @@
+/**
+ * Default wall-clock budget for one orchestration script.
+ *
+ * EXPORTED because it is not only this function's default — it is the budget every caller who
+ * RECOMMENDS folding tool calls into a script is implicitly promising. EI-21254965187146713: the
+ * batch-hint told an agent to chain N `testing:run` calls inside one script, and the fold could
+ * not finish, because a single child tool is allowed 60s by the dispatch stack (`exec.tool
+ * .timeoutSec ?? 60`) while the script wrapping it had 30s. Nothing was wrong with either number
+ * in isolation; the advice restated the script budget from memory instead of reading it. Anything
+ * reasoning about whether a fold FITS must import this rather than repeat the literal.
+ */
+export const DEFAULT_SCRIPT_TIMEOUT_MS = 30_000;
 function jsonInputError(value, path, seen) {
     if (value === null || typeof value === 'string' || typeof value === 'boolean')
         return null;
@@ -145,6 +157,43 @@ const WORKER_SRC = `(() => {
   const PROBE_KEYS = new Set(['then', 'toJSON', 'constructor', 'inspect', 'nodeType', '$$typeof']);
   const ROOT_ENVELOPE_FIELDS = new Set(['content', 'text']);
   const SHAPE_HINT_LIMIT = 8;
+  // EI-21163938645109933 / EI-21164455886001541: classify a miss instead of warning uniformly.
+  // Bounded Levenshtein — bails as soon as every cell on a row exceeds max, so cost stays O(n*m)
+  // with a tiny constant and never runs on more than AVAIL_LIMIT keys.
+  const editWithin = (a, b, max) => {
+    if (Math.abs(a.length - b.length) > max) return false;
+    let prev = [];
+    for (let j = 0; j <= b.length; j++) prev[j] = j;
+    for (let i = 1; i <= a.length; i++) {
+      const cur = [i];
+      let best = i;
+      for (let j = 1; j <= b.length; j++) {
+        const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1;
+        cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+        if (cur[j] < best) best = cur[j];
+      }
+      if (best > max) return false;
+      prev = cur;
+    }
+    return prev[b.length] <= max;
+  };
+  // A typo is NEAR an available key; an optional-field probe resembles nothing on the shape.
+  // Case-insensitive so a casing slip (rowcount/rowCount) reads as the typo it is.
+  const nearestKey = (key, keys) => {
+    const k = String(key).toLowerCase();
+    for (const cand of keys) {
+      const c = String(cand).toLowerCase();
+      if (c === k) return cand;
+      const max = Math.min(k.length, c.length) >= 5 ? 2 : 1;
+      if (editWithin(k, c, max)) return cand;
+      // Containment either way, not just a shared prefix. The incident this detector was BUILT
+      // for is "count" read off a result whose key is "claimableCount" -- 9 edits apart, so a
+      // distance test alone would file the founding case as an optional-field probe.
+      // (No backticks in this comment: it lives INSIDE a template literal.)
+      if (k.length >= 4 && (c.indexOf(k) >= 0 || k.indexOf(c) >= 0)) return cand;
+    }
+    return null;
+  };
   const compactShapeHint = (target) => Object.keys(target)
     .sort()
     .slice(0, SHAPE_HINT_LIMIT)
@@ -188,7 +237,12 @@ const WORKER_SRC = `(() => {
           const sig = tool + '|' + path + '|' + key;
           if (!missSeen.has(sig) && fieldMisses.length < MISS_LIMIT) {
             missSeen.add(sig);
-            fieldMisses.push({ tool, path: path || '(root)', read: key, available: Object.keys(target).slice(0, AVAIL_LIMIT) });
+            const availableKeys = Object.keys(target).slice(0, AVAIL_LIMIT);
+            const near = nearestKey(key, availableKeys);
+            fieldMisses.push(Object.assign(
+              { tool, path: path || '(root)', read: key, available: availableKeys },
+              near ? { likely: 'typo', didYouMean: near } : { likely: 'optional-field' },
+            ));
           }
           if (!path && ROOT_ENVELOPE_FIELDS.has(key)) {
             throw new Error(structuredRootShapeError(tool, key, target));
@@ -210,6 +264,92 @@ const WORKER_SRC = `(() => {
     seen.set(raw, out);
     for (const k of Object.keys(raw)) out[k] = unwrap(raw[k], seen);
     return out;
+  };
+
+  // --- functions.exec compatibility helpers without hidden cross-call state ---
+  // bindings.values arrive as workerInputs. They remain immutable through \`inputs\`, while this
+  // private copy is the explicit store/load state returned to the host for replay on the next run.
+  const replayState = JSON.parse(JSON.stringify(workerInputs));
+  let stateTouched = false;
+  const STATE_KEY_LIMIT = 200;
+  const STATE_BYTES_LIMIT = 65536;
+  const generatedImages = [];
+  const jsonValueError = (value, path, seen) => {
+    if (value === null || typeof value === 'string' || typeof value === 'boolean') return null;
+    if (typeof value === 'number') return Number.isFinite(value) ? null : path + ' must be a finite number';
+    if (typeof value !== 'object') return path + ' contains non-JSON ' + typeof value;
+    if (seen.has(value)) return path + ' contains a cycle';
+    seen.add(value);
+    if (Array.isArray(value)) {
+      for (let index = 0; index < value.length; index += 1) {
+        if (!Object.prototype.hasOwnProperty.call(value, index)) return path + '[' + index + '] is sparse';
+        const error = jsonValueError(value[index], path + '[' + index + ']', seen);
+        if (error) return error;
+      }
+      seen.delete(value);
+      return null;
+    }
+    const proto = Object.getPrototypeOf(value);
+    if (proto !== null && Object.getPrototypeOf(proto) !== null) return path + ' must be a plain JSON object';
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== 'string') return path + ' contains a symbol key';
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) {
+        return path + '.' + key + ' must be an enumerable data property';
+      }
+      const error = jsonValueError(descriptor.value, path + '.' + key, seen);
+      if (error) return error;
+    }
+    seen.delete(value);
+    return null;
+  };
+  const cloneJsonValue = (value, path) => {
+    const plain = unwrap(value, new Map());
+    const error = jsonValueError(plain, path, new Set());
+    if (error) throw new Error('state_not_serializable: ' + error);
+    return JSON.parse(JSON.stringify(plain));
+  };
+  const requireStateKey = (key) => {
+    if (typeof key !== 'string' || key.length === 0 || key.length > 200) {
+      throw new Error('state_key_invalid: store/load keys must be strings of 1-200 characters');
+    }
+    return key;
+  };
+  const touchState = () => {
+    if (stateTouched) return;
+    stateTouched = true;
+    parentPort.postMessage({ t: 'state', op: 'touch' });
+  };
+  const load = (key) => {
+    const safeKey = requireStateKey(key);
+    touchState();
+    if (!Object.prototype.hasOwnProperty.call(replayState, safeKey)) return undefined;
+    return cloneJsonValue(replayState[safeKey], 'state.' + safeKey);
+  };
+  const store = (key, value) => {
+    const safeKey = requireStateKey(key);
+    const cloned = cloneJsonValue(value, 'state.' + safeKey);
+    const nextState = { ...replayState, [safeKey]: cloned };
+    if (Object.keys(nextState).length > STATE_KEY_LIMIT) {
+      throw new Error('state_limit_exceeded: replay state may contain at most ' + STATE_KEY_LIMIT + ' keys');
+    }
+    const serialized = JSON.stringify(nextState);
+    if (Buffer.byteLength(serialized, 'utf8') > STATE_BYTES_LIMIT) {
+      throw new Error('state_limit_exceeded: replay state may contain at most ' + STATE_BYTES_LIMIT + ' UTF-8 bytes');
+    }
+    replayState[safeKey] = cloned;
+    touchState();
+    parentPort.postMessage({ t: 'state', op: 'set', key: safeKey, value: cloned });
+    return cloneJsonValue(cloned, 'state.' + safeKey);
+  };
+  const notify = (value) => {
+    parentPort.postMessage({ t: 'emit', name: 'notify', data: unwrap(value, new Map()) });
+  };
+  const yield_control = () => {
+    parentPort.postMessage({ t: 'emit', name: 'yield_control', data: null });
+  };
+  const generatedImage = (value) => {
+    generatedImages.push(unwrap(value, new Map()));
   };
 
   // --- the Proxy facade injected as \`tools\` (mirrors tool-facade.ts: tools.ns.verb + tools.call) ---
@@ -314,6 +454,11 @@ const WORKER_SRC = `(() => {
         console: { log, error: log, warn: log },
         log,
         sleep,
+        notify,
+        yield_control,
+        generatedImage,
+        store,
+        load,
         __papercuspInputsJson: JSON.stringify(workerInputs),
       },
       { displayErrors: true },
@@ -328,7 +473,16 @@ const WORKER_SRC = `(() => {
       // Deep-unwrap first: a tracking Proxy is not structured-cloneable, so returning a tool
       // result verbatim (\`return pp;\`) would otherwise become result_not_serializable.
       const plain = unwrap(result, new Map());
-      try { parentPort.postMessage({ t: 'done', result: plain, fieldMisses, sleepCaps }); }
+      try {
+        parentPort.postMessage({
+          t: 'done',
+          result: plain,
+          fieldMisses,
+          sleepCaps,
+          generatedImages,
+          ...(stateTouched ? { state: replayState } : {}),
+        });
+      }
       catch (cloneErr) { parentPort.postMessage({ t: 'error', error: 'result_not_serializable: ' + ((cloneErr && cloneErr.message) || String(cloneErr)) }); }
     } catch (err) {
       const msg = (err && err.message) || String(err);
@@ -340,12 +494,17 @@ const WORKER_SRC = `(() => {
       const friendly = /dynamic import callback/i.test(msg)
         ? 'dynamic_import_unsupported: code:run cannot import()/require() repo modules or node builtins -- only tools.ns.verb(args) is exposed (the role tool whitelist IS the sandbox security boundary, same reason require/process are absent). Use capability:bash + npx tsx for direct module/DB access outside that whitelist.'
         : msg;
-      parentPort.postMessage({ t: 'error', error: friendly });
+      parentPort.postMessage({
+        t: 'error',
+        error: friendly,
+        generatedImages,
+        ...(stateTouched ? { state: replayState } : {}),
+      });
     }
   })();
 })();`;
 export async function runOrchestrationScript(script, facade, opts = {}) {
-    const timeoutMs = opts.timeoutMs ?? 30_000;
+    const timeoutMs = opts.timeoutMs ?? DEFAULT_SCRIPT_TIMEOUT_MS;
     const maxLogLines = opts.maxLogLines ?? 200;
     const logs = [];
     const inputs = opts.inputs ?? {};
@@ -357,6 +516,7 @@ export async function runOrchestrationScript(script, facade, opts = {}) {
     const { Worker } = await import('node:worker_threads');
     return await new Promise((resolve) => {
         let settled = false;
+        let latestState;
         const worker = new Worker(WORKER_SRC, {
             eval: true,
             name: 'code-orchestration',
@@ -373,7 +533,11 @@ export async function runOrchestrationScript(script, facade, opts = {}) {
             settled = true;
             clearTimeout(timer);
             void worker.terminate();
-            resolve({ ...out, logs });
+            resolve({
+                ...out,
+                ...(out.state ? {} : latestState ? { state: latestState } : {}),
+                logs,
+            });
         };
         // The kill switch: terminate() stops the worker thread even mid sync-loop.
         const timer = setTimeout(() => {
@@ -397,10 +561,33 @@ export async function runOrchestrationScript(script, facade, opts = {}) {
                     result: m.result,
                     ...(m.fieldMisses && m.fieldMisses.length ? { fieldMisses: m.fieldMisses } : {}),
                     ...(m.sleepCaps && m.sleepCaps.length ? { sleepCaps: m.sleepCaps } : {}),
+                    ...(m.generatedImages && m.generatedImages.length ? { generatedImages: m.generatedImages } : {}),
+                    ...(m.state ? { state: m.state } : {}),
                 });
             }
-            if (m.t === 'error')
-                return finish({ ok: false, error: m.error });
+            if (m.t === 'error') {
+                return finish({
+                    ok: false,
+                    error: m.error,
+                    ...(m.generatedImages && m.generatedImages.length ? { generatedImages: m.generatedImages } : {}),
+                    ...(m.state ? { state: m.state } : {}),
+                });
+            }
+            if (m.t === 'state') {
+                latestState ??= JSON.parse(JSON.stringify(inputs));
+                if (m.op === 'set')
+                    latestState[m.key] = m.value;
+                return;
+            }
+            if (m.t === 'emit') {
+                try {
+                    opts.emit?.(m.name, m.data);
+                }
+                catch {
+                    // Streaming is advisory: a detached/non-streaming transport must not fail the run.
+                }
+                return;
+            }
             if (m.t === 'call')
                 void handleCall(worker, facade, m, () => settled);
         });

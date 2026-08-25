@@ -206,7 +206,26 @@ function shortDesc(desc) {
     if (!desc)
         return '';
     const one = desc.replace(/\s+/g, ' ').trim();
-    return one.length > DESC_MAX ? `${one.slice(0, DESC_MAX - 1)}…` : one;
+    const bounded = one.length > DESC_MAX ? `${one.slice(0, DESC_MAX - 1)}…` : one;
+    // Keep authored descriptions from terminating the generated JSDoc early.
+    return bounded.replace(/\*\//g, '*\\/');
+}
+/** Render top-level JSON-Schema property descriptions as JSDoc @param hints. */
+function toolArgDocs(tool) {
+    const schema = tool.inputSchema;
+    if (!isObj(schema) || !isObj(schema.properties))
+        return [];
+    const docs = [];
+    for (const [key, propSchema] of Object.entries(schema.properties)) {
+        if (!isObj(propSchema) || typeof propSchema.description !== 'string')
+            continue;
+        const description = shortDesc(propSchema.description);
+        if (!description)
+            continue;
+        const path = isValidIdent(key) ? `args.${key}` : `args[${JSON.stringify(key)}]`;
+        docs.push({ path, description });
+    }
+    return docs;
 }
 /** Project the tools into well-formed, allowed facade entries (sorted ns then verb). */
 function facadeEntries(tools, opts) {
@@ -237,6 +256,7 @@ function facadeEntries(tools, opts) {
             verb: camelVerb(rawVerb),
             name,
             desc: shortDesc(tool.description),
+            argDocs: toolArgDocs(tool),
             args: toolArgsType(tool, opts.maxDepth),
             resultType: toolResultType(tool, opts.maxDepth),
             returns: returnsNote(tool),
@@ -265,6 +285,8 @@ export function generateToolFacadeTypes(tools, opts = {}) {
         for (const e of byNs.get(ns)) {
             if (e.desc)
                 lines.push(`    /** ${e.desc} */`);
+            for (const doc of e.argDocs)
+                lines.push(`    /** @param ${doc.path} ${doc.description} */`);
             // EI-13298: surface the RETURN shape right next to the arg signature — a
             // free-text `@returns` hint (guidance.returns, EI-10882) when authored, so the
             // model reads the real response shape instead of guessing keys that silently

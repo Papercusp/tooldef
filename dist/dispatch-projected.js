@@ -17,7 +17,7 @@
  * Spec: apps/operator/docs/plugin-mcp-host-design.md.
  */
 import { DEFAULT_DISPATCH_STACK, runDispatchStack, } from './dispatch-stack';
-export { defaultComputeQuotaWindow, PASS_THROUGH, UnauthorizedToolError, HarnessRequiredError, InvalidInputError, } from './dispatch-types';
+export { defaultComputeQuotaWindow, PASS_THROUGH, UnauthorizedToolError, HarnessRequiredError, WorkspaceTxNotDeclaredError, WorkspaceTxUnavailableError, InvalidInputError, } from './dispatch-types';
 export { DEFAULT_DISPATCH_STACK, withReplacedStep, } from './dispatch-stack';
 /* ─── Dispatcher entrypoint ──────────────────────────────────────────── */
 /**

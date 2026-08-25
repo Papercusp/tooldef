@@ -21,15 +21,78 @@ import { register } from './registry';
 import { collectToolEmits } from './emits-registry';
 import { PROJECTED_TOOL_REGISTRY_SOURCE, projectedToolRegistryRevision, renderProjectedToolCall, registerProjectedTool, recordToolShapers, } from './tool-projection';
 import { UnauthorizedToolError, InvalidInputError, } from './dispatch-projected';
-import { serverVintageHint } from './server-vintage';
+import { serverVintageHint, constraintVintageHint } from './server-vintage';
 import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
 import { applyPayloadTier, extractPayloadTier, resolvePayloadTier } from './payload-tier';
 import { parseDeltaRequest, computeViewFingerprint, contentRevision, negotiateDelta, decodeDeltaCursor, computeRowDigest, computeViewChecksum, diffFromDigest, deltaCounts, isSemanticDeltaEnabled, DELTA_SMALL_RESPONSE_BYTES, computeRowDigestUncapped, } from './delta-protocol';
 import { putRowDigest, getRowDigest } from './delta-digest-store';
 import { analyzeSchema, projectReadColumns, projectWriteColumns, reconstructArgs, isWritePositional, getPrePromptEntry, isObjectWithArrayField, } from '@papercusp/result-encoding';
 /**
- * Walk up the call stack to find the file that called defineTool, then
- * derive a tool name from that file's path. Convention:
+ * The absolute path of the file that called `defineTool` — a tool's DEFINITION
+ * SITE, captured from the call stack at registration time.
+ *
+ * Derived, never declared: a tool that had to hand-write its own source path
+ * would be a second copy of a truth the module graph already owns, and it would
+ * drift the first time a file moved (derived-truth-ladder rung 1). Nothing here
+ * is host-specific — "where was this tool defined" is a property of any tool
+ * registry, so it stays in the generic lib; what a HOST then does with the path
+ * (resolve it against a repo, ask git whether it is stale) is the host's policy.
+ *
+ * ## Why the frame is SEARCHED rather than indexed
+ *
+ * The previous implementation took frame `[2]` with the comment
+ * "[0]=this fn, [1]=defineTool, [2]=caller". That was off by one: this helper is
+ * called from inside `definePrincipalGatedTool` / `defineRoleGatedTool`, which
+ * `defineTool` delegates to, so the real caller sits at `[3]`. Frame `[2]` is
+ * `defineTool` itself, whose path (`.../tooldef/src/define-tool.ts`) never
+ * matches the `/tools/<group>/<verb>` convention below — so the derivation
+ * silently returned `null` for every tool instead of throwing. It went unnoticed
+ * because every first-party tool passes an explicit `name`.
+ *
+ * A hardcoded index is the wrong shape for a stack whose depth is an
+ * implementation detail of this file. So: skip every frame belonging to THIS
+ * file (identified from frame `[0]`, which is always this function — no
+ * `import.meta.url`, which the CJS preflight seam can render differently) and
+ * take the first frame outside it. Correct at any delegation depth, and it stays
+ * correct when this file is refactored again.
+ */
+function captureDefinitionSite() {
+    const ErrorAny = Error;
+    const orig = ErrorAny.prepareStackTrace;
+    const origLimit = Error.stackTraceLimit;
+    try {
+        ErrorAny.prepareStackTrace = (_err, stack) => stack;
+        // Bounded: we need the nearest few frames, not a full trace. Measured at
+        // ~10.6µs per capture, ~8.7ms across a full 820-tool catalog boot.
+        Error.stackTraceLimit = 12;
+        const raw = new Error().stack;
+        if (!Array.isArray(raw) || raw.length === 0)
+            return null;
+        // Frame [0] is this function, so its file IS this file.
+        const selfFile = raw[0]?.getFileName?.() ?? null;
+        for (const frame of raw) {
+            const file = frame?.getFileName?.();
+            if (!file)
+                continue;
+            if (selfFile && file === selfFile)
+                continue;
+            // Node internals ('node:internal/...') are never a definition site.
+            if (file.startsWith('node:'))
+                continue;
+            return file;
+        }
+        return null;
+    }
+    catch {
+        return null;
+    }
+    finally {
+        ErrorAny.prepareStackTrace = orig;
+        Error.stackTraceLimit = origLimit;
+    }
+}
+/**
+ * Derive a tool name from its definition site's path. Convention:
  *   .../tools/tasks/list.ts    → tasks:list
  *   .../tools/harness/get.ts   → harness:get
  *   .../tools/search/query.ts  → search:query
@@ -37,33 +100,19 @@ import { analyzeSchema, projectReadColumns, projectWriteColumns, reconstructArgs
  * If the file is `index.ts`, the parent directory contributes the verb;
  * useful for tools that need a directory of helpers.
  */
-function deriveNameFromCallSite() {
-    const ErrorAny = Error;
-    const orig = ErrorAny.prepareStackTrace;
-    try {
-        ErrorAny.prepareStackTrace = (_err, stack) => stack;
-        const raw = new Error().stack;
-        // [0]=this fn, [1]=defineTool, [2]=caller (the tool file).
-        const callerFile = raw?.[2]?.getFileName?.();
-        if (!callerFile)
-            return null;
-        // Find the segment after 'tools/'.
-        const match = /\/tools\/([^/]+)\/([^/]+)\.[mc]?[jt]s$/.exec(callerFile);
-        if (!match)
-            return null;
-        const group = match[1];
-        let verb = match[2];
-        if (verb === 'index') {
-            verb = 'default';
-        }
-        return `${group}:${verb}`;
-    }
-    catch {
+function deriveNameFromCallSite(site) {
+    if (!site)
         return null;
+    // Find the segment after 'tools/'.
+    const match = /\/tools\/([^/]+)\/([^/]+)\.[mc]?[jt]s$/.exec(site);
+    if (!match)
+        return null;
+    const group = match[1];
+    let verb = match[2];
+    if (verb === 'index') {
+        verb = 'default';
     }
-    finally {
-        ErrorAny.prepareStackTrace = orig;
-    }
+    return `${group}:${verb}`;
 }
 /**
  * Compose a model-facing description from `guidance` for tools that omit
@@ -666,7 +715,8 @@ export function inferCapabilityEffect(capability, explicit) {
     return WRITE_CAPABILITY_SUFFIXES.some((s) => cap.endsWith(s)) ? 'write' : 'read';
 }
 function definePrincipalGatedTool(input) {
-    const name = input.name ?? deriveNameFromCallSite();
+    const definitionSite = captureDefinitionSite();
+    const name = input.name ?? deriveNameFromCallSite(definitionSite);
     if (!name) {
         throw new Error('defineTool: could not derive tool name from call site. ' +
             'Pass `name` explicitly or place the file under `tools/<group>/<verb>.ts`.');
@@ -681,6 +731,7 @@ function definePrincipalGatedTool(input) {
         capability: input.capability,
         tier,
         effect: inferCapabilityEffect(input.capability, input.effect),
+        effectForCall: input.effectForCall,
         idempotent: input.idempotent,
         replaces: input.replaces,
         composition: (input.replaces?.length ?? 0) > 0 ? 'composite' : 'primitive',
@@ -703,7 +754,9 @@ function definePrincipalGatedTool(input) {
         // already threads this; the principal-gated path previously dropped it, so a
         // principal-gated cross-workspace tool failed `workspace_required`. See the field doc.
         crossWorkspace: input.crossWorkspace,
-        // EI-18666279107998059: see ToolDefinition.skipWorkspaceTx.
+        // EI-18808330244321407: transaction retention is explicit opt-in.
+        needsWorkspaceTx: input.needsWorkspaceTx,
+        // Legacy no-op metadata retained for older plugin/source compatibility.
         skipWorkspaceTx: input.skipWorkspaceTx,
         // EI-19386201256023240: see ToolDefinition.skipResultDoor.
         skipResultDoor: input.skipResultDoor,
@@ -733,7 +786,7 @@ function definePrincipalGatedTool(input) {
     // The catalog stores defs with their schema type erased (handlers run on
     // post-validation values); a specific TArgs isn't assignable to the
     // unknown-output base under Standard Schema's variance, so widen explicitly.
-    registerLegacyAsProjected(def, input.expose);
+    registerLegacyAsProjected(def, input.expose, definitionSite);
     register(def);
     // Co-located intrinsic emissions → the generic collector; the operator-core
     // desugar registers them as event-reaction rules at load (D-002).
@@ -752,7 +805,8 @@ function definePrincipalGatedTool(input) {
  * resolved pool; do not assume `tx` is set.
  */
 function defineRoleGatedTool(input) {
-    const name = input.name ?? deriveNameFromCallSite();
+    const definitionSite = captureDefinitionSite();
+    const name = input.name ?? deriveNameFromCallSite(definitionSite);
     if (!name) {
         throw new Error('defineTool: could not derive tool name from call site. ' +
             'Pass `name` explicitly or place the file under `tools/<group>/<verb>.ts`.');
@@ -773,6 +827,7 @@ function defineRoleGatedTool(input) {
         capability: input.capability,
         tier,
         effect: inferCapabilityEffect(input.capability, input.effect),
+        effectForCall: input.effectForCall,
         idempotent: input.idempotent,
         replaces: input.replaces,
         composition: (input.replaces?.length ?? 0) > 0 ? 'composite' : 'primitive',
@@ -786,7 +841,9 @@ function defineRoleGatedTool(input) {
         idleTimeoutSec: input.idleTimeoutSec,
         replayBufferSize: input.replayBufferSize,
         crossWorkspace: input.crossWorkspace,
-        // EI-18666279107998059: see RoleToolDefinition.skipWorkspaceTx.
+        // EI-18808330244321407: see RoleToolDefinition.needsWorkspaceTx.
+        needsWorkspaceTx: input.needsWorkspaceTx,
+        // Legacy no-op metadata retained for older plugin/source compatibility.
         skipWorkspaceTx: input.skipWorkspaceTx,
         // EI-19386201256023240: see RoleToolDefinition.skipResultDoor.
         skipResultDoor: input.skipResultDoor,
@@ -809,7 +866,7 @@ function defineRoleGatedTool(input) {
         emits: input.emits,
         requires: input.requires,
     };
-    registerRoleGatedAsProjected(def, input.expose);
+    registerRoleGatedAsProjected(def, input.expose, definitionSite);
     // Co-located intrinsic emissions → the generic collector; the operator-core
     // desugar registers them as event-reaction rules at load (D-002).
     collectToolEmits(name, input.emits);
@@ -1251,8 +1308,13 @@ function makeInvalidInputError(toolName, issues, input, rawSchema, argRedirects,
         corrections: invalidInputCorrections(issues, rawSchema, argRedirects),
     };
     return new InvalidInputError(`invalid_args: ${formatIssues(issues, input)}${unknownArgHint(issues, rawSchema, argRedirects)}` +
+        // EI-21353729155349111: the value-level branch appends no SCHEMA (EI-10943 — a
+        // caller who knows the shape and sent a bad value learns nothing from a 1,800-char
+        // dump), but "the constraint that just refused you may not exist in the tree any
+        // more" is the one thing it cannot work out for itself. One conditional sentence,
+        // and only when the host registered a vintage resolver.
         (issuesAreValueLevel(issues)
-            ? ''
+            ? constraintVintageHint()
             : failingFieldSchemaHint(issues, rawSchema) || argsSchemaHint(rawSchema, schemaHintCache)), metadata);
 }
 /**
@@ -1328,8 +1390,18 @@ function compactSchemaExampleValue(node, depth = 0) {
             return 0;
         case 'boolean':
             return false;
-        case 'array':
-            return [];
+        case 'array': {
+            // An empty teaching example is not accepted by schemas with minItems.
+            // Keep optional/unbounded arrays compact, but include the minimum number
+            // of item examples whenever the schema requires a non-empty array.
+            const minItems = typeof rec.minItems === 'number' && Number.isFinite(rec.minItems)
+                ? Math.max(0, Math.ceil(rec.minItems))
+                : 0;
+            if (minItems === 0)
+                return [];
+            const itemExample = compactSchemaExampleValue(rec.items, depth + 1);
+            return Array.from({ length: minItems }, () => itemExample);
+        }
         case 'object':
             return hasProperties(node) ? compactAcceptedObjectExample(node, depth + 1) : {};
         default:
@@ -1522,7 +1594,7 @@ export function toArgsJsonSchema(toolName, args) {
             `\`.pipe(<schema>)\` so the OUTPUT stays representable. Refinements are always fine.`);
     }
 }
-function registerLegacyAsProjected(def, expose) {
+function registerLegacyAsProjected(def, expose, sourceFile) {
     // tasks:list → /api/agent-tools/tasks/list
     const httpPath = `/api/agent-tools/${def.name.replaceAll(':', '/')}`;
     // Pluggable schema→JSON-Schema (P-021); default adapter is Zod 4's
@@ -1648,12 +1720,16 @@ function registerLegacyAsProjected(def, expose) {
     registerProjectedTool({
         pluginName: 'agent-mcp',
         description: def.description,
+        // Where this tool was defined (absolute, captured from the call stack).
+        // Null when the stack was unreadable — never guessed.
+        sourceFile: sourceFile ?? undefined,
         inputSchema,
         // Keep the complete branch requirements for discovery/introspection while
         // retaining the flattened schema above for strict OpenAI/MCP callers.
         discoveryInputSchema: rawSchema,
         capabilities: [def.capability],
         effect: def.effect,
+        effectForCall: def.effectForCall,
         idempotent: def.idempotent,
         replaces: def.replaces,
         composition: def.composition,
@@ -1672,8 +1748,9 @@ function registerLegacyAsProjected(def, expose) {
         // parity. crossWorkspace tools self-derive workspaceId (never rely on the tx's
         // RLS), so the admin-handle path is behavior-preserving for concrete callers.
         crossWorkspace: def.crossWorkspace,
-        // EI-18666279107998059: thread skipWorkspaceTx the same way — read by the
-        // host's dispatchWithSynthesizedTx seam. See ProjectedTool.skipWorkspaceTx.
+        // EI-18808330244321407: host transaction retention is explicit opt-in.
+        needsWorkspaceTx: def.needsWorkspaceTx,
+        // Legacy no-op metadata: projected for compatibility, ignored by hosts.
         skipWorkspaceTx: def.skipWorkspaceTx,
         // EI-19386201256023240: thread skipResultDoor the same way — read by the
         // host's result-door choke point. See ProjectedTool.skipResultDoor.
@@ -1713,7 +1790,7 @@ function registerLegacyAsProjected(def, expose) {
  * `ToolResponse` envelope; this wrapper normalises to `ToolResult` so
  * both transports see the same content[] array.
  */
-function registerRoleGatedAsProjected(def, expose) {
+function registerRoleGatedAsProjected(def, expose, sourceFile) {
     const httpPath = `/api/agent-tools/${def.name.replaceAll(':', '/')}`;
     const rawSchema = toArgsJsonSchema(def.name, def.args);
     delete rawSchema.$schema;
@@ -1790,12 +1867,16 @@ function registerRoleGatedAsProjected(def, expose) {
     registerProjectedTool({
         pluginName: 'agent-mcp',
         description: def.description,
+        // Where this tool was defined (absolute, captured from the call stack).
+        // Null when the stack was unreadable — never guessed.
+        sourceFile: sourceFile ?? undefined,
         inputSchema,
         // Keep the complete branch requirements for discovery/introspection while
         // retaining the flattened schema above for strict OpenAI/MCP callers.
         discoveryInputSchema: rawSchema,
         capabilities: [def.capability],
         effect: def.effect,
+        effectForCall: def.effectForCall,
         idempotent: def.idempotent,
         replaces: def.replaces,
         composition: def.composition,
@@ -1816,7 +1897,9 @@ function registerRoleGatedAsProjected(def, expose) {
         idleTimeoutSec: def.idleTimeoutSec,
         replayBufferSize: def.replayBufferSize,
         crossWorkspace: def.crossWorkspace,
-        // EI-18666279107998059: see ProjectedTool.skipWorkspaceTx.
+        // EI-18808330244321407: see ProjectedTool.needsWorkspaceTx.
+        needsWorkspaceTx: def.needsWorkspaceTx,
+        // Legacy no-op metadata: projected for compatibility, ignored by hosts.
         skipWorkspaceTx: def.skipWorkspaceTx,
         // EI-19386201256023240: see ProjectedTool.skipResultDoor.
         skipResultDoor: def.skipResultDoor,

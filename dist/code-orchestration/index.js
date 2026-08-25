@@ -7,7 +7,7 @@
  * dry-run/confirm gate (`runToolOrchestration`). The `code:run` agent tool is a thin wrapper.
  */
 export { buildToolFacade, facadeToolNames, roleScopedToolNames, } from './tool-facade';
-export { runOrchestrationScript, } from './run-script';
+export { runOrchestrationScript, DEFAULT_SCRIPT_TIMEOUT_MS, } from './run-script';
 export { checkScript, ensureParseCheckReady, } from './parse-check';
 export { realDispatch, unwrapToolResult } from './dispatch-binding';
 export { parseJsonWithTrailer } from './json-prefix';

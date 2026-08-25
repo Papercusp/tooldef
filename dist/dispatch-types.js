@@ -43,6 +43,32 @@ export class HarnessRequiredError extends Error {
     name = 'HarnessRequiredError';
 }
 /**
+ * Thrown when a tool touches `ctx.tx` without declaring
+ * `needsWorkspaceTx: true`. This is a tool-contract defect, not an auth or
+ * infrastructure failure; keeping a stable name makes the miss immediately
+ * attributable even across duplicate module instances.
+ */
+export class WorkspaceTxNotDeclaredError extends Error {
+    name = 'WorkspaceTxNotDeclaredError';
+    constructor(toolName) {
+        super(`workspace_tx_not_declared: tool "${toolName}" accessed ctx.tx without ` +
+            '`needsWorkspaceTx: true`');
+    }
+}
+/**
+ * Thrown when a tool declared the transaction contract but the host could not
+ * bind one (normally because no concrete workspace was in scope). Access is
+ * guarded lazily so a conditional handler can still return its own scope error
+ * without paying for a transaction it never reads.
+ */
+export class WorkspaceTxUnavailableError extends Error {
+    name = 'WorkspaceTxUnavailableError';
+    constructor(toolName) {
+        super(`workspace_tx_unavailable: tool "${toolName}" declared ` +
+            '`needsWorkspaceTx: true`, but no transaction was bound');
+    }
+}
+/**
  * Throw to signal the CALLER's input failed schema validation. The dispatcher
  * surfaces this as `invalid_input` (HTTP 400) instead of `handler_error`
  * (500) — the distinction matters downstream: error-class telemetry treats

@@ -30,17 +30,22 @@ import { tierFor } from './capability-tiers';
 import { collectEntityRefs, formatEntityRefViolations, resolveEntityRefs, } from './entity-ref';
 import { PASS_THROUGH, HarnessRequiredError, InvalidInputError, UnauthorizedToolError, defaultComputeQuotaWindow, } from './dispatch-types';
 import { evaluateDataCondition } from '@papercusp/rules';
+import { applyWorkspaceTxContract } from './workspace-tx';
 function initExecution(tool, toolName, input, ctx, deps) {
+    // EI-18808330244321407: enforce the tx contract before ANY gate or
+    // authorizer can observe ctx. The final handler-decorator spread below
+    // reapplies the guard because its getter is deliberately non-enumerable.
+    const contractCtx = applyWorkspaceTxContract(tool, toolName, ctx);
     // Resolve the quota window + ceiling once, up front: the window key feeds
     // both the quota gate and telemetry, so it must be computed for every call
     // (not just quota'd ones). `roleQuota` is the tool's entry for this role.
-    const roleQuota = ctx.role ? tool.rolesQuota?.[ctx.role] : undefined;
-    const { key: windowKey, limit: quotaLimit } = (deps.computeQuotaWindow ?? defaultComputeQuotaWindow)(ctx, roleQuota, toolName);
+    const roleQuota = contractCtx.role ? tool.rolesQuota?.[contractCtx.role] : undefined;
+    const { key: windowKey, limit: quotaLimit } = (deps.computeQuotaWindow ?? defaultComputeQuotaWindow)(contractCtx, roleQuota, toolName);
     return {
         tool,
         toolName,
         input,
-        ctx,
+        ctx: contractCtx,
         deps,
         startedAt: Date.now(),
         windowKey,
@@ -54,7 +59,7 @@ function initExecution(tool, toolName, input, ctx, deps) {
         bufferWriter: null,
         eventCount: 0,
         metadataJson: null,
-        handlerCtx: ctx,
+        handlerCtx: contractCtx,
         handlerResult: null,
         envelopeVerdict: null,
     };
@@ -349,7 +354,7 @@ const replayBufferStep = {
 const ctxBindingsStep = {
     name: 'ctx-bindings',
     async run(exec) {
-        const { ctx, tool } = exec;
+        const { ctx, tool, toolName } = exec;
         // wrappedEmit — refreshes idle deadline + pushes into replay buffer
         // + bumps eventCount. Always installed; both features are conditional
         // inside.
@@ -426,7 +431,7 @@ const ctxBindingsStep = {
         const metadataCallback = (data) => {
             exec.metadataJson = { ...data };
         };
-        exec.handlerCtx = {
+        exec.handlerCtx = applyWorkspaceTxContract(tool, toolName, {
             ...ctx,
             signal: exec.abort.signal,
             emit: wrappedEmit,
@@ -434,7 +439,7 @@ const ctxBindingsStep = {
             metadata: metadataCallback,
             ...(askUser ? { askUser } : {}),
             ...(publishState ? { publishState } : {}),
-        };
+        });
         return null;
     },
 };
@@ -1159,6 +1164,22 @@ function mergeDispatchErrorMetadata(metadataJson, result) {
  */
 export async function runDispatchStack(tool, toolName, input, ctx, deps, stack = DEFAULT_DISPATCH_STACK) {
     const exec = initExecution(tool, toolName, input, ctx, deps);
+    // Notify the host before any gate or handler work begins. This is deliberately
+    // best-effort: a liveness marker must not be able to change dispatch behavior,
+    // and it must run before a long-lived handler becomes in-flight.
+    if (deps.onDispatchStart) {
+        try {
+            deps.onDispatchStart({
+                toolName,
+                pluginName: tool.pluginName,
+                args: input,
+                ctx,
+            });
+        }
+        catch {
+            // Start observers are advisory and must never break their trigger.
+        }
+    }
     let result = null;
     try {
         for (const step of stack) {

@@ -58,17 +58,70 @@ export function formatVintageAge(ms) {
         return `${hr.toFixed(1)}h`;
     return `${(hr / 24).toFixed(1)}d`;
 }
+/** The shared opening clause both hints below state — "which code is actually
+ *  answering you". Empty string when there is no resolver / nothing to report, which
+ *  is what makes every caller safe to concatenate unconditionally. */
+function vintagePrefix() {
+    const vintage = readServerVintage();
+    if (!vintage)
+        return '';
+    const build = vintage.buildId ?? 'an unknown build';
+    return ` This server is running build ${build}, started ${formatVintageAge(vintage.bootedAgoMs)} ago.`;
+}
 /**
  * The extra sentence appended to an `Unrecognized key` invalid_args error, when a
  * host resolver is registered. Empty string when there is nothing to add (no
  * resolver, or the resolver returned null) — callers concatenate unconditionally.
  */
 export function serverVintageHint() {
-    const vintage = readServerVintage();
-    if (!vintage)
+    const prefix = vintagePrefix();
+    if (!prefix)
         return '';
-    const build = vintage.buildId ?? 'an unknown build';
-    const age = formatVintageAge(vintage.bootedAgoMs);
-    return (` This server is running build ${build}, started ${age} ago. If this argument was added` +
+    return (`${prefix} If this argument was added` +
         ' after that build, the running process has never seen it — restart the app/process to pick up the new code.');
+}
+/**
+ * The mirror of `serverVintageHint` for a CONSTRAINT violation (`minItems`, an enum
+ * member, a range, a regex) — appended to a value-level invalid_args error.
+ *
+ * EI-21353729155349111: `serverVintageHint` covers the caller being NEWER than the
+ * server (an arg the process predates). The mirror case is the server enforcing a
+ * constraint the tree has since RELAXED, and it is strictly nastier to diagnose,
+ * because the evidence a reader naturally reaches for actively misleads them: they
+ * open the tool's source in the tree, see no such constraint, and conclude the error
+ * is a defect in the tool rather than a skew between two versions of it. That is not
+ * hypothetical — it cost a full investigation in EI-21310032409432146, where
+ * `work_items:complete` refused `verification.coverage.residue: []` against a live
+ * `minItems: 1` the tree had already dropped. An `Unrecognized key` would have been
+ * annotated; the `too_small` that actually fired was not.
+ *
+ * WHY THIS GATES ON NOTHING BUT REGISTRATION (the design question EI-21353729155349111
+ * left open, both of whose proposed gates are wrong):
+ *
+ *   - Gating on `bootedAgoMs` inverts the signal. The host wires it to
+ *     `process.uptime()`, so it measures how long THIS PROCESS has run, not how old
+ *     its CODE is. A process restarted two minutes ago from a three-day-old build is
+ *     the most dangerous case there is, and an age threshold scores it "fresh" —
+ *     suppressing the hint exactly when it was needed.
+ *   - Gating on a real per-tool staleness probe (comparing the tool's defining file
+ *     between the serving build and the tree) is precise, but every such probe is
+ *     async and this is synchronous error construction. Wiring it needs an
+ *     out-of-band cache — new machinery on a failure path, to suppress one sentence.
+ *
+ * So this follows the same discipline `serverVintageHint` already established: state
+ * the vintage, phrase the consequence CONDITIONALLY, and let the reader judge. A
+ * caller who really did send a bad enum reads past one clause; a caller staring at a
+ * constraint that does not exist in the source in front of them is handed the answer.
+ *
+ * Deliberately ONE sentence: it lands on the value-level branch that EI-10943 keeps
+ * free of the full args-schema dump precisely because that dump is context burn for a
+ * caller who already knows the shape. This must not re-litigate that.
+ */
+export function constraintVintageHint() {
+    const prefix = vintagePrefix();
+    if (!prefix)
+        return '';
+    return (`${prefix} If this CONSTRAINT was relaxed after that build, the running process is still` +
+        " enforcing the OLD one — the tool's source in the tree can disagree with what just refused you," +
+        ' so verify against the serving build before treating this as a defect.');
 }

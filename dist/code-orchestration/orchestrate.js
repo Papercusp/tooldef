@@ -2,53 +2,69 @@ import { buildToolFacade } from './tool-facade';
 import { realDispatch, isPreExecutionFailure } from './dispatch-binding';
 import { runOrchestrationScript, } from './run-script';
 import { checkScript, ensureParseCheckReady } from './parse-check';
+function setContainsAll(superset, subset) {
+    if (!subset || subset.size === 0)
+        return true;
+    if (!superset)
+        return false;
+    for (const value of subset)
+        if (!superset.has(value))
+            return false;
+    return true;
+}
+/** True only when the actual inner-dispatch context has a grant the outer caller lacked. */
+function authorityWidened(outer, inner) {
+    if (inner.isSuperuser === true && outer.isSuperuser !== true)
+        return true;
+    if (inner.role !== outer.role)
+        return true;
+    const outerPrincipal = outer.principal;
+    const innerPrincipal = inner.principal;
+    if (!innerPrincipal)
+        return false;
+    if (!outerPrincipal)
+        return true;
+    if (innerPrincipal.slug !== outerPrincipal.slug)
+        return true;
+    if (!setContainsAll(outerPrincipal.capabilities, innerPrincipal.capabilities))
+        return true;
+    if (!setContainsAll(outerPrincipal.roles, innerPrincipal.roles))
+        return true;
+    return false;
+}
 /**
- * P-020 (fleet-leadership-continuity-and-actuation-2026-08-01) — name the writes that
- * NEVER RAN, not just the ones that failed.
- *
- * A thrown call aborts the vm script, so every `tools.ns.verb(...)` written AFTER it in
- * source order never dispatches at all. Those calls are invisible to every existing
- * recovery surface — `plannedMutations`/`rejected`/`uncertain` are all recorded AT
- * DISPATCH, and an unreached line never dispatched. So the result could say "1 call was
- * rejected, nothing was written" while silently omitting that the script had also ordered
- * a `work_items:checkpoint` that never happened. The agent reads "nothing written, safe to
- * re-run", fixes the typo'd read... and the continuity write it thought it had made is gone.
- *
- * EI-18717906460509995 already recognised this shape and added ORDERING_HINT — but that is a
- * MITIGATION ("write your durable calls first"), not a report: it tells the author how to
- * avoid the trap next time and still never says which write was stranded THIS time. This is
- * the missing read-side half.
- *
- * Sound by construction — it reports only the provable set. `checkScript` already resolves
- * every statically-visible facade reference to its canonical `ns:verb` (it runs anyway, for
- * `unknownRefs`), so this reuses that parse rather than adding a second, drifting one. A
- * write-effect tool named in the script with ZERO dispatches provably never ran. A tool that
- * dispatched at least once is deliberately NOT reported: inside a loop or a branch it may
- * have run some iterations and not others, and no static count can tell which — claiming
- * otherwise would be the same cry-wolf failure EI-10951 fixed in the warning next door.
- * Dynamic dispatch (`tools.call(someVar)`) is likewise invisible to the static parse and
- * simply not claimed.
- *
- * Source order is preserved so the report reads as the script does.
- *
- * PURE — unit-tested without a vm, PG, or a live dispatcher.
+ * Resolve a projected tool's effect for one facade call. A classifier is
+ * advisory metadata: malformed output or a thrown classifier must not turn a
+ * safe static write into an executable dry-run call.
  */
+export function resolveToolEffect(tool, args) {
+    const fallback = tool.effect === 'read' || tool.effect === 'write' ? tool.effect : 'unknown';
+    if (typeof tool.effectForCall !== 'function')
+        return fallback;
+    try {
+        const resolved = tool.effectForCall(args);
+        return resolved === 'read' || resolved === 'write' ? resolved : fallback;
+    }
+    catch {
+        return fallback;
+    }
+}
 export function detectStrandedWrites(staticCalls, tools, dispatchedToolNames) {
     // `expose.mcp.name` is the canonical projected name — the SAME accessor buildToolFacade and
     // facadeToolNames use, and the one `checkScript` resolves its `calls` against. A ProjectedTool
     // has no top-level `.name`; reading one yields `undefined` for every tool, which silently
     // empties this set and makes the whole detector a no-op that still passes any unit test whose
     // fixture invents the field. (It did exactly that until an end-to-end run caught it.)
-    const writeEffect = new Set(tools
-        .filter((t) => t.effect === 'write')
-        .map((t) => t.expose?.mcp?.name)
-        .filter((n) => typeof n === 'string'));
+    const toolsByName = new Map(tools
+        .map((tool) => [tool.expose?.mcp?.name, tool])
+        .filter((entry) => typeof entry[0] === 'string'));
     const dispatched = new Set(dispatchedToolNames);
     const stranded = [];
     const seen = new Set();
     for (const call of staticCalls) {
         const name = call.tool;
-        if (!writeEffect.has(name))
+        const tool = toolsByName.get(name);
+        if (!tool || resolveToolEffect(tool, call.args) !== 'write')
             continue; // reads are re-runnable; only writes strand
         if (dispatched.has(name))
             continue; // ran at least once — cannot prove anything about the rest
@@ -179,6 +195,7 @@ function extractOutputReferences(value) {
 }
 const STRICT_BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const MEDIA_MIME_RE = /^(image|audio)\/[A-Za-z0-9][A-Za-z0-9.+_-]*$/;
+const GENERATED_IMAGE_DATA_URL_RE = /^data:(image\/[A-Za-z0-9][A-Za-z0-9.+_-]*);base64,(.+)$/;
 function isPlainRecord(value) {
     if (typeof value !== 'object' || value === null || Array.isArray(value))
         return false;
@@ -204,6 +221,39 @@ function validateMediaItem(value, index) {
     // Copy only the validated MCP fields: arbitrary sibling properties from script data must not
     // hitch a ride around the authored summary/result-door contract.
     return { type, data: value.data, mimeType: value.mimeType };
+}
+function validateGeneratedImages(values) {
+    const media = [];
+    for (let index = 0; index < (values?.length ?? 0); index += 1) {
+        const value = values[index];
+        if (!isPlainRecord(value)) {
+            return { media: [], error: `invalid_generated_image: generatedImages[${index}] must be an object` };
+        }
+        if (typeof value.image_url !== 'string') {
+            return { media: [], error: `invalid_generated_image: generatedImages[${index}].image_url must be a data URL` };
+        }
+        const match = GENERATED_IMAGE_DATA_URL_RE.exec(value.image_url);
+        if (!match || !STRICT_BASE64_RE.test(match[2])) {
+            return {
+                media: [],
+                error: `invalid_generated_image: generatedImages[${index}].image_url must be a canonical base64 image data URL`,
+            };
+        }
+        if (value.output_hint !== undefined &&
+            (typeof value.output_hint !== 'string' || value.output_hint.length > 2_000)) {
+            return {
+                media: [],
+                error: `invalid_generated_image: generatedImages[${index}].output_hint must be a string of at most 2000 characters`,
+            };
+        }
+        media.push({
+            type: 'image',
+            data: match[2],
+            mimeType: match[1],
+            ...(value.output_hint === undefined ? {} : { _meta: { output_hint: value.output_hint } }),
+        });
+    }
+    return { media };
 }
 /**
  * Interpret the opt-in final media contract without changing legacy summaries. An ordinary
@@ -263,6 +313,9 @@ export async function runToolOrchestration(script, opts) {
     const rejectedMutations = [];
     const uncertainMutations = [];
     const callRecords = [];
+    const dispatchedToolNames = [];
+    let authorizationObservationCount = 0;
+    let authorityWideningDetected = false;
     let dispatchCount = 0;
     let intermediateBytes = 0;
     await ensureParseCheckReady(); // lazy-load the TS compiler before the static parse-check (kept out of the eager client bundle)
@@ -277,16 +330,17 @@ export async function runToolOrchestration(script, opts) {
     // per-call error.
     const unknownRefs = check.ok ? undefined : check.unknownRefs;
     const dispatch = async (tool, name, args) => {
+        const effect = resolveToolEffect(tool, args);
         const callRecord = {
             ordinal: callRecords.length,
             tool: name,
-            effect: tool.effect === 'read' || tool.effect === 'write' ? tool.effect : 'unknown',
+            effect,
             disposition: 'in_flight',
             outputReferences: [],
         };
         callRecords.push(callRecord);
         let writeAttempt;
-        if (tool.effect === 'write') {
+        if (effect === 'write') {
             plannedMutations.push({ tool: name, args });
             if (dryRun) {
                 callRecord.disposition = 'planned';
@@ -299,12 +353,20 @@ export async function runToolOrchestration(script, opts) {
             };
             writeAttempts.push(writeAttempt);
         }
+        dispatchedToolNames.push(name);
         // Counted at the same point the host's dispatcher is entered (a throw below still
         // reached it), so this equals the number of inner telemetry rows the run produced —
         // what lets a wrapper tool (code:run / recipes:run) mark its own row as a dispatch
         // wrapper only when inner rows actually exist (census double-count, P-012).
         dispatchCount += 1;
-        const call = (callCtx) => realDispatch(callCtx, deps)(tool, name, args);
+        const call = (callCtx) => {
+            // Observe the exact context that enters the real dispatcher, after any
+            // per-call workspace/principal rebinding. This is the runtime-owned
+            // authorization entry; the script cannot forge or suppress it.
+            authorizationObservationCount += 1;
+            authorityWideningDetected ||= authorityWidened(ctx, callCtx);
+            return realDispatch(callCtx, deps)(tool, name, args);
+        };
         try {
             const result = await (wrapDispatch
                 ? wrapDispatch(tool, name, args, dispatchCtx, call)
@@ -329,7 +391,7 @@ export async function runToolOrchestration(script, opts) {
             if (isOkFalseResult(result) || isBulkPartialFailure(result)) {
                 callRecord.disposition = 'semantic_rejected';
                 childFailures.push({ tool: name, kind: 'semantic', result });
-                if (tool.effect === 'write') {
+                if (effect === 'write') {
                     if (writeAttempt)
                         writeAttempt.disposition = 'semantic_rejected';
                     okFalseMutations.push({ tool: name, args, result });
@@ -357,7 +419,7 @@ export async function runToolOrchestration(script, opts) {
                 kind: preExecution ? 'rejected' : 'uncertain',
                 error: err instanceof Error ? err.message : String(err),
             });
-            if (tool.effect === 'write') {
+            if (effect === 'write') {
                 if (writeAttempt)
                     writeAttempt.disposition = preExecution ? 'rejected' : 'uncertain';
                 (preExecution ? rejectedMutations : uncertainMutations).push({
@@ -374,29 +436,38 @@ export async function runToolOrchestration(script, opts) {
         ...(timeoutMs ? { timeoutMs } : {}),
         onTimeout: abortFromParent,
         ...(opts.inputs ? { inputs: opts.inputs } : {}),
+        ...(ctx.emit ? { emit: (name, data) => ctx.emit(name, data) } : {}),
     });
     ctx.signal?.removeEventListener('abort', abortFromParent);
     // P-020: only meaningful when the script ABORTED — a run that completed reached every line
     // it was going to, so an undispatched write there was a branch not taken, not a stranding.
     const strandedWrites = run.ok
         ? []
-        : detectStrandedWrites(check.calls, tools, plannedMutations.map((m) => m.tool));
+        : detectStrandedWrites(check.calls, tools, dispatchedToolNames);
     const notDispatchedWrites = strandedWrites.map((tool) => ({
         tool,
         executed: false,
     }));
     const finalResult = run.ok ? parseFinalResult(run.result) : { summary: run.result };
-    const effectiveOk = run.ok && !finalResult.error;
+    const generated = validateGeneratedImages(run.generatedImages);
+    const media = [...(finalResult.media ?? []), ...generated.media];
+    const effectiveOk = run.ok && !finalResult.error && !generated.error;
     return {
         ok: effectiveOk,
         summary: finalResult.summary,
-        ...(finalResult.media ? { media: finalResult.media } : {}),
+        ...(media.length ? { media } : {}),
+        ...(run.state ? { state: run.state } : {}),
         logs: run.logs,
-        error: finalResult.error ?? run.error,
+        error: finalResult.error ?? generated.error ?? run.error,
         ...(unknownRefs && unknownRefs.length ? { unknownRefs } : {}),
         dryRun,
         dispatchCount,
         intermediateBytes,
+        runtimeObservations: {
+            authorizationObservationCount,
+            authorityWideningDetected,
+            midTurnPromptInjectionObservability: 'not-observable',
+        },
         plannedMutations,
         ...(!dryRun && writeAttempts.length
             ? { writeAttempts: writeAttempts.map((attempt) => ({ ...attempt })) }

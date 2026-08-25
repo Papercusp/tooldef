@@ -153,10 +153,29 @@ function isPlainObject(value) {
     const prototype = Object.getPrototypeOf(value);
     return prototype === Object.prototype || prototype === null;
 }
-/** Preserve an array's element contract while keeping truncation visible in band. */
-function arrayTruncationValue(source, droppedCount, shownCount, totalCount) {
+/**
+ * Preserve an array's element contract while keeping truncation visible in band.
+ *
+ * ⚠ `projectedRows` MUST be the array the marker is about to be APPENDED TO — not
+ * the source array it was projected from (EI-21219452028880493). The two diverge,
+ * and only the projected one is what the caller ends up iterating:
+ *
+ *  - a source element PAST the truncation window can be a non-object (a stray
+ *    string, a nested array, a marker left by an earlier shaping pass) while every
+ *    element the caller can SEE is an object. Judging by the source then picked the
+ *    string form and handed back a heterogeneous array — the reported failure, where
+ *    locks:queue returned `active_locks` with a string among objects and
+ *    `jq group_by(.lock_id)` died with "Cannot index string with string lock_id".
+ *  - symmetrically, a source of all plain objects can PROJECT to strings (an element
+ *    replaced by `omissionMarker(...)`, `'[circular]'`, or a depth-limit marker),
+ *    where judging by the source would append an object into an array of strings.
+ *
+ * The rule is simply that the marker must match the contract of the array it JOINS.
+ * An empty `projectedRows` carries no contract to preserve, so it keeps the string.
+ */
+function arrayTruncationValue(projectedRows, droppedCount, shownCount, totalCount) {
     const note = arrayTruncationMarker(droppedCount, shownCount, totalCount);
-    if (source.length > 0 && source.every(isPlainObject)) {
+    if (projectedRows.length > 0 && projectedRows.every(isPlainObject)) {
         return {
             id: '(truncated)',
             _truncated: true,
@@ -215,6 +234,12 @@ function takePrimitive(state, value, path) {
 const IDENTITY_FIELDS = new Set([
     'id', 'title', 'name', 'slug', 'ref', 'kind', 'state', 'status', 'ok', 'error',
     'item', 'itemId', 'plan', 'planSlug', 'rubricRef', 'workItemId',
+    // EI-21197620758075816: a rubric criterion's structured `check` is its
+    // executable identity. Dropping it makes a bound criterion indistinguishable
+    // from a fuzzy/unbound one. The value is handled as a bounded structured
+    // field below so its discriminated-union payload (files/instrument/scope)
+    // survives without promoting generic keys such as `files` globally.
+    'check',
     // EI-21058972492075433: the outcome-identity of a WRITE/LAUNCH receipt (a
     // singleton fire-and-can't-safely-retry call like release:checkpoint-run) —
     // "did it launch, and against what" is exactly as load-bearing as `ok`/`id`
@@ -222,7 +247,13 @@ const IDENTITY_FIELDS = new Set([
     'launched', 'candidate', 'unit', 'runId',
 ]);
 const IDENTITY_ENVELOPES = new Set(['results', 'items', 'workItem', 'counts']);
+const STRUCTURED_IDENTITY_FIELDS = new Set(['check']);
 const IDENTITY_PREVIEW_DEPTH = 4;
+/** Announces, ON a depth-compacted object, that non-identity fields were withheld —
+ *  so a partial object is never read as a complete one (EI-21364503818966104).
+ *  Underscore-prefixed to match `_projection` and stay clear of real payload keys. */
+const PARTIAL_MARKER_KEY = '_omitted';
+const PARTIAL_MARKER_MAX_KEYS = 6;
 function projectIdentityPreview(value, path, depth, state) {
     if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
         return takePrimitive(state, value, path);
@@ -265,7 +296,7 @@ function projectIdentityPreview(value, path, depth, state) {
                 // even when per-row entries for the KEPT elements would otherwise fill it
                 // first (EI-19965559011729712).
                 recordOmission(state, `${path}[${projected.length}]`, `${droppedCount} identity row(s) omitted; showing ${projected.length} of ${value.length}`, droppedCount, true);
-                projected.push(arrayTruncationValue(value, droppedCount, projected.length, value.length));
+                projected.push(arrayTruncationValue(projected, droppedCount, projected.length, value.length));
             }
             return projected;
         }
@@ -283,11 +314,35 @@ function projectIdentityPreview(value, path, depth, state) {
                 break;
             }
             state.remaining -= keyCost;
-            projected[key] = projectIdentityPreview(child, `${path}.${key}`, depth + 1, state);
+            projected[key] = STRUCTURED_IDENTITY_FIELDS.has(key)
+                ? projectValue(child, `${path}.${key}`, 0, state)
+                : projectIdentityPreview(child, `${path}.${key}`, depth + 1, state);
         }
         const dropped = entries.length - chosen.length;
         if (dropped > 0) {
             recordOmission(state, `${path}.*`, `${dropped} non-identity fields omitted at projection depth limit`, dropped);
+            // EI-21364503818966104: the surviving identity fields make this object look
+            // WHOLE. A reader cannot tell "the field is empty in the store" from "the
+            // projection withheld it", and the global _projection.omitted[] list is both
+            // easy to read past and sample-capped — so the object must announce its own
+            // partialness. This cost a false major bug filing plus wrong findings
+            // delivered to two rubric authors: `rubrics:get` renders each criterion down
+            // to title+check, and populated model/method/driftMarkers read as absent.
+            // Naming the dropped keys is what makes it actionable (you can see WHICH
+            // falsifier is missing), so spend the bytes on names when the budget allows.
+            const droppedKeys = entries
+                .filter(([key]) => !IDENTITY_FIELDS.has(key) && !IDENTITY_ENVELOPES.has(key))
+                .map(([key]) => key);
+            const shownKeys = droppedKeys.slice(0, PARTIAL_MARKER_MAX_KEYS);
+            const named = shownKeys.length < droppedKeys.length
+                ? `${shownKeys.join(', ')}, +${droppedKeys.length - shownKeys.length} more`
+                : shownKeys.join(', ');
+            const marker = `[omitted: ${dropped} non-identity field(s) at projection depth limit: ${named} — recover: re-call with payloadTier:'full']`;
+            const markerCost = jsonLen(PARTIAL_MARKER_KEY) + jsonLen(marker) + 4;
+            if (state.remaining >= markerCost) {
+                state.remaining -= markerCost;
+                projected[PARTIAL_MARKER_KEY] = marker;
+            }
         }
         return projected;
     }
@@ -341,7 +396,7 @@ function projectValue(value, path, depth, state) {
                 // (EI-19965559011729712). The in-band marker also travels WITH the array
                 // itself, so a downstream encoder's own element count reflects the drop.
                 recordOmission(state, `${path}[${projected.length}]`, `${droppedCount} array item(s) omitted; showing ${projected.length} of ${value.length}`, droppedCount, true);
-                projected.push(arrayTruncationValue(value, droppedCount, projected.length, value.length));
+                projected.push(arrayTruncationValue(projected, droppedCount, projected.length, value.length));
             }
             return projected;
         }
@@ -508,11 +563,13 @@ export function projectBoundedPayload(data, opts) {
         // ask-for-LESS lead: for an oversized result, narrowing beats paging.
         next: opts.recovery?.next ?? buildDefaultRecoveryNext(opts, cursorArgs.truncated),
     };
-    let result = Array.isArray(preview)
-        ? { items: preview, _projection: metadata }
-        : preview && typeof preview === 'object'
-            ? { ...preview, _projection: metadata }
-            : { value: preview, _projection: metadata };
+    const buildResultFrom = (body, meta) => Array.isArray(body)
+        ? { items: body, _projection: meta }
+        : body && typeof body === 'object'
+            ? { ...body, _projection: meta }
+            : { value: body, _projection: meta };
+    const buildResult = (meta) => buildResultFrom(preview, meta);
+    let result = buildResult(metadata);
     metadata.returnedChars = jsonLen(result);
     // Exact last-line defense: pathological keys/escaping must not defeat the
     // transport bound even if the approximate recursion budget under-counted.
@@ -536,6 +593,95 @@ export function projectBoundedPayload(data, opts) {
     // payload) does this keep the old all-detail-erased summary — there is
     // nothing left to preserve.
     if (metadata.returnedChars >= Math.min(target, PAYLOAD_TIER_HARD_CEILING_CHARS)) {
+        // EI-21215297173311865: shed the DIAGNOSTIC manifest before sacrificing DATA.
+        // The block above correctly identifies the metadata as what usually blows the
+        // bound — but the identity-only fallback below then discards the whole preview
+        // while keeping that same oversized metadata intact, which inverts the value
+        // order: `omitted[]` is a list of per-path EXAMPLES a caller can re-derive
+        // nothing from, whereas the preview is the only copy of the data. Observed on
+        // coord:orient { afterCompaction:true } — a 131KB payload returned `{ok:true}`
+        // plus a ~2.9KB manifest of 152 omissions and ZERO content fields, which reads
+        // as a successful orient over an empty world (no peers, no claims, no unanswered
+        // messages) precisely on the post-compaction path where the caller has the least
+        // independent state to notice.
+        //
+        // `omittedCount` — the load-bearing number, and the marker that keeps a bounded
+        // measurement from reading as a real zero — is preserved at full precision in
+        // every branch; only the per-path samples are shed, disclosed via
+        // `omittedSamplesDropped`. Recovery (`cursor` + `next`) is never traded away:
+        // it is what makes the omission actionable.
+        const ceiling = Math.min(target, PAYLOAD_TIER_HARD_CEILING_CHARS);
+        let leanMetadata = metadata;
+        for (const sampleCap of [5, 0]) {
+            if (leanMetadata.omitted.length <= sampleCap)
+                continue;
+            leanMetadata = {
+                ...metadata,
+                omitted: metadata.omitted.slice(0, sampleCap),
+                omittedSamplesDropped: true,
+                returnedChars: 0,
+            };
+            const candidate = buildResult(leanMetadata);
+            const candidateChars = jsonLen(candidate);
+            if (candidateChars < ceiling) {
+                candidate._projection.returnedChars = candidateChars;
+                return candidate;
+            }
+        }
+        // Shedding samples alone is not always enough, and the reason is structural: the
+        // preview above was budgeted against a FIXED metadata reserve (target - 1_600)
+        // that this call's metadata overran, so preview + metadata cannot fit however
+        // much of the manifest is shed. Re-project the DATA against the budget the lean
+        // metadata actually leaves, instead of dropping to an identity-only husk. A
+        // PARTIAL reading of the real payload beats a complete inventory of what was
+        // withheld — the caller can act on the former and can re-derive nothing from the
+        // latter.
+        // `state.remaining` is an APPROXIMATE recursion budget (see the "pathological
+        // keys/escaping" note above — it is exactly why this exact-measurement backstop
+        // exists), so a single sized attempt can still overshoot. Step the content
+        // budget down and take the first projection that measurably fits, rather than
+        // giving up on content after one miss.
+        const leanMetaChars = jsonLen({ ...leanMetadata, returnedChars: 0 });
+        const contentHeadroom = ceiling - leanMetaChars - 64;
+        // The walk's `remaining` under-counts the SERIALIZED size by a wide and
+        // payload-dependent factor (measured 3.5x-5.7x on an orient-shaped payload:
+        // a 1,129-char budget serialized to 3,927 chars), so a fixed fraction ladder
+        // misses unpredictably — one measured case landed 24 chars over a 3,000
+        // ceiling and fell through to the husk. Re-aim each attempt using the
+        // overshoot the previous attempt actually exhibited, and require a strict
+        // decrease so the loop always terminates.
+        let contentBudget = contentHeadroom;
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+            if (contentBudget < 200)
+                break;
+            const reState = {
+                remaining: contentBudget,
+                omittedCount: 0,
+                omitted: [],
+                priorityOmitted: [],
+                active: new WeakSet(),
+                limits: { maxArray: 6, maxDepth: 4, maxKeys: 24, maxString: 300 },
+            };
+            const rePreview = projectValue(data, '$', 0, reState);
+            const reMetadata = {
+                ...leanMetadata,
+                // Count the omissions of the projection ACTUALLY RETURNED, and never
+                // under-report the fuller walk that was discarded: a bounded measurement
+                // that reads as a real zero is the failure mode this whole block exists to
+                // prevent.
+                omittedCount: Math.max(leanMetadata.omittedCount, reState.omittedCount),
+                returnedChars: 0,
+            };
+            const candidate = buildResultFrom(rePreview, reMetadata);
+            const candidateChars = jsonLen(candidate);
+            if (candidateChars < ceiling) {
+                candidate._projection.returnedChars = candidateChars;
+                return candidate;
+            }
+            const serializedContent = Math.max(1, candidateChars - leanMetaChars);
+            const overshoot = Math.max(1.1, serializedContent / contentBudget);
+            contentBudget = Math.min(Math.floor(contentHeadroom / overshoot), Math.floor(contentBudget * 0.7));
+        }
         const identityState = {
             remaining: Math.max(400, Math.floor(target * 0.2)),
             omittedCount: 0,
@@ -560,10 +706,10 @@ export function projectBoundedPayload(data, opts) {
         }
         result =
             identityFields && Object.keys(identityFields).length > 0
-                ? { ...identityFields, _projection: { ...metadata, returnedChars: 0 } }
+                ? { ...identityFields, _projection: { ...leanMetadata, returnedChars: 0 } }
                 : {
                     summary: '[payload preview omitted: serialized projection exceeded transport budget]',
-                    _projection: { ...metadata, returnedChars: 0 },
+                    _projection: { ...leanMetadata, returnedChars: 0 },
                 };
         result._projection.returnedChars = jsonLen(result);
     }

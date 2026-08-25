@@ -381,6 +381,24 @@ export function listAllProjectedTools() {
     return Array.from(REGISTRY.values());
 }
 /**
+ * The absolute file that defined `toolName` (its MCP-exposed name, e.g.
+ * `improvements:capture`), or `null` when the tool is unknown, was registered
+ * without a readable call stack, or has no defining module at all.
+ *
+ * Three-valued by omission on purpose: `null` means UNKNOWN, never "this tool
+ * has no source". A caller that treats a null as a negative verdict would turn
+ * an unreadable stack into a confident claim about the code — the same
+ * absence-reads-as-positive failure `candidate-contains.ts` is built to avoid.
+ */
+export function projectedToolSourceFile(toolName) {
+    // Tolerant on purpose: a caller reporting a tool failure copies whatever
+    // spelling it saw — the canonical colon form from the docs, the underscore
+    // form, or its client's fully-mangled `mcp__<server>__<verb>` id. resolveMcpName
+    // accepts all three and returns undefined rather than guessing when a
+    // normalized name is ambiguous.
+    return resolveMcpName(toolName)?.sourceFile ?? null;
+}
+/**
  * Stable content revision for the executable MCP contract.
  *
  * The registry is the authority for names, accepted argument shapes, and
