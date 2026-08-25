@@ -49,6 +49,23 @@ describe('unwrapToolResult (B-CX-1A dispatch binding)', () => {
     expect(result).toEqual(value);
   });
 
+  it('preserves the non-empty mode:get array in a compact object envelope', () => {
+    const value = {
+      ok: true,
+      agent: 'su-e9297c3a-43fc-48fd-8767-293b4f59f08e',
+      modes: [
+        { mode: 'auto', axis: 'autonomy', reason: 'launch: --auto', setBy: 'su-e9297c3a-43fc-48fd-8767-293b4f59f08e', ownerDirected: false, setAt: '2026-08-24 23:03:33.874857-04' },
+        { mode: 'goal', axis: 'work-source', reason: 'activated goal work-on-everything-0a8163', setBy: 'su-83dc3ae6-5f90-4db6-9b7e-9b45ab3c8d30', ownerDirected: false, setAt: '2026-08-24 23:03:32.922349-04' },
+        { mode: 'grade', axis: 'overlay', reason: 'Stacking GRADE beside GOAL per work-on-everything kickoff', setBy: 'su-e9297c3a-43fc-48fd-8767-293b4f59f08e', ownerDirected: false, setAt: '2026-08-24 23:04:49.922867-04' },
+        { mode: 'ideate', axis: 'overlay', reason: 'implied by goal — activated goal work-on-everything', setBy: 'su-83dc3ae6-5f90-4db6-9b7e-9b45ab3c8d30', ownerDirected: false, setAt: '2026-08-24 23:03:32.922349-04' },
+      ],
+    };
+    const text = `format: toon\n${encode(value, 'toon')}`;
+    const result = unwrapToolResult(tr({ content: [{ type: 'text', text }] as never }));
+    expect(result).toEqual(value);
+    expect((result as typeof value).modes).toHaveLength(4);
+  });
+
   it('decodes a format:csv-marked payload via the matching delimited decoder', () => {
     const value = [{ a: '1', b: 'x' }, { a: '2', b: 'y' }];
     const text = `format: csv\n${encode(value, 'csv')}`;
