@@ -41,6 +41,7 @@ import {
 import { serverVintageHint, constraintVintageHint } from './server-vintage';
 import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
 import { applyPayloadTier, extractPayloadTier, resolvePayloadTier } from './payload-tier';
+import { boundWorkspaceTx } from './workspace-tx';
 import {
   parseDeltaRequest,
   computeViewFingerprint,
@@ -1743,12 +1744,16 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
   const schemaHintCache: { hint?: string } = {};
 
   const projectedFn: ToolFn = async (input, ctx) => {
-    if (!ctx.principal || !ctx.tx) {
+    // The dispatch stack may expose `tx` as a fail-loud getter for tools that
+    // did not declare `needsWorkspaceTx`. Never probe that property directly:
+    // the descriptor-aware helper returns only a real bound transaction.
+    const workspaceTx = boundWorkspaceTx(ctx);
+    if (!ctx.principal || (def.needsWorkspaceTx === true && workspaceTx === undefined)) {
       // Almost always this is a workspace-SCOPING gap, not an auth failure:
-      // the caller is bearer-authenticated but the session carries no
-      // concrete workspace, so the host synthesized no workspace
-      // transaction. Say so — "requires authenticated request" sent
-      // authenticated callers down the wrong debugging path (EI-30).
+      // either the principal is missing or a declared transaction consumer
+      // has no concrete workspace from which the host can bind a transaction.
+      // Say so — "requires authenticated request" sent authenticated callers
+      // down the wrong debugging path (EI-30).
       throw new UnauthorizedToolError(
         `built-in tool "${def.name}" requires a workspace-scoped call — this session has no workspace transaction. ` +
           `Scope the session to a workspace, or pass a per-call workspace where the host/tool supports one.`,
@@ -1759,13 +1764,13 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     // Framework-reserved per-call tier override is stripped next — BEFORE
     // validation (context-trimming-tiers D-004; not part of any tool's schema).
     const { input: tierlessInput, callTier } = extractPayloadTier(unwrapUnparsedToolInput(input));
-    const legacyCtx: ToolContext & {
-      contextTier?: string;
-      payloadTierOverride?: string;
-      telemetrySurface?: string;
-    } = {
+    const legacyCtx = {
       principal: ctx.principal as unknown as ToolContext['principal'],
-      tx: ctx.tx,
+      // EI-18808330244321407: transaction-free tools receive no `tx` key at
+      // all. A declared consumer reaches this point only with a real bound tx.
+      ...(def.needsWorkspaceTx === true
+        ? { tx: workspaceTx as ToolContext['tx'] }
+        : {}),
       log: (level, msg, meta) => ctx.log(`[${level}] ${msg}${meta ? ` ${JSON.stringify(meta)}` : ''}`),
       // Thread the RESOLVED payload tier so principal-gated tools that keep a
       // hand-rolled JSON ToolResult (byte-stable contracts — memory:search)
@@ -1805,6 +1810,10 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       // the handler READS the field, never that dispatch DELIVERS it. That gap is
       // exactly why this shipped green.
       ...(ctx.telemetrySurface ? { telemetrySurface: ctx.telemetrySurface } : {}),
+    } as ToolContext & {
+      contextTier?: string;
+      payloadTierOverride?: string;
+      telemetrySurface?: string;
     };
     const shimmed = applyHarnessArgAlias(
       rawSchema,
