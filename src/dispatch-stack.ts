@@ -1195,7 +1195,7 @@ async function recordTelemetry(
   exec: DispatchExecution,
   result: DispatchProjectedResult,
 ): Promise<void> {
-  const { deps, tool, toolName, ctx, windowKey, input, startedAt, eventCount } = exec;
+  const { deps, tool, toolName, ctx, windowKey, input, startedAt, eventCount, callId } = exec;
   if (!deps.recordInvocation) return;
   // Gate denials (no windowKey required); successes + handler errors
   // require windowKey to match pre-refactor behavior (was guarded by
@@ -1281,6 +1281,7 @@ async function recordTelemetry(
         pluginName: tool.pluginName,
         ctx,
         windowKey: windowKey ?? '',
+        callId,
         durationMs: Date.now() - startedAt,
         status: selfReportedFailure ? 'refused' : 'ok',
         // Lift the refusal's OWN code/reason onto the first-class column so a
@@ -1304,6 +1305,7 @@ async function recordTelemetry(
         pluginName: tool.pluginName,
         ctx,
         windowKey: windowKey ?? '',
+        callId,
         durationMs: Date.now() - startedAt,
         status,
         // Persist the dispatcher error CLASS (computed above, then historically
