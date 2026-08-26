@@ -589,6 +589,13 @@ export interface UnifiedToolContext {
   requestOrigin?: RequestOriginMetadata;
 
   /**
+   * Validated request-level idempotency key supplied by the transport. Hosts
+   * may use it to make downstream side effects stable across a retry of the
+   * same request; absent for calls that did not opt into idempotency.
+   */
+  idempotencyKey?: string;
+
+  /**
    * Client-negotiated result format (token-efficient-tool-result-formats D-005).
    * The RAW request token from the transport — `?format=`/`Accept` on HTTP,
    * `_meta.format` or `?format=` on MCP — parsed by the result serializer via
