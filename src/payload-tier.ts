@@ -193,6 +193,16 @@ export interface ProjectBoundedPayloadOpts {
    */
   preserveTopLevelKeys?: readonly string[];
   /**
+   * Keep a projected top-level array as an array in the serialized result.
+   *
+   * The generic payload-tier contract defaults to an object wrapper so its
+   * `_projection` metadata survives JSON serialization. A model-facing result
+   * door may opt into the source tool's array root instead; metadata remains
+   * attached as a non-enumerable property for the in-memory caller and the
+   * door's own machine-readable metadata path.
+   */
+  preserveArrayRoot?: boolean;
+  /**
    * EI-20720054720826414: the host's concrete raw-args dispatch spelling for a
    * `payloadTier:'full'` re-call (`{tool}` substituted with the tool name) —
    * see UnifiedToolContext.rawDispatchTemplate. Present ⇒ the recovery `next`
@@ -784,12 +794,28 @@ export function projectBoundedPayload(
     // ask-for-LESS lead: for an oversized result, narrowing beats paging.
     next: opts.recovery?.next ?? buildDefaultRecoveryNext(opts, cursorArgs.truncated),
   };
+  const buildArrayRootResult = (
+    body: unknown[],
+    meta: BoundedPayloadProjection['_projection'],
+  ): BoundedPayloadProjection => {
+    // JSON.stringify intentionally ignores non-index array properties, so the
+    // model-facing body stays a bare array while callers inside this process can
+    // still inspect the durable projection metadata before serialization.
+    Object.defineProperty(body, '_projection', {
+      value: meta,
+      enumerable: false,
+      configurable: true,
+    });
+    return body as unknown as BoundedPayloadProjection;
+  };
   const buildResultFrom = (
     body: unknown,
     meta: BoundedPayloadProjection['_projection'],
   ): BoundedPayloadProjection =>
     Array.isArray(body)
-      ? { items: body, _projection: meta }
+      ? opts.preserveArrayRoot
+        ? buildArrayRootResult(body, meta)
+        : { items: body, _projection: meta }
       : body && typeof body === 'object'
         ? { ...(body as Record<string, unknown>), _projection: meta }
         : { value: body, _projection: meta };
@@ -935,13 +961,16 @@ export function projectBoundedPayload(
         identityFields[key] = projectValue(sourceFields[key], `$.${key}`, 0, identityState);
       }
     }
+    const fallbackMetadata = { ...leanMetadata, returnedChars: 0 };
     result =
-      identityFields && Object.keys(identityFields).length > 0
-        ? { ...identityFields, _projection: { ...leanMetadata, returnedChars: 0 } }
-        : {
-            summary: '[payload preview omitted: serialized projection exceeded transport budget]',
-            _projection: { ...leanMetadata, returnedChars: 0 },
-          };
+      opts.preserveArrayRoot && Array.isArray(identityOnly)
+        ? buildArrayRootResult(identityOnly, fallbackMetadata)
+        : identityFields && Object.keys(identityFields).length > 0
+          ? { ...identityFields, _projection: fallbackMetadata }
+          : {
+              summary: '[payload preview omitted: serialized projection exceeded transport budget]',
+              _projection: fallbackMetadata,
+            };
     result._projection.returnedChars = jsonLen(result);
   }
   return result;

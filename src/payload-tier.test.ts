@@ -301,6 +301,24 @@ describe('applyPayloadTier', () => {
     expect(original).toHaveLength(200);
   });
 
+  it('can preserve a top-level array root while keeping projection metadata in memory', () => {
+    const original = Array.from({ length: 200 }, (_, i) => ({ i, blob: 'x'.repeat(100) }));
+    const projected = projectBoundedPayload(original, {
+      toolName: 'catalog:list',
+      tier: 'trimmed',
+      preserveArrayRoot: true,
+    });
+
+    expect(Array.isArray(projected)).toBe(true);
+    expect(projected).not.toHaveProperty('items');
+    expect((projected as unknown as { _projection: { omittedCount: number } })._projection.omittedCount).toBeGreaterThan(0);
+    expect(Object.prototype.propertyIsEnumerable.call(projected, '_projection')).toBe(false);
+    expect(JSON.parse(JSON.stringify(projected))).toEqual(
+      Array.from(projected as unknown as unknown[]),
+    );
+    expect(original).toHaveLength(200);
+  });
+
   it('accepts an exact transport target and a schema-valid host recovery cursor', () => {
     const recovery = {
       cursor: {
