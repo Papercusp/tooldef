@@ -97,6 +97,13 @@ export interface DispatchExecution {
   /** Original ctx as received by the dispatcher. */
   readonly ctx: UnifiedToolContext;
   readonly deps: DispatchProjectedDeps;
+  /**
+   * Per-call correlation id handed to BOTH `onDispatchStart` and
+   * `recordInvocation`, so a host can open in-flight state at start and close
+   * that exact entry at settle. See `DispatchStartEvent['callId']` for why no
+   * existing ctx field can serve (they are all session-scoped).
+   */
+  readonly callId: string;
   readonly startedAt: number;
   /** Quota/telemetry window key, or null when ctx has no run/chunk to scope to. */
   readonly windowKey: string | null;
@@ -132,6 +139,22 @@ export interface DispatchExecution {
   handlerResult: ToolResult | null;
 }
 
+/**
+ * Per-call id source for `DispatchExecution.callId`.
+ *
+ * A process-local counter behind a random prefix, deliberately NOT a UUID: the
+ * consumer is an in-process in-flight registry keyed per call, so uniqueness
+ * WITHIN a process is the whole requirement, and this costs a string concat on
+ * a hot path where `randomUUID()` would cost entropy. The prefix keeps two
+ * processes' ids distinct if one is ever persisted or compared across a port.
+ */
+let callSeq = 0;
+const CALL_ID_PREFIX = Math.random().toString(36).slice(2, 8);
+function nextCallId(): string {
+  callSeq += 1;
+  return `${CALL_ID_PREFIX}-${callSeq.toString(36)}`;
+}
+
 function initExecution(
   tool: ProjectedTool,
   toolName: string,
@@ -156,6 +179,7 @@ function initExecution(
     input,
     ctx: contractCtx,
     deps,
+    callId: nextCallId(),
     startedAt: Date.now(),
     windowKey,
     quotaLimit,
@@ -1351,6 +1375,7 @@ export async function runDispatchStack(
         pluginName: tool.pluginName,
         args: input,
         ctx,
+        callId: exec.callId,
       });
     } catch {
       // Start observers are advisory and must never break their trigger.

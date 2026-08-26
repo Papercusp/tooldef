@@ -257,6 +257,24 @@ export interface DispatchStartEvent {
   pluginName: string;
   args: unknown;
   ctx: UnifiedToolContext;
+  /**
+   * Per-call correlation id, stable across this call's `onDispatchStart` and its
+   * matching `recordInvocation`. Present whenever the dispatcher initialized an
+   * execution (i.e. every call routed through `runDispatchStack`).
+   *
+   * It exists because NOTHING else in the payload identifies a single call:
+   * `ctx.runId`/`spawnId`/`parentSpawnId` are all SESSION-scoped, so an agent with
+   * several calls in flight at once produces start events a host cannot tell apart
+   * — which makes "this specific call is still running" unrepresentable and is
+   * exactly the gap that let an idle member and a member busy in a long call read
+   * identically (EI-21548894457555139).
+   *
+   * DELIBERATELY OPTIONAL: a host that ignores it is unaffected, and no existing
+   * call site is stranded. Do not tighten it to required without re-reading
+   * `npm run lint:required-field-strands` — the value here is correlation, not
+   * a new invariant.
+   */
+  callId?: string;
 }
 
 export interface DispatchProjectedDeps {
@@ -342,6 +360,17 @@ export interface DispatchProjectedDeps {
       | 'invalid-input'
       | 'refused'
       | 'replayed';
+    /**
+     * The same per-call correlation id this call's `onDispatchStart` carried — see
+     * `DispatchStartEvent['callId']`. A host that opened in-flight state at start
+     * closes exactly THAT entry here, with no heuristic (ownerId, toolName) matching
+     * that would mis-settle an agent's concurrent calls to the same tool.
+     *
+     * Absent for calls that never reached `runDispatchStack` (notably the MCP
+     * handler's idempotency `replayed` branch, which returns before dispatch and so
+     * has no start event to correlate with).
+     */
+    callId?: string;
     outputRef?: string | null;
     outputSize?: number | null;
     errorMessage?: string | null;
