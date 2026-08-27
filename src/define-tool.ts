@@ -1032,7 +1032,25 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
  * Schemas that already have `type: "object"` and no problematic
  * top-level keys pass through unchanged.
  */
-function flattenForOpenAi(schema: Record<string, unknown>): Record<string, unknown> {
+/**
+ * Zod serializes `z.never()` as `{ not: {} }`. A union branch often uses that
+ * schema to forbid a field (for example, `resume` on the fresh-launch branch).
+ * Treat only an empty `not` schema as impossible; a constrained `not` remains a
+ * meaningful validation rule and must not be discarded while flattening.
+ */
+function isNeverJsonSchema(value: unknown): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const schema = value as Record<string, unknown>;
+  const negated = schema.not;
+  return (
+    negated !== null &&
+    typeof negated === 'object' &&
+    !Array.isArray(negated) &&
+    Object.keys(negated as Record<string, unknown>).length === 0
+  );
+}
+
+export function flattenForOpenAi(schema: Record<string, unknown>): Record<string, unknown> {
   // Already shaped right.
   const PROHIBITED_AT_ROOT = ['oneOf', 'anyOf', 'allOf', 'not'];
   const hasProhibited = PROHIBITED_AT_ROOT.some((k) => k in schema);
@@ -1064,7 +1082,14 @@ function flattenForOpenAi(schema: Record<string, unknown>): Record<string, unkno
   for (const v of variants) {
     const props = (v.properties as Record<string, unknown>) ?? {};
     for (const [pk, pv] of Object.entries(props)) {
-      if (!(pk in mergedProps)) mergedProps[pk] = pv;
+      // A field can be present in every union variant but intentionally be
+      // `z.never()` in one of them. Keeping that first impossible definition
+      // makes the flattened OpenAI contract reject the valid variant too.
+      // Preserve first-declaration-wins for real schemas, while replacing a
+      // never placeholder with the first satisfiable definition we encounter.
+      if (!(pk in mergedProps) || (isNeverJsonSchema(mergedProps[pk]) && !isNeverJsonSchema(pv))) {
+        mergedProps[pk] = pv;
+      }
     }
     const req = Array.isArray(v.required) ? new Set(v.required as string[]) : new Set<string>();
     requiredSets.push(req);
