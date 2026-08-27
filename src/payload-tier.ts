@@ -437,6 +437,10 @@ function takePrimitive(state: ProjectionState, value: unknown, path: string): un
 const IDENTITY_FIELDS = new Set([
   'id', 'title', 'name', 'slug', 'ref', 'kind', 'state', 'status', 'ok', 'error',
   'item', 'itemId', 'plan', 'planSlug', 'rubricRef', 'workItemId',
+  // A bounded object may already be passing through a second projection seam
+  // (payload tier -> result door). Its honesty markers and array-count receipt
+  // are identity too: dropping them recreates a complete-looking partial row.
+  '_partial', '_omitted', '_truncated', 'omittedCount', 'shownCount', 'totalCount',
   // EI-21197620758075816: a rubric criterion's structured `check` is its
   // executable identity. Dropping it makes a bound criterion indistinguishable
   // from a fuzzy/unbound one. The value is handled as a bounded structured
@@ -456,7 +460,30 @@ const IDENTITY_PREVIEW_DEPTH = 4;
  *  so a partial object is never read as a complete one (EI-21364503818966104).
  *  Underscore-prefixed to match `_projection` and stay clear of real payload keys. */
 const PARTIAL_MARKER_KEY = '_omitted';
+/** Minimal, machine-readable truth bit for EVERY object that loses a direct
+ * field to depth/key/budget projection. The prose `_omitted` marker remains the
+ * richer explanation when it fits; this bit is deliberately cheap enough to
+ * survive the exact budget edge where that explanation cannot. */
+const PARTIAL_FLAG_KEY = '_partial';
 const PARTIAL_MARKER_MAX_KEYS = 6;
+
+function identityPriority(key: string): number {
+  // Correlation outranks outcome. A row with only `{ok:true}` is unusable and
+  // reads complete; `{id,_partial:true}` is both attributable and honest.
+  if (key === 'id' || key === 'itemId' || key === 'workItemId' || key === 'ref') return 4;
+  if (key === PARTIAL_FLAG_KEY || key === PARTIAL_MARKER_KEY || key === '_truncated') return 3;
+  return IDENTITY_FIELDS.has(key) ? 2 : IDENTITY_ENVELOPES.has(key) ? 1 : 0;
+}
+
+function markPartial(projected: Record<string, unknown>, state: ProjectionState): void {
+  if (projected[PARTIAL_FLAG_KEY] === true) return;
+  projected[PARTIAL_FLAG_KEY] = true;
+  // Charge the flag when there is room, but never suppress the truth bit at the
+  // boundary that caused it. The exact serialized-size backstop below remains
+  // authoritative for pathological escaping/metadata combinations.
+  const cost = jsonLen(PARTIAL_FLAG_KEY) + jsonLen(true) + 3;
+  state.remaining = Math.max(0, state.remaining - cost);
+}
 
 function projectIdentityPreview(
   value: unknown,
@@ -513,27 +540,33 @@ function projectIdentityPreview(
     }
 
     const entries = Object.entries(value as Record<string, unknown>);
-    const chosen = entries.filter(([key]) => IDENTITY_FIELDS.has(key) || IDENTITY_ENVELOPES.has(key));
+    const chosen = entries
+      .filter(([key]) => IDENTITY_FIELDS.has(key) || IDENTITY_ENVELOPES.has(key))
+      .sort((a, b) => identityPriority(b[0]) - identityPriority(a[0]));
     if (chosen.length === 0) {
       recordOmission(state, path, 'nested value omitted at projection depth limit');
       return omissionMarker('depth limit');
     }
 
     const projected: Record<string, unknown> = {};
+    let chosenProjected = 0;
     for (const [key, child] of chosen) {
       const keyCost = jsonLen(key) + 2;
       if (state.remaining < keyCost + 128) {
-        recordOmission(state, `${path}.${key}`, 'remaining identity fields omitted to fit projection budget', chosen.length - Object.keys(projected).length);
+        recordOmission(state, `${path}.${key}`, 'remaining identity fields omitted to fit projection budget', chosen.length - chosenProjected);
+        markPartial(projected, state);
         break;
       }
       state.remaining -= keyCost;
       projected[key] = STRUCTURED_IDENTITY_FIELDS.has(key)
         ? projectValue(child, `${path}.${key}`, 0, state)
         : projectIdentityPreview(child, `${path}.${key}`, depth + 1, state);
+      chosenProjected += 1;
     }
     const dropped = entries.length - chosen.length;
     if (dropped > 0) {
       recordOmission(state, `${path}.*`, `${dropped} non-identity fields omitted at projection depth limit`, dropped);
+      markPartial(projected, state);
       // EI-21364503818966104: the surviving identity fields make this object look
       // WHOLE. A reader cannot tell "the field is empty in the store" from "the
       // projection withheld it", and the global _projection.omitted[] list is both
@@ -633,15 +666,17 @@ function projectValue(value: unknown, path: string, depth: number, state: Projec
     // NORMAL (non-depth-limited) path with the same IDENTITY_FIELDS priority.
     const entries = Object.entries(value as Record<string, unknown>);
     const prioritized = entries.length > 1
-      ? [...entries].sort((a, b) => Number(IDENTITY_FIELDS.has(b[0])) - Number(IDENTITY_FIELDS.has(a[0])))
+      ? [...entries].sort((a, b) => identityPriority(b[0]) - identityPriority(a[0]))
       : entries;
     const projected: Record<string, unknown> = {};
     const shown = prioritized.slice(0, state.limits.maxKeys);
+    let partial = prioritized.length > shown.length;
     for (let i = 0; i < shown.length; i += 1) {
       const [key, child] = shown[i];
       const keyCost = jsonLen(key) + 2;
       if (state.remaining < keyCost + 128) {
         recordOmission(state, `${path}.${key}`, 'remaining fields omitted to fit projection budget', shown.length - i);
+        partial = true;
         break;
       }
       state.remaining -= keyCost;
@@ -650,6 +685,7 @@ function projectValue(value: unknown, path: string, depth: number, state: Projec
     if (prioritized.length > shown.length) {
       recordOmission(state, `${path}.*`, `${prioritized.length - shown.length} object fields omitted`, prioritized.length - shown.length);
     }
+    if (partial) markPartial(projected, state);
     return projected;
   } finally {
     state.active.delete(value);

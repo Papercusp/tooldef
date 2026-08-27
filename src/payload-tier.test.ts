@@ -474,7 +474,7 @@ describe('applyPayloadTier', () => {
     expect(JSON.stringify(projected).length - projected._projection.returnedChars).toBeLessThanOrEqual(8);
   });
 
-  it('retains `id`/`ok` for every bulk results[] row even when per-key BUDGET (not depth) runs out mid-object (EI-18683546971375407)', () => {
+  it('retains every bulk row id and marks budget-partial objects in band (EI-18683546971375407 / EI-21566007420787313)', () => {
     // Each row's bulky fields (workItem.summary, checkpoint) come AFTER id/ok in
     // insertion order — exactly the shape work_items:get returns — so a naive
     // insertion-order key loop starves `id` out once the budget trips partway
@@ -488,7 +488,14 @@ describe('applyPayloadTier', () => {
     }));
     const envelope = { ok: true, results, counts: { ok: results.length, failed: 0 } };
 
-    const projected = projectBoundedPayload(envelope, { toolName: 'work_items:get', tier: 'trimmed' });
+    const projected = projectBoundedPayload(envelope, {
+      toolName: 'work_items:get',
+      tier: 'trimmed',
+      // The live defect is downstream result-door shaping (~6k), not the
+      // generic tier's roomier default. A tighter target deterministically
+      // exercises the row that used to emerge as `{ok:true}` / partial workItem.
+      targetChars: 2_400,
+    });
     const rows = projected.results as Array<Record<string, unknown> | string>;
 
     expect(rows.length).toBeGreaterThan(0);
@@ -501,9 +508,27 @@ describe('applyPayloadTier', () => {
     // a row, so it's excluded from this per-row check.)
     for (const row of rows) {
       if (typeof row === 'string') continue;
+      if (row._truncated === true) continue;
       expect(row.id).toBeDefined();
       expect(typeof row.id).toBe('string');
+
+      const source = results.find((candidate) => candidate.id === row.id)!;
+      const workItem = row.workItem as Record<string, unknown> | undefined;
+      const rootLostField = Object.keys(source).some((key) => !(key in row));
+      const workItemLostField = workItem != null && Object.keys(source.workItem).some((key) => !(key in workItem));
+      if (rootLostField) expect(row._partial).toBe(true);
+      if (workItemLostField) expect(workItem?._partial).toBe(true);
     }
+    // Calibration: this scenario MUST include a real partial object. Otherwise
+    // the assertions above could all pass on complete rows and fail to guard the
+    // live missing-assignee/checkpoint direction.
+    expect(
+      rows.some((row) =>
+        typeof row !== 'string' &&
+        row._truncated !== true &&
+        (row._partial === true || (row.workItem as Record<string, unknown> | undefined)?._partial === true),
+      ),
+    ).toBe(true);
     // The budget genuinely was exhausted (this is what made the old code drop
     // ids in the first place) — confirm we actually exercised that path, not a
     // no-op fast path where nothing needed trimming.
