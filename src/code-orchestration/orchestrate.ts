@@ -22,6 +22,7 @@ import type { DispatchProjectedDeps } from '../dispatch-types';
 import { buildToolFacade, type FacadeDispatch } from './tool-facade';
 import { realDispatch, isPreExecutionFailure } from './dispatch-binding';
 import {
+  DEFAULT_TIMEOUT_SETTLEMENT_GRACE_MS,
   runOrchestrationScript,
   type FieldMiss,
   type OrchestrationInputs,
@@ -690,6 +691,9 @@ export async function runToolOrchestration(
   let intermediateBytes = 0;
   const activeCalls = new Set<ActiveOrchestrationCall>();
   let timeoutTriggered = false;
+  /** Frozen at the end of the bounded grace, before later handler microtasks can remove calls. */
+  let detachedCallsSnapshot: ActiveOrchestrationCall[] | undefined;
+  let timeoutBoundaryTimer: ReturnType<typeof setTimeout> | undefined;
 
   /**
    * Abort every dispatch observed at the script deadline, then wait for the cooperative ones to
@@ -700,7 +704,24 @@ export async function runToolOrchestration(
     timeoutTriggered = true;
     const pending = Array.from(activeCalls);
     abortFromParent();
-    await Promise.allSettled(pending.map((call) => call.settled));
+    const graceMs = Number.isFinite(opts.timeoutGraceMs)
+      ? Math.max(0, opts.timeoutGraceMs as number)
+      : DEFAULT_TIMEOUT_SETTLEMENT_GRACE_MS;
+    const allSettled = Promise.allSettled(pending.map((call) => call.settled)).then(() => true);
+    const graceBoundary = new Promise<boolean>((resolve) => {
+      timeoutBoundaryTimer = setTimeout(() => {
+        timeoutBoundaryTimer = undefined;
+        // This is the authoritative detached census. Do not derive it later from activeCalls:
+        // a non-cooperative handler can settle between this boundary and result assembly.
+        detachedCallsSnapshot = Array.from(activeCalls);
+        resolve(false);
+      }, graceMs);
+    });
+    const settledWithinGrace = await Promise.race([allSettled, graceBoundary]);
+    if (settledWithinGrace && timeoutBoundaryTimer) {
+      clearTimeout(timeoutBoundaryTimer);
+      timeoutBoundaryTimer = undefined;
+    }
   };
 
   await ensureParseCheckReady(); // lazy-load the TS compiler before the static parse-check (kept out of the eager client bundle)
@@ -844,6 +865,17 @@ export async function runToolOrchestration(
     ...(ctx.emit ? { emit: (name, data) => ctx.emit(name, data) } : {}),
   });
   ctx.signal?.removeEventListener('abort', abortFromParent);
+  // run-script owns the public grace timer. If its timer and our census timer have the same
+  // deadline, its result promise can win the event-loop race by one turn; yield once so the
+  // census callback gets a chance to freeze the exact boundary before falling back to live state.
+  if (timeoutTriggered && detachedCallsSnapshot === undefined && timeoutBoundaryTimer) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    detachedCallsSnapshot ??= Array.from(activeCalls);
+  }
+  if (timeoutBoundaryTimer) {
+    clearTimeout(timeoutBoundaryTimer);
+    timeoutBoundaryTimer = undefined;
+  }
   // P-020: only meaningful when the script ABORTED — a run that completed reached every line
   // it was going to, so an undispatched write there was a branch not taken, not a stranding.
   const strandedWrites = run.ok
@@ -854,7 +886,7 @@ export async function runToolOrchestration(
     executed: false,
   }));
   const detachedCalls: DetachedOrchestrationCall[] = timeoutTriggered
-    ? Array.from(activeCalls)
+    ? (detachedCallsSnapshot ?? Array.from(activeCalls))
         .filter((call): call is ActiveOrchestrationCall & { callId: string } => typeof call.callId === 'string')
         .map((call) => ({
           callId: call.callId,
