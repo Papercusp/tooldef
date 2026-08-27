@@ -37,6 +37,7 @@ export {
   type OrchestrateOptions,
   type OrchestrateResult,
   type OrchestrationCallRecord,
+  type DetachedOrchestrationCall,
   type OrchestrationCallDisposition,
   type OrchestrationOutputReference,
   type PlannedMutation,
