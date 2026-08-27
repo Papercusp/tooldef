@@ -75,6 +75,20 @@ export interface OrchestrateOptions {
   inputs?: OrchestrationInputs;
 }
 
+/**
+ * Derive the idempotency key for one nested dispatch in a keyed code:run.
+ *
+ * The transport key identifies the whole orchestration request, but forwarding
+ * it unchanged to every child makes child-level idempotency consumers (for
+ * example coord:send) treat distinct writes as retries of the same write. The
+ * dispatch ordinal is allocated synchronously before the first await, so it is
+ * unique within a run and stable when the same keyed run is retried.
+ */
+function nestedIdempotencyKey(ctx: UnifiedToolContext, ordinal: number): string | undefined {
+  const outer = ctx.idempotencyKey?.trim();
+  return outer ? `code-run:nested:${outer}:${ordinal}` : undefined;
+}
+
 export interface PlannedMutation {
   tool: string;
   args: unknown;
@@ -786,13 +800,20 @@ export async function runToolOrchestration(
     // what lets a wrapper tool (code:run / recipes:run) mark its own row as a dispatch
     // wrapper only when inner rows actually exist (census double-count, P-012).
     dispatchCount += 1;
+    const childIdempotencyKey = nestedIdempotencyKey(ctx, callRecord.ordinal);
     const call: DispatchNext = (callCtx) => {
       // Observe the exact context that enters the real dispatcher, after any
       // per-call workspace/principal rebinding. This is the runtime-owned
       // authorization entry; the script cannot forge or suppress it.
       authorizationObservationCount += 1;
       authorityWideningDetected ||= authorityWidened(ctx, callCtx);
-      return realDispatch(callCtx, callDeps)(tool, name, args);
+      // Keep the outer transport key on the wrapper input, but scope it to this
+      // child before dispatch. This preserves whole-run replay while preventing
+      // two distinct nested writes from sharing one child idempotency identity.
+      const childCtx = childIdempotencyKey
+        ? { ...callCtx, idempotencyKey: childIdempotencyKey }
+        : callCtx;
+      return realDispatch(childCtx, callDeps)(tool, name, args);
     };
     try {
       const result = await (wrapDispatch

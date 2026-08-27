@@ -496,6 +496,40 @@ describe('runToolOrchestration (WI-1411 — wrapDispatch, per-inner-call context
     expect(r.summary).toEqual([{ id: 1 }, { id: 2 }]); // next(callCtx) result still flows through correctly
   });
 
+  it('derives distinct stable idempotency keys for keyed nested dispatches', async () => {
+    const handlerKeys: string[] = [];
+    const wrapperKeys: Array<string | undefined> = [];
+    const send = mkTool('coord:send', 'write', async (_args, ctx) => {
+      handlerKeys.push(ctx.idempotencyKey ?? '');
+      return json({ ok: true });
+    });
+    const script = `
+      await tools.coord.send({});
+      await tools.coord.send({});
+      return 'ok';
+    `;
+    const run = () =>
+      runToolOrchestration(script, {
+        ctx: MAKE_CTX({ idempotencyKey: 'outer-retry-key' }),
+        deps: DEPS,
+        tools: [send],
+        wrapDispatch: async (_tool, _toolName, _args, ctx, next) => {
+          wrapperKeys.push(ctx.idempotencyKey);
+          return next(ctx);
+        },
+      });
+
+    expect((await run()).ok).toBe(true);
+    expect((await run()).ok).toBe(true);
+    expect(wrapperKeys).toEqual(['outer-retry-key', 'outer-retry-key', 'outer-retry-key', 'outer-retry-key']);
+    expect(handlerKeys).toEqual([
+      'code-run:nested:outer-retry-key:0',
+      'code-run:nested:outer-retry-key:1',
+      'code-run:nested:outer-retry-key:0',
+      'code-run:nested:outer-retry-key:1',
+    ]);
+  });
+
   it('a write-effect call under dryRun is recorded WITHOUT reaching wrapDispatch (the dryRun gate short-circuits before dispatch)', async () => {
     const wrapDispatch = vi.fn(async (_tool, _name, _args, ctx, next) => next(ctx));
     const setStatus = mkTool('wi:set-status', 'write', vi.fn());
