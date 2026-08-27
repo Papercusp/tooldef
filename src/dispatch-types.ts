@@ -194,6 +194,18 @@ export type ToolDispatchOverrideFn = (
   | typeof PASS_THROUGH;
 
 /**
+ * Optional host-owned guidance for a capability denial. The generic dispatcher
+ * knows the denied capability, but only the host knows whether this transport
+ * has an alternate authorized route (for example, a separate superuser MCP
+ * surface). Returning undefined keeps the generic error unchanged.
+ */
+export type AuthorizationFailureHintFn = (input: {
+  toolName: string;
+  missingCapability: string;
+  ctx: UnifiedToolContext;
+}) => string | undefined;
+
+/**
  * The capability-envelope verdict for one call (agent-capability-confinement-2026-06-13
  * B-06 / P-012). Produced by the host's `checkCapabilityEnvelope` port, consumed by the
  * `capability-envelope` dispatch step (a `deny` short-circuits) AND threaded onto
@@ -278,6 +290,11 @@ export interface DispatchStartEvent {
 }
 
 export interface DispatchProjectedDeps {
+  /**
+   * Add actionable, host-specific routing guidance to a capability denial.
+   * Synchronous and best-effort: a hint must never change the denial itself.
+   */
+  authorizationFailureHint?: AuthorizationFailureHintFn;
   /**
    * Best-effort observation point for the beginning of every projected dispatch.
    * The dispatcher does not await this hook and swallows failures so a host's

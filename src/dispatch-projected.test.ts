@@ -145,6 +145,31 @@ describe('dispatchProjectedTool', () => {
     expect(bypassed.ok).toBe(true);
   });
 
+  it('appends host-provided route guidance without changing the denial', async () => {
+    const tool = makeTool({ capabilities: ['plans:write'] });
+    const principal = {
+      kind: 'system' as const,
+      slug: 'system:judge',
+      workspaceId: 'default',
+      authMethod: 'spawn-url' as const,
+      trust: 'trusted' as const,
+      capabilities: new Set<string>(),
+    };
+    const denied = await dispatchProjectedTool(
+      tool,
+      'plans:audit',
+      {},
+      MAKE_CTX({ transport: 'mcp', role: 'judge', principal }),
+      MAKE_DEPS({
+        authorizationFailureHint: ({ toolName, missingCapability }) =>
+          `Use papercusp-su tools:invoke for ${toolName} (${missingCapability}).`,
+      }),
+    );
+    expect(denied.ok).toBe(false);
+    expect(denied.error?.code).toBe('missing_capability');
+    expect(denied.error?.message).toContain('Use papercusp-su tools:invoke');
+  });
+
   it("treats '*' as the canonical wildcard capability", async () => {
     const tool = makeTool({ capabilities: ['secrets:read'] });
     const principal = {

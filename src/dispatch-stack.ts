@@ -269,11 +269,20 @@ const capabilityCheckStep: DispatchStep = {
         !ctx.principal.capabilities.has(cap) &&
         !ctx.principal.capabilities.has('*')
       ) {
+        let hint: string | undefined;
+        try {
+          hint = deps.authorizationFailureHint?.({ toolName, missingCapability: cap, ctx });
+        } catch {
+          // Host guidance is advisory; never turn an authorization denial into
+          // a handler failure because its formatter threw.
+        }
         return {
           ok: false,
           error: {
             code: 'missing_capability' as DispatchProjectedErrorCode,
-            message: `Principal "${ctx.principal.slug}" lacks capability "${cap}" (tool: ${toolName})`,
+            message:
+              `Principal "${ctx.principal.slug}" lacks capability "${cap}" (tool: ${toolName})` +
+              (hint ? ` — ${hint}` : ''),
             meta: { tool: toolName, principal: ctx.principal.slug, missing: cap },
           },
         };
