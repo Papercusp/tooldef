@@ -73,6 +73,28 @@ describe('runOrchestrationScript (B-CX-1A)', () => {
     expect(r.error).toMatch(/script_timeout/);
   });
 
+  it('awaits an async timeout hook but caps a hook that never settles', async () => {
+    let hookReachedAfterAwait = false;
+    const startedAt = Date.now();
+    const r = await runOrchestrationScript(`await new Promise(() => {});`, facade({}), {
+      timeoutMs: 30,
+      timeoutGraceMs: 40,
+      onTimeout: async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 5));
+        hookReachedAfterAwait = true;
+        await new Promise<void>(() => {});
+      },
+    });
+    const elapsed = Date.now() - startedAt;
+
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('script_timeout');
+    // A synchronous/void-only timeout callback would resolve before this continuation ran.
+    expect(hookReachedAfterAwait).toBe(true);
+    // The never-settling tail cannot hold the caller beyond the configured bounded grace.
+    expect(elapsed).toBeLessThan(500);
+  });
+
   it('denies node ambient access (no require/process in the vm context)', async () => {
     const r = await runOrchestrationScript(`return typeof require + ',' + typeof process;`, facade({}));
     expect(r.ok).toBe(true);
