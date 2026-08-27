@@ -262,7 +262,7 @@ const roleAllowlistStep: DispatchStep = {
 const capabilityCheckStep: DispatchStep = {
   name: 'capability-check',
   async run(exec) {
-    const { tool, ctx, toolName } = exec;
+    const { tool, ctx, toolName, deps } = exec;
     if (!ctx.principal || ctx.gateBypass?.capability || tool.capabilities.length === 0) return null;
     for (const cap of tool.capabilities) {
       if (
