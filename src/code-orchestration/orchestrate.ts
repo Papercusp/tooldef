@@ -61,6 +61,8 @@ export interface OrchestrateOptions {
   dryRun?: boolean;
   /** Wall-clock budget. Default = run-script's 30s. */
   timeoutMs?: number;
+  /** Bounded grace for host dispatches to settle after the script wall-clock budget expires. */
+  timeoutGraceMs?: number;
   /**
    * Optional per-call context-rebinding hook (WI-1411) — see `WrapDispatch`.
    * Absent ⇒ every call in the batch dispatches under the fixed `ctx`
@@ -129,6 +131,21 @@ export interface OrchestrationCallRecord {
   effect: 'read' | 'write' | 'unknown';
   disposition: OrchestrationCallDisposition;
   outputReferences: OrchestrationOutputReference[];
+}
+
+/**
+ * Secret-free correlation for a host dispatch that did not settle during the timeout grace
+ * window. The dispatch stack's callId is the same value sent to the host's start and telemetry
+ * hooks, so a caller can inspect or reconcile exactly this call without guessing from tool name
+ * or session identity. This is intentionally separate from callRecords: settled/rejected call
+ * records keep their existing shape, while only genuinely detached calls need a callId.
+ */
+export interface DetachedOrchestrationCall {
+  callId: string;
+  tool: string;
+  effect: OrchestrationCallRecord['effect'];
+  ordinal: number;
+  disposition: OrchestrationCallDisposition;
 }
 
 /**
@@ -290,6 +307,15 @@ export interface OrchestrateResult {
    * from their model-facing payloads after persisting the normalized trace.
    */
   callRecords?: OrchestrationCallRecord[];
+  /** Host dispatches still unresolved after the bounded timeout settlement grace. */
+  detachedCalls?: DetachedOrchestrationCall[];
+}
+
+interface ActiveOrchestrationCall {
+  callRecord: OrchestrationCallRecord;
+  settled: Promise<void>;
+  resolveSettled: () => void;
+  callId?: string;
 }
 
 function setContainsAll<T>(superset: ReadonlySet<T> | undefined, subset: ReadonlySet<T> | undefined): boolean {
@@ -662,6 +688,20 @@ export async function runToolOrchestration(
   let authorityWideningDetected = false;
   let dispatchCount = 0;
   let intermediateBytes = 0;
+  const activeCalls = new Set<ActiveOrchestrationCall>();
+  let timeoutTriggered = false;
+
+  /**
+   * Abort every dispatch observed at the script deadline, then wait for the cooperative ones to
+   * run their normal settlement/telemetry paths. run-script bounds this hook with its grace
+   * window; anything still in activeCalls when it returns is explicit detached evidence.
+   */
+  const settleOnTimeout = async (): Promise<void> => {
+    timeoutTriggered = true;
+    const pending = Array.from(activeCalls);
+    abortFromParent();
+    await Promise.allSettled(pending.map((call) => call.settled));
+  };
 
   await ensureParseCheckReady(); // lazy-load the TS compiler before the static parse-check (kept out of the eager client bundle)
   const check = checkScript(script, tools, allowed);
@@ -699,6 +739,26 @@ export async function runToolOrchestration(
       };
       writeAttempts.push(writeAttempt);
     }
+    let resolveSettled!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      resolveSettled = resolve;
+    });
+    const activeCall: ActiveOrchestrationCall = {
+      callRecord,
+      settled,
+      resolveSettled,
+    };
+    activeCalls.add(activeCall);
+    // Each runDispatchStack invocation creates its own callId before the first await. A
+    // per-call wrapper preserves that exact start event and lets the timeout path associate the
+    // id with this call record without heuristic matching on tool name or session context.
+    const callDeps: DispatchProjectedDeps = {
+      ...deps,
+      onDispatchStart: (event) => {
+        activeCall.callId = event.callId;
+        deps.onDispatchStart?.(event);
+      },
+    };
     dispatchedToolNames.push(name);
     // Counted at the same point the host's dispatcher is entered (a throw below still
     // reached it), so this equals the number of inner telemetry rows the run produced —
@@ -711,7 +771,7 @@ export async function runToolOrchestration(
       // authorization entry; the script cannot forge or suppress it.
       authorizationObservationCount += 1;
       authorityWideningDetected ||= authorityWidened(ctx, callCtx);
-      return realDispatch(callCtx, deps)(tool, name, args);
+      return realDispatch(callCtx, callDeps)(tool, name, args);
     };
     try {
       const result = await (wrapDispatch
@@ -769,13 +829,17 @@ export async function runToolOrchestration(
         });
       }
       throw err;
+    } finally {
+      activeCalls.delete(activeCall);
+      resolveSettled();
     }
   };
 
   const facade = buildToolFacade(tools, dispatch, allowed, unknownRefs);
   const run = await runOrchestrationScript(script, facade, {
     ...(timeoutMs ? { timeoutMs } : {}),
-    onTimeout: abortFromParent,
+    ...(opts.timeoutGraceMs !== undefined ? { timeoutGraceMs: opts.timeoutGraceMs } : {}),
+    onTimeout: settleOnTimeout,
     ...(opts.inputs ? { inputs: opts.inputs } : {}),
     ...(ctx.emit ? { emit: (name, data) => ctx.emit(name, data) } : {}),
   });
@@ -789,6 +853,17 @@ export async function runToolOrchestration(
     tool,
     executed: false,
   }));
+  const detachedCalls: DetachedOrchestrationCall[] = timeoutTriggered
+    ? Array.from(activeCalls)
+        .filter((call): call is ActiveOrchestrationCall & { callId: string } => typeof call.callId === 'string')
+        .map((call) => ({
+          callId: call.callId,
+          tool: call.callRecord.tool,
+          effect: call.callRecord.effect,
+          ordinal: call.callRecord.ordinal,
+          disposition: call.callRecord.disposition,
+        }))
+    : [];
   const finalResult = run.ok ? parseFinalResult(run.result) : { summary: run.result };
   const generated = validateGeneratedImages(run.generatedImages);
   const media = [...(finalResult.media ?? []), ...generated.media];
@@ -819,6 +894,7 @@ export async function runToolOrchestration(
     ...(uncertainMutations.length ? { uncertainMutations } : {}),
     ...(strandedWrites.length ? { strandedWrites } : {}),
     ...(notDispatchedWrites.length ? { notDispatchedWrites } : {}),
+    ...(detachedCalls.length ? { detachedCalls } : {}),
     ...(run.fieldMisses?.length ? { fieldMisses: run.fieldMisses } : {}),
     ...(run.sleepCaps?.length ? { sleepCaps: run.sleepCaps } : {}),
     callRecords: callRecords.map((record) => ({

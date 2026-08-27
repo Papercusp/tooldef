@@ -177,16 +177,33 @@ export interface GeneratedImageRequest {
  */
 export const DEFAULT_SCRIPT_TIMEOUT_MS = 30_000;
 
+/**
+ * Maximum time the host gets to settle tool calls after the script worker hits its wall-clock
+ * deadline. The worker is terminated immediately at the deadline; this grace only keeps the
+ * outer result open long enough for cooperative host handlers to report their final disposition.
+ * Calls that still have not settled when this window closes are returned as detached evidence by
+ * the orchestration composition layer.
+ */
+export const DEFAULT_TIMEOUT_SETTLEMENT_GRACE_MS = 1_000;
+
 export interface RunScriptOptions {
   /** Wall-clock budget for the whole script. Defaults to {@link DEFAULT_SCRIPT_TIMEOUT_MS} (30s).
    *  Sync loops are killed at this bound. */
   timeoutMs?: number;
   /**
    * Called immediately before the worker is terminated by the wall-clock budget. Host-side tool
-   * calls may still be awaiting their real handler after the worker is gone, so callers must use
-   * this hook to cancel those calls before the result is returned (EI-20282336542235171).
+   * calls may still be awaiting their real handler after the worker is gone. The hook may return
+   * a promise; the executor waits for it up to {@link timeoutGraceMs} before returning, so a
+   * cooperative host handler can settle without making the script timeout unbounded
+   * (EI-20282336542235171).
    */
-  onTimeout?: () => void;
+  onTimeout?: () => void | Promise<void>;
+  /**
+   * Bounded host-settlement grace after {@link onTimeout} runs. Defaults to
+   * {@link DEFAULT_TIMEOUT_SETTLEMENT_GRACE_MS}. The worker is hard-terminated before this
+   * window starts, so it cannot emit more calls while host dispatches settle.
+   */
+  timeoutGraceMs?: number;
   /** Cap on captured console lines. Default 200. */
   maxLogLines?: number;
   /**
@@ -719,6 +736,7 @@ export async function runOrchestrationScript(
 
   return await new Promise<RunScriptResult>((resolve) => {
     let settled = false;
+    let timeoutTriggered = false;
     let latestState: Record<string, OrchestrationInputValue> | undefined;
     const worker: NodeWorker = new Worker(WORKER_SRC, {
       eval: true,
@@ -731,8 +749,8 @@ export async function runOrchestrationScript(
         : {}),
     });
 
-    const finish = (out: Omit<RunScriptResult, 'logs'>): void => {
-      if (settled) return;
+    const finish = (out: Omit<RunScriptResult, 'logs'>, fromTimeout = false): void => {
+      if (settled || (timeoutTriggered && !fromTimeout)) return;
       settled = true;
       clearTimeout(timer);
       void worker.terminate();
@@ -743,15 +761,44 @@ export async function runOrchestrationScript(
       });
     };
 
-    // The kill switch: terminate() stops the worker thread even mid sync-loop.
+    /**
+     * Give an awaitable timeout hook a finite window, swallowing hook failures because timeout
+     * settlement is advisory to the script result. The worker is killed before the hook runs so
+     * a script that was still yielding cannot enqueue another host dispatch during the grace.
+     */
+    const awaitTimeoutHook = async (): Promise<void> => {
+      if (!opts.onTimeout) return;
+      const graceMs = Number.isFinite(opts.timeoutGraceMs)
+        ? Math.max(0, opts.timeoutGraceMs as number)
+        : DEFAULT_TIMEOUT_SETTLEMENT_GRACE_MS;
+      let graceTimer: ReturnType<typeof setTimeout> | undefined;
+      await new Promise<void>((done) => {
+        let completed = false;
+        const complete = (): void => {
+          if (completed) return;
+          completed = true;
+          if (graceTimer) clearTimeout(graceTimer);
+          done();
+        };
+        graceTimer = setTimeout(complete, graceMs);
+        try {
+          Promise.resolve(opts.onTimeout!()).then(complete, complete);
+        } catch {
+          complete();
+        }
+      });
+    };
+
+    // The kill switch: terminate() stops the worker thread even mid sync-loop. Host-side facade
+    // calls may still be awaiting real tools, so the awaitable hook gets a bounded grace window
+    // before this outer result resolves (EI-20282336542235171).
     const timer = setTimeout(() => {
-      // Terminating the worker only stops the script. A host-side facade call may still be
-      // awaiting a real tool (for example a long foreground capability:bash), and letting that
-      // call continue after code:run returned leaves the caller without a resumable handle and
-      // makes a retry capable of duplicating the command. Give the host a cancellation seam
-      // before killing the worker (EI-20282336542235171).
-      opts.onTimeout?.();
-      finish({ ok: false, error: `script_timeout after ${timeoutMs}ms` });
+      if (settled || timeoutTriggered) return;
+      timeoutTriggered = true;
+      void worker.terminate();
+      void awaitTimeoutHook().then(() => {
+        finish({ ok: false, error: `script_timeout after ${timeoutMs}ms` }, true);
+      });
     }, timeoutMs);
 
     worker.on('message', (m: WorkerMessage) => {
@@ -790,13 +837,13 @@ export async function runOrchestrationScript(
         }
         return;
       }
-      if (m.t === 'call') void handleCall(worker, facade, m, () => settled);
+      if (m.t === 'call') void handleCall(worker, facade, m, () => settled || timeoutTriggered);
     });
 
     // A worker that dies without a terminal message (native crash, OOM kill) still settles.
     worker.on('error', (err) => finish({ ok: false, error: errMsg(err) }));
     worker.on('exit', (code) => {
-      if (!settled) finish({ ok: false, error: `worker exited unexpectedly (code ${code})` });
+      if (!settled && !timeoutTriggered) finish({ ok: false, error: `worker exited unexpectedly (code ${code})` });
     });
   });
 }
