@@ -769,7 +769,7 @@ function defineRouteShaped<TInputSchema extends ZodTypeAny | undefined>(
 export const WRITE_CAPABILITY_SUFFIXES = [':write', ':admin', ':delete', ':manage', ':execute'] as const;
 /**
  * Known-mutating capabilities whose names don't end in a write-suffix — the
- * `capability:*` host-capability family (bash/fs-write/edit/write/git/computer/net) plus
+ * `capability:*` host-capability family (bash/fs-write/edit/write/git/computer/net/terminal) plus
  * dedicated control / side-effect capabilities (processes:kill, turn:interrupt,
  * ui:dispatch, tui:dispatch, operator:converse, activity:report).
  * Each is used ONLY by a mutating tool — where a read sibling exists it is a DISTINCT
@@ -789,6 +789,7 @@ export const WRITE_CAPABILITIES = new Set<string>([
   'capability:git',
   'capability:computer',
   'capability:net', // outbound HTTP (capability:fetch) — can POST/PUT/DELETE → external mutation
+  'capability:terminal', // opens command/agent windows or headless agent processes
   'processes:kill',
   'processes:control', // freezes/thaws or re-budgets a live task's cgroup
   'turn:interrupt', // ends a peer agent's current turn

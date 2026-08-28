@@ -79,6 +79,7 @@ describe('defineTool effect inference (B-CX-PRE)', () => {
     'operator:converse',
     'activity:report',
     'capability:net',
+    'capability:terminal',
   ])("treats dedicated mutator capability '%s' as 'write'", (capability) => {
     const def = defineTool({ name: `test:eff_${capability.replace(/:/g, '_')}`, capability, ...base });
     expect(def.effect).toBe('write');
