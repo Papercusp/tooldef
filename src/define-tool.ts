@@ -1083,8 +1083,23 @@ export function flattenForOpenAi(schema: Record<string, unknown>): Record<string
   // Merge variant properties. Each property keeps its first definition;
   // a property required by EVERY variant stays required (typically the
   // discriminator); others become optional.
+  //
+  // EI-21914494224354098: first-declaration-wins is wrong for the DISCRIMINATOR
+  // field itself. Zod renders each `z.literal(x)` branch of a discriminated
+  // union as `{ const: x }`, so `op: z.literal('get') | z.literal('converge') |
+  // z.literal('retire')` produces three variants whose `op` property is
+  // `{const:'get'}`, `{const:'converge'}`, `{const:'retire'}` respectively.
+  // First-wins collapsed that to `{const:'get'}` alone — the flattened schema
+  // (and hence the tool description every caller reads) advertised `op` as
+  // ALWAYS "get", hiding "converge"/"retire" entirely. Track every `const`
+  // value seen per key; when a key is `const`-shaped in every appearance and
+  // spans more than one distinct value, replace it with an `enum` of the full
+  // set instead of the first branch alone. A key that is ever non-const in any
+  // appearance is left to ordinary first-wins (unioning heterogeneous shapes
+  // is not safe in general — this only targets the literal-discriminator case).
   const mergedProps: Record<string, unknown> = {};
   const requiredSets: Set<string>[] = [];
+  const constTracking = new Map<string, { allConst: boolean; values: Set<unknown> }>();
   for (const v of variants) {
     const props = (v.properties as Record<string, unknown>) ?? {};
     for (const [pk, pv] of Object.entries(props)) {
@@ -1096,9 +1111,21 @@ export function flattenForOpenAi(schema: Record<string, unknown>): Record<string
       if (!(pk in mergedProps) || (isNeverJsonSchema(mergedProps[pk]) && !isNeverJsonSchema(pv))) {
         mergedProps[pk] = pv;
       }
+      const isConst =
+        pv !== null && typeof pv === 'object' && !Array.isArray(pv) && 'const' in (pv as Record<string, unknown>);
+      const entry = constTracking.get(pk) ?? { allConst: true, values: new Set<unknown>() };
+      if (isConst) entry.values.add((pv as Record<string, unknown>).const);
+      else entry.allConst = false;
+      constTracking.set(pk, entry);
     }
     const req = Array.isArray(v.required) ? new Set(v.required as string[]) : new Set<string>();
     requiredSets.push(req);
+  }
+  for (const [pk, { allConst, values }] of constTracking) {
+    if (allConst && values.size > 1) {
+      const sample = [...values][0];
+      mergedProps[pk] = { type: typeof sample === 'string' ? 'string' : typeof sample, enum: [...values] };
+    }
   }
   const required = [...requiredSets[0]].filter((p) =>
     requiredSets.every((s) => s.has(p)),

@@ -39,6 +39,34 @@ describe('flattenForOpenAi', () => {
     expect(flattened.properties).toEqual({ value: { type: 'string' } });
   });
 
+  it('unions a discriminated-union discriminator into an enum instead of collapsing to the first branch', () => {
+    // EI-21914494224354098: release:repair-queue's `op: z.discriminatedUnion('op', [get, converge, retire])`
+    // flattened to `op: { const: 'get' }` — hiding 'converge'/'retire' from every caller reading the schema.
+    const schema = z.discriminatedUnion('op', [
+      z.object({ op: z.literal('get') }),
+      z.object({ op: z.literal('converge'), confirm: z.boolean().optional() }),
+      z.object({ op: z.literal('retire'), reason: z.string() }),
+    ]);
+
+    const flattened = flattenForOpenAi(toArgsJsonSchema('test:op', schema));
+    const properties = flattened.properties as Record<string, Record<string, unknown>>;
+
+    expect(properties.op).toEqual({ type: 'string', enum: ['get', 'converge', 'retire'] });
+    expect(flattened.required).toEqual(['op']);
+  });
+
+  it('leaves a single-valued const field alone (no spurious enum wrapping)', () => {
+    const schema = z.union([
+      z.object({ mode: z.literal('a'), extra: z.string().optional() }),
+      z.object({ mode: z.literal('a'), other: z.number().optional() }),
+    ]);
+
+    const flattened = flattenForOpenAi(toArgsJsonSchema('test:same-const', schema));
+    const properties = flattened.properties as Record<string, Record<string, unknown>>;
+
+    expect(properties.mode).toEqual({ const: 'a', type: 'string' });
+  });
+
   it('does not classify a constrained not schema as never', () => {
     const flattened = flattenForOpenAi({
       anyOf: [
