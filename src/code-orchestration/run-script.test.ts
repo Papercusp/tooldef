@@ -151,6 +151,50 @@ describe('runOrchestrationScript (B-CX-1A)', () => {
     expect(r.error).toMatch(/^dynamic_import_unsupported:/);
   });
 
+  // EI-7839 / EI-20385364997159134 / EI-21867145325617024 (and other recurring reports of the
+  // same root cause): setTimeout is deliberately absent from the vm context (sleep(ms) is the
+  // documented replacement), so a script calling it threw a bare, unrewritten "setTimeout is not
+  // defined" ReferenceError with no hint that sleep(ms) exists -- the same shape of confusion the
+  // dynamic-import rewrite above already solves for imports. This asserts the matching rewrite.
+  it('rewrites a setTimeout call into a named, actionable error pointing at sleep(ms) (not the raw ReferenceError)', async () => {
+    const r = await runOrchestrationScript(
+      `return await new Promise((resolve) => setTimeout(resolve, 10));`,
+      facade({}),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/^setTimeout_unsupported:/);
+    expect(r.error).not.toMatch(/^setTimeout is not defined$/);
+    expect(r.error).toMatch(/sleep\(ms\)/);
+  });
+
+  it('same rewrite applies to setInterval, with repeating-delay guidance instead of the sleep(ms) API', async () => {
+    const r = await runOrchestrationScript(`setInterval(() => {}, 10); return 1;`, facade({}));
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/^setInterval_unsupported:/);
+    expect(r.error).not.toMatch(/^setInterval is not defined$/);
+    expect(r.error).toMatch(/loop with await sleep\(ms\)/);
+  });
+
+  // Reproduces the exact D-115 evidence-script shape from EI-21867145325617024: a tool call
+  // BEFORE the unsupported timer already dispatched (and so already has a real side effect) by
+  // the time the script throws; a second, later-ordered call was planned but never reached. The
+  // rewritten error must still surface cleanly even when the script is not a clean single-liner.
+  it('surfaces the rewritten timer error even after a prior tool call already dispatched (the stranded-write shape)', async () => {
+    const before = vi.fn(async () => ({ ok: true, marker: 'before-timer' }));
+    const after = vi.fn(async () => ({ ok: true, marker: 'after-timer' }));
+    const r = await runOrchestrationScript(
+      `const first = await tools.capability.read({ file_path: '/tmp/x' });
+       await new Promise((resolve) => setTimeout(resolve, 10));
+       const second = await tools.capability.bash({ command: 'echo unreachable' });
+       return { first, second };`,
+      facade({ capability: { read: before, bash: after } }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/^setTimeout_unsupported:/);
+    expect(before).toHaveBeenCalledOnce(); // the call ordered BEFORE setTimeout already ran
+    expect(after).not.toHaveBeenCalled(); // the call ordered AFTER it was never dispatched
+  });
+
   // B-CX-SANDBOX: the reason the executor moved to a worker thread — a SYNCHRONOUS infinite loop
   // must be killable. The old in-host vm executor's wall-clock race only bounded async-yielding
   // work, so `while (true) {}` froze the whole process. Now the worker is terminated at the bound.
