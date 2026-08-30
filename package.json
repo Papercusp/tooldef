@@ -12,6 +12,11 @@
       "import": "./src/index.ts",
       "default": "./src/index.ts"
     },
+    "./define-tool": {
+      "types": "./src/define-tool.ts",
+      "import": "./src/define-tool.ts",
+      "default": "./src/define-tool.ts"
+    },
     "./delta-client": {
       "types": "./src/delta-client.ts",
       "import": "./src/delta-client.ts",

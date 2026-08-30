@@ -82,6 +82,11 @@ import type {
 } from './types';
 import type { ToolResult } from './wire';
 
+// Narrow authoring entrypoint consumers (notably hosted HTTP profiles) need
+// the route shape beside defineTool without importing src/index.ts's complete
+// dispatch/code-orchestration surface.
+export type { RouteDefinition } from './types';
+
 /**
  * The absolute path of the file that called `defineTool` — a tool's DEFINITION
  * SITE, captured from the call stack at registration time.
