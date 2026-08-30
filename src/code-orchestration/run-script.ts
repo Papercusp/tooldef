@@ -704,8 +704,18 @@ const WORKER_SRC = `(() => {
       // the specifier is ever looked at -- indistinguishable, on first read, from a bad path.
       // Rewritten here so the constraint (tools.* only -- the whitelist IS the security boundary,
       // same reason require/process are absent) costs one read instead of a wasted retry.
+      // EI-7839 / EI-20385364997159134 / EI-21867145325617024 (and others): setTimeout and
+      // setInterval are deliberately absent from the vm context (see the header note + sleep
+      // above), so a script calling either throws this exact bare ReferenceError -- and it keeps
+      // recurring because the raw V8 message gives no hint that sleep(ms) exists. Any prior
+      // tools.*/capability:* calls in the script already ran; ones ordered AFTER this point were
+      // never dispatched (see strandedWrites in the wrapping tool result). Same rewrite pattern
+      // as the dynamic-import case above -- named + actionable instead of a bare ReferenceError.
+      const timerMatch = /^(setTimeout|setInterval) is not defined$/.exec(msg);
       const friendly = /dynamic import callback/i.test(msg)
         ? 'dynamic_import_unsupported: code:run cannot import()/require() repo modules or node builtins -- only tools.ns.verb(args) is exposed (the role tool whitelist IS the sandbox security boundary, same reason require/process are absent). Use capability:bash + npx tsx for direct module/DB access outside that whitelist.'
+        : timerMatch
+        ? timerMatch[1] + '_unsupported: code:run has no ambient ' + timerMatch[1] + ' -- the vm sandbox exposes only await sleep(ms) for a bounded async delay (capped per call; resolves with the actual ms waited, so a careful script can self-correct). For a REPEATING delay, loop with await sleep(ms) between iterations instead of setInterval. Any tools.*/capability:* calls ordered after this point in the script were never dispatched -- check strandedWrites in the result.'
         : msg;
       parentPort.postMessage({
         t: 'error',
