@@ -382,6 +382,27 @@ export function formatIssues(issues: ReadonlyArray<StandardSchemaV1.Issue>, inpu
           : `too long — over the ${max}-char limit; trim to ${max}.`;
       return { path, code: extras.code, text: path ? `${path}: ${detail}` : detail };
     }
+    // EI-21903452986957483: the NUMBER twin of the string branch above. Zod's raw
+    // message for a numeric ceiling — "Too big: expected number to be <=10" — names
+    // the limit but not the caller's actual value or how far past it they landed, so
+    // a caller retries blind instead of clamping in one step. Same defect, same fix,
+    // as `formatInvalidArgs` in packages/agent-mcp/src/server.ts (that file's own
+    // comment names work_items:get's threadLimit — capped at 10 — as the motivating
+    // case, recurring across 6+ sessions) — but that formatter only serves the legacy
+    // agent-mcp dispatch path. Every `defineTool`-registered tool (including
+    // work_items:get, and every call routed through `tools:invoke`) validates through
+    // THIS formatter instead, which never got the number branch — so the exact same
+    // caller-facing gap persisted on the projected-tool path the fix was meant to close.
+    if (extras.code === 'too_big' && extras.origin === 'number' && typeof extras.maximum === 'number') {
+      const max = extras.maximum;
+      const actual = input !== undefined ? valueAtPath(input, segs) : undefined;
+      const over = typeof actual === 'number' ? actual - max : null;
+      const detail =
+        over !== null && over > 0
+          ? `too big — ${over} over the ${max} limit; use ${max}.`
+          : `too big — over the ${max} limit; use ${max}.`;
+      return { path, code: extras.code, text: path ? `${path}: ${detail}` : detail };
+    }
     return {
       path,
       code: extras.code,

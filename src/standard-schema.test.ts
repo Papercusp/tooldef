@@ -212,6 +212,31 @@ describe('formatIssues — actionable too_big (EI-10943 / P-003)', () => {
   });
 });
 
+describe('formatIssues — actionable numeric too_big (EI-21903452986957483)', () => {
+  // work_items:get's real threadLimit ceiling — the reported case: a caller on the
+  // tools:invoke/defineTool path got Zod's raw "Too big: expected number to be <=10"
+  // with no indication of their actual value or what to send instead.
+  const schema = z.object({ threadLimit: z.number().max(10) });
+
+  it('reports the overage and the target when given the input', () => {
+    const r = schema.safeParse({ threadLimit: 20 });
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      expect(formatIssues(r.error.issues, { threadLimit: 20 })).toBe(
+        'threadLimit: too big — 10 over the 10 limit; use 10.',
+      );
+    }
+  });
+
+  it('degrades to the target-only form without the input', () => {
+    const r = schema.safeParse({ threadLimit: 20 });
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      expect(formatIssues(r.error.issues)).toBe('threadLimit: too big — over the 10 limit; use 10.');
+    }
+  });
+});
+
 describe('formatIssues — a SIZE verdict on a wrong-typed value (EI-20018883577474576)', () => {
   // Reproduces coord:send's `youMayNotKnow` / `couldNotDetermine`: an ARRAY field
   // carrying a `.max(20)` ITEM bound, handed a prose string. Zod's size check reads
