@@ -63,6 +63,19 @@ describe('runOrchestrationScript (B-CX-1A)', () => {
     expect(r.error).toMatch(/compile_error/);
   });
 
+  // EI-21909921686340240: code:run scripts are compiled as plain JavaScript
+  // (via vm.runInNewContext) — TypeScript-only syntax (type annotations, `as`
+  // casts, interfaces) fails to parse with an opaque V8 SyntaxError and no
+  // guidance that TypeScript isn't supported here. The compile_error message
+  // now always appends that guidance so a caller isn't left guessing.
+  it('appends plain-JavaScript-only guidance to a compile error from TypeScript syntax', async () => {
+    const r = await runOrchestrationScript(`const f = (t:any) => t; return f(1);`, facade({}));
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/compile_error/);
+    expect(r.error).toMatch(/plain JavaScript only/);
+    expect(r.error).toMatch(/TypeScript type annotations/);
+  });
+
   it('enforces the wall-clock timeout on an async hang', async () => {
     const r = await runOrchestrationScript(
       `await new Promise(() => {}); return 1;`,

@@ -677,7 +677,13 @@ const WORKER_SRC = `(() => {
       { displayErrors: true },
     );
   } catch (err) {
-    parentPort.postMessage({ t: 'error', error: 'compile_error: ' + ((err && err.message) || String(err)) });
+    parentPort.postMessage({
+      t: 'error',
+      error:
+        'compile_error: ' +
+        ((err && err.message) || String(err)) +
+        ' -- code:run scripts are plain JavaScript only (no TypeScript type annotations, interfaces, or "as" casts); strip them and retry',
+    });
     return;
   }
   (async () => {
