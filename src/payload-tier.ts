@@ -203,6 +203,13 @@ export interface ProjectBoundedPayloadOpts {
    */
   preserveArrayRoot?: boolean;
   /**
+   * Explicit caller-selected paths that must remain addressable when the bounded
+   * preview reaches its depth/key fallback. The result door supplies the same
+   * paths its caller used for `projection.pick`; values remain subject to the
+   * normal string, key, array, and transport budgets.
+   */
+  preservePaths?: readonly string[];
+  /**
    * EI-20720054720826414: the host's concrete raw-args dispatch spelling for a
    * `payloadTier:'full'` re-call (`{tool}` substituted with the tool name) —
    * see UnifiedToolContext.rawDispatchTemplate. Present ⇒ the recovery `next`
@@ -252,6 +259,64 @@ interface ProjectionState {
    * trusts (see `omissionMarker`). Derived once in `projectBoundedPayload`.
    */
   recoveryPointer: string;
+  preservePaths: readonly PreservePathSegment[][];
+}
+
+type PreservePathSegment =
+  | { kind: 'key'; name: string }
+  | { kind: 'array' }
+  | { kind: 'index'; index: number };
+
+/** Parse the same dot/bracket path subset used by the dispatch projection seam. */
+function parsePreservePath(path: string): PreservePathSegment[] {
+  const segments: PreservePathSegment[] = [];
+  for (const token of path.split('.')) {
+    if (token === '') continue;
+    const head = token.replace(/(\[\d*\])+$/, '');
+    if (head) segments.push({ kind: 'key', name: head });
+    const brackets = token.slice(head.length).match(/\[\d*\]/g) ?? [];
+    for (const bracket of brackets) {
+      const inner = bracket.slice(1, -1);
+      segments.push(inner === '' ? { kind: 'array' } : { kind: 'index', index: Number(inner) });
+    }
+  }
+  return segments;
+}
+
+/** Return path suffixes that select an object child; an empty path selects all descendants. */
+function preserveObjectChildPaths(
+  paths: readonly PreservePathSegment[][],
+  key: string,
+): PreservePathSegment[][] {
+  const childPaths: PreservePathSegment[][] = [];
+  for (const path of paths) {
+    if (path.length === 0) {
+      childPaths.push([]);
+    } else if (path[0].kind === 'key' && path[0].name === key) {
+      childPaths.push(path.slice(1));
+    }
+  }
+  return childPaths;
+}
+
+/** Return path suffixes that select an array element; an empty path selects all descendants. */
+function preserveArrayChildPaths(
+  paths: readonly PreservePathSegment[][],
+  index: number,
+): PreservePathSegment[][] {
+  const childPaths: PreservePathSegment[][] = [];
+  for (const path of paths) {
+    if (path.length === 0) {
+      childPaths.push([]);
+    } else if (path[0].kind === 'array' || (path[0].kind === 'index' && path[0].index === index)) {
+      childPaths.push(path.slice(1));
+    }
+  }
+  return childPaths;
+}
+
+function hasPreservedObjectChild(paths: readonly PreservePathSegment[][], key: string): boolean {
+  return preserveObjectChildPaths(paths, key).length > 0;
 }
 
 /**
@@ -569,6 +634,7 @@ function projectIdentityPreview(
   path: string,
   depth: number,
   state: ProjectionState,
+  preservePaths: readonly PreservePathSegment[][] = state.preservePaths,
 ): unknown {
   if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
     return takePrimitive(state, value, path);
@@ -580,7 +646,7 @@ function projectIdentityPreview(
   }
   if (value instanceof Date) return takePrimitive(state, value.toISOString(), path);
   if (value instanceof Error) {
-    return projectIdentityPreview({ name: value.name, error: value.message }, path, depth, state);
+    return projectIdentityPreview({ name: value.name, error: value.message }, path, depth, state, preservePaths);
   }
   if (typeof value !== 'object') return takePrimitive(state, String(value), path);
   if (state.active.has(value)) {
@@ -599,7 +665,15 @@ function projectIdentityPreview(
       const projected: unknown[] = [];
       for (let i = 0; i < shown.length; i += 1) {
         if (state.remaining < 128) break;
-        projected.push(projectIdentityPreview(shown[i], `${path}[${i}]`, depth + 1, state));
+        projected.push(
+          projectIdentityPreview(
+            shown[i],
+            `${path}[${i}]`,
+            depth + 1,
+            state,
+            preserveArrayChildPaths(preservePaths, i),
+          ),
+        );
       }
       const droppedCount = value.length - projected.length;
       if (droppedCount > 0) {
@@ -620,8 +694,17 @@ function projectIdentityPreview(
 
     const entries = Object.entries(value as Record<string, unknown>);
     const chosen = entries
-      .filter(([key]) => IDENTITY_FIELDS.has(key) || IDENTITY_ENVELOPES.has(key))
-      .sort((a, b) => identityPriority(b[0]) - identityPriority(a[0]));
+      .filter(
+        ([key]) =>
+          IDENTITY_FIELDS.has(key) ||
+          IDENTITY_ENVELOPES.has(key) ||
+          hasPreservedObjectChild(preservePaths, key),
+      )
+      .sort(
+        (a, b) =>
+          (hasPreservedObjectChild(preservePaths, b[0]) ? 5 : identityPriority(b[0])) -
+          (hasPreservedObjectChild(preservePaths, a[0]) ? 5 : identityPriority(a[0])),
+      );
     if (chosen.length === 0) {
       recordOmission(state, path, 'nested value omitted at projection depth limit');
       return omissionMarker(state.recoveryPointer, 'depth limit');
@@ -637,9 +720,11 @@ function projectIdentityPreview(
         break;
       }
       state.remaining -= keyCost;
-      projected[key] = STRUCTURED_IDENTITY_FIELDS.has(key)
-        ? projectValue(child, `${path}.${key}`, 0, state)
-        : projectIdentityPreview(child, `${path}.${key}`, depth + 1, state);
+      const childPreservePaths = preserveObjectChildPaths(preservePaths, key);
+      projected[key] =
+        childPreservePaths.length > 0 || STRUCTURED_IDENTITY_FIELDS.has(key)
+          ? projectValue(child, `${path}.${key}`, 0, state, childPreservePaths)
+          : projectIdentityPreview(child, `${path}.${key}`, depth + 1, state, childPreservePaths);
       chosenProjected += 1;
     }
     const dropped = entries.length - chosen.length;
@@ -675,7 +760,13 @@ function projectIdentityPreview(
   }
 }
 
-function projectValue(value: unknown, path: string, depth: number, state: ProjectionState): unknown {
+function projectValue(
+  value: unknown,
+  path: string,
+  depth: number,
+  state: ProjectionState,
+  preservePaths: readonly PreservePathSegment[][] = state.preservePaths,
+): unknown {
   if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
     return takePrimitive(state, value, path);
   }
@@ -686,7 +777,7 @@ function projectValue(value: unknown, path: string, depth: number, state: Projec
   }
   if (value instanceof Date) return takePrimitive(state, value.toISOString(), path);
   if (value instanceof Error) {
-    return projectValue({ name: value.name, message: value.message }, path, depth, state);
+    return projectValue({ name: value.name, message: value.message }, path, depth, state, preservePaths);
   }
   if (typeof value !== 'object') return takePrimitive(state, String(value), path);
   if (state.active.has(value)) {
@@ -695,7 +786,7 @@ function projectValue(value: unknown, path: string, depth: number, state: Projec
   }
   if (depth >= state.limits.maxDepth) {
     recordOmission(state, path, 'nested value compacted at projection depth limit');
-    return projectIdentityPreview(value, path, 0, state);
+    return projectIdentityPreview(value, path, 0, state, preservePaths);
   }
 
   state.active.add(value);
@@ -705,7 +796,9 @@ function projectValue(value: unknown, path: string, depth: number, state: Projec
       const projected: unknown[] = [];
       for (let i = 0; i < shown.length; i += 1) {
         if (state.remaining < 128) break;
-        projected.push(projectValue(shown[i], `${path}[${i}]`, depth + 1, state));
+        projected.push(
+          projectValue(shown[i], `${path}[${i}]`, depth + 1, state, preserveArrayChildPaths(preservePaths, i)),
+        );
       }
       const droppedCount = value.length - projected.length;
       if (droppedCount > 0) {
@@ -745,7 +838,11 @@ function projectValue(value: unknown, path: string, depth: number, state: Projec
     // NORMAL (non-depth-limited) path with the same IDENTITY_FIELDS priority.
     const entries = Object.entries(value as Record<string, unknown>);
     const prioritized = entries.length > 1
-      ? [...entries].sort((a, b) => identityPriority(b[0]) - identityPriority(a[0]))
+      ? [...entries].sort(
+          (a, b) =>
+            (hasPreservedObjectChild(preservePaths, b[0]) ? 5 : identityPriority(b[0])) -
+            (hasPreservedObjectChild(preservePaths, a[0]) ? 5 : identityPriority(a[0])),
+        )
       : entries;
     const projected: Record<string, unknown> = {};
     const shown = prioritized.slice(0, state.limits.maxKeys);
@@ -759,7 +856,13 @@ function projectValue(value: unknown, path: string, depth: number, state: Projec
         break;
       }
       state.remaining -= keyCost;
-      projected[key] = projectValue(child, `${path}.${key}`, depth + 1, state);
+      projected[key] = projectValue(
+        child,
+        `${path}.${key}`,
+        depth + 1,
+        state,
+        preserveObjectChildPaths(preservePaths, key),
+      );
     }
     if (prioritized.length > shown.length) {
       recordOmission(state, `${path}.*`, `${prioritized.length - shown.length} object fields omitted`, prioritized.length - shown.length);
@@ -807,6 +910,7 @@ function projectCursorArgs(args: unknown): {
     // bare re-call this used to name, and it is co-located, so the two cannot
     // drift apart.
     recoveryPointer: RECOVERY_POINTER.RE_CALL,
+    preservePaths: [],
   };
   const preview = projectIdentityPreview(source, '$._projection.cursor.args', 0, state);
   const bounded = preview && typeof preview === 'object' && !Array.isArray(preview)
@@ -887,6 +991,9 @@ export function projectBoundedPayload(
     // explicit-full re-call. EI-19371883353428338: advertising the re-call at
     // the door was measurably inert, so this is chosen per projection.
     recoveryPointer: opts.recovery ? RECOVERY_POINTER.CURSOR : RECOVERY_POINTER.RE_CALL,
+    preservePaths: (opts.preservePaths ?? [])
+      .map(parsePreservePath)
+      .filter((path) => path.length > 0),
   };
   const preview = projectValue(data, '$', 0, state);
   const cursorArgs = projectCursorArgs(opts.args);
@@ -1046,6 +1153,7 @@ export function projectBoundedPayload(
         // Same projection, narrower budget — the route that recovers is
         // unchanged, so it must not silently revert to the generic re-call.
         recoveryPointer: state.recoveryPointer,
+        preservePaths: state.preservePaths,
       };
       const rePreview = projectValue(data, '$', 0, reState);
       const reMetadata: BoundedPayloadProjection['_projection'] = {
@@ -1081,6 +1189,7 @@ export function projectBoundedPayload(
       // The identity-only husk drops the MOST, so its markers are the ones a
       // reader is likeliest to act on — they need the route that resolves.
       recoveryPointer: state.recoveryPointer,
+      preservePaths: state.preservePaths,
     };
     const identityOnly = projectIdentityPreview(data, '$', 0, identityState);
     const identityFields =

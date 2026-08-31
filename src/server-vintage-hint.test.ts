@@ -70,7 +70,11 @@ describe('unknownArgHint + server-vintage wiring', () => {
   });
 
   it('an unrecognized-key rejection appends the build id + age + restart hint when a resolver IS registered', async () => {
-    setServerVintageResolver(() => ({ buildId: '7af3a88344', bootedAgoMs: 4.6 * 60 * 60_000 }));
+    setServerVintageResolver(() => ({
+      buildId: '7af3a88344',
+      bootedAgoMs: 4.6 * 60 * 60_000,
+      freshCodeEndpoint: 'the staging operator at :3170 (retry with --port 3170)',
+    }));
     defineTool({
       name: 'test:vintage-hint-present',
       capability: 'test:read',
@@ -86,6 +90,8 @@ describe('unknownArgHint + server-vintage wiring', () => {
     expect(message).toContain('7af3a88344');
     expect(message).toContain('4.6h');
     expect(message.toLowerCase()).toContain('restart');
+    expect(message).toContain('the staging operator at :3170');
+    expect(message).toContain('--port 3170');
   });
 
   it('a call that validates cleanly is completely unaffected by a registered resolver', async () => {

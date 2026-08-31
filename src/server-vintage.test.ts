@@ -89,6 +89,17 @@ describe('serverVintageHint', () => {
     expect(hint.toLowerCase()).toContain('restart');
   });
 
+  it('renders an optional host-provided route to the current source tree', () => {
+    setServerVintageResolver(() => ({
+      buildId: '7af3a88344',
+      bootedAgoMs: 4.6 * 60 * 60_000,
+      freshCodeEndpoint: 'the staging operator at :3170 (retry with --port 3170)',
+    }));
+    const hint = serverVintageHint();
+    expect(hint).toContain('the staging operator at :3170');
+    expect(hint).toContain('--port 3170');
+  });
+
   it('degrades gracefully to "an unknown build" when buildId is null', () => {
     setServerVintageResolver(() => ({ buildId: null, bootedAgoMs: 60_000 }));
     expect(serverVintageHint()).toContain('an unknown build');

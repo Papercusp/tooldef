@@ -1,0 +1,273 @@
+import { camelNamespace, camelVerb, splitToolName } from './tool-facade';
+let _ts = null;
+/** Lazily load the TS compiler (kept out of the eager client bundle). Await once before checkScript(). Idempotent. */
+export async function ensureParseCheckReady() {
+    if (!_ts) {
+        const m = (await import('typescript'));
+        _ts = (m.default ?? m);
+    }
+}
+function tsc() {
+    if (!_ts) {
+        throw new Error('parse-check: ensureParseCheckReady() must be awaited before checkScript() (the TS compiler is lazy-loaded to keep it out of the eager client bundle)');
+    }
+    return _ts;
+}
+export function checkScript(script, tools, allowed) {
+    const ts = tsc(); // lazy-loaded TS compiler (see ensureParseCheckReady)
+    const memberToName = new Map(); // "ns.camelVerb" → full name
+    const fullNames = new Set();
+    for (const t of tools) {
+        const name = t.expose?.mcp?.name;
+        if (!name)
+            continue;
+        // EI-18683272396981279: a plugin-namespaced tool projects with a DOT (`gitnexus.query`),
+        // not the canonical colon — recognize both shapes here the same way buildToolFacade does,
+        // or a plugin tool that IS reachable at runtime gets falsely flagged as an "unknown ref" by
+        // this static pre-check.
+        const split = splitToolName(name);
+        if (!split)
+            continue;
+        if (allowed && !allowed.has(name))
+            continue;
+        memberToName.set(`${camelNamespace(split.rawNs)}.${camelVerb(split.rawVerb)}`, name);
+        fullNames.add(name);
+    }
+    const refs = new Set();
+    const unknown = new Set();
+    const calls = [];
+    // Accept the snake_case OR camelCase spelling of a `ns.verb` member: the
+    // facade exposes BOTH (the canonical MCP name is snake_case), so normalize to
+    // the camel key before deciding "unknown". Deterministic, not fuzzy — mirrors
+    // the raw-alias registration in buildToolFacade. A member is always exactly
+    // `ns.verb` (one dot) as built by `step`.
+    const canonMember = (member) => {
+        const dot = member.indexOf('.');
+        if (dot <= 0)
+            return member;
+        return `${camelNamespace(member.slice(0, dot))}.${camelVerb(member.slice(dot + 1))}`;
+    };
+    const recordMember = (member) => {
+        refs.add(member);
+        if (!memberToName.has(member) && !memberToName.has(canonMember(member)))
+            unknown.add(member);
+    };
+    const recordFull = (name) => {
+        refs.add(name);
+        if (!fullNames.has(name))
+            unknown.add(name);
+    };
+    /** Preserve every literal leaf we can prove while marking the aggregate
+     * incomplete when a computed/spread/runtime value appears. */
+    const readStaticValue = (node) => {
+        if (ts.isParenthesizedExpression(node) || ts.isNonNullExpression(node)) {
+            return readStaticValue(node.expression);
+        }
+        if (ts.isStringLiteralLike(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+            return { value: node.text, complete: true };
+        }
+        if (ts.isNumericLiteral(node))
+            return { value: Number(node.text), complete: true };
+        if (node.kind === ts.SyntaxKind.TrueKeyword)
+            return { value: true, complete: true };
+        if (node.kind === ts.SyntaxKind.FalseKeyword)
+            return { value: false, complete: true };
+        if (node.kind === ts.SyntaxKind.NullKeyword)
+            return { value: null, complete: true };
+        if (ts.isPrefixUnaryExpression(node) &&
+            (node.operator === ts.SyntaxKind.MinusToken || node.operator === ts.SyntaxKind.PlusToken) &&
+            ts.isNumericLiteral(node.operand)) {
+            const n = Number(node.operand.text);
+            return { value: node.operator === ts.SyntaxKind.MinusToken ? -n : n, complete: true };
+        }
+        if (ts.isArrayLiteralExpression(node)) {
+            const out = [];
+            let complete = true;
+            for (const element of node.elements) {
+                if (ts.isSpreadElement(element) || ts.isOmittedExpression(element)) {
+                    complete = false;
+                    continue;
+                }
+                const part = readStaticValue(element);
+                complete = complete && part.complete;
+                if (part.value !== undefined)
+                    out.push(part.value);
+            }
+            return { value: out, complete };
+        }
+        if (ts.isObjectLiteralExpression(node)) {
+            const out = {};
+            let complete = true;
+            for (const property of node.properties) {
+                if (!ts.isPropertyAssignment(property)) {
+                    complete = false;
+                    continue;
+                }
+                const key = ts.isIdentifier(property.name) || ts.isStringLiteralLike(property.name)
+                    ? property.name.text
+                    : ts.isNumericLiteral(property.name)
+                        ? property.name.text
+                        : null;
+                if (key == null) {
+                    complete = false;
+                    continue;
+                }
+                const part = readStaticValue(property.initializer);
+                complete = complete && part.complete;
+                if (part.value !== undefined)
+                    out[key] = part.value;
+            }
+            return { value: out, complete };
+        }
+        return { value: undefined, complete: false };
+    };
+    const canonicalMemberName = (member) => memberToName.get(member) ?? memberToName.get(canonMember(member)) ?? member;
+    let source;
+    try {
+        source = ts.createSourceFile('script.ts', script, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+    }
+    catch {
+        return regexFallback(script, memberToName, fullNames);
+    }
+    // Binding maps, populated in source order during the walk. Straight-line scripts declare an
+    // alias (`const t = tools`) before they use it, and chained bindings (`const w = tools.x; const
+    // f = w.y`) resolve because the walk is depth-first in source order. The runtime whitelist is
+    // the real boundary, so an unusual out-of-order binding that this misses is caught there.
+    const toolsAliases = new Set(['tools']);
+    const nsBindings = new Map(); // ident → ns
+    const funcBindings = new Map(); // ident → "ns.camelVerb" member
+    const literalKey = (node) => ts.isStringLiteralLike(node) ? node.text : null;
+    /** One property step within the facade, given the resolved base. */
+    const step = (base, prop) => {
+        if (base.kind === 'tools') {
+            // `tools.call` is the escape hatch, never a namespace (mirrors buildToolFacade).
+            return prop === 'call' ? { kind: 'callHatch' } : { kind: 'ns', ns: prop };
+        }
+        if (base.kind === 'ns')
+            return { kind: 'member', member: `${base.ns}.${prop}` };
+        return null; // 'member' / 'callHatch' have no further facade step
+    };
+    /** Resolve an expression to a facade position, or null if it isn't one / is dynamically computed. */
+    const resolve = (node) => {
+        if (ts.isParenthesizedExpression(node) || ts.isNonNullExpression(node)) {
+            return resolve(node.expression);
+        }
+        if (ts.isIdentifier(node)) {
+            const n = node.text;
+            if (toolsAliases.has(n))
+                return { kind: 'tools' };
+            const ns = nsBindings.get(n);
+            if (ns !== undefined)
+                return { kind: 'ns', ns };
+            const member = funcBindings.get(n);
+            if (member !== undefined)
+                return { kind: 'member', member };
+            return null;
+        }
+        if (ts.isPropertyAccessExpression(node)) {
+            const base = resolve(node.expression);
+            return base ? step(base, node.name.text) : null;
+        }
+        if (ts.isElementAccessExpression(node)) {
+            const base = resolve(node.expression);
+            if (!base)
+                return null;
+            const key = literalKey(node.argumentExpression);
+            return key == null ? null : step(base, key); // dynamic key → unresolvable → runtime boundary
+        }
+        return null;
+    };
+    const bindElements = (pattern, r) => {
+        for (const el of pattern.elements) {
+            if (!ts.isIdentifier(el.name))
+                continue; // nested patterns aren't facade bindings
+            const local = el.name.text;
+            const pn = el.propertyName;
+            const key = pn && ts.isIdentifier(pn)
+                ? pn.text
+                : pn && ts.isStringLiteralLike(pn)
+                    ? pn.text
+                    : local;
+            if (r.kind === 'tools') {
+                if (key === 'call')
+                    continue; // destructured escape hatch — not a namespace
+                nsBindings.set(local, key);
+            }
+            else {
+                funcBindings.set(local, `${r.ns}.${key}`);
+            }
+        }
+    };
+    const visit = (node) => {
+        // 1) Binding collection (source order, before this node's own references are recorded).
+        if (ts.isVariableDeclaration(node) && node.initializer) {
+            const r = resolve(node.initializer);
+            if (r) {
+                if (ts.isIdentifier(node.name)) {
+                    if (r.kind === 'tools')
+                        toolsAliases.add(node.name.text);
+                    else if (r.kind === 'ns')
+                        nsBindings.set(node.name.text, r.ns);
+                    else if (r.kind === 'member')
+                        funcBindings.set(node.name.text, r.member);
+                }
+                else if (ts.isObjectBindingPattern(node.name) && (r.kind === 'tools' || r.kind === 'ns')) {
+                    bindElements(node.name, r);
+                }
+            }
+        }
+        // 2) Reference recording.
+        if (ts.isCallExpression(node)) {
+            const r = resolve(node.expression);
+            if (r?.kind === 'callHatch') {
+                const name = node.arguments[0] ? literalKey(node.arguments[0]) : null;
+                if (name != null) {
+                    recordFull(name); // dynamic arg → runtime boundary
+                    const parsed = node.arguments[1]
+                        ? readStaticValue(node.arguments[1])
+                        : { value: null, complete: node.arguments.length < 2 };
+                    calls.push({ tool: name, args: parsed.value ?? null, dynamicArgs: !parsed.complete });
+                }
+            }
+            else if (r?.kind === 'member') {
+                recordMember(r.member);
+                const parsed = node.arguments[0]
+                    ? readStaticValue(node.arguments[0])
+                    : { value: null, complete: true };
+                calls.push({
+                    tool: canonicalMemberName(r.member),
+                    args: parsed.value ?? null,
+                    dynamicArgs: !parsed.complete,
+                });
+            }
+        }
+        else if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+            const r = resolve(node);
+            if (r?.kind === 'member')
+                recordMember(r.member);
+        }
+        ts.forEachChild(node, visit);
+    };
+    visit(source);
+    return { ok: unknown.size === 0, unknownRefs: [...unknown].sort(), refs: [...refs].sort(), calls };
+}
+/** Degrade gracefully if AST parsing ever throws: the original regex scan (dotted + call only). */
+function regexFallback(script, memberToName, fullNames) {
+    const refs = new Set();
+    const unknown = new Set();
+    for (const m of script.matchAll(/\btools\.([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)/g)) {
+        if (m[1] === 'call')
+            continue;
+        const member = `${m[1]}.${m[2]}`;
+        const canon = `${camelNamespace(m[1])}.${camelVerb(m[2])}`; // snake OR camel spelling
+        refs.add(member);
+        if (!memberToName.has(member) && !memberToName.has(canon))
+            unknown.add(member);
+    }
+    for (const m of script.matchAll(/\btools\.call\(\s*['"`]([^'"`]+)['"`]/g)) {
+        refs.add(m[1]);
+        if (!fullNames.has(m[1]))
+            unknown.add(m[1]);
+    }
+    return { ok: unknown.size === 0, unknownRefs: [...unknown].sort(), refs: [...refs].sort(), calls: [] };
+}
