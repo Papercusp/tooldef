@@ -59,6 +59,7 @@ import type { PayloadShapers } from './payload-tier';
  * is incidental rather than the point. Absent ⇒ the door applies as normal.
  */
 export type ResultDoorSkipReason = 'programmatic-caller' | 'oversize-by-design';
+import { pinModuleState } from '@papercusp/module-singleton';
 import { toJsonSchema } from './schema-adapter';
 import type { StandardSchemaV1 } from './standard-schema';
 import type { Authorizer } from './authz';
@@ -1255,7 +1256,7 @@ export interface ValidatedProjectedToolCorrectiveCall extends ProjectedToolCorre
 
 /* ─── Registry ───────────────────────────────────────────────────────── */
 
-// Anchor on globalThis so multiple module instances (Next standalone +
+// Pinned through `pinModuleState` so multiple module instances (Next standalone +
 // Turbopack chunking sometimes resolves @papercusp/agent-mcp into more
 // than one CJS instance — e.g. one for app routes, one for plugin-loader's
 // dynamic import) share a single registry. Without this, plugin-loader's
@@ -1264,6 +1265,12 @@ export interface ValidatedProjectedToolCorrectiveCall extends ProjectedToolCorre
 // register but are never reachable. Bug regressed twice before this
 // comment landed; please don't switch back without solving the
 // module-instance-singleton story first.
+//
+// This was a hand-rolled `globalThis[key]` pair until EI-19479108855357092. The
+// correctness story is unchanged — the primitive pins to the same one-per-realm
+// slot — but a hand-rolled key is invisible to `listModuleDuplications()`, so a
+// re-split here used to be undiscoverable centrally. Do NOT reintroduce the
+// hand-rolled form: `npm run lint:no-hand-rolled-module-pin` fails on it.
 interface RegistryStore {
   REGISTRY: Map<string, ProjectedTool>;
   BY_MCP_NAME: Map<string, ProjectedTool>;
@@ -1288,25 +1295,24 @@ interface RegistryStore {
   CONTRACT_REVISION_CACHE?: { epoch: number; revision: string };
 }
 const __PAPERCUSP_PROJECTED_TOOL_REGISTRY = '__papercuspProjectedToolRegistry';
-const __g = globalThis as unknown as Record<string, RegistryStore>;
-if (!__g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY]) {
-  __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY] = {
+const REGISTRY_STORE = pinModuleState<RegistryStore>(
+  __PAPERCUSP_PROJECTED_TOOL_REGISTRY,
+  () => ({
     REGISTRY: new Map<string, ProjectedTool>(),
     BY_MCP_NAME: new Map<string, ProjectedTool>(),
     BY_HTTP_PATH: new Map<string, ProjectedTool>(),
     SHAPERS: new Map<string, { shape: PayloadShapers; returns?: string }>(),
     CONTRACT_EPOCH: 0,
-  };
-}
-const REGISTRY_STORE = __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY];
-const REGISTRY = __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].REGISTRY;
-const BY_MCP_NAME = __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].BY_MCP_NAME;
-const BY_HTTP_PATH = __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].BY_HTTP_PATH;
+  }),
+);
+const REGISTRY = REGISTRY_STORE.REGISTRY;
+const BY_MCP_NAME = REGISTRY_STORE.BY_MCP_NAME;
+const BY_HTTP_PATH = REGISTRY_STORE.BY_HTTP_PATH;
 // A store pinned before this field existed has no SHAPERS map (an older module
-// record can win the `if (!__g[...])` race above). Backfill rather than letting
-// `.set` throw on undefined — an absent map must degrade to "nothing recorded",
-// never to a crash at import time.
-const SHAPERS = (__g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].SHAPERS ??= new Map<
+// record can win the pin race above and seed the slot without it). Backfill
+// rather than letting `.set` throw on undefined — an absent map must degrade to
+// "nothing recorded", never to a crash at import time.
+const SHAPERS = (REGISTRY_STORE.SHAPERS ??= new Map<
   string,
   { shape: PayloadShapers; returns?: string }
 >());
