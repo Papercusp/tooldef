@@ -1,0 +1,1 @@
+[2026-08-31T17:21:34Z] content-fixer papercusp/libs/generic/tooldef: In a submodule harness, probe the outer-root file with --as=<dispatch repo-relative path> so detector scope matches the dispatch; the literal outer path may return exit 2 ENOENT.
