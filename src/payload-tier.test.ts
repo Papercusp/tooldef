@@ -892,15 +892,24 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
       expect(without.length).toBeGreaterThan(0);
       expect(withCursor).not.toEqual(without);
       expect(withCursor.every((m) => m.includes('_projection.cursor'))).toBe(true);
-      expect(without.every((m) => m.includes("payloadTier:'full'"))).toBe(true);
+      expect(without.every((m) => m.includes('_projection.next'))).toBe(true);
     });
 
-    it('the no-recovery path is UNCHANGED — the re-call is still named when it is the only exit', () => {
-      // Guards the other direction: this fix must not blanket-replace the
-      // pointer, or every generic projection would advertise a cursor that
-      // does not exist.
+    it('the no-recovery path still points SOMEWHERE ELSE — no blanket cursor claim', () => {
+      // Guards the other direction: this must not blanket-replace the pointer,
+      // or every generic projection would advertise a cursor that does not
+      // exist.
+      //
+      // WI-1697551 changed WHAT the no-recovery branch names, not whether it
+      // differs. It used to assert the re-call itself (`payloadTier:'full'`) —
+      // a route this module's own `buildDefaultRecoveryNext` documents as
+      // conditional (framework-reserved, stripped before validation, rejected
+      // by a schema-validating client on a direct call). The short marker has
+      // no room for that condition, so it now defers to the field that carries
+      // it. The branch is still distinct and still derived from `recovery`.
       for (const m of markersOf(projectBoundedPayload(dropping, { toolName: 't', tier: 'trimmed' }))) {
-        expect(m).toContain("payloadTier:'full'");
+        expect(m).toContain('_projection.next');
+        expect(m).not.toContain('_projection.cursor');
       }
     });
   });
