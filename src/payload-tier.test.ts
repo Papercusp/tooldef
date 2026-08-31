@@ -792,15 +792,17 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     expect(markers.length).toBeGreaterThan(0);
     for (const m of markers) {
       // NO `recovery` was passed, so no durable artifact holds the dropped
-      // values and the explicit-full re-call really is the only exit (it sets
-      // explicitFullRequest, which skips the hard-ceiling force-shape).
+      // values and the explicit-full re-call is the exit (it sets
+      // explicitFullRequest, which skips the hard-ceiling force-shape) — but
+      // only CONDITIONALLY, which is why the marker names the field carrying
+      // the condition rather than the route itself (WI-1697551).
       //
       // ⚠ This is the NO-RECOVERY case specifically. This assertion once
       // carried a rationale claiming the re-call is correct UNIVERSALLY and the
       // spill "provably cannot recover these" — EI-19371883353428338 measured
       // both halves false at the result door, where the spill is written from
       // `result.content` BEFORE this projection runs. See the sibling test.
-      expect(m).toContain("payloadTier:'full'");
+      expect(m).toContain('_projection.next');
       expect(m).not.toContain('scratch');
     }
   });
@@ -1042,7 +1044,7 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     const markers = text.match(/\[omitted: (?:depth limit|compact preview depth)[^\]]*\]/g) ?? [];
     expect(markers.length).toBeGreaterThan(0);
     for (const m of markers) {
-      expect(m).toContain("payloadTier:'full'");
+      expect(m).toContain('_projection.next');
       // Deliberately size-free: computing one would cost a JSON.stringify per
       // dropped node, and this marker is charged to the same budget it is
       // trying to save.
@@ -1094,7 +1096,7 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     const partials = text.match(/\[omitted: \d+ non-identity field\(s\) at projection depth limit:[^\]]*\]/g) ?? [];
     expect(partials.length).toBeGreaterThan(0);
     expect(partials.some((m) => m.includes('model'))).toBe(true);
-    for (const m of partials) expect(m).toContain("payloadTier:'full'");
+    for (const m of partials) expect(m).toContain('_projection.next');
   });
 
   // EI-21058972492075433 — release:checkpoint-run's own launch receipt, once its
