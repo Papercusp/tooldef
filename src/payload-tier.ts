@@ -263,13 +263,34 @@ interface ProjectionState {
  * runs). The omitted values are in it, so point there — which is also what
  * `truncationMarker`/`arrayTruncationMarker` already say.
  *
- * `RE_CALL` — no durable artifact; the only exit is a re-call carrying an
- * explicit `payloadTier:'full'`, which sets `explicitFullRequest` and skips the
- * hard-ceiling force-shape (see `applyPayloadTier`).
+ * `RE_CALL` — no durable artifact. The exit is a re-call carrying an explicit
+ * `payloadTier:'full'`, which sets `explicitFullRequest` and skips the
+ * hard-ceiling force-shape (see `applyPayloadTier`) — but that route is
+ * CONDITIONAL, and this marker is too short to carry the condition. It used to
+ * read `re-call with payloadTier:'full'` and say nothing else, while
+ * `buildDefaultRecoveryNext` — twenty lines away, building the `next` field of
+ * this same projection — spelled out that `payloadTier` is framework-reserved,
+ * stripped before schema validation, absent from the tool's published schema,
+ * and therefore REJECTED by a schema-validating client on a direct call.
+ *
+ * Two emitters in one module, disagreeing about one route. The uncaveated one
+ * is the string an agent actually reads (it travels INSIDE the truncated
+ * payload, fired up to 5x per result) while the honest one is a sibling field
+ * that is routinely not read — so the divergence resolved, every time, toward
+ * the over-claim. WI-1697551.
+ *
+ * So it defers instead of asserting: it names the field that carries the whole
+ * conditional story, exactly as `CURSOR` names the artifact that holds the
+ * bytes. Both pointers now say "the truth is HERE" rather than "this call will
+ * work". It is also 11 chars shorter than the claim it replaces, and this
+ * string shares the projection's char budget with the retained preview
+ * (EI-20685195115158619), so the honest form is the cheap one too.
+ *
+ * `recovery-pointer-guard.test.ts` is the recurrence guard for the class.
  */
 const RECOVERY_POINTER = {
   CURSOR: 'recover: see _projection.cursor',
-  RE_CALL: "recover: re-call with payloadTier:'full'",
+  RE_CALL: 'recover: see _projection.next',
 } as const;
 
 function recordOmission(
@@ -759,7 +780,12 @@ function projectCursorArgs(args: unknown): {
     active: new WeakSet<object>(),
     limits: { maxArray: 12, maxDepth: 5, maxKeys: 40, maxString: 800 },
     // This projection BUILDS the cursor args, so it cannot point at the cursor
-    // it is producing; the re-call is the only route it can honestly name.
+    // it is producing. It defers to `_projection.next` instead — which, for
+    // this branch, is `buildDefaultRecoveryNext(opts, argsTruncated: true)`:
+    // the one string that says these args are a bounded identity preview and
+    // the ORIGINAL args are what to restore. That is strictly more than the
+    // bare re-call this used to name, and it is co-located, so the two cannot
+    // drift apart.
     recoveryPointer: RECOVERY_POINTER.RE_CALL,
   };
   const preview = projectIdentityPreview(source, '$._projection.cursor.args', 0, state);
