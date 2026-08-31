@@ -227,6 +227,26 @@ describe('unknownArgHint argRedirects (EI-20281509195248260)', () => {
     const out = unknownArgHint(issues, schema, { tags: '' });
     expect(out).not.toContain('is not an arg of this tool');
   });
+
+  it('END-TO-END: the rendered hint routes around a value-incompatible target (EI-21390759884688723)', () => {
+    // The whole point of EI-10883's loud rejection is that ONE failed call teaches the
+    // corrected call. A hint naming a target that cannot hold the value inverts that,
+    // so assert on the message the caller actually reads, not just the suggester.
+    const presenceSchema = {
+      properties: {
+        scope: { type: 'string', enum: ['hive', 'workspace', 'all'] },
+        pot: { type: 'string' },
+        owner: { type: 'string' },
+      },
+    };
+    const rejection = [{ message: 'Unrecognized key: "harness"', keys: ['harness'] }];
+    const out = unknownArgHint(rejection, presenceSchema, undefined, { harness: 'papercusp' });
+    expect(out).toContain('Did you mean `pot` for `harness`?');
+    expect(out).not.toContain('`scope` for `harness`');
+    // CONTROL: with no input threaded through, the pre-fix misdirection is what appears —
+    // this is what makes the assertion above a real measurement rather than a tautology.
+    expect(unknownArgHint(rejection, presenceSchema)).toContain('`scope` for `harness`');
+  });
 });
 
 describe('suggestArgName', () => {
@@ -264,6 +284,74 @@ describe('suggestArgName', () => {
 
   it('does not invent a correction for an unrelated field', () => {
     expect(suggestArgName('completelyDifferent', ['id', 'state', 'harness'])).toBeNull();
+  });
+
+  it('refuses a name-correct suggestion whose target provably cannot hold the value (EI-21390759884688723)', () => {
+    // MEASURED 2026-08-31: `coord:presence { harness: 'papercusp' }` was answered with
+    // "Did you mean `scope` for `harness`?", but that tool's `scope` is an enum of
+    // hive|workspace|all — so obeying the hint produced a SECOND invalid_args
+    // (`scope: Invalid option: expected one of "hive"|"workspace"|"all"`). The call
+    // that actually works is `pot: '<harness slug>'`.
+    const presenceProps = {
+      scope: { type: 'string', enum: ['hive', 'workspace', 'all'] },
+      pot: { type: 'string' },
+      workspace: { type: 'string' },
+      owner: { type: 'string' },
+    };
+    const accepted = Object.keys(presenceProps);
+    expect(suggestArgName('harness', accepted, { value: 'papercusp', props: presenceProps })).toBe('pot');
+    // The refutation is VALUE-specific, not a blanket ban on the enum key: a caller who
+    // did pass an admissible member is still sent to `scope`.
+    expect(suggestArgName('harness', accepted, { value: 'workspace', props: presenceProps })).toBe('scope');
+  });
+
+  it('keeps harness -> scope where scope genuinely takes a slug', () => {
+    // The SAME alias pair is CORRECT on improvements:capture, whose `scope` is a free
+    // string (pinned above at the EI-13475 case). This is why the fix could not simply
+    // drop the alias: the discriminator is the target's admissibility, not the name pair.
+    const captureProps = {
+      title: { type: 'string' },
+      kind: { type: 'string' },
+      scope: { type: 'string' },
+      foundDuring: { type: 'string' },
+    };
+    expect(
+      suggestArgName('harness', Object.keys(captureProps), { value: 'papercusp', props: captureProps }),
+    ).toBe('scope');
+  });
+
+  it('stays silent rather than misdirecting when no viable target remains', () => {
+    // No `pot` declared and `scope` refuted. A suggestion that cannot work costs a
+    // guaranteed extra round-trip AND teaches a false vocabulary the caller carries to
+    // other tools, so no suggestion is the better answer.
+    const props = { scope: { enum: ['hive', 'all'] }, limit: { type: 'number' } };
+    expect(suggestArgName('harness', ['scope', 'limit'], { value: 'papercusp', props })).toBeNull();
+  });
+
+  it('treats only enum/const as proof — it never guesses from type', () => {
+    // `const` enumerates the admissible set exactly as an enum does.
+    expect(
+      suggestArgName('harness', ['scope'], { value: 'papercusp', props: { scope: { const: 'hive' } } }),
+    ).toBeNull();
+    // An unconstrained target yields NO proof, so the name-based suggestion stands — a
+    // wrong suppression would be exactly as harmful as the wrong suggestion, just quieter.
+    expect(
+      suggestArgName('harness', ['scope'], { value: 'papercusp', props: { scope: { type: 'number' } } }),
+    ).toBe('scope');
+    // A structured value against an enum of primitives is not decidable by identity.
+    expect(
+      suggestArgName('harness', ['scope'], {
+        value: { slug: 'papercusp' },
+        props: { scope: { enum: ['hive'] } },
+      }),
+    ).toBe('scope');
+  });
+
+  it('is name-only when no value is supplied — every existing caller is unaffected', () => {
+    // The opts bag is optional, and a value-less call cannot refute anything, so
+    // behaviour is exactly as it was before the filter existed.
+    expect(suggestArgName('harness', ['scope', 'pot'])).toBe('scope');
+    expect(suggestArgName('harness', ['scope', 'pot'], { props: { scope: { enum: ['hive'] } } })).toBe('scope');
   });
 
   it('maps the WI-38059 measured burst — the natural-language spellings agents actually reach for', () => {
