@@ -27,6 +27,8 @@ export interface ServerVintage {
   readonly buildId: string | null;
   /** Milliseconds since the process started serving. */
   readonly bootedAgoMs: number;
+  /** Optional host-provided route to the endpoint serving the current source tree. */
+  readonly freshCodeEndpoint?: string | null;
 }
 
 let resolver: (() => ServerVintage | null) | null = null;
@@ -71,11 +73,15 @@ export function formatVintageAge(ms: number): string {
 /** The shared opening clause both hints below state — "which code is actually
  *  answering you". Empty string when there is no resolver / nothing to report, which
  *  is what makes every caller safe to concatenate unconditionally. */
-function vintagePrefix(): string {
-  const vintage = readServerVintage();
+function vintagePrefix(vintage: ServerVintage | null = readServerVintage()): string {
   if (!vintage) return '';
   const build = vintage.buildId ?? 'an unknown build';
   return ` This server is running build ${build}, started ${formatVintageAge(vintage.bootedAgoMs)} ago.`;
+}
+
+function freshCodeEndpointHint(vintage: ServerVintage): string {
+  const endpoint = vintage.freshCodeEndpoint?.trim();
+  return endpoint ? ` For the current source tree, retry this call against ${endpoint}.` : '';
 }
 
 /**
@@ -84,11 +90,13 @@ function vintagePrefix(): string {
  * resolver, or the resolver returned null) — callers concatenate unconditionally.
  */
 export function serverVintageHint(): string {
-  const prefix = vintagePrefix();
+  const vintage = readServerVintage();
+  const prefix = vintagePrefix(vintage);
   if (!prefix) return '';
   return (
     `${prefix} If this argument was added` +
-    ' after that build, the running process has never seen it — restart the app/process to pick up the new code.'
+    ' after that build, the running process has never seen it — restart the app/process to pick up the new code.' +
+    freshCodeEndpointHint(vintage!)
   );
 }
 
@@ -130,11 +138,13 @@ export function serverVintageHint(): string {
  * caller who already knows the shape. This must not re-litigate that.
  */
 export function constraintVintageHint(): string {
-  const prefix = vintagePrefix();
+  const vintage = readServerVintage();
+  const prefix = vintagePrefix(vintage);
   if (!prefix) return '';
   return (
     `${prefix} If this CONSTRAINT was relaxed after that build, the running process is still` +
     " enforcing the OLD one — the tool's source in the tree can disagree with what just refused you," +
-    ' so verify against the serving build before treating this as a defect.'
+    ' so verify against the serving build before treating this as a defect.' +
+    freshCodeEndpointHint(vintage!)
   );
 }
