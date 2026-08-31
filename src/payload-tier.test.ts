@@ -392,6 +392,55 @@ describe('applyPayloadTier', () => {
     expect(projected._projection.next).not.toContain('narrower filters/ids');
   });
 
+  it('REGRESSION (EI-21974854722078500): an explicit nested pick survives key/depth fallback while an unselected sibling stays partial', () => {
+    // Put the requested path after more keys than the generic maxKeys limit at
+    // each object boundary. `preservePaths` must promote each next segment or
+    // the result door's bounded preview drops `rubric` before it can reach the
+    // selected criterion method.
+    const noise = (prefix: string) => Object.fromEntries(
+      Array.from({ length: 48 }, (_, i) => [`${prefix}-${i}`, `noise-${i}`]),
+    );
+    const payload = {
+      results: [{
+        ...noise('result-noise'),
+        rubric: {
+          ...noise('rubric-noise'),
+          criteria: [{
+            ...noise('criterion-noise'),
+            key: 'selected-criterion',
+            title: 'Selected criterion',
+            method: 'Use this method to grade the criterion.',
+            unselectedSibling: 'This field must remain lossy.',
+          }],
+        },
+      }],
+    };
+
+    const projected = projectBoundedPayload(payload, {
+      toolName: 'rubrics:get',
+      tier: 'trimmed',
+      preservePaths: ['results[].rubric.criteria[].method'],
+    });
+    const row = ((projected.results as any[])[0].rubric.criteria as any[])[0];
+
+    // The path is selected explicitly, but still obeys normal string/key/array
+    // budgets. It reaches the criteria object's depth fallback and remains
+    // addressable there.
+    expect(row.method).toBe('Use this method to grade the criterion.');
+    expect(row).not.toHaveProperty('unselectedSibling');
+    expect(row._partial).toBe(true);
+    expect(projected._projection.omitted).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        path: '$.results[0].rubric.criteria[0]',
+        reason: expect.stringContaining('depth limit'),
+      }),
+      expect.objectContaining({
+        path: '$.results[0].*',
+        reason: expect.stringContaining('object fields omitted'),
+      }),
+    ]));
+  });
+
   it('REGRESSION (EI-21197620758075816): rubric criterion check bindings survive the depth preview', () => {
     const criteria = Array.from({ length: 8 }, (_, i) => ({
       key: `criterion-${i}`,
