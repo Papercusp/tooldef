@@ -245,7 +245,32 @@ interface ProjectionState {
   priorityOmitted: Array<{ path: string; reason: string }>;
   active: WeakSet<object>;
   limits: { maxArray: number; maxDepth: number; maxKeys: number; maxString: number };
+  /**
+   * The recovery route THIS projection's omission markers advertise. Per-
+   * projection because the two callers of `projectBoundedPayload` recover by
+   * different routes, and a marker naming the wrong one is a lie the model
+   * trusts (see `omissionMarker`). Derived once in `projectBoundedPayload`.
+   */
+  recoveryPointer: string;
 }
+
+/**
+ * The two recovery routes an omission marker can honestly advertise.
+ *
+ * `CURSOR` — a durable artifact holding the FULL pre-projection body already
+ * exists (the caller passed `opts.recovery`; at the model-facing result door
+ * that is the spill, written from `result.content` BEFORE this projection
+ * runs). The omitted values are in it, so point there — which is also what
+ * `truncationMarker`/`arrayTruncationMarker` already say.
+ *
+ * `RE_CALL` — no durable artifact; the only exit is a re-call carrying an
+ * explicit `payloadTier:'full'`, which sets `explicitFullRequest` and skips the
+ * hard-ceiling force-shape (see `applyPayloadTier`).
+ */
+const RECOVERY_POINTER = {
+  CURSOR: 'recover: see _projection.cursor',
+  RE_CALL: "recover: re-call with payloadTier:'full'",
+} as const;
 
 function recordOmission(
   state: ProjectionState,
@@ -308,21 +333,34 @@ function clipString(value: string, keep: number): string {
  *
  * ⚠ The research is equally explicit that a self-describing placeholder is WORSE
  * than nothing if the recovery pointer it advertises does not resolve — it
- * becomes a lie the model trusts. So the pointer here is deliberately NOT the
- * result-door spill, which provably cannot recover these (the omitted values are
- * never serialized, so they are not in the spill either). It is the re-call with
- * an EXPLICIT `payloadTier:'full'`, which sets `explicitFullRequest` — the one
- * documented exit from the hard-ceiling force-shape (see applyPayloadTier
- * below). That path resolves; the spill path does not.
+ * becomes a lie the model trusts. So WHICH pointer is correct depends on the
+ * caller, and this marker must not hard-code one.
+ *
+ * EI-19371883353428338 measured what hard-coding cost. This marker named
+ * `payloadTier:'full'` unconditionally, including at the model-facing result
+ * door where that lever provably cannot lift the cut. On `work_items:get` the
+ * same request through all three documented routes — a bare re-call, a re-call
+ * with `payloadTier:'full'`, and `tools:invoke { args:{ …, payloadTier:'full' }}`
+ * (the door's own `rawDispatchTemplate`) — returned a BYTE-IDENTICAL truncated
+ * body, while the spill this comment used to dismiss held the complete field
+ * (3042 of 3042 chars, no truncation marker). Both halves of the old rationale
+ * were inverted, and the marker fired 5x per result saying so confidently.
+ *
+ * The cause is that two layers cut, and `explicitFullRequest` exempts only one:
+ * `applyPayloadTier`'s hard-ceiling force-shape. The result door
+ * (`result-door.ts`) is a separate cut with no such exemption — but it spills
+ * `result.content` BEFORE projecting, so its omitted values ARE recoverable,
+ * just by the cursor rather than by a re-call. It signals this by passing
+ * `opts.recovery`; that presence is the discriminant used below.
  *
  * Size is included only where the caller ALREADY computed it. The depth-boundary
  * sites deliberately omit it rather than pay a `JSON.stringify` per dropped node
  * — this marker is charged to the same projection budget as the content it
  * replaces, so it stays cheap.
  */
-function omissionMarker(reason: string, omittedChars?: number): string {
+function omissionMarker(pointer: string, reason: string, omittedChars?: number): string {
   const size = omittedChars != null && omittedChars > 0 ? `, ~${omittedChars} chars` : '';
-  return `[omitted: ${reason}${size} — recover: re-call with payloadTier:'full']`;
+  return `[omitted: ${reason}${size} — ${pointer}]`;
 }
 
 /**
@@ -393,7 +431,7 @@ function takePrimitive(state: ProjectionState, value: unknown, path: string): un
     const size = jsonLen(value);
     if (size > state.remaining) {
       recordOmission(state, path, 'value omitted to fit projection budget');
-      return omissionMarker('projection budget', size);
+      return omissionMarker(state.recoveryPointer, 'projection budget', size);
     }
     state.remaining -= size;
     return value;
@@ -420,7 +458,7 @@ function takePrimitive(state: ProjectionState, value: unknown, path: string): un
     recordOmission(state, path, 'value omitted to fit projection budget');
     // The WHOLE string is dropped here, not the clipped candidate — so the
     // omitted amount is the original length, which we already have for free.
-    return omissionMarker('projection budget', value.length);
+    return omissionMarker(state.recoveryPointer, 'projection budget', value.length);
   }
   state.remaining -= size;
   return candidate;
@@ -510,7 +548,7 @@ function projectIdentityPreview(
   }
   if (depth >= IDENTITY_PREVIEW_DEPTH) {
     recordOmission(state, path, 'non-identity detail omitted at compact preview depth');
-    return omissionMarker('compact preview depth');
+    return omissionMarker(state.recoveryPointer, 'compact preview depth');
   }
 
   state.active.add(value);
@@ -545,7 +583,7 @@ function projectIdentityPreview(
       .sort((a, b) => identityPriority(b[0]) - identityPriority(a[0]));
     if (chosen.length === 0) {
       recordOmission(state, path, 'nested value omitted at projection depth limit');
-      return omissionMarker('depth limit');
+      return omissionMarker(state.recoveryPointer, 'depth limit');
     }
 
     const projected: Record<string, unknown> = {};
@@ -583,7 +621,7 @@ function projectIdentityPreview(
       const named = shownKeys.length < droppedKeys.length
         ? `${shownKeys.join(', ')}, +${droppedKeys.length - shownKeys.length} more`
         : shownKeys.join(', ');
-      const marker = `[omitted: ${dropped} non-identity field(s) at projection depth limit: ${named} — recover: re-call with payloadTier:'full']`;
+      const marker = `[omitted: ${dropped} non-identity field(s) at projection depth limit: ${named} — ${state.recoveryPointer}]`;
       const markerCost = jsonLen(PARTIAL_MARKER_KEY) + jsonLen(marker) + 4;
       if (state.remaining >= markerCost) {
         state.remaining -= markerCost;
@@ -720,6 +758,9 @@ function projectCursorArgs(args: unknown): {
     priorityOmitted: [],
     active: new WeakSet<object>(),
     limits: { maxArray: 12, maxDepth: 5, maxKeys: 40, maxString: 800 },
+    // This projection BUILDS the cursor args, so it cannot point at the cursor
+    // it is producing; the re-call is the only route it can honestly name.
+    recoveryPointer: RECOVERY_POINTER.RE_CALL,
   };
   const preview = projectIdentityPreview(source, '$._projection.cursor.args', 0, state);
   const bounded = preview && typeof preview === 'object' && !Array.isArray(preview)
@@ -793,6 +834,13 @@ export function projectBoundedPayload(
     limits: projectionTier === 'standard'
       ? { maxArray: 40, maxDepth: 8, maxKeys: 100, maxString: 2_500 }
       : { maxArray: 12, maxDepth: 5, maxKeys: 40, maxString: 800 },
+    // A caller-supplied `recovery` is a durable artifact holding the FULL
+    // pre-projection body (at the result door, the spill — written from
+    // `result.content` before this runs). Its presence is what makes the
+    // cursor the pointer that RESOLVES; without it the only exit is the
+    // explicit-full re-call. EI-19371883353428338: advertising the re-call at
+    // the door was measurably inert, so this is chosen per projection.
+    recoveryPointer: opts.recovery ? RECOVERY_POINTER.CURSOR : RECOVERY_POINTER.RE_CALL,
   };
   const preview = projectValue(data, '$', 0, state);
   const cursorArgs = projectCursorArgs(opts.args);
@@ -949,6 +997,9 @@ export function projectBoundedPayload(
         priorityOmitted: [],
         active: new WeakSet<object>(),
         limits: { maxArray: 6, maxDepth: 4, maxKeys: 24, maxString: 300 },
+        // Same projection, narrower budget — the route that recovers is
+        // unchanged, so it must not silently revert to the generic re-call.
+        recoveryPointer: state.recoveryPointer,
       };
       const rePreview = projectValue(data, '$', 0, reState);
       const reMetadata: BoundedPayloadProjection['_projection'] = {
@@ -981,6 +1032,9 @@ export function projectBoundedPayload(
       priorityOmitted: [],
       active: new WeakSet<object>(),
       limits: { maxArray: 8, maxDepth: 3, maxKeys: 20, maxString: 300 },
+      // The identity-only husk drops the MOST, so its markers are the ones a
+      // reader is likeliest to act on — they need the route that resolves.
+      recoveryPointer: state.recoveryPointer,
     };
     const identityOnly = projectIdentityPreview(data, '$', 0, identityState);
     const identityFields =

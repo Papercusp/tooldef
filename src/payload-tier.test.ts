@@ -791,14 +791,118 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
 
     expect(markers.length).toBeGreaterThan(0);
     for (const m of markers) {
-      // The pointer that actually resolves — an EXPLICIT payloadTier:'full' sets
-      // explicitFullRequest, the one documented exit from the hard-ceiling
-      // force-shape. Deliberately NOT the result-door spill: these values were
-      // never serialized, so they are not in the spill either, and advertising
-      // it would be a lie the model trusts.
+      // NO `recovery` was passed, so no durable artifact holds the dropped
+      // values and the explicit-full re-call really is the only exit (it sets
+      // explicitFullRequest, which skips the hard-ceiling force-shape).
+      //
+      // ⚠ This is the NO-RECOVERY case specifically. This assertion once
+      // carried a rationale claiming the re-call is correct UNIVERSALLY and the
+      // spill "provably cannot recover these" — EI-19371883353428338 measured
+      // both halves false at the result door, where the spill is written from
+      // `result.content` BEFORE this projection runs. See the sibling test.
       expect(m).toContain("payloadTier:'full'");
       expect(m).not.toContain('scratch');
     }
+  });
+
+  // EI-19371883353428338. Measured on :3070 build 8cf4ef262f: `work_items:get`
+  // truncated a 3042-char summary and emitted this marker 5x naming
+  // payloadTier:'full'. All three documented routes — a bare re-call, a re-call
+  // with payloadTier:'full', and `tools:invoke { args:{ …, payloadTier:'full' }}`
+  // (the door's own rawDispatchTemplate) — returned a BYTE-IDENTICAL truncated
+  // body, while the spill held the field complete (3042 of 3042, no marker).
+  // The advertised pointer was the one that did NOT resolve.
+  describe('when a durable recovery cursor exists, the marker points THERE', () => {
+    const RECOVERY = {
+      cursor: {
+        kind: 'scratch-page',
+        tool: 'capability:read',
+        args: { file_path: 'papercusp://scratch/ws/tool/result-door-1.spill' },
+      },
+      next: 'Use capability:read with _projection.cursor.args',
+    } as const;
+
+    const dropping = {
+      deep: { a: { b: { c: { d: { e: { noIdentityHere: 'x', more: 'y' } } } } } },
+      rows: Array.from({ length: 30 }, (_, i) => ({
+        id: `WI-${i}`,
+        nested: { plan_item: { slug: 's', item: 'P-1' } },
+        summary: 'S'.repeat(400),
+      })),
+    };
+
+    /** The property under test, as ONE function, so the control below can
+     *  exercise the SAME assertion a wrong implementation must fail. */
+    const assertPointsAtCursor = (markers: readonly string[]): void => {
+      expect(markers.length).toBeGreaterThan(0);
+      for (const m of markers) {
+        expect(m).toContain('_projection.cursor');
+        // The inert lever. Advertising it here is the defect: it cannot lift
+        // the result door's cut, so following it returns ok:true and an
+        // unchanged body — which reads as "this IS the full content".
+        expect(m).not.toContain("payloadTier:'full'");
+      }
+    };
+
+    const markersOf = (out: unknown): string[] =>
+      [...new Set(JSON.stringify(out).match(/\[omitted:[^\]"]*\]/g) ?? [])];
+
+    it('every omission marker names the cursor, never the inert re-call', () => {
+      assertPointsAtCursor(
+        markersOf(
+          projectBoundedPayload(dropping, {
+            toolName: 't',
+            tier: 'trimmed',
+            forced: true,
+            recovery: RECOVERY,
+          }),
+        ),
+      );
+    });
+
+    it('CONTROL: that assertion is FALSIFIABLE — the pre-fix marker is caught', () => {
+      // The exact string the projector emitted before this fix, kept
+      // permanently. If the assertion above were vacuous (no markers matched,
+      // or the substring checks were inverted), this would pass too.
+      const preFix = "[omitted: depth limit — recover: re-call with payloadTier:'full']";
+      expect(() => assertPointsAtCursor([preFix])).toThrow();
+      // Calibration: the assertion is not simply always-throwing.
+      expect(() => assertPointsAtCursor(['[omitted: depth limit — recover: see _projection.cursor]'])).not.toThrow();
+    });
+
+    it('CONTROL: an empty marker set FAILS rather than passing vacuously', () => {
+      // Without this, a projector that emitted no markers at all would satisfy
+      // the for-loop above — a zero read as a clean bill of health, which is
+      // the failure class this whole item is about.
+      expect(() => assertPointsAtCursor([])).toThrow();
+    });
+
+    it('DISCRIMINATOR: the SAME payload through the SAME projector yields DIFFERENT pointers', () => {
+      // The two tests either side of this one each pin one branch, so a
+      // hard-coded pointer fails one of them — but only if both actually run
+      // the real subject. This asserts the difference itself, over one
+      // projector and one payload, so the pointer is provably DERIVED from
+      // `recovery` rather than coincidentally matching two fixtures.
+      const withCursor = markersOf(
+        projectBoundedPayload(dropping, { toolName: 't', tier: 'trimmed', forced: true, recovery: RECOVERY }),
+      );
+      const without = markersOf(projectBoundedPayload(dropping, { toolName: 't', tier: 'trimmed' }));
+
+      expect(withCursor.length).toBeGreaterThan(0);
+      expect(without.length).toBeGreaterThan(0);
+      expect(withCursor).not.toEqual(without);
+      expect(withCursor.every((m) => m.includes('_projection.cursor'))).toBe(true);
+      expect(without.every((m) => m.includes("payloadTier:'full'"))).toBe(true);
+    });
+
+    it('the no-recovery path is UNCHANGED — the re-call is still named when it is the only exit', () => {
+      // Guards the other direction: this fix must not blanket-replace the
+      // pointer, or every generic projection would advertise a cursor that
+      // does not exist.
+      for (const m of markersOf(projectBoundedPayload(dropping, { toolName: 't', tier: 'trimmed' }))) {
+        expect(m).toContain("payloadTier:'full'");
+      }
+    });
   });
 
   it('CONTROL: a payload that FITS carries no omission marker — it must not become noise', () => {
