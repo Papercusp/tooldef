@@ -506,6 +506,26 @@ const IDENTITY_FIELDS = new Set([
   // field below so its discriminated-union payload (files/instrument/scope)
   // survives without promoting generic keys such as `files` globally.
   'check',
+  // EI-21364690783677984: a rubric criterion's `method` is the GRADING
+  // INSTRUCTION its reader acts on, so losing it is not a neutral loss of
+  // detail — it silently changes the verdict.
+  //
+  // Measured 2026-08-31. Criterion 1's method carried a REFERENCE OBSERVATION
+  // (a row the author supplies "so it can be CHECKED, not re-read as the
+  // answer") FOLLOWED by the prohibition "do NOT rate `pass` on the reference
+  // row alone". The cut kept the reference and dropped the prohibition, so the
+  // grader measured the author's own supplied row, agreed with it, and rated
+  // `pass` — the exact failure that criterion was written to prevent. It cost a
+  // wrong acceptance card and a public retraction. A truncation that preserves
+  // a HAZARD while removing its SAFETY RAIL does not merely lose information,
+  // it inverts the instrument — the same class `truncationMarker` above exists
+  // for, one level up.
+  //
+  // Kept so it survives the depth cut. When it is still too long for the tier
+  // it is CLIPPED by `clipString`, whose in-band marker tells the grader the
+  // instruction is incomplete — which is the whole point: a partial method that
+  // reads as whole is what produced the bad grade.
+  'method',
   // EI-21058972492075433: the outcome-identity of a WRITE/LAUNCH receipt (a
   // singleton fire-and-can't-safely-retry call like release:checkpoint-run) —
   // "did it launch, and against what" is exactly as load-bearing as `ok`/`id`
