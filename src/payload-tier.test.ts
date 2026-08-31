@@ -420,6 +420,45 @@ describe('applyPayloadTier', () => {
     expect(rows.slice(5).every((row) => !Object.prototype.hasOwnProperty.call(row, 'check'))).toBe(true);
   });
 
+  it("REGRESSION (EI-21364690783677984): a rubric criterion's grading METHOD survives the depth preview, and a surviving one is never silently partial", () => {
+    // The measured harm (2026-08-31): the method carried a REFERENCE ROW
+    // followed by the prohibition against grading on that row alone. The cut
+    // kept the reference and dropped the prohibition, so the grader measured
+    // the author's own supplied row, agreed, and rated `pass` — the exact
+    // failure the criterion existed to prevent. Wrong card, public retraction.
+    const prohibition = 'Do NOT rate `pass` on the reference row alone.';
+    const criteria = Array.from({ length: 3 }, (_, i) => ({
+      key: `criterion-${i}`,
+      title: `Criterion ${i}`,
+      model: 'm'.repeat(200),
+      method: `Reference observation EI-${1000 + i}. ${'n'.repeat(1_200)} ${prohibition}`,
+      driftMarkers: 'd'.repeat(150),
+    }));
+
+    const projected = projectBoundedPayload(
+      { results: [{ ok: true, rubric: { rubricId: 'graded-rubric', criteria } }] },
+      { toolName: 'rubrics:get', tier: 'trimmed' },
+    );
+    const rows = ((projected.results as any[])[0].rubric.criteria) as Array<any>;
+    expect(rows).toHaveLength(3);
+
+    for (const row of rows) {
+      // 1. Never silently ABSENT. `absent-in-projection` was indistinguishable
+      //    from `empty-in-store`, which is what let a partial criterion read as
+      //    a complete one.
+      expect(Object.prototype.hasOwnProperty.call(row, 'method')).toBe(true);
+      expect(typeof row.method).toBe('string');
+
+      // 2. What survives is COMPLETE, or announces its own cut IN BAND — the
+      //    grader must never have to correlate a sibling `_projection` entry to
+      //    learn the instruction it is acting on was truncated.
+      const method = row.method as string;
+      const complete = method.endsWith(prohibition);
+      const announcesCut = method.includes('TRUNCATED') || method.startsWith('[omitted');
+      expect(complete || announcesCut).toBe(true);
+    }
+  });
+
   it('sheds the omission SAMPLE list before it discards content (EI-21215297173311865)', () => {
     // The observed failure: coord:orient { afterCompaction:true } returned
     // `{ok:true}` plus a ~2.9KB manifest of 152 omissions and ZERO content fields.
