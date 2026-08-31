@@ -22,6 +22,7 @@
 
 import type { ToolResult } from './wire';
 import { applySeeAlso } from './see-also';
+import { applyDenominator } from './denominator';
 import { applyResultAnnotator } from './result-annotator';
 import type { AgentRole } from './host-types';
 import {
@@ -633,6 +634,12 @@ const invokeStep: DispatchStep = {
       // Self-gates (unchanged result) when the tool declares none / emits none /
       // errored; never fails the underlying tool call.
       result = applySeeAlso(result, exec.tool.guidance?.seeAlso, input, handlerCtx);
+      // guidance.denominator — the base-rate stamp (EI-19375528138828761): what
+      // this result MATCHED against the population it was drawn from, so a
+      // filtered slice cannot be read as a census. Authored per-tool because
+      // only the tool knows what it queried FROM; rendered here so every tool
+      // spells it identically. Same self-gating/never-throw contract as seeAlso.
+      result = applyDenominator(result, exec.tool.guidance?.denominator, input, handlerCtx);
       // Host ambient annotator (agent-managed-compaction P-013): the host may append a
       // banded context-usage gauge to EVERY result so a heads-down session that never
       // calls a coord tool still sees its usage. Default no-op; never throws.

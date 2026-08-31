@@ -21,6 +21,14 @@ export type {
   EmitCallback,
 } from './wire';
 export type { SeeAlso, SeeAlsoEntry, SeeAlsoPointer } from './see-also';
+// Base-rate stamping (EI-19375528138828761): a filtered result carries the
+// population it was drawn from, so a slice is never read as a census.
+export type { Denominator, DenominatorSpec } from './denominator';
+export {
+  applyDenominator,
+  resolveDenominator,
+  renderDenominatorText,
+} from './denominator';
 export {
   applySeeAlso,
   resolveSeeAlso,

@@ -11,6 +11,7 @@ import type { Authorizer } from './authz';
 import type { ToolRequireSpec } from './requires';
 import type { DeltaCapability } from './delta-protocol';
 import type { SeeAlso } from './see-also';
+import type { DenominatorSpec } from './denominator';
 import type {
   OpenCardSnapshot as WireOpenCardSnapshot,
   ReportBlock,
@@ -382,6 +383,24 @@ export interface ToolGuidance {
    * See presence-coord-unification-2026-07-01 D-003.
    */
   seeAlso?: SeeAlso;
+  /**
+   * Base-rate stamp — what this result MATCHED, against the population it was
+   * drawn from. Declare it on any tool that returns a filtered slice of a set
+   * it can count.
+   *
+   * WHY (EI-19375528138828761): every read is a filtered one, and nothing
+   * supplies the denominator, so a cluster gets reasoned forward from without
+   * anyone testing whether it is remarkable. Same shape as `seeAlso` — usually
+   * a function `(result, args, ctx) => { matched, population, of?, window? }`
+   * computed from the ACTUAL result, self-gating (return `null` to emit
+   * nothing), rendered uniformly into every transport envelope
+   * (`_meta._denominator` + a one-line "Denominator:" text block).
+   *
+   * A tool that cannot count its source set sets `population: 'unknown'` —
+   * which RENDERS, loudly. Do not omit the stamp to mean that: absence reads
+   * as "this is the whole set", which is the exact misreading this prevents.
+   */
+  denominator?: DenominatorSpec;
   /**
    * Rejected-key → "that lives in ANOTHER TOOL" redirect, surfaced in the
    * `invalid_args` unrecognized-key message. Map an arg name this tool does

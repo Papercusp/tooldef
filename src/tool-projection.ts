@@ -1237,6 +1237,13 @@ export interface ProjectedTool {
     /** Authored rejected-key → canonical field/tool correction map. */
     argRedirects?: Record<string, string | ProjectedToolCorrectiveCall>;
     seeAlso?: import('./see-also').SeeAlso;
+    /**
+     * Base-rate stamp (EI-19375528138828761) — resolved from the ACTUAL result
+     * at dispatch and rendered uniformly (`_meta._denominator` + a one-line
+     * "Denominator:" block), so a filtered slice is never read as a census.
+     * Applied by `applyDenominator` in `./denominator`.
+     */
+    denominator?: import('./denominator').DenominatorSpec;
     byRole?: Record<string, { when?: string; notWhen?: string; chaining?: string }>;
   };
 }
