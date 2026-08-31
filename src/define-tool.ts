@@ -1282,7 +1282,12 @@ const COMMON_ARG_ALIASES: Readonly<Record<string, readonly string[]>> = {
   completionref: ['completionRef', 'completion_ref', 'completion'],
   description: ['content', 'summary', 'body', 'text'],
   foundduring: ['foundDuring', 'found_during'],
-  harness: ['scope', 'harnessSlug', 'harness_slug'],
+  // `pot` trails the existing entries on purpose: on a tool whose `scope` genuinely
+  // takes a slug, `scope` still wins exactly as before. It is reachable only once the
+  // value-admissibility filter refutes the earlier candidates — which is the measured
+  // `coord:presence` case, where `pot: '<harness slug>'` is the working call
+  // (verified 2026-08-31: returns `scope: hive, hive: papercusp`). EI-21390759884688723.
+  harness: ['scope', 'harnessSlug', 'harness_slug', 'pot'],
   itemid: ['item'],
   linkedfeatureid: ['linkedFeatureId', 'linked_feature_id'],
   owner: ['ownerEmail', 'ownerId', 'assignee', 'assign_to'],
@@ -1345,26 +1350,93 @@ function editDistance(a: string, b: string): number {
   return previous[b.length];
 }
 
-/** Return the closest declared field for an unknown arg, when confidence is high. */
-export function suggestArgName(unknown: string, accepted: readonly string[]): string | null {
+/**
+ * Does `candidate`'s declared schema PROVE it cannot hold `value`?
+ *
+ * WHY (EI-21390759884688723): every suggestion source above matches on NAMES alone,
+ * so the alias map will confidently relocate a value into a key whose schema cannot
+ * accept it. Measured: `coord:presence { harness: 'papercusp' }` was answered with
+ * "Did you mean `scope` for `harness`?", but that tool's `scope` is an enum of
+ * hive|workspace|all — so obeying the hint produced a SECOND invalid_args
+ * (`scope: Invalid option: expected one of "hive"|"workspace"|"all"`).
+ *
+ * A suggestion that provably cannot work is worse than no suggestion at all. It costs
+ * a guaranteed extra round-trip, and — the expensive part — it teaches a false
+ * vocabulary ("`scope` is where `harness` goes") that the caller then carries to other
+ * tools and into its own durable notes. The whole point of EI-10883's loud rejection is
+ * that ONE failed call teaches the corrected call; a misdirection inverts that.
+ *
+ * The fix cannot be to drop the alias: `harness -> scope` is CORRECT on tools that
+ * declare a free-string `scope` which really does take a harness slug (pinned by
+ * strict-args.test.ts for `improvements:capture`). The same name pair is right on one
+ * tool and wrong on another, and the only discriminator is whether the TARGET can hold
+ * the VALUE — which is what this decides.
+ *
+ * Deliberately narrow: only `enum`/`const` count as proof. Those enumerate the entire
+ * admissible set, so "cannot accept" is decidable with no judgment. A `type`-based check
+ * would have to guess — a string offered to an array-typed key is often a legitimate
+ * relocation that merely needs wrapping — and a wrong SUPPRESSION is exactly as harmful
+ * as the wrong suggestion this removes, just harder to notice. Absent proof we stay
+ * silent and let the name-based suggestion stand.
+ */
+function candidateRefutesValue(
+  props: Record<string, unknown> | undefined,
+  candidate: string,
+  value: unknown,
+): boolean {
+  if (!props || value === undefined) return false;
+  const schema = props[candidate];
+  if (!schema || typeof schema !== 'object') return false;
+  // Only primitives are compared. A structured value tested against an enum of
+  // primitives is not decidable by identity, so it yields no proof either way.
+  if (value !== null && typeof value === 'object') return false;
+  const constrained = schema as { enum?: unknown; const?: unknown };
+  if (Array.isArray(constrained.enum)) return !constrained.enum.includes(value);
+  if ('const' in constrained) return constrained.const !== value;
+  return false;
+}
+
+/**
+ * Return the closest declared field for an unknown arg, when confidence is high.
+ *
+ * `opts` is optional so every name-only caller (and the exported-direct test surface)
+ * keeps its current behaviour; pass `value`/`props` to enable the value-admissibility
+ * filter documented on `candidateRefutesValue`.
+ */
+export function suggestArgName(
+  unknown: string,
+  accepted: readonly string[],
+  opts?: { value?: unknown; props?: Record<string, unknown> },
+): string | null {
   const compactUnknown = compactArgName(unknown);
+  const admissible = (candidate: string): boolean =>
+    !candidateRefutesValue(opts?.props, candidate, opts?.value);
   // An EXACT declared match outranks every alias. Latent via `unknownArgHint`
   // (which filters declared keys before asking), but `suggestArgName` is exported
   // and used directly, and without this a tool that genuinely declares `text` or
   // `value` would be told to use `content`/`body` instead — the alias map
   // confidently overriding the tool's own vocabulary. Widening the alias map in
   // WI-38059 is what made that reachable enough to matter.
+  //
+  // Deliberately NOT value-filtered: if the tool declares this very name, the name is
+  // unambiguously right and any value problem is a separate, correctly-taught error.
   const exact = accepted.find((candidate) => compactArgName(candidate) === compactUnknown);
   if (exact) return exact;
   const semanticAliases = COMMON_ARG_ALIASES[compactUnknown] ?? [];
+  // Value-incompatible aliases are SKIPPED rather than ending the search, so the list
+  // keeps its authored preference order and simply falls through to the next viable
+  // entry (`harness` -> `scope` refuted by an enum -> ... -> `pot`).
   const semantic = semanticAliases.find((alias) =>
-    accepted.some((candidate) => compactArgName(candidate) === compactArgName(alias)),
+    accepted.some(
+      (candidate) => compactArgName(candidate) === compactArgName(alias) && admissible(candidate),
+    ),
   );
   if (semantic) {
     return accepted.find((candidate) => compactArgName(candidate) === compactArgName(semantic)) ?? semantic;
   }
 
   const ranked = accepted
+    .filter(admissible)
     .map((candidate) => ({ candidate, distance: editDistance(compactUnknown, compactArgName(candidate)) }))
     .sort((a, b) => a.distance - b.distance || a.candidate.localeCompare(b.candidate));
   const best = ranked[0];
@@ -1407,6 +1479,9 @@ export function invalidInputCorrections(
   issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
   rawSchema: unknown,
   argRedirects?: Record<string, string | ProjectedToolCorrectiveCall>,
+  /** The caller's raw args, so a near-name guess can be checked against the value it
+   *  would relocate (EI-21390759884688723). Optional: absent, behaviour is name-only. */
+  input?: unknown,
 ): InvalidInputCorrection[] {
   const msgs = (issues ?? []).map((i) => i?.message ?? '').join(' ');
   if (!/nrecognized key/i.test(msgs)) return [];
@@ -1449,7 +1524,11 @@ export function invalidInputCorrections(
     }
     const nestedTarget = nested.get(rejectedArg);
     if (nestedTarget) return [{ rejectedArg, target: nestedTarget, kind: 'nested-path' }];
-    const nearName = suggestArgName(rejectedArg, keys);
+    const rejectedValue =
+      input && typeof input === 'object'
+        ? (input as Record<string, unknown>)[rejectedArg]
+        : undefined;
+    const nearName = suggestArgName(rejectedArg, keys, { value: rejectedValue, props });
     return nearName ? [{ rejectedArg, target: nearName, kind: 'near-name' }] : [];
   });
 }
@@ -1460,13 +1539,15 @@ export function unknownArgHint(
   issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
   rawSchema: unknown,
   argRedirects?: Record<string, string | ProjectedToolCorrectiveCall>,
+  /** See `invalidInputCorrections` — enables the value-admissibility filter. */
+  input?: unknown,
 ): string {
   const msgs = (issues ?? []).map((i) => i?.message ?? '').join(' ');
   if (!/nrecognized key/i.test(msgs)) return '';
   const props = (rawSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
   const keys = props ? Object.keys(props) : [];
   if (keys.length === 0) return '';
-  const corrections = invalidInputCorrections(issues, rawSchema, argRedirects);
+  const corrections = invalidInputCorrections(issues, rawSchema, argRedirects, input);
   const redirected = corrections.filter((correction) => correction.kind === 'authored-redirect');
   const redirectText = redirected
     .map(({ rejectedArg, target }) => ` \`${rejectedArg}\` is not an arg of this tool — it is written by ${target}.`)
@@ -1501,7 +1582,7 @@ function makeInvalidInputError(
     source: PROJECTED_TOOL_REGISTRY_SOURCE,
     registryRevision: projectedToolRegistryRevision(),
     toolName,
-    corrections: invalidInputCorrections(issues, rawSchema, argRedirects),
+    corrections: invalidInputCorrections(issues, rawSchema, argRedirects, input),
   };
   return new InvalidInputError(
     `invalid_args: ${formatIssues(issues, input)}${unknownArgHint(issues, rawSchema, argRedirects)}` +
