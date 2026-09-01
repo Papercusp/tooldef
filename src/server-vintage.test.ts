@@ -93,11 +93,11 @@ describe('serverVintageHint', () => {
     setServerVintageResolver(() => ({
       buildId: '7af3a88344',
       bootedAgoMs: 4.6 * 60 * 60_000,
-      freshCodeEndpoint: 'the staging operator at :3170 (retry with --port 3170)',
+      freshCodeEndpoint: 'the staging operator at :3170 (with ptool, pass --url=http://127.0.0.1:3170 explicitly)',
     }));
     const hint = serverVintageHint();
     expect(hint).toContain('the staging operator at :3170');
-    expect(hint).toContain('--port 3170');
+    expect(hint).toContain('--url=http://127.0.0.1:3170');
   });
 
   it('degrades gracefully to "an unknown build" when buildId is null', () => {

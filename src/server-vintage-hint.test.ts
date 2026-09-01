@@ -73,7 +73,7 @@ describe('unknownArgHint + server-vintage wiring', () => {
     setServerVintageResolver(() => ({
       buildId: '7af3a88344',
       bootedAgoMs: 4.6 * 60 * 60_000,
-      freshCodeEndpoint: 'the staging operator at :3170 (retry with --port 3170)',
+      freshCodeEndpoint: 'the staging operator at :3170 (with ptool, pass --url=http://127.0.0.1:3170 explicitly)',
     }));
     defineTool({
       name: 'test:vintage-hint-present',
@@ -91,7 +91,7 @@ describe('unknownArgHint + server-vintage wiring', () => {
     expect(message).toContain('4.6h');
     expect(message.toLowerCase()).toContain('restart');
     expect(message).toContain('the staging operator at :3170');
-    expect(message).toContain('--port 3170');
+    expect(message).toContain('--url=http://127.0.0.1:3170');
   });
 
   it('a call that validates cleanly is completely unaffected by a registered resolver', async () => {
