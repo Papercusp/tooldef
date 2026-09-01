@@ -10,6 +10,14 @@
  * reasoning about whether a fold FITS must import this rather than repeat the literal.
  */
 export const DEFAULT_SCRIPT_TIMEOUT_MS = 30_000;
+/**
+ * Maximum time the host gets to settle tool calls after the script worker hits its wall-clock
+ * deadline. The worker is terminated immediately at the deadline; this grace only keeps the
+ * outer result open long enough for cooperative host handlers to report their final disposition.
+ * Calls that still have not settled when this window closes are returned as detached evidence by
+ * the orchestration composition layer.
+ */
+export const DEFAULT_TIMEOUT_SETTLEMENT_GRACE_MS = 1_000;
 function jsonInputError(value, path, seen) {
     if (value === null || typeof value === 'string' || typeof value === 'boolean')
         return null;
@@ -464,7 +472,13 @@ const WORKER_SRC = `(() => {
       { displayErrors: true },
     );
   } catch (err) {
-    parentPort.postMessage({ t: 'error', error: 'compile_error: ' + ((err && err.message) || String(err)) });
+    parentPort.postMessage({
+      t: 'error',
+      error:
+        'compile_error: ' +
+        ((err && err.message) || String(err)) +
+        ' -- code:run scripts are plain JavaScript only (no TypeScript type annotations, interfaces, or "as" casts); strip them and retry',
+    });
     return;
   }
   (async () => {
@@ -491,8 +505,18 @@ const WORKER_SRC = `(() => {
       // the specifier is ever looked at -- indistinguishable, on first read, from a bad path.
       // Rewritten here so the constraint (tools.* only -- the whitelist IS the security boundary,
       // same reason require/process are absent) costs one read instead of a wasted retry.
+      // EI-7839 / EI-20385364997159134 / EI-21867145325617024 (and others): setTimeout and
+      // setInterval are deliberately absent from the vm context (see the header note + sleep
+      // above), so a script calling either throws this exact bare ReferenceError -- and it keeps
+      // recurring because the raw V8 message gives no hint that sleep(ms) exists. Any prior
+      // tools.*/capability:* calls in the script already ran; ones ordered AFTER this point were
+      // never dispatched (see strandedWrites in the wrapping tool result). Same rewrite pattern
+      // as the dynamic-import case above -- named + actionable instead of a bare ReferenceError.
+      const timerMatch = /^(setTimeout|setInterval) is not defined$/.exec(msg);
       const friendly = /dynamic import callback/i.test(msg)
         ? 'dynamic_import_unsupported: code:run cannot import()/require() repo modules or node builtins -- only tools.ns.verb(args) is exposed (the role tool whitelist IS the sandbox security boundary, same reason require/process are absent). Use capability:bash + npx tsx for direct module/DB access outside that whitelist.'
+        : timerMatch
+        ? timerMatch[1] + '_unsupported: code:run has no ambient ' + timerMatch[1] + ' -- the vm sandbox exposes only await sleep(ms) for a bounded async delay (capped per call; resolves with the actual ms waited, so a careful script can self-correct). For a REPEATING delay, loop with await sleep(ms) between iterations instead of setInterval. Any tools.*/capability:* calls ordered after this point in the script were never dispatched -- check strandedWrites in the result.'
         : msg;
       parentPort.postMessage({
         t: 'error',
@@ -516,6 +540,7 @@ export async function runOrchestrationScript(script, facade, opts = {}) {
     const { Worker } = await import('node:worker_threads');
     return await new Promise((resolve) => {
         let settled = false;
+        let timeoutTriggered = false;
         let latestState;
         const worker = new Worker(WORKER_SRC, {
             eval: true,
@@ -527,8 +552,8 @@ export async function runOrchestrationScript(script, facade, opts = {}) {
                 ? { resourceLimits: { maxOldGenerationSizeMb: opts.maxOldGenerationSizeMb } }
                 : {}),
         });
-        const finish = (out) => {
-            if (settled)
+        const finish = (out, fromTimeout = false) => {
+            if (settled || (timeoutTriggered && !fromTimeout))
                 return;
             settled = true;
             clearTimeout(timer);
@@ -539,15 +564,48 @@ export async function runOrchestrationScript(script, facade, opts = {}) {
                 logs,
             });
         };
-        // The kill switch: terminate() stops the worker thread even mid sync-loop.
+        /**
+         * Give an awaitable timeout hook a finite window, swallowing hook failures because timeout
+         * settlement is advisory to the script result. The worker is killed before the hook runs so
+         * a script that was still yielding cannot enqueue another host dispatch during the grace.
+         */
+        const awaitTimeoutHook = async () => {
+            if (!opts.onTimeout)
+                return;
+            const graceMs = Number.isFinite(opts.timeoutGraceMs)
+                ? Math.max(0, opts.timeoutGraceMs)
+                : DEFAULT_TIMEOUT_SETTLEMENT_GRACE_MS;
+            let graceTimer;
+            await new Promise((done) => {
+                let completed = false;
+                const complete = () => {
+                    if (completed)
+                        return;
+                    completed = true;
+                    if (graceTimer)
+                        clearTimeout(graceTimer);
+                    done();
+                };
+                graceTimer = setTimeout(complete, graceMs);
+                try {
+                    Promise.resolve(opts.onTimeout()).then(complete, complete);
+                }
+                catch {
+                    complete();
+                }
+            });
+        };
+        // The kill switch: terminate() stops the worker thread even mid sync-loop. Host-side facade
+        // calls may still be awaiting real tools, so the awaitable hook gets a bounded grace window
+        // before this outer result resolves (EI-20282336542235171).
         const timer = setTimeout(() => {
-            // Terminating the worker only stops the script. A host-side facade call may still be
-            // awaiting a real tool (for example a long foreground capability:bash), and letting that
-            // call continue after code:run returned leaves the caller without a resumable handle and
-            // makes a retry capable of duplicating the command. Give the host a cancellation seam
-            // before killing the worker (EI-20282336542235171).
-            opts.onTimeout?.();
-            finish({ ok: false, error: `script_timeout after ${timeoutMs}ms` });
+            if (settled || timeoutTriggered)
+                return;
+            timeoutTriggered = true;
+            void worker.terminate();
+            void awaitTimeoutHook().then(() => {
+                finish({ ok: false, error: `script_timeout after ${timeoutMs}ms` }, true);
+            });
         }, timeoutMs);
         worker.on('message', (m) => {
             if (m.t === 'log') {
@@ -589,12 +647,12 @@ export async function runOrchestrationScript(script, facade, opts = {}) {
                 return;
             }
             if (m.t === 'call')
-                void handleCall(worker, facade, m, () => settled);
+                void handleCall(worker, facade, m, () => settled || timeoutTriggered);
         });
         // A worker that dies without a terminal message (native crash, OOM kill) still settles.
         worker.on('error', (err) => finish({ ok: false, error: errMsg(err) }));
         worker.on('exit', (code) => {
-            if (!settled)
+            if (!settled && !timeoutTriggered)
                 finish({ ok: false, error: `worker exited unexpectedly (code ${code})` });
         });
     });

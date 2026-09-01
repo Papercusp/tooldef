@@ -17,6 +17,7 @@
  *
  * Spec: apps/operator/docs/plugin-mcp-host-design.md.
  */
+import { pinModuleState } from '@papercusp/module-singleton';
 import { toJsonSchema } from './schema-adapter';
 /**
  * Runtime list of reserved event names. The compile-time `UserEvents<T>`
@@ -111,25 +112,21 @@ export function emitToSseSink(sink, tool, name, data) {
     }
 }
 const __PAPERCUSP_PROJECTED_TOOL_REGISTRY = '__papercuspProjectedToolRegistry';
-const __g = globalThis;
-if (!__g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY]) {
-    __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY] = {
-        REGISTRY: new Map(),
-        BY_MCP_NAME: new Map(),
-        BY_HTTP_PATH: new Map(),
-        SHAPERS: new Map(),
-        CONTRACT_EPOCH: 0,
-    };
-}
-const REGISTRY_STORE = __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY];
-const REGISTRY = __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].REGISTRY;
-const BY_MCP_NAME = __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].BY_MCP_NAME;
-const BY_HTTP_PATH = __g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].BY_HTTP_PATH;
+const REGISTRY_STORE = pinModuleState(__PAPERCUSP_PROJECTED_TOOL_REGISTRY, () => ({
+    REGISTRY: new Map(),
+    BY_MCP_NAME: new Map(),
+    BY_HTTP_PATH: new Map(),
+    SHAPERS: new Map(),
+    CONTRACT_EPOCH: 0,
+}));
+const REGISTRY = REGISTRY_STORE.REGISTRY;
+const BY_MCP_NAME = REGISTRY_STORE.BY_MCP_NAME;
+const BY_HTTP_PATH = REGISTRY_STORE.BY_HTTP_PATH;
 // A store pinned before this field existed has no SHAPERS map (an older module
-// record can win the `if (!__g[...])` race above). Backfill rather than letting
-// `.set` throw on undefined — an absent map must degrade to "nothing recorded",
-// never to a crash at import time.
-const SHAPERS = (__g[__PAPERCUSP_PROJECTED_TOOL_REGISTRY].SHAPERS ??= new Map());
+// record can win the pin race above and seed the slot without it). Backfill
+// rather than letting `.set` throw on undefined — an absent map must degrade to
+// "nothing recorded", never to a crash at import time.
+const SHAPERS = (REGISTRY_STORE.SHAPERS ??= new Map());
 function invalidateProjectedToolContract() {
     REGISTRY_STORE.CONTRACT_EPOCH = (REGISTRY_STORE.CONTRACT_EPOCH ?? 0) + 1;
     REGISTRY_STORE.CONTRACT_REVISION_CACHE = undefined;

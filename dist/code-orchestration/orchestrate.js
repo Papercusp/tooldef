@@ -1,7 +1,20 @@
 import { buildToolFacade } from './tool-facade';
 import { realDispatch, isPreExecutionFailure } from './dispatch-binding';
-import { runOrchestrationScript, } from './run-script';
+import { DEFAULT_TIMEOUT_SETTLEMENT_GRACE_MS, runOrchestrationScript, } from './run-script';
 import { checkScript, ensureParseCheckReady } from './parse-check';
+/**
+ * Derive the idempotency key for one nested dispatch in a keyed code:run.
+ *
+ * The transport key identifies the whole orchestration request, but forwarding
+ * it unchanged to every child makes child-level idempotency consumers (for
+ * example coord:send) treat distinct writes as retries of the same write. The
+ * dispatch ordinal is allocated synchronously before the first await, so it is
+ * unique within a run and stable when the same keyed run is retried.
+ */
+function nestedIdempotencyKey(ctx, ordinal) {
+    const outer = ctx.idempotencyKey?.trim();
+    return outer ? `code-run:nested:${outer}:${ordinal}` : undefined;
+}
 function setContainsAll(superset, subset) {
     if (!subset || subset.size === 0)
         return true;
@@ -318,6 +331,39 @@ export async function runToolOrchestration(script, opts) {
     let authorityWideningDetected = false;
     let dispatchCount = 0;
     let intermediateBytes = 0;
+    const activeCalls = new Set();
+    let timeoutTriggered = false;
+    /** Frozen at the end of the bounded grace, before later handler microtasks can remove calls. */
+    let detachedCallsSnapshot;
+    let timeoutBoundaryTimer;
+    /**
+     * Abort every dispatch observed at the script deadline, then wait for the cooperative ones to
+     * run their normal settlement/telemetry paths. run-script bounds this hook with its grace
+     * window; anything still in activeCalls when it returns is explicit detached evidence.
+     */
+    const settleOnTimeout = async () => {
+        timeoutTriggered = true;
+        const pending = Array.from(activeCalls);
+        abortFromParent();
+        const graceMs = Number.isFinite(opts.timeoutGraceMs)
+            ? Math.max(0, opts.timeoutGraceMs)
+            : DEFAULT_TIMEOUT_SETTLEMENT_GRACE_MS;
+        const allSettled = Promise.allSettled(pending.map((call) => call.settled)).then(() => true);
+        const graceBoundary = new Promise((resolve) => {
+            timeoutBoundaryTimer = setTimeout(() => {
+                timeoutBoundaryTimer = undefined;
+                // This is the authoritative detached census. Do not derive it later from activeCalls:
+                // a non-cooperative handler can settle between this boundary and result assembly.
+                detachedCallsSnapshot = Array.from(activeCalls);
+                resolve(false);
+            }, graceMs);
+        });
+        const settledWithinGrace = await Promise.race([allSettled, graceBoundary]);
+        if (settledWithinGrace && timeoutBoundaryTimer) {
+            clearTimeout(timeoutBoundaryTimer);
+            timeoutBoundaryTimer = undefined;
+        }
+    };
     await ensureParseCheckReady(); // lazy-load the TS compiler before the static parse-check (kept out of the eager client bundle)
     const check = checkScript(script, tools, allowed);
     // F8 (autonomous-loop-hardening / H2): an unknown tool ref no longer NUKES the whole run before
@@ -353,19 +399,46 @@ export async function runToolOrchestration(script, opts) {
             };
             writeAttempts.push(writeAttempt);
         }
+        let resolveSettled;
+        const settled = new Promise((resolve) => {
+            resolveSettled = resolve;
+        });
+        const activeCall = {
+            callRecord,
+            settled,
+            resolveSettled,
+        };
+        activeCalls.add(activeCall);
+        // Each runDispatchStack invocation creates its own callId before the first await. A
+        // per-call wrapper preserves that exact start event and lets the timeout path associate the
+        // id with this call record without heuristic matching on tool name or session context.
+        const callDeps = {
+            ...deps,
+            onDispatchStart: (event) => {
+                activeCall.callId = event.callId;
+                deps.onDispatchStart?.(event);
+            },
+        };
         dispatchedToolNames.push(name);
         // Counted at the same point the host's dispatcher is entered (a throw below still
         // reached it), so this equals the number of inner telemetry rows the run produced —
         // what lets a wrapper tool (code:run / recipes:run) mark its own row as a dispatch
         // wrapper only when inner rows actually exist (census double-count, P-012).
         dispatchCount += 1;
+        const childIdempotencyKey = nestedIdempotencyKey(ctx, callRecord.ordinal);
         const call = (callCtx) => {
             // Observe the exact context that enters the real dispatcher, after any
             // per-call workspace/principal rebinding. This is the runtime-owned
             // authorization entry; the script cannot forge or suppress it.
             authorizationObservationCount += 1;
             authorityWideningDetected ||= authorityWidened(ctx, callCtx);
-            return realDispatch(callCtx, deps)(tool, name, args);
+            // Keep the outer transport key on the wrapper input, but scope it to this
+            // child before dispatch. This preserves whole-run replay while preventing
+            // two distinct nested writes from sharing one child idempotency identity.
+            const childCtx = childIdempotencyKey
+                ? { ...callCtx, idempotencyKey: childIdempotencyKey }
+                : callCtx;
+            return realDispatch(childCtx, callDeps)(tool, name, args);
         };
         try {
             const result = await (wrapDispatch
@@ -430,15 +503,31 @@ export async function runToolOrchestration(script, opts) {
             }
             throw err;
         }
+        finally {
+            activeCalls.delete(activeCall);
+            resolveSettled();
+        }
     };
     const facade = buildToolFacade(tools, dispatch, allowed, unknownRefs);
     const run = await runOrchestrationScript(script, facade, {
         ...(timeoutMs ? { timeoutMs } : {}),
-        onTimeout: abortFromParent,
+        ...(opts.timeoutGraceMs !== undefined ? { timeoutGraceMs: opts.timeoutGraceMs } : {}),
+        onTimeout: settleOnTimeout,
         ...(opts.inputs ? { inputs: opts.inputs } : {}),
         ...(ctx.emit ? { emit: (name, data) => ctx.emit(name, data) } : {}),
     });
     ctx.signal?.removeEventListener('abort', abortFromParent);
+    // run-script owns the public grace timer. If its timer and our census timer have the same
+    // deadline, its result promise can win the event-loop race by one turn; yield once so the
+    // census callback gets a chance to freeze the exact boundary before falling back to live state.
+    if (timeoutTriggered && detachedCallsSnapshot === undefined && timeoutBoundaryTimer) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        detachedCallsSnapshot ??= Array.from(activeCalls);
+    }
+    if (timeoutBoundaryTimer) {
+        clearTimeout(timeoutBoundaryTimer);
+        timeoutBoundaryTimer = undefined;
+    }
     // P-020: only meaningful when the script ABORTED — a run that completed reached every line
     // it was going to, so an undispatched write there was a branch not taken, not a stranding.
     const strandedWrites = run.ok
@@ -448,6 +537,17 @@ export async function runToolOrchestration(script, opts) {
         tool,
         executed: false,
     }));
+    const detachedCalls = timeoutTriggered
+        ? (detachedCallsSnapshot ?? Array.from(activeCalls))
+            .filter((call) => typeof call.callId === 'string')
+            .map((call) => ({
+            callId: call.callId,
+            tool: call.callRecord.tool,
+            effect: call.callRecord.effect,
+            ordinal: call.callRecord.ordinal,
+            disposition: call.callRecord.disposition,
+        }))
+        : [];
     const finalResult = run.ok ? parseFinalResult(run.result) : { summary: run.result };
     const generated = validateGeneratedImages(run.generatedImages);
     const media = [...(finalResult.media ?? []), ...generated.media];
@@ -478,6 +578,7 @@ export async function runToolOrchestration(script, opts) {
         ...(uncertainMutations.length ? { uncertainMutations } : {}),
         ...(strandedWrites.length ? { strandedWrites } : {}),
         ...(notDispatchedWrites.length ? { notDispatchedWrites } : {}),
+        ...(detachedCalls.length ? { detachedCalls } : {}),
         ...(run.fieldMisses?.length ? { fieldMisses: run.fieldMisses } : {}),
         ...(run.sleepCaps?.length ? { sleepCaps: run.sleepCaps } : {}),
         callRecords: callRecords.map((record) => ({

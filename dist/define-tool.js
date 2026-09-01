@@ -667,7 +667,7 @@ function defineRouteShaped(def) {
 export const WRITE_CAPABILITY_SUFFIXES = [':write', ':admin', ':delete', ':manage', ':execute'];
 /**
  * Known-mutating capabilities whose names don't end in a write-suffix — the
- * `capability:*` host-capability family (bash/fs-write/edit/write/git/computer/net) plus
+ * `capability:*` host-capability family (bash/fs-write/edit/write/git/computer/net/terminal) plus
  * dedicated control / side-effect capabilities (processes:kill, turn:interrupt,
  * ui:dispatch, tui:dispatch, operator:converse, activity:report).
  * Each is used ONLY by a mutating tool — where a read sibling exists it is a DISTINCT
@@ -687,6 +687,7 @@ export const WRITE_CAPABILITIES = new Set([
     'capability:git',
     'capability:computer',
     'capability:net', // outbound HTTP (capability:fetch) — can POST/PUT/DELETE → external mutation
+    'capability:terminal', // opens command/agent windows or headless agent processes
     'processes:kill',
     'processes:control', // freezes/thaws or re-budgets a live task's cgroup
     'turn:interrupt', // ends a peer agent's current turn
@@ -914,7 +915,23 @@ function defineRoleGatedTool(input) {
  * Schemas that already have `type: "object"` and no problematic
  * top-level keys pass through unchanged.
  */
-function flattenForOpenAi(schema) {
+/**
+ * Zod serializes `z.never()` as `{ not: {} }`. A union branch often uses that
+ * schema to forbid a field (for example, `resume` on the fresh-launch branch).
+ * Treat only an empty `not` schema as impossible; a constrained `not` remains a
+ * meaningful validation rule and must not be discarded while flattening.
+ */
+function isNeverJsonSchema(value) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value))
+        return false;
+    const schema = value;
+    const negated = schema.not;
+    return (negated !== null &&
+        typeof negated === 'object' &&
+        !Array.isArray(negated) &&
+        Object.keys(negated).length === 0);
+}
+export function flattenForOpenAi(schema) {
     // Already shaped right.
     const PROHIBITED_AT_ROOT = ['oneOf', 'anyOf', 'allOf', 'not'];
     const hasProhibited = PROHIBITED_AT_ROOT.some((k) => k in schema);
@@ -942,16 +959,50 @@ function flattenForOpenAi(schema) {
     // Merge variant properties. Each property keeps its first definition;
     // a property required by EVERY variant stays required (typically the
     // discriminator); others become optional.
+    //
+    // EI-21914494224354098: first-declaration-wins is wrong for the DISCRIMINATOR
+    // field itself. Zod renders each `z.literal(x)` branch of a discriminated
+    // union as `{ const: x }`, so `op: z.literal('get') | z.literal('converge') |
+    // z.literal('retire')` produces three variants whose `op` property is
+    // `{const:'get'}`, `{const:'converge'}`, `{const:'retire'}` respectively.
+    // First-wins collapsed that to `{const:'get'}` alone — the flattened schema
+    // (and hence the tool description every caller reads) advertised `op` as
+    // ALWAYS "get", hiding "converge"/"retire" entirely. Track every `const`
+    // value seen per key; when a key is `const`-shaped in every appearance and
+    // spans more than one distinct value, replace it with an `enum` of the full
+    // set instead of the first branch alone. A key that is ever non-const in any
+    // appearance is left to ordinary first-wins (unioning heterogeneous shapes
+    // is not safe in general — this only targets the literal-discriminator case).
     const mergedProps = {};
     const requiredSets = [];
+    const constTracking = new Map();
     for (const v of variants) {
         const props = v.properties ?? {};
         for (const [pk, pv] of Object.entries(props)) {
-            if (!(pk in mergedProps))
+            // A field can be present in every union variant but intentionally be
+            // `z.never()` in one of them. Keeping that first impossible definition
+            // makes the flattened OpenAI contract reject the valid variant too.
+            // Preserve first-declaration-wins for real schemas, while replacing a
+            // never placeholder with the first satisfiable definition we encounter.
+            if (!(pk in mergedProps) || (isNeverJsonSchema(mergedProps[pk]) && !isNeverJsonSchema(pv))) {
                 mergedProps[pk] = pv;
+            }
+            const isConst = pv !== null && typeof pv === 'object' && !Array.isArray(pv) && 'const' in pv;
+            const entry = constTracking.get(pk) ?? { allConst: true, values: new Set() };
+            if (isConst)
+                entry.values.add(pv.const);
+            else
+                entry.allConst = false;
+            constTracking.set(pk, entry);
         }
         const req = Array.isArray(v.required) ? new Set(v.required) : new Set();
         requiredSets.push(req);
+    }
+    for (const [pk, { allConst, values }] of constTracking) {
+        if (allConst && values.size > 1) {
+            const sample = [...values][0];
+            mergedProps[pk] = { type: typeof sample === 'string' ? 'string' : typeof sample, enum: [...values] };
+        }
     }
     const required = [...requiredSets[0]].filter((p) => requiredSets.every((s) => s.has(p)));
     return {
@@ -1105,7 +1156,12 @@ const COMMON_ARG_ALIASES = {
     completionref: ['completionRef', 'completion_ref', 'completion'],
     description: ['content', 'summary', 'body', 'text'],
     foundduring: ['foundDuring', 'found_during'],
-    harness: ['scope', 'harnessSlug', 'harness_slug'],
+    // `pot` trails the existing entries on purpose: on a tool whose `scope` genuinely
+    // takes a slug, `scope` still wins exactly as before. It is reachable only once the
+    // value-admissibility filter refutes the earlier candidates — which is the measured
+    // `coord:presence` case, where `pot: '<harness slug>'` is the working call
+    // (verified 2026-08-31: returns `scope: hive, hive: papercusp`). EI-21390759884688723.
+    harness: ['scope', 'harnessSlug', 'harness_slug', 'pot'],
     itemid: ['item'],
     linkedfeatureid: ['linkedFeatureId', 'linked_feature_id'],
     owner: ['ownerEmail', 'ownerId', 'assignee', 'assign_to'],
@@ -1164,24 +1220,84 @@ function editDistance(a, b) {
     }
     return previous[b.length];
 }
-/** Return the closest declared field for an unknown arg, when confidence is high. */
-export function suggestArgName(unknown, accepted) {
+/**
+ * Does `candidate`'s declared schema PROVE it cannot hold `value`?
+ *
+ * WHY (EI-21390759884688723): every suggestion source above matches on NAMES alone,
+ * so the alias map will confidently relocate a value into a key whose schema cannot
+ * accept it. Measured: `coord:presence { harness: 'papercusp' }` was answered with
+ * "Did you mean `scope` for `harness`?", but that tool's `scope` is an enum of
+ * hive|workspace|all — so obeying the hint produced a SECOND invalid_args
+ * (`scope: Invalid option: expected one of "hive"|"workspace"|"all"`).
+ *
+ * A suggestion that provably cannot work is worse than no suggestion at all. It costs
+ * a guaranteed extra round-trip, and — the expensive part — it teaches a false
+ * vocabulary ("`scope` is where `harness` goes") that the caller then carries to other
+ * tools and into its own durable notes. The whole point of EI-10883's loud rejection is
+ * that ONE failed call teaches the corrected call; a misdirection inverts that.
+ *
+ * The fix cannot be to drop the alias: `harness -> scope` is CORRECT on tools that
+ * declare a free-string `scope` which really does take a harness slug (pinned by
+ * strict-args.test.ts for `improvements:capture`). The same name pair is right on one
+ * tool and wrong on another, and the only discriminator is whether the TARGET can hold
+ * the VALUE — which is what this decides.
+ *
+ * Deliberately narrow: only `enum`/`const` count as proof. Those enumerate the entire
+ * admissible set, so "cannot accept" is decidable with no judgment. A `type`-based check
+ * would have to guess — a string offered to an array-typed key is often a legitimate
+ * relocation that merely needs wrapping — and a wrong SUPPRESSION is exactly as harmful
+ * as the wrong suggestion this removes, just harder to notice. Absent proof we stay
+ * silent and let the name-based suggestion stand.
+ */
+function candidateRefutesValue(props, candidate, value) {
+    if (!props || value === undefined)
+        return false;
+    const schema = props[candidate];
+    if (!schema || typeof schema !== 'object')
+        return false;
+    // Only primitives are compared. A structured value tested against an enum of
+    // primitives is not decidable by identity, so it yields no proof either way.
+    if (value !== null && typeof value === 'object')
+        return false;
+    const constrained = schema;
+    if (Array.isArray(constrained.enum))
+        return !constrained.enum.includes(value);
+    if ('const' in constrained)
+        return constrained.const !== value;
+    return false;
+}
+/**
+ * Return the closest declared field for an unknown arg, when confidence is high.
+ *
+ * `opts` is optional so every name-only caller (and the exported-direct test surface)
+ * keeps its current behaviour; pass `value`/`props` to enable the value-admissibility
+ * filter documented on `candidateRefutesValue`.
+ */
+export function suggestArgName(unknown, accepted, opts) {
     const compactUnknown = compactArgName(unknown);
+    const admissible = (candidate) => !candidateRefutesValue(opts?.props, candidate, opts?.value);
     // An EXACT declared match outranks every alias. Latent via `unknownArgHint`
     // (which filters declared keys before asking), but `suggestArgName` is exported
     // and used directly, and without this a tool that genuinely declares `text` or
     // `value` would be told to use `content`/`body` instead — the alias map
     // confidently overriding the tool's own vocabulary. Widening the alias map in
     // WI-38059 is what made that reachable enough to matter.
+    //
+    // Deliberately NOT value-filtered: if the tool declares this very name, the name is
+    // unambiguously right and any value problem is a separate, correctly-taught error.
     const exact = accepted.find((candidate) => compactArgName(candidate) === compactUnknown);
     if (exact)
         return exact;
     const semanticAliases = COMMON_ARG_ALIASES[compactUnknown] ?? [];
-    const semantic = semanticAliases.find((alias) => accepted.some((candidate) => compactArgName(candidate) === compactArgName(alias)));
+    // Value-incompatible aliases are SKIPPED rather than ending the search, so the list
+    // keeps its authored preference order and simply falls through to the next viable
+    // entry (`harness` -> `scope` refuted by an enum -> ... -> `pot`).
+    const semantic = semanticAliases.find((alias) => accepted.some((candidate) => compactArgName(candidate) === compactArgName(alias) && admissible(candidate)));
     if (semantic) {
         return accepted.find((candidate) => compactArgName(candidate) === compactArgName(semantic)) ?? semantic;
     }
     const ranked = accepted
+        .filter(admissible)
         .map((candidate) => ({ candidate, distance: editDistance(compactUnknown, compactArgName(candidate)) }))
         .sort((a, b) => a.distance - b.distance || a.candidate.localeCompare(b.candidate));
     const best = ranked[0];
@@ -1222,7 +1338,10 @@ export function nestedArgPaths(props) {
     }
     return out;
 }
-export function invalidInputCorrections(issues, rawSchema, argRedirects) {
+export function invalidInputCorrections(issues, rawSchema, argRedirects, 
+/** The caller's raw args, so a near-name guess can be checked against the value it
+ *  would relocate (EI-21390759884688723). Optional: absent, behaviour is name-only. */
+input) {
     const msgs = (issues ?? []).map((i) => i?.message ?? '').join(' ');
     if (!/nrecognized key/i.test(msgs))
         return [];
@@ -1267,13 +1386,18 @@ export function invalidInputCorrections(issues, rawSchema, argRedirects) {
         const nestedTarget = nested.get(rejectedArg);
         if (nestedTarget)
             return [{ rejectedArg, target: nestedTarget, kind: 'nested-path' }];
-        const nearName = suggestArgName(rejectedArg, keys);
+        const rejectedValue = input && typeof input === 'object'
+            ? input[rejectedArg]
+            : undefined;
+        const nearName = suggestArgName(rejectedArg, keys, { value: rejectedValue, props });
         return nearName ? [{ rejectedArg, target: nearName, kind: 'near-name' }] : [];
     });
 }
 // Exported for direct unit test alongside its sibling correction sources
 // (`nestedArgPaths`, `suggestArgName`) — see strict-args.test.ts.
-export function unknownArgHint(issues, rawSchema, argRedirects) {
+export function unknownArgHint(issues, rawSchema, argRedirects, 
+/** See `invalidInputCorrections` — enables the value-admissibility filter. */
+input) {
     const msgs = (issues ?? []).map((i) => i?.message ?? '').join(' ');
     if (!/nrecognized key/i.test(msgs))
         return '';
@@ -1281,7 +1405,7 @@ export function unknownArgHint(issues, rawSchema, argRedirects) {
     const keys = props ? Object.keys(props) : [];
     if (keys.length === 0)
         return '';
-    const corrections = invalidInputCorrections(issues, rawSchema, argRedirects);
+    const corrections = invalidInputCorrections(issues, rawSchema, argRedirects, input);
     const redirected = corrections.filter((correction) => correction.kind === 'authored-redirect');
     const redirectText = redirected
         .map(({ rejectedArg, target }) => ` \`${rejectedArg}\` is not an arg of this tool — it is written by ${target}.`)
@@ -1306,7 +1430,7 @@ function makeInvalidInputError(toolName, issues, input, rawSchema, argRedirects,
         source: PROJECTED_TOOL_REGISTRY_SOURCE,
         registryRevision: projectedToolRegistryRevision(),
         toolName,
-        corrections: invalidInputCorrections(issues, rawSchema, argRedirects),
+        corrections: invalidInputCorrections(issues, rawSchema, argRedirects, input),
     };
     return new InvalidInputError(`invalid_args: ${formatIssues(issues, input)}${unknownArgHint(issues, rawSchema, argRedirects)}` +
         // EI-21353729155349111: the value-level branch appends no SCHEMA (EI-10943 — a

@@ -12,6 +12,7 @@
  * Papercusp host adapter (`@papercusp/agent-mcp`) re-exports this surface and
  * supplies the deps (PG tx, telemetry, role config, HMAC signing, …).
  */
+export { applyDenominator, resolveDenominator, renderDenominatorText, } from './denominator';
 export { applySeeAlso, resolveSeeAlso, renderSeeAlsoText, readJsonResult, } from './see-also';
 export { setResultAnnotator, resetResultAnnotator, applyResultAnnotator, } from './result-annotator';
 export { setServerVintageResolver, resetServerVintageResolver, readServerVintage, formatVintageAge, serverVintageHint, constraintVintageHint, } from './server-vintage';

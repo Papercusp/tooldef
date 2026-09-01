@@ -61,12 +61,15 @@ export function formatVintageAge(ms) {
 /** The shared opening clause both hints below state — "which code is actually
  *  answering you". Empty string when there is no resolver / nothing to report, which
  *  is what makes every caller safe to concatenate unconditionally. */
-function vintagePrefix() {
-    const vintage = readServerVintage();
+function vintagePrefix(vintage = readServerVintage()) {
     if (!vintage)
         return '';
     const build = vintage.buildId ?? 'an unknown build';
     return ` This server is running build ${build}, started ${formatVintageAge(vintage.bootedAgoMs)} ago.`;
+}
+function freshCodeEndpointHint(vintage) {
+    const endpoint = vintage.freshCodeEndpoint?.trim();
+    return endpoint ? ` For the current source tree, retry this call against ${endpoint}.` : '';
 }
 /**
  * The extra sentence appended to an `Unrecognized key` invalid_args error, when a
@@ -74,11 +77,13 @@ function vintagePrefix() {
  * resolver, or the resolver returned null) — callers concatenate unconditionally.
  */
 export function serverVintageHint() {
-    const prefix = vintagePrefix();
+    const vintage = readServerVintage();
+    const prefix = vintagePrefix(vintage);
     if (!prefix)
         return '';
     return (`${prefix} If this argument was added` +
-        ' after that build, the running process has never seen it — restart the app/process to pick up the new code.');
+        ' after that build, the running process has never seen it — restart the app/process to pick up the new code.' +
+        freshCodeEndpointHint(vintage));
 }
 /**
  * The mirror of `serverVintageHint` for a CONSTRAINT violation (`minItems`, an enum
@@ -118,10 +123,12 @@ export function serverVintageHint() {
  * caller who already knows the shape. This must not re-litigate that.
  */
 export function constraintVintageHint() {
-    const prefix = vintagePrefix();
+    const vintage = readServerVintage();
+    const prefix = vintagePrefix(vintage);
     if (!prefix)
         return '';
     return (`${prefix} If this CONSTRAINT was relaxed after that build, the running process is still` +
         " enforcing the OLD one — the tool's source in the tree can disagree with what just refused you," +
-        ' so verify against the serving build before treating this as a defect.');
+        ' so verify against the serving build before treating this as a defect.' +
+        freshCodeEndpointHint(vintage));
 }

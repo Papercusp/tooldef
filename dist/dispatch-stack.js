@@ -20,6 +20,7 @@
  * so it stays co-located with the steps it observes.
  */
 import { applySeeAlso } from './see-also';
+import { applyDenominator } from './denominator';
 import { applyResultAnnotator } from './result-annotator';
 import { PROJECTED_TOOL_REGISTRY_SOURCE, toolDeclaresGate, } from './tool-projection';
 import { openBuffer as openReplayBuffer, } from './replay-buffer';
@@ -31,6 +32,21 @@ import { collectEntityRefs, formatEntityRefViolations, resolveEntityRefs, } from
 import { PASS_THROUGH, HarnessRequiredError, InvalidInputError, UnauthorizedToolError, defaultComputeQuotaWindow, } from './dispatch-types';
 import { evaluateDataCondition } from '@papercusp/rules';
 import { applyWorkspaceTxContract } from './workspace-tx';
+/**
+ * Per-call id source for `DispatchExecution.callId`.
+ *
+ * A process-local counter behind a random prefix, deliberately NOT a UUID: the
+ * consumer is an in-process in-flight registry keyed per call, so uniqueness
+ * WITHIN a process is the whole requirement, and this costs a string concat on
+ * a hot path where `randomUUID()` would cost entropy. The prefix keeps two
+ * processes' ids distinct if one is ever persisted or compared across a port.
+ */
+let callSeq = 0;
+const CALL_ID_PREFIX = Math.random().toString(36).slice(2, 8);
+function nextCallId() {
+    callSeq += 1;
+    return `${CALL_ID_PREFIX}-${callSeq.toString(36)}`;
+}
 function initExecution(tool, toolName, input, ctx, deps) {
     // EI-18808330244321407: enforce the tx contract before ANY gate or
     // authorizer can observe ctx. The final handler-decorator spread below
@@ -47,6 +63,7 @@ function initExecution(tool, toolName, input, ctx, deps) {
         input,
         ctx: contractCtx,
         deps,
+        callId: nextCallId(),
         startedAt: Date.now(),
         windowKey,
         quotaLimit,
@@ -115,17 +132,26 @@ const roleAllowlistStep = {
 const capabilityCheckStep = {
     name: 'capability-check',
     async run(exec) {
-        const { tool, ctx, toolName } = exec;
+        const { tool, ctx, toolName, deps } = exec;
         if (!ctx.principal || ctx.gateBypass?.capability || tool.capabilities.length === 0)
             return null;
         for (const cap of tool.capabilities) {
             if (!ctx.principal.capabilities.has(cap) &&
                 !ctx.principal.capabilities.has('*')) {
+                let hint;
+                try {
+                    hint = deps.authorizationFailureHint?.({ toolName, missingCapability: cap, ctx });
+                }
+                catch {
+                    // Host guidance is advisory; never turn an authorization denial into
+                    // a handler failure because its formatter threw.
+                }
                 return {
                     ok: false,
                     error: {
                         code: 'missing_capability',
-                        message: `Principal "${ctx.principal.slug}" lacks capability "${cap}" (tool: ${toolName})`,
+                        message: `Principal "${ctx.principal.slug}" lacks capability "${cap}" (tool: ${toolName})` +
+                            (hint ? ` — ${hint}` : ''),
                         meta: { tool: toolName, principal: ctx.principal.slug, missing: cap },
                     },
                 };
@@ -467,6 +493,12 @@ const invokeStep = {
             // Self-gates (unchanged result) when the tool declares none / emits none /
             // errored; never fails the underlying tool call.
             result = applySeeAlso(result, exec.tool.guidance?.seeAlso, input, handlerCtx);
+            // guidance.denominator — the base-rate stamp (EI-19375528138828761): what
+            // this result MATCHED against the population it was drawn from, so a
+            // filtered slice cannot be read as a census. Authored per-tool because
+            // only the tool knows what it queried FROM; rendered here so every tool
+            // spells it identically. Same self-gating/never-throw contract as seeAlso.
+            result = applyDenominator(result, exec.tool.guidance?.denominator, input, handlerCtx);
             // Host ambient annotator (agent-managed-compaction P-013): the host may append a
             // banded context-usage gauge to EVERY result so a heads-down session that never
             // calls a coord tool still sees its usage. Default no-op; never throws.
@@ -971,6 +1003,57 @@ const REFUSAL_MESSAGE_MAX = 512;
 const REFUSAL_FALLBACK_CODE = 'handler_refusal';
 const REFUSAL_FALLBACK_MESSAGE = 'tool returned isError=true without a structured refusal message';
 /**
+ * Maximum soft-failure reason retained in per-call telemetry.
+ *
+ * Reasons are operator-authored category labels in normal use, but the result is
+ * still handler-controlled input on a hot, append-only ledger. Bounding it here
+ * prevents one accidental payload/message from turning metadata_json into a
+ * second result store. The watchdog hashes the bounded value for its stable key.
+ */
+export const SOFT_FAILURE_REASON_MAX = 512;
+function objectRecord(value) {
+    return value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? value
+        : null;
+}
+/**
+ * Extract the conventional successful-call / unsuccessful-effect outcome.
+ *
+ * `status` deliberately remains CALL-level: a handler that returned a valid
+ * ToolResult succeeded as a call. This adds a separate, queryable EFFECT-level
+ * outcome for the house `{ ok:false, reason:'category' }` convention.
+ *
+ * Structured content is authoritative when it is an object. Only when it is
+ * absent/non-object do we parse the first JSON text item; a conflicting compact
+ * text representation must never override the lossless structured result. The
+ * match is intentionally narrow — exact top-level `ok === false` plus a nonblank
+ * string `reason` — because a false positive becomes a clean, misleading health
+ * signal while an unrecognized shape merely stays unclassified.
+ */
+export function extractSoftFailureOutcome(result) {
+    let candidate = objectRecord(result.structuredContent);
+    if (!candidate) {
+        const firstText = result.content.find((item) => item.type === 'text');
+        if (!firstText)
+            return null;
+        try {
+            candidate = objectRecord(JSON.parse(firstText.text));
+        }
+        catch {
+            return null;
+        }
+    }
+    if (!candidate || candidate.ok !== false || typeof candidate.reason !== 'string')
+        return null;
+    const reason = candidate.reason.trim();
+    if (!reason)
+        return null;
+    return {
+        resultOutcome: 'soft-failure',
+        softFailureReason: reason.slice(0, SOFT_FAILURE_REASON_MAX),
+    };
+}
+/**
  * Lift a self-reported refusal's own error code out of its payload.
  *
  * The house convention for `isError: true` results is a single text content whose
@@ -1008,7 +1091,7 @@ function extractRefusalDetails(r) {
  * recordInvocation errors are swallowed.
  */
 async function recordTelemetry(exec, result) {
-    const { deps, tool, toolName, ctx, windowKey, input, startedAt, eventCount } = exec;
+    const { deps, tool, toolName, ctx, windowKey, input, startedAt, eventCount, callId } = exec;
     if (!deps.recordInvocation)
         return;
     // Gate denials (no windowKey required); successes + handler errors
@@ -1037,6 +1120,7 @@ async function recordTelemetry(exec, result) {
     try {
         if (result.ok && result.result) {
             const r = result.result;
+            const selfReportedFailure = r.isError === true;
             // Capture the SERVED result format (json/toon/csv/tsv/md) into metadata_json so
             // compact-encoding ADOPTION is a measurable signal — `metadata_json->>'format'`
             // GROUP BY gives the toon-vs-json share per tool over time, the success metric
@@ -1076,6 +1160,14 @@ async function recordTelemetry(exec, result) {
                     metaWithFormat = { ...(metaWithFormat ?? {}), deltaServed: derivedDeltaServed };
                 }
             }
+            // EI-20219227925547855: distinguish a successful CALL from a successful
+            // EFFECT without changing the long-standing meaning of status='ok'. Merge
+            // after handler metadata so these framework-owned keys cannot be spoofed
+            // or contradicted by ctx.metadata() on a real soft-failure result.
+            const softFailure = selfReportedFailure ? null : extractSoftFailureOutcome(r);
+            if (softFailure) {
+                metaWithFormat = { ...(metaWithFormat ?? {}), ...softFailure };
+            }
             // A handler can fail in TWO ways, and only one of them throws. Dispatch-level
             // failure (throw / gate denial) is `!result.ok` and handled in the else branch
             // below. The other is a SELF-REPORTED refusal: the handler returns normally with
@@ -1085,13 +1177,13 @@ async function recordTelemetry(exec, result) {
             // loss (EI-20184794555427363; the doc comment on RecordInvocation['status']
             // carries the full case). Derive the status from the result the handler actually
             // returned, not merely from the fact that it returned.
-            const selfReportedFailure = r.isError === true;
             const refusal = selfReportedFailure ? extractRefusalDetails(r) : null;
             await deps.recordInvocation({
                 toolName,
                 pluginName: tool.pluginName,
                 ctx,
                 windowKey: windowKey ?? '',
+                callId,
                 durationMs: Date.now() - startedAt,
                 status: selfReportedFailure ? 'refused' : 'ok',
                 // Lift the refusal's OWN code/reason onto the first-class column so a
@@ -1116,6 +1208,7 @@ async function recordTelemetry(exec, result) {
                 pluginName: tool.pluginName,
                 ctx,
                 windowKey: windowKey ?? '',
+                callId,
                 durationMs: Date.now() - startedAt,
                 status,
                 // Persist the dispatcher error CLASS (computed above, then historically
@@ -1175,6 +1268,7 @@ export async function runDispatchStack(tool, toolName, input, ctx, deps, stack =
                 pluginName: tool.pluginName,
                 args: input,
                 ctx,
+                callId: exec.callId,
             });
         }
         catch {

@@ -63,6 +63,90 @@ function jsonLen(v) {
         return 0;
     }
 }
+/** Parse the same dot/bracket path subset used by the dispatch projection seam. */
+function parsePreservePath(path) {
+    const segments = [];
+    for (const token of path.split('.')) {
+        if (token === '')
+            continue;
+        const head = token.replace(/(\[\d*\])+$/, '');
+        if (head)
+            segments.push({ kind: 'key', name: head });
+        const brackets = token.slice(head.length).match(/\[\d*\]/g) ?? [];
+        for (const bracket of brackets) {
+            const inner = bracket.slice(1, -1);
+            segments.push(inner === '' ? { kind: 'array' } : { kind: 'index', index: Number(inner) });
+        }
+    }
+    return segments;
+}
+/** Return path suffixes that select an object child; an empty path selects all descendants. */
+function preserveObjectChildPaths(paths, key) {
+    const childPaths = [];
+    for (const path of paths) {
+        if (path.length === 0) {
+            childPaths.push([]);
+        }
+        else if (path[0].kind === 'key' && path[0].name === key) {
+            childPaths.push(path.slice(1));
+        }
+    }
+    return childPaths;
+}
+/** Return path suffixes that select an array element; an empty path selects all descendants. */
+function preserveArrayChildPaths(paths, index) {
+    const childPaths = [];
+    for (const path of paths) {
+        if (path.length === 0) {
+            childPaths.push([]);
+        }
+        else if (path[0].kind === 'array' || (path[0].kind === 'index' && path[0].index === index)) {
+            childPaths.push(path.slice(1));
+        }
+    }
+    return childPaths;
+}
+function hasPreservedObjectChild(paths, key) {
+    return preserveObjectChildPaths(paths, key).length > 0;
+}
+/**
+ * The two recovery routes an omission marker can honestly advertise.
+ *
+ * `CURSOR` — a durable artifact holding the FULL pre-projection body already
+ * exists (the caller passed `opts.recovery`; at the model-facing result door
+ * that is the spill, written from `result.content` BEFORE this projection
+ * runs). The omitted values are in it, so point there — which is also what
+ * `truncationMarker`/`arrayTruncationMarker` already say.
+ *
+ * `RE_CALL` — no durable artifact. The exit is a re-call carrying an explicit
+ * `payloadTier:'full'`, which sets `explicitFullRequest` and skips the
+ * hard-ceiling force-shape (see `applyPayloadTier`) — but that route is
+ * CONDITIONAL, and this marker is too short to carry the condition. It used to
+ * read `re-call with payloadTier:'full'` and say nothing else, while
+ * `buildDefaultRecoveryNext` — twenty lines away, building the `next` field of
+ * this same projection — spelled out that `payloadTier` is framework-reserved,
+ * stripped before schema validation, absent from the tool's published schema,
+ * and therefore REJECTED by a schema-validating client on a direct call.
+ *
+ * Two emitters in one module, disagreeing about one route. The uncaveated one
+ * is the string an agent actually reads (it travels INSIDE the truncated
+ * payload, fired up to 5x per result) while the honest one is a sibling field
+ * that is routinely not read — so the divergence resolved, every time, toward
+ * the over-claim. WI-1697551.
+ *
+ * So it defers instead of asserting: it names the field that carries the whole
+ * conditional story, exactly as `CURSOR` names the artifact that holds the
+ * bytes. Both pointers now say "the truth is HERE" rather than "this call will
+ * work". It is also 11 chars shorter than the claim it replaces, and this
+ * string shares the projection's char budget with the retained preview
+ * (EI-20685195115158619), so the honest form is the cheap one too.
+ *
+ * `recovery-pointer-guard.test.ts` is the recurrence guard for the class.
+ */
+const RECOVERY_POINTER = {
+    CURSOR: 'recover: see _projection.cursor',
+    RE_CALL: 'recover: see _projection.next',
+};
 function recordOmission(state, path, reason, count = 1, priority = false) {
     state.omittedCount += Math.max(1, count);
     const bucket = priority ? state.priorityOmitted : state.omitted;
@@ -115,21 +199,34 @@ function clipString(value, keep) {
  *
  * ⚠ The research is equally explicit that a self-describing placeholder is WORSE
  * than nothing if the recovery pointer it advertises does not resolve — it
- * becomes a lie the model trusts. So the pointer here is deliberately NOT the
- * result-door spill, which provably cannot recover these (the omitted values are
- * never serialized, so they are not in the spill either). It is the re-call with
- * an EXPLICIT `payloadTier:'full'`, which sets `explicitFullRequest` — the one
- * documented exit from the hard-ceiling force-shape (see applyPayloadTier
- * below). That path resolves; the spill path does not.
+ * becomes a lie the model trusts. So WHICH pointer is correct depends on the
+ * caller, and this marker must not hard-code one.
+ *
+ * EI-19371883353428338 measured what hard-coding cost. This marker named
+ * `payloadTier:'full'` unconditionally, including at the model-facing result
+ * door where that lever provably cannot lift the cut. On `work_items:get` the
+ * same request through all three documented routes — a bare re-call, a re-call
+ * with `payloadTier:'full'`, and `tools:invoke { args:{ …, payloadTier:'full' }}`
+ * (the door's own `rawDispatchTemplate`) — returned a BYTE-IDENTICAL truncated
+ * body, while the spill this comment used to dismiss held the complete field
+ * (3042 of 3042 chars, no truncation marker). Both halves of the old rationale
+ * were inverted, and the marker fired 5x per result saying so confidently.
+ *
+ * The cause is that two layers cut, and `explicitFullRequest` exempts only one:
+ * `applyPayloadTier`'s hard-ceiling force-shape. The result door
+ * (`result-door.ts`) is a separate cut with no such exemption — but it spills
+ * `result.content` BEFORE projecting, so its omitted values ARE recoverable,
+ * just by the cursor rather than by a re-call. It signals this by passing
+ * `opts.recovery`; that presence is the discriminant used below.
  *
  * Size is included only where the caller ALREADY computed it. The depth-boundary
  * sites deliberately omit it rather than pay a `JSON.stringify` per dropped node
  * — this marker is charged to the same projection budget as the content it
  * replaces, so it stays cheap.
  */
-function omissionMarker(reason, omittedChars) {
+function omissionMarker(pointer, reason, omittedChars) {
     const size = omittedChars != null && omittedChars > 0 ? `, ~${omittedChars} chars` : '';
-    return `[omitted: ${reason}${size} — recover: re-call with payloadTier:'full']`;
+    return `[omitted: ${reason}${size} — ${pointer}]`;
 }
 /**
  * An array whose ELEMENT COUNT was truncated must announce it the same way a
@@ -192,7 +289,7 @@ function takePrimitive(state, value, path) {
         const size = jsonLen(value);
         if (size > state.remaining) {
             recordOmission(state, path, 'value omitted to fit projection budget');
-            return omissionMarker('projection budget', size);
+            return omissionMarker(state.recoveryPointer, 'projection budget', size);
         }
         state.remaining -= size;
         return value;
@@ -218,7 +315,7 @@ function takePrimitive(state, value, path) {
         recordOmission(state, path, 'value omitted to fit projection budget');
         // The WHOLE string is dropped here, not the clipped candidate — so the
         // omitted amount is the original length, which we already have for free.
-        return omissionMarker('projection budget', value.length);
+        return omissionMarker(state.recoveryPointer, 'projection budget', value.length);
     }
     state.remaining -= size;
     return candidate;
@@ -234,12 +331,36 @@ function takePrimitive(state, value, path) {
 const IDENTITY_FIELDS = new Set([
     'id', 'title', 'name', 'slug', 'ref', 'kind', 'state', 'status', 'ok', 'error',
     'item', 'itemId', 'plan', 'planSlug', 'rubricRef', 'workItemId',
+    // A bounded object may already be passing through a second projection seam
+    // (payload tier -> result door). Its honesty markers and array-count receipt
+    // are identity too: dropping them recreates a complete-looking partial row.
+    '_partial', '_omitted', '_truncated', 'omittedCount', 'shownCount', 'totalCount',
     // EI-21197620758075816: a rubric criterion's structured `check` is its
     // executable identity. Dropping it makes a bound criterion indistinguishable
     // from a fuzzy/unbound one. The value is handled as a bounded structured
     // field below so its discriminated-union payload (files/instrument/scope)
     // survives without promoting generic keys such as `files` globally.
     'check',
+    // EI-21364690783677984: a rubric criterion's `method` is the GRADING
+    // INSTRUCTION its reader acts on, so losing it is not a neutral loss of
+    // detail — it silently changes the verdict.
+    //
+    // Measured 2026-08-31. Criterion 1's method carried a REFERENCE OBSERVATION
+    // (a row the author supplies "so it can be CHECKED, not re-read as the
+    // answer") FOLLOWED by the prohibition "do NOT rate `pass` on the reference
+    // row alone". The cut kept the reference and dropped the prohibition, so the
+    // grader measured the author's own supplied row, agreed with it, and rated
+    // `pass` — the exact failure that criterion was written to prevent. It cost a
+    // wrong acceptance card and a public retraction. A truncation that preserves
+    // a HAZARD while removing its SAFETY RAIL does not merely lose information,
+    // it inverts the instrument — the same class `truncationMarker` above exists
+    // for, one level up.
+    //
+    // Kept so it survives the depth cut. When it is still too long for the tier
+    // it is CLIPPED by `clipString`, whose in-band marker tells the grader the
+    // instruction is incomplete — which is the whole point: a partial method that
+    // reads as whole is what produced the bad grade.
+    'method',
     // EI-21058972492075433: the outcome-identity of a WRITE/LAUNCH receipt (a
     // singleton fire-and-can't-safely-retry call like release:checkpoint-run) —
     // "did it launch, and against what" is exactly as load-bearing as `ok`/`id`
@@ -253,8 +374,32 @@ const IDENTITY_PREVIEW_DEPTH = 4;
  *  so a partial object is never read as a complete one (EI-21364503818966104).
  *  Underscore-prefixed to match `_projection` and stay clear of real payload keys. */
 const PARTIAL_MARKER_KEY = '_omitted';
+/** Minimal, machine-readable truth bit for EVERY object that loses a direct
+ * field to depth/key/budget projection. The prose `_omitted` marker remains the
+ * richer explanation when it fits; this bit is deliberately cheap enough to
+ * survive the exact budget edge where that explanation cannot. */
+const PARTIAL_FLAG_KEY = '_partial';
 const PARTIAL_MARKER_MAX_KEYS = 6;
-function projectIdentityPreview(value, path, depth, state) {
+function identityPriority(key) {
+    // Correlation outranks outcome. A row with only `{ok:true}` is unusable and
+    // reads complete; `{id,_partial:true}` is both attributable and honest.
+    if (key === 'id' || key === 'itemId' || key === 'workItemId' || key === 'ref')
+        return 4;
+    if (key === PARTIAL_FLAG_KEY || key === PARTIAL_MARKER_KEY || key === '_truncated')
+        return 3;
+    return IDENTITY_FIELDS.has(key) ? 2 : IDENTITY_ENVELOPES.has(key) ? 1 : 0;
+}
+function markPartial(projected, state) {
+    if (projected[PARTIAL_FLAG_KEY] === true)
+        return;
+    projected[PARTIAL_FLAG_KEY] = true;
+    // Charge the flag when there is room, but never suppress the truth bit at the
+    // boundary that caused it. The exact serialized-size backstop below remains
+    // authoritative for pathological escaping/metadata combinations.
+    const cost = jsonLen(PARTIAL_FLAG_KEY) + jsonLen(true) + 3;
+    state.remaining = Math.max(0, state.remaining - cost);
+}
+function projectIdentityPreview(value, path, depth, state, preservePaths = state.preservePaths) {
     if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
         return takePrimitive(state, value, path);
     }
@@ -268,7 +413,7 @@ function projectIdentityPreview(value, path, depth, state) {
     if (value instanceof Date)
         return takePrimitive(state, value.toISOString(), path);
     if (value instanceof Error) {
-        return projectIdentityPreview({ name: value.name, error: value.message }, path, depth, state);
+        return projectIdentityPreview({ name: value.name, error: value.message }, path, depth, state, preservePaths);
     }
     if (typeof value !== 'object')
         return takePrimitive(state, String(value), path);
@@ -278,7 +423,7 @@ function projectIdentityPreview(value, path, depth, state) {
     }
     if (depth >= IDENTITY_PREVIEW_DEPTH) {
         recordOmission(state, path, 'non-identity detail omitted at compact preview depth');
-        return omissionMarker('compact preview depth');
+        return omissionMarker(state.recoveryPointer, 'compact preview depth');
     }
     state.active.add(value);
     try {
@@ -288,7 +433,7 @@ function projectIdentityPreview(value, path, depth, state) {
             for (let i = 0; i < shown.length; i += 1) {
                 if (state.remaining < 128)
                     break;
-                projected.push(projectIdentityPreview(shown[i], `${path}[${i}]`, depth + 1, state));
+                projected.push(projectIdentityPreview(shown[i], `${path}[${i}]`, depth + 1, state, preserveArrayChildPaths(preservePaths, i)));
             }
             const droppedCount = value.length - projected.length;
             if (droppedCount > 0) {
@@ -301,26 +446,37 @@ function projectIdentityPreview(value, path, depth, state) {
             return projected;
         }
         const entries = Object.entries(value);
-        const chosen = entries.filter(([key]) => IDENTITY_FIELDS.has(key) || IDENTITY_ENVELOPES.has(key));
+        const chosen = entries
+            .filter(([key]) => IDENTITY_FIELDS.has(key) ||
+            IDENTITY_ENVELOPES.has(key) ||
+            hasPreservedObjectChild(preservePaths, key))
+            .sort((a, b) => (hasPreservedObjectChild(preservePaths, b[0]) ? 5 : identityPriority(b[0])) -
+            (hasPreservedObjectChild(preservePaths, a[0]) ? 5 : identityPriority(a[0])));
         if (chosen.length === 0) {
             recordOmission(state, path, 'nested value omitted at projection depth limit');
-            return omissionMarker('depth limit');
+            return omissionMarker(state.recoveryPointer, 'depth limit');
         }
         const projected = {};
+        let chosenProjected = 0;
         for (const [key, child] of chosen) {
             const keyCost = jsonLen(key) + 2;
             if (state.remaining < keyCost + 128) {
-                recordOmission(state, `${path}.${key}`, 'remaining identity fields omitted to fit projection budget', chosen.length - Object.keys(projected).length);
+                recordOmission(state, `${path}.${key}`, 'remaining identity fields omitted to fit projection budget', chosen.length - chosenProjected);
+                markPartial(projected, state);
                 break;
             }
             state.remaining -= keyCost;
-            projected[key] = STRUCTURED_IDENTITY_FIELDS.has(key)
-                ? projectValue(child, `${path}.${key}`, 0, state)
-                : projectIdentityPreview(child, `${path}.${key}`, depth + 1, state);
+            const childPreservePaths = preserveObjectChildPaths(preservePaths, key);
+            projected[key] =
+                childPreservePaths.length > 0 || STRUCTURED_IDENTITY_FIELDS.has(key)
+                    ? projectValue(child, `${path}.${key}`, 0, state, childPreservePaths)
+                    : projectIdentityPreview(child, `${path}.${key}`, depth + 1, state, childPreservePaths);
+            chosenProjected += 1;
         }
         const dropped = entries.length - chosen.length;
         if (dropped > 0) {
             recordOmission(state, `${path}.*`, `${dropped} non-identity fields omitted at projection depth limit`, dropped);
+            markPartial(projected, state);
             // EI-21364503818966104: the surviving identity fields make this object look
             // WHOLE. A reader cannot tell "the field is empty in the store" from "the
             // projection withheld it", and the global _projection.omitted[] list is both
@@ -337,7 +493,7 @@ function projectIdentityPreview(value, path, depth, state) {
             const named = shownKeys.length < droppedKeys.length
                 ? `${shownKeys.join(', ')}, +${droppedKeys.length - shownKeys.length} more`
                 : shownKeys.join(', ');
-            const marker = `[omitted: ${dropped} non-identity field(s) at projection depth limit: ${named} — recover: re-call with payloadTier:'full']`;
+            const marker = `[omitted: ${dropped} non-identity field(s) at projection depth limit: ${named} — ${state.recoveryPointer}]`;
             const markerCost = jsonLen(PARTIAL_MARKER_KEY) + jsonLen(marker) + 4;
             if (state.remaining >= markerCost) {
                 state.remaining -= markerCost;
@@ -350,7 +506,7 @@ function projectIdentityPreview(value, path, depth, state) {
         state.active.delete(value);
     }
 }
-function projectValue(value, path, depth, state) {
+function projectValue(value, path, depth, state, preservePaths = state.preservePaths) {
     if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
         return takePrimitive(state, value, path);
     }
@@ -364,7 +520,7 @@ function projectValue(value, path, depth, state) {
     if (value instanceof Date)
         return takePrimitive(state, value.toISOString(), path);
     if (value instanceof Error) {
-        return projectValue({ name: value.name, message: value.message }, path, depth, state);
+        return projectValue({ name: value.name, message: value.message }, path, depth, state, preservePaths);
     }
     if (typeof value !== 'object')
         return takePrimitive(state, String(value), path);
@@ -374,7 +530,7 @@ function projectValue(value, path, depth, state) {
     }
     if (depth >= state.limits.maxDepth) {
         recordOmission(state, path, 'nested value compacted at projection depth limit');
-        return projectIdentityPreview(value, path, 0, state);
+        return projectIdentityPreview(value, path, 0, state, preservePaths);
     }
     state.active.add(value);
     try {
@@ -384,7 +540,7 @@ function projectValue(value, path, depth, state) {
             for (let i = 0; i < shown.length; i += 1) {
                 if (state.remaining < 128)
                     break;
-                projected.push(projectValue(shown[i], `${path}[${i}]`, depth + 1, state));
+                projected.push(projectValue(shown[i], `${path}[${i}]`, depth + 1, state, preserveArrayChildPaths(preservePaths, i)));
             }
             const droppedCount = value.length - projected.length;
             if (droppedCount > 0) {
@@ -417,23 +573,28 @@ function projectValue(value, path, depth, state) {
         // NORMAL (non-depth-limited) path with the same IDENTITY_FIELDS priority.
         const entries = Object.entries(value);
         const prioritized = entries.length > 1
-            ? [...entries].sort((a, b) => Number(IDENTITY_FIELDS.has(b[0])) - Number(IDENTITY_FIELDS.has(a[0])))
+            ? [...entries].sort((a, b) => (hasPreservedObjectChild(preservePaths, b[0]) ? 5 : identityPriority(b[0])) -
+                (hasPreservedObjectChild(preservePaths, a[0]) ? 5 : identityPriority(a[0])))
             : entries;
         const projected = {};
         const shown = prioritized.slice(0, state.limits.maxKeys);
+        let partial = prioritized.length > shown.length;
         for (let i = 0; i < shown.length; i += 1) {
             const [key, child] = shown[i];
             const keyCost = jsonLen(key) + 2;
             if (state.remaining < keyCost + 128) {
                 recordOmission(state, `${path}.${key}`, 'remaining fields omitted to fit projection budget', shown.length - i);
+                partial = true;
                 break;
             }
             state.remaining -= keyCost;
-            projected[key] = projectValue(child, `${path}.${key}`, depth + 1, state);
+            projected[key] = projectValue(child, `${path}.${key}`, depth + 1, state, preserveObjectChildPaths(preservePaths, key));
         }
         if (prioritized.length > shown.length) {
             recordOmission(state, `${path}.*`, `${prioritized.length - shown.length} object fields omitted`, prioritized.length - shown.length);
         }
+        if (partial)
+            markPartial(projected, state);
         return projected;
     }
     finally {
@@ -464,6 +625,15 @@ function projectCursorArgs(args) {
         priorityOmitted: [],
         active: new WeakSet(),
         limits: { maxArray: 12, maxDepth: 5, maxKeys: 40, maxString: 800 },
+        // This projection BUILDS the cursor args, so it cannot point at the cursor
+        // it is producing. It defers to `_projection.next` instead — which, for
+        // this branch, is `buildDefaultRecoveryNext(opts, argsTruncated: true)`:
+        // the one string that says these args are a bounded identity preview and
+        // the ORIGINAL args are what to restore. That is strictly more than the
+        // bare re-call this used to name, and it is co-located, so the two cannot
+        // drift apart.
+        recoveryPointer: RECOVERY_POINTER.RE_CALL,
+        preservePaths: [],
     };
     const preview = projectIdentityPreview(source, '$._projection.cursor.args', 0, state);
     const bounded = preview && typeof preview === 'object' && !Array.isArray(preview)
@@ -526,6 +696,16 @@ export function projectBoundedPayload(data, opts) {
         limits: projectionTier === 'standard'
             ? { maxArray: 40, maxDepth: 8, maxKeys: 100, maxString: 2_500 }
             : { maxArray: 12, maxDepth: 5, maxKeys: 40, maxString: 800 },
+        // A caller-supplied `recovery` is a durable artifact holding the FULL
+        // pre-projection body (at the result door, the spill — written from
+        // `result.content` before this runs). Its presence is what makes the
+        // cursor the pointer that RESOLVES; without it the only exit is the
+        // explicit-full re-call. EI-19371883353428338: advertising the re-call at
+        // the door was measurably inert, so this is chosen per projection.
+        recoveryPointer: opts.recovery ? RECOVERY_POINTER.CURSOR : RECOVERY_POINTER.RE_CALL,
+        preservePaths: (opts.preservePaths ?? [])
+            .map(parsePreservePath)
+            .filter((path) => path.length > 0),
     };
     const preview = projectValue(data, '$', 0, state);
     const cursorArgs = projectCursorArgs(opts.args);
@@ -563,8 +743,21 @@ export function projectBoundedPayload(data, opts) {
         // ask-for-LESS lead: for an oversized result, narrowing beats paging.
         next: opts.recovery?.next ?? buildDefaultRecoveryNext(opts, cursorArgs.truncated),
     };
+    const buildArrayRootResult = (body, meta) => {
+        // JSON.stringify intentionally ignores non-index array properties, so the
+        // model-facing body stays a bare array while callers inside this process can
+        // still inspect the durable projection metadata before serialization.
+        Object.defineProperty(body, '_projection', {
+            value: meta,
+            enumerable: false,
+            configurable: true,
+        });
+        return body;
+    };
     const buildResultFrom = (body, meta) => Array.isArray(body)
-        ? { items: body, _projection: meta }
+        ? opts.preserveArrayRoot
+            ? buildArrayRootResult(body, meta)
+            : { items: body, _projection: meta }
         : body && typeof body === 'object'
             ? { ...body, _projection: meta }
             : { value: body, _projection: meta };
@@ -661,6 +854,10 @@ export function projectBoundedPayload(data, opts) {
                 priorityOmitted: [],
                 active: new WeakSet(),
                 limits: { maxArray: 6, maxDepth: 4, maxKeys: 24, maxString: 300 },
+                // Same projection, narrower budget — the route that recovers is
+                // unchanged, so it must not silently revert to the generic re-call.
+                recoveryPointer: state.recoveryPointer,
+                preservePaths: state.preservePaths,
             };
             const rePreview = projectValue(data, '$', 0, reState);
             const reMetadata = {
@@ -689,6 +886,10 @@ export function projectBoundedPayload(data, opts) {
             priorityOmitted: [],
             active: new WeakSet(),
             limits: { maxArray: 8, maxDepth: 3, maxKeys: 20, maxString: 300 },
+            // The identity-only husk drops the MOST, so its markers are the ones a
+            // reader is likeliest to act on — they need the route that resolves.
+            recoveryPointer: state.recoveryPointer,
+            preservePaths: state.preservePaths,
         };
         const identityOnly = projectIdentityPreview(data, '$', 0, identityState);
         const identityFields = identityOnly && typeof identityOnly === 'object' && !Array.isArray(identityOnly)
@@ -704,13 +905,16 @@ export function projectBoundedPayload(data, opts) {
                 identityFields[key] = projectValue(sourceFields[key], `$.${key}`, 0, identityState);
             }
         }
+        const fallbackMetadata = { ...leanMetadata, returnedChars: 0 };
         result =
-            identityFields && Object.keys(identityFields).length > 0
-                ? { ...identityFields, _projection: { ...leanMetadata, returnedChars: 0 } }
-                : {
-                    summary: '[payload preview omitted: serialized projection exceeded transport budget]',
-                    _projection: { ...leanMetadata, returnedChars: 0 },
-                };
+            opts.preserveArrayRoot && Array.isArray(identityOnly)
+                ? buildArrayRootResult(identityOnly, fallbackMetadata)
+                : identityFields && Object.keys(identityFields).length > 0
+                    ? { ...identityFields, _projection: fallbackMetadata }
+                    : {
+                        summary: '[payload preview omitted: serialized projection exceeded transport budget]',
+                        _projection: fallbackMetadata,
+                    };
         result._projection.returnedChars = jsonLen(result);
     }
     return result;
