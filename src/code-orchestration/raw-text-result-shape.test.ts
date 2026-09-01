@@ -111,4 +111,35 @@ describe('a hand-rolled TEXT ToolResult, as a code:run script sees it', () => {
     // so the direct path carries the output exactly once.
     expect(r.result!.structuredContent).toBeUndefined();
   });
+
+  // EI-22044192752243601: capability:read's raw:true / default line-window modes
+  // hit this same defect — and the reported case's precise failure was an EMPTY
+  // string body (`cur.content ?? cur.text ?? ''` resolved to `''`), which is
+  // indistinguishable from "the field legitimately exists and is empty" once
+  // laundered through a falsy-leaning check. Drive an empty body through the
+  // REAL dispatch pipeline (not a hand-built object) so a serialization/tiering
+  // hop that treats '' as "nothing to carry" would be caught here, not just in
+  // the direct-handler unit tests.
+  it('survives the real dispatch path with an EMPTY body — not a vanished field', async () => {
+    defineTool({
+      name: 't:empty-body',
+      requirePrincipal: false,
+      capability: 'test:read',
+      args: z.object({}),
+      handler: async (_a, c) => ({
+        content: [{ type: 'text' as const, text: '' }],
+        ...(c.codeMode ? { structuredContent: { ok: true, file_path: '/tmp/x', body: '' } } : {}),
+      }),
+    });
+    const seen = (await seenByScript('t:empty-body', { codeMode: true })) as Record<string, unknown>;
+
+    expect(typeof seen).toBe('object');
+    expect(seen.body).toBe('');
+    expect(seen.ok).toBe(true);
+    // Field names that would collide with the MCP envelope's own `content`/`text`
+    // are exactly what let the original bug's `cur.content ?? cur.text ?? ''`
+    // silently resolve — `body` must not be shadowed by either.
+    expect(seen.content).toBeUndefined();
+    expect(seen.text).toBeUndefined();
+  });
 });
