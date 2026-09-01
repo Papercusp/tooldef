@@ -314,6 +314,54 @@ describe('formatIssues — union branch descent (EI-19968462161677390)', () => {
   });
 });
 
+describe('formatIssues — union branch tie-break by fewest issues (EI-22057520151022793)', () => {
+  // Mirrors facts:assert's multi-branch modality union: several sibling object
+  // branches all fail at the SAME shallow depth (a bare top-level field
+  // mismatch), so depth alone cannot separate them. The FIRST-listed branch
+  // requires shareable:true and settledBy — TWO issues against this input —
+  // while the LATER-listed branch only requires settledBy — ONE issue, and
+  // the actual close match. The closer (fewer-issue) branch must win the tie,
+  // not the branch that merely happens to be declared first.
+  const shareableBranch = z.object({
+    shareable: z.literal(true),
+    kind: z.literal('undecidable'),
+    settledBy: z.string(),
+  });
+  const privateBranch = z.object({
+    shareable: z.literal(false).optional(),
+    kind: z.literal('undecidable'),
+    settledBy: z.string(),
+  });
+  const schema = z.union([shareableBranch, privateBranch]);
+
+  it('surfaces the closer-matching (fewest-issue) branch, not the first-listed one', () => {
+    const r = schema.safeParse({ shareable: false, kind: 'undecidable' }); // settledBy omitted
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      const msg = formatIssues(r.error.issues);
+      // Must NOT report the irrelevant shareable mismatch from the first-listed
+      // (worse-matching) branch.
+      expect(msg).not.toContain('shareable');
+      // Must report the single real problem: the missing settledBy.
+      expect(msg).toContain('settledBy');
+    }
+  });
+
+  it('still keeps first-listed on a genuine tie (equal depth AND equal issue count)', () => {
+    // Neither branch matches at all (kind is wrong for both) — both fail on
+    // BOTH kind and settledBy: a true tie in depth and issue count, so
+    // declaration order remains the deciding rule.
+    const r = schema.safeParse({ shareable: false, kind: 'conclusion' });
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      const msg = formatIssues(r.error.issues);
+      // The first-listed branch (shareableBranch) also reports the shareable
+      // mismatch, since it's genuinely tied with the private branch otherwise.
+      expect(msg).toContain('kind');
+    }
+  });
+});
+
 describe('validateSync', () => {
   it('validates synchronously for sync validators', () => {
     expect(validateSync(numberBox, { n: 1 })).toEqual({ ok: true, value: { n: 1 } });

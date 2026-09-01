@@ -246,11 +246,25 @@ export function validateSync<S extends StandardSchemaV1>(
  * "expected string, received array" from the string branch — the deep one is the
  * branch the caller actually meant, so its issues are the ones worth surfacing.
  *
- * Picks the branch reaching the greatest PATH DEPTH (ties keep the first). A branch
- * with depth 0 (e.g. the string branch's bare type mismatch) never wins once any
- * other branch located a specific field — reproduced live: reporting the deepest
- * branch turns "body: Invalid input" into
+ * Picks the branch reaching the greatest PATH DEPTH first; on a DEPTH TIE, the
+ * branch with the FEWEST issues (ties within that keep the first). A branch
+ * with depth 0 (e.g. the string branch's bare type mismatch) never wins once
+ * any other branch located a specific field — reproduced live: reporting the
+ * deepest branch turns "body: Invalid input" into
  * "body[1].forYouBecause.note: forYouBecause.relation:'other' REQUIRES a `note`".
+ *
+ * EI-22057520151022793: depth alone is blind to a union of SIBLING object
+ * branches that all fail at the SAME shallow depth — facts:assert's 6-way
+ * modality union is exactly this shape. For a private, undecidable fact
+ * missing `settledBy`, every branch fails at path-depth 1 (a bare top-level
+ * field mismatch), so the old code kept whichever branch was listed FIRST
+ * regardless of how well it actually matched: the caller was told
+ * "shareable: expected true" — a field that has nothing to do with their one
+ * real mistake — because the shareable-federation branch happens to be
+ * declared before the private-fact branch it actually meant. Fewer issues on
+ * a tied-depth branch means fewer respects in which that branch disagrees
+ * with the input, i.e. a closer match; break further ties by declaration
+ * order, as before, so this only ever sharpens an existing ambiguous case.
  */
 function bestUnionBranch(
   issue: StandardSchemaV1.Issue,
@@ -259,11 +273,13 @@ function bestUnionBranch(
   if (!Array.isArray(branches) || branches.length === 0) return null;
   let best: ReadonlyArray<StandardSchemaV1.Issue> | null = null;
   let bestDepth = 0;
+  let bestCount = Infinity;
   for (const branch of branches) {
     if (!Array.isArray(branch) || branch.length === 0) continue;
     const depth = Math.max(...branch.map((i) => (i.path ?? []).length));
-    if (depth > bestDepth) {
+    if (depth > bestDepth || (depth === bestDepth && branch.length < bestCount)) {
       bestDepth = depth;
+      bestCount = branch.length;
       best = branch;
     }
   }
