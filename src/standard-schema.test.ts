@@ -347,17 +347,20 @@ describe('formatIssues — union branch tie-break by fewest issues (EI-220575201
     }
   });
 
-  it('still keeps first-listed on a genuine tie (equal depth AND equal issue count)', () => {
-    // Neither branch matches at all (kind is wrong for both) — both fail on
-    // BOTH kind and settledBy: a true tie in depth and issue count, so
-    // declaration order remains the deciding rule.
-    const r = schema.safeParse({ shareable: false, kind: 'conclusion' });
+  it('still keeps the first-listed branch on a genuine tie (equal depth AND equal issue count)', () => {
+    // Two branches, each with exactly one distinguishing required field, given
+    // input that satisfies NEITHER — both fail with exactly one issue at
+    // depth 1, a true tie the fewest-issues rule cannot break. Declaration
+    // order remains the deciding rule, unchanged from before this fix.
+    const branchA = z.object({ onlyA: z.literal('yes') });
+    const branchB = z.object({ onlyB: z.literal('yes') });
+    const tiedSchema = z.union([branchA, branchB]);
+    const r = tiedSchema.safeParse({});
     expect(r.success).toBe(false);
     if (!r.success) {
       const msg = formatIssues(r.error.issues);
-      // The first-listed branch (shareableBranch) also reports the shareable
-      // mismatch, since it's genuinely tied with the private branch otherwise.
-      expect(msg).toContain('kind');
+      expect(msg).toContain('onlyA');
+      expect(msg).not.toContain('onlyB');
     }
   });
 });
