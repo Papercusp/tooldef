@@ -7,6 +7,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_DISPATCH_STACK,
+  SOFT_FAILURE_REASON_MAX,
+  extractSoftFailureOutcome,
   withReplacedStep,
   runDispatchStack,
   type DispatchStepName,
@@ -273,6 +275,65 @@ describe('runDispatchStack — custom stack', () => {
       denyAll,
     );
     expect(recorded).toEqual(['role-not-allowed']);
+  });
+
+  it('extracts a bounded top-level soft failure, preferring structuredContent over conflicting text', () => {
+    const longReason = `  ${'x'.repeat(SOFT_FAILURE_REASON_MAX + 40)}  `;
+    expect(extractSoftFailureOutcome({
+      structuredContent: { ok: false, reason: longReason },
+      content: [{ type: 'text', text: JSON.stringify({ ok: false, reason: 'text-loses' }) }],
+    })).toEqual({
+      resultOutcome: 'soft-failure',
+      softFailureReason: 'x'.repeat(SOFT_FAILURE_REASON_MAX),
+    });
+  });
+
+  it('falls back to the first JSON text result and rejects lookalike/nested/blank shapes', () => {
+    expect(extractSoftFailureOutcome({
+      content: [{ type: 'text', text: JSON.stringify({ ok: false, reason: 'transcript_not_found' }) }],
+    })).toEqual({ resultOutcome: 'soft-failure', softFailureReason: 'transcript_not_found' });
+
+    for (const value of [
+      { ok: true, reason: 'no' },
+      { ok: 0, reason: 'no' },
+      { ok: false, reason: '   ' },
+      { data: { ok: false, reason: 'nested' } },
+      ['not', 'an', 'object'],
+    ]) {
+      expect(extractSoftFailureOutcome({
+        content: [{ type: 'text', text: JSON.stringify(value) }],
+      })).toBeNull();
+    }
+    expect(extractSoftFailureOutcome({ content: [{ type: 'text', text: 'not json' }] })).toBeNull();
+  });
+
+  it('records soft-failure outcome metadata after handler metadata without changing call-level status', async () => {
+    let captured: {
+      status?: string;
+      metadataJson?: Record<string, unknown> | null;
+      errorCode?: string | null;
+      errorMessage?: string | null;
+    } | undefined;
+    const tool = makeTool({
+      fn: async (_input, ctx) => {
+        ctx.metadata?.({ resultOutcome: 'handler-claim', softFailureReason: 'handler-claim', marker: 1 });
+        return { content: [{ type: 'text', text: JSON.stringify({ ok: false, reason: 'no_assistant_turn' }) }] };
+      },
+    });
+    await runDispatchStack(tool, 'fix.tool', {}, MAKE_CTX(), {
+      computeQuotaWindow: () => ({ key: 'w', limit: 0 }),
+      recordInvocation: vi.fn(async (input) => { captured = input; }),
+    });
+    expect(captured).toMatchObject({
+      status: 'ok',
+      metadataJson: {
+        marker: 1,
+        resultOutcome: 'soft-failure',
+        softFailureReason: 'no_assistant_turn',
+      },
+    });
+    expect(captured?.errorCode).toBeUndefined();
+    expect(captured?.errorMessage).toBeUndefined();
   });
 
   it('captures the served result _meta.format into recorded metadata_json (usage-insights P-002)', async () => {

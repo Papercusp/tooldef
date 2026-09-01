@@ -295,6 +295,44 @@ describe('dispatchProjectedTool', () => {
     expect(recorded[0]?.outputSize).toBeGreaterThan(0);
   });
 
+  it('records a canonical ToolResponse { data:{ ok:false, reason } } as call-ok plus soft-failure metadata', async () => {
+    defineTool({
+      name: 'test:soft-failure-outcome',
+      requirePrincipal: false as const,
+      capability: 'test:read',
+      args: z.object({}),
+      async handler() {
+        return { data: { ok: false, recorded: false, reason: 'transcript_not_found' } };
+      },
+    });
+    let captured: {
+      status?: string;
+      errorCode?: string | null;
+      errorMessage?: string | null;
+      metadataJson?: Record<string, unknown> | null;
+    } | undefined;
+    const result = await dispatchProjectedTool(
+      lookupByMcpName('test:soft-failure-outcome')!,
+      'test:soft-failure-outcome',
+      {},
+      MAKE_CTX(),
+      MAKE_DEPS({
+        recordInvocation: vi.fn(async (input) => { captured = input; }),
+      }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(captured).toMatchObject({
+      status: 'ok',
+      metadataJson: {
+        resultOutcome: 'soft-failure',
+        softFailureReason: 'transcript_not_found',
+      },
+    });
+    expect(captured?.errorCode).toBeUndefined();
+    expect(captured?.errorMessage).toBeUndefined();
+  });
+
   it('records handler_error when fn throws', async () => {
     const tool = makeTool({ fn: async () => { throw new Error('boom'); } });
     const recorded: string[] = [];
