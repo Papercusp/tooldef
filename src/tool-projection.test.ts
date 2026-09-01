@@ -308,17 +308,25 @@ describe('listMcpProjections', () => {
     expect((list[0] as unknown as Record<string, unknown>).events).toBeUndefined();
   });
 
-  it('uses one order-independent revision and changes it when an accepted schema changes', () => {
+  it('uses one order-independent revision and changes with every agent-facing contract surface', () => {
     const a = baseTool({
       expose: { mcp: { name: 'rev:a' } },
       inputSchema: { type: 'object', properties: { x: { type: 'string' } }, required: ['x'] },
+      outputJsonSchema: { type: 'object', properties: { result: { type: 'string' } } },
+      guidance: { when: 'Use rev:a for text.', returns: '{ result }' },
     });
     const b = baseTool({ expose: { mcp: { name: 'rev:b' } } });
     expect(projectedToolRegistryRevision([a, b])).toBe(projectedToolRegistryRevision([b, a]));
-    expect(projectedToolRegistryRevision([a, b])).not.toBe(projectedToolRegistryRevision([
+    for (const changed of [
+      { ...a, description: 'changed description' },
       { ...a, inputSchema: { type: 'object', properties: { x: { type: 'number' } }, required: ['x'] } },
-      b,
-    ]));
+      { ...a, outputJsonSchema: { type: 'object', properties: { result: { type: 'number' } } } },
+      { ...a, guidance: { ...a.guidance, when: 'Use rev:a for voice.' } },
+      { ...a, guidance: { ...a.guidance, returns: '{ stale_result }' } },
+      { ...a, guidance: { ...a.guidance, seeAlso: ['rev:b'] } },
+    ]) {
+      expect(projectedToolRegistryRevision([a, b])).not.toBe(projectedToolRegistryRevision([changed, b]));
+    }
   });
 
   it('surfaces events schemas as JSON-Schema when the tool declares them', () => {
@@ -458,28 +466,54 @@ describe('listMcpProjections', () => {
 });
 
 describe('registry-derived executable tool contracts (P-002)', () => {
-  it('returns the accepted schema, authored aliases, and registry provenance', () => {
+  it('returns the accepted call schema, registered result schema, aliases, and registry provenance', () => {
     const inputSchema = {
       type: 'object',
       properties: { current_plan_slug: { type: 'string' } },
       required: ['current_plan_slug'],
       additionalProperties: false,
     };
+    const outputJsonSchema = {
+      type: 'object',
+      properties: { accepted: { type: 'boolean' } },
+      required: ['accepted'],
+    };
     registerProjectedTool(baseTool({
       expose: { mcp: { name: 'coord:declare-intent' } },
+      description: 'Declare a coordination intent.',
       inputSchema,
-      guidance: { argRedirects: { planSlug: 'current_plan_slug' } },
+      outputJsonSchema,
+      guidance: {
+        returns: '{ stale_authored_shape }',
+        argRedirects: { planSlug: 'current_plan_slug' },
+      },
     }));
 
     expect(projectedToolCallContract('coord:declare-intent')).toEqual({
       source: PROJECTED_TOOL_REGISTRY_SOURCE,
       revision: projectedToolRegistryRevision(),
       name: 'coord:declare-intent',
+      description: 'Declare a coordination intent.',
       inputSchema,
+      returns: { source: 'registered-output-schema', outputJsonSchema },
       aliases: {
         planSlug: { target: 'current_plan_slug', provenance: 'authored-tool-guidance' },
       },
     });
+  });
+
+  it('uses authored return guidance only when no registered output schema exists', () => {
+    registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'legacy:result' } },
+      guidance: { returns: '  { legacy, rows:[...] }  ' },
+    }));
+    registerProjectedTool(baseTool({ expose: { mcp: { name: 'runtime:untyped' } } }));
+
+    expect(projectedToolCallContract('legacy:result').returns).toEqual({
+      source: 'authored-tool-guidance',
+      description: '{ legacy, rows:[...] }',
+    });
+    expect(projectedToolCallContract('runtime:untyped').returns).toEqual({ source: 'undeclared' });
   });
 
   it('invalidates the cached registry revision after register and unregister mutations', () => {
