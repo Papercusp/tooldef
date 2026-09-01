@@ -1633,7 +1633,15 @@ export const PROJECTED_TOOL_REGISTRY_SOURCE = 'projected-tool-registry' as const
 export function projectedToolRegistryRevision(
   tools?: readonly Pick<
     ProjectedTool,
-    'expose' | 'inputSchema' | 'discoveryInputSchema' | 'agentRoles' | 'profile' | 'modality' | 'guidance'
+    | 'expose'
+    | 'description'
+    | 'inputSchema'
+    | 'discoveryInputSchema'
+    | 'outputJsonSchema'
+    | 'agentRoles'
+    | 'profile'
+    | 'modality'
+    | 'guidance'
   >[],
 ): string {
   if (!tools) {
@@ -1659,11 +1667,26 @@ export function projectedToolRegistryRevision(
       if (!name) return [];
       return [{
         name,
+        description: tool.description,
         inputSchema: tool.discoveryInputSchema ?? tool.inputSchema,
+        outputJsonSchema: tool.outputJsonSchema ?? null,
         agentRoles: [...(tool.agentRoles ?? [])].sort(),
         profile: tool.profile ?? 'all',
         modality: [...(tool.modality ?? ['text', 'voice'])].sort(),
-        argRedirects: tool.guidance?.argRedirects ?? {},
+        guidance: {
+          when: tool.guidance?.when ?? null,
+          notWhen: tool.guidance?.notWhen ?? null,
+          chaining: tool.guidance?.chaining ?? null,
+          returns: tool.guidance?.returns ?? null,
+          argRedirects: tool.guidance?.argRedirects ?? {},
+          byRole: tool.guidance?.byRole ?? {},
+          // Function-form result links are runtime-only truth and cannot be
+          // serialized into a stable catalog revision. Static links can and
+          // should invalidate every cached guidance projection when changed.
+          seeAlso: typeof tool.guidance?.seeAlso === 'function'
+            ? 'runtime-resolved'
+            : tool.guidance?.seeAlso ?? null,
+        },
       }];
     })
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -1688,7 +1711,12 @@ export interface ProjectedToolCallContract {
   source: typeof PROJECTED_TOOL_REGISTRY_SOURCE;
   revision: string;
   name: string;
+  description: string;
   inputSchema: Record<string, unknown>;
+  returns:
+    | { source: 'registered-output-schema'; outputJsonSchema: Record<string, unknown> }
+    | { source: 'authored-tool-guidance'; description: string }
+    | { source: 'undeclared' };
   aliases: Record<string, { target: string; provenance: 'authored-tool-guidance' }>;
 }
 
@@ -1720,7 +1748,13 @@ export function projectedToolCallContract(
     source: PROJECTED_TOOL_REGISTRY_SOURCE,
     revision: projectedToolRegistryRevision(),
     name,
+    description: tool.description,
     inputSchema: tool.discoveryInputSchema ?? tool.inputSchema,
+    returns: tool.outputJsonSchema
+      ? { source: 'registered-output-schema', outputJsonSchema: tool.outputJsonSchema }
+      : tool.guidance?.returns?.trim()
+        ? { source: 'authored-tool-guidance', description: tool.guidance.returns.trim() }
+        : { source: 'undeclared' },
     aliases: Object.fromEntries(
       Object.entries(tool.guidance?.argRedirects ?? {})
         .filter((entry): entry is [string, string] => typeof entry[1] === 'string')
