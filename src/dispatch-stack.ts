@@ -1165,6 +1165,63 @@ const REFUSAL_FALLBACK_CODE = 'handler_refusal';
 const REFUSAL_FALLBACK_MESSAGE = 'tool returned isError=true without a structured refusal message';
 
 /**
+ * Maximum soft-failure reason retained in per-call telemetry.
+ *
+ * Reasons are operator-authored category labels in normal use, but the result is
+ * still handler-controlled input on a hot, append-only ledger. Bounding it here
+ * prevents one accidental payload/message from turning metadata_json into a
+ * second result store. The watchdog hashes the bounded value for its stable key.
+ */
+export const SOFT_FAILURE_REASON_MAX = 512;
+
+export interface SoftFailureOutcomeMetadata {
+  resultOutcome: 'soft-failure';
+  softFailureReason: string;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+/**
+ * Extract the conventional successful-call / unsuccessful-effect outcome.
+ *
+ * `status` deliberately remains CALL-level: a handler that returned a valid
+ * ToolResult succeeded as a call. This adds a separate, queryable EFFECT-level
+ * outcome for the house `{ ok:false, reason:'category' }` convention.
+ *
+ * Structured content is authoritative when it is an object. Only when it is
+ * absent/non-object do we parse the first JSON text item; a conflicting compact
+ * text representation must never override the lossless structured result. The
+ * match is intentionally narrow — exact top-level `ok === false` plus a nonblank
+ * string `reason` — because a false positive becomes a clean, misleading health
+ * signal while an unrecognized shape merely stays unclassified.
+ */
+export function extractSoftFailureOutcome(result: Pick<ToolResult, 'content' | 'structuredContent'>): SoftFailureOutcomeMetadata | null {
+  let candidate = objectRecord(result.structuredContent);
+  if (!candidate) {
+    const firstText = result.content.find(
+      (item): item is Extract<ToolResult['content'][number], { type: 'text' }> => item.type === 'text',
+    );
+    if (!firstText) return null;
+    try {
+      candidate = objectRecord(JSON.parse(firstText.text));
+    } catch {
+      return null;
+    }
+  }
+  if (!candidate || candidate.ok !== false || typeof candidate.reason !== 'string') return null;
+  const reason = candidate.reason.trim();
+  if (!reason) return null;
+  return {
+    resultOutcome: 'soft-failure',
+    softFailureReason: reason.slice(0, SOFT_FAILURE_REASON_MAX),
+  };
+}
+
+/**
  * Lift a self-reported refusal's own error code out of its payload.
  *
  * The house convention for `isError: true` results is a single text content whose
@@ -1242,6 +1299,7 @@ async function recordTelemetry(
   try {
     if (result.ok && result.result) {
       const r = result.result;
+      const selfReportedFailure = r.isError === true;
       // Capture the SERVED result format (json/toon/csv/tsv/md) into metadata_json so
       // compact-encoding ADOPTION is a measurable signal — `metadata_json->>'format'`
       // GROUP BY gives the toon-vs-json share per tool over time, the success metric
@@ -1281,6 +1339,14 @@ async function recordTelemetry(
           metaWithFormat = { ...(metaWithFormat ?? {}), deltaServed: derivedDeltaServed };
         }
       }
+      // EI-20219227925547855: distinguish a successful CALL from a successful
+      // EFFECT without changing the long-standing meaning of status='ok'. Merge
+      // after handler metadata so these framework-owned keys cannot be spoofed
+      // or contradicted by ctx.metadata() on a real soft-failure result.
+      const softFailure = selfReportedFailure ? null : extractSoftFailureOutcome(r);
+      if (softFailure) {
+        metaWithFormat = { ...(metaWithFormat ?? {}), ...softFailure };
+      }
       // A handler can fail in TWO ways, and only one of them throws. Dispatch-level
       // failure (throw / gate denial) is `!result.ok` and handled in the else branch
       // below. The other is a SELF-REPORTED refusal: the handler returns normally with
@@ -1290,7 +1356,6 @@ async function recordTelemetry(
       // loss (EI-20184794555427363; the doc comment on RecordInvocation['status']
       // carries the full case). Derive the status from the result the handler actually
       // returned, not merely from the fact that it returned.
-      const selfReportedFailure = r.isError === true;
       const refusal = selfReportedFailure ? extractRefusalDetails(r) : null;
       await deps.recordInvocation({
         toolName,
