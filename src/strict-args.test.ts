@@ -14,7 +14,14 @@
  */
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { nestedArgPaths, strictArgs, suggestArgName, toArgsJsonSchema, unknownArgHint } from './define-tool';
+import {
+  isLocalSchemaTarget,
+  nestedArgPaths,
+  strictArgs,
+  suggestArgName,
+  toArgsJsonSchema,
+  unknownArgHint,
+} from './define-tool';
 
 /** Zod 4 exposes safeParse on the schema; keep the test honest about the shape. */
 function parse(schema: unknown, value: unknown): { ok: boolean; message: string } {
@@ -246,6 +253,77 @@ describe('unknownArgHint argRedirects (EI-20281509195248260)', () => {
     // CONTROL: with no input threaded through, the pre-fix misdirection is what appears —
     // this is what makes the assertion above a real measurement rather than a tautology.
     expect(unknownArgHint(rejection, presenceSchema)).toContain('`scope` for `harness`');
+  });
+});
+
+describe('unknownArgHint same-tool relocation vs cross-tool redirect (EI-21119949290826530)', () => {
+  // An authored redirect means two different things and only the CROSS-TOOL one was
+  // rendered. `improvements:capture` already redirects `linkTo -> observation.linkTo`
+  // (a move within its OWN schema) and the message read "`linkTo` is not an arg of
+  // this tool — it is written by observation.linkTo", i.e. it told a caller who merely
+  // nested a field wrongly that some other TOOL owns their data. Independently
+  // observed as "argRedirects has no same-tool alias form" (EI-22174773207603281).
+  const schema = { properties: { title: {}, body: {}, observation: {}, toolFailure: {} } };
+
+  it('renders a SAME-TOOL target as a relocation, not as another tool', () => {
+    const issues = [{ message: 'Unrecognized key: "linkTo"', keys: ['linkTo'] }];
+    const out = unknownArgHint(issues, schema, { linkTo: 'observation.linkTo' });
+    expect(out).toContain('`linkTo` is not a top-level arg of this tool');
+    expect(out).toContain('pass it as `observation.linkTo` instead');
+    // The cross-tool phrasing must NOT appear: it is the defect being fixed.
+    expect(out).not.toContain('it is written by');
+  });
+
+  it('still renders a CROSS-TOOL target as the owning tool (EI-20281509195248260 intact)', () => {
+    const issues = [{ message: 'Unrecognized key: "tags"', keys: ['tags'] }];
+    const out = unknownArgHint(issues, schema, { tags: 'work_items:tag { id, topic }' });
+    expect(out).toContain('it is written by work_items:tag { id, topic }');
+    expect(out).not.toContain('pass it as');
+  });
+
+  it('routes a bare top-level `evidence` to `body` (the capture case)', () => {
+    const issues = [{ message: 'Unrecognized key: "evidence"', keys: ['evidence'] }];
+    const out = unknownArgHint(issues, schema, { evidence: 'body' });
+    expect(out).toContain('pass it as `body` instead');
+  });
+
+  it('classifies targets from the tool\'s OWN keys, so a redirect needs no extra flag', () => {
+    expect(isLocalSchemaTarget('body', ['title', 'body'])).toBe(true);
+    expect(isLocalSchemaTarget('observation.linkTo', ['observation'])).toBe(true);
+    // A rendered tool call carries a space/`{`/`:` and can never look like a local path.
+    expect(isLocalSchemaTarget('work_items:tag { id, topic }', ['body'])).toBe(false);
+    // A dotted path whose ROOT this tool does not declare is not local either.
+    expect(isLocalSchemaTarget('other.field', ['body'])).toBe(false);
+  });
+});
+
+describe('unknownArgHint tools:invoke envelope hint (EI-21826333890701824)', () => {
+  // Wrapping a DIRECT verb call in `tools:invoke`'s `{ name, args }` envelope is a
+  // recurring caller error whose remedy the generic message cannot express: it
+  // truthfully reports two unknown keys, leaving the caller to infer that their call
+  // SHAPE — not their field names — was wrong.
+  const schema = { properties: { title: {}, kind: {}, body: {} } };
+  const issues = [{ message: 'Unrecognized keys: "name", "args"', keys: ['name', 'args'] }];
+
+  it('names the envelope and both correct forms', () => {
+    const out = unknownArgHint(issues, schema, undefined, { name: 'improvements:capture', args: {} });
+    expect(out).toContain('`tools:invoke` ENVELOPE');
+    expect(out).toContain('directly with its own declared args at top level');
+    expect(out).toContain('tools:invoke { name, args }');
+  });
+
+  it('does NOT fire for the meta-dispatcher that genuinely declares name/args', () => {
+    const invokeSchema = { properties: { name: {}, args: {} } };
+    const soloIssue = [{ message: 'Unrecognized key: "tool"', keys: ['tool'] }];
+    const out = unknownArgHint(soloIssue, invokeSchema, undefined, { tool: 'x' });
+    expect(out).not.toContain('ENVELOPE');
+  });
+
+  it('does NOT fire when only ONE of the two envelope keys is present', () => {
+    const oneKey = [{ message: 'Unrecognized key: "name"', keys: ['name'] }];
+    const out = unknownArgHint(oneKey, schema, undefined, { name: 'x' });
+    expect(out).toContain('this tool accepts ONLY');
+    expect(out).not.toContain('ENVELOPE');
   });
 });
 

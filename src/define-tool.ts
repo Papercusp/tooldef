@@ -1723,6 +1723,22 @@ export function invalidInputCorrections(
   });
 }
 
+/**
+ * Does an authored redirect target name a path inside THIS tool's own schema (a
+ * RELOCATION, e.g. `observation.linkTo` or `body`) rather than another tool (a
+ * CROSS-TOOL redirect, e.g. `work_items:tag { id, topic }`)? Derived from the tool's
+ * own declared keys, so the two cases never need a hand-maintained flag alongside the
+ * redirect. A rendered tool call always carries a space, `{` or `:`, so it can never
+ * be mistaken for a dotted local path.
+ *
+ * Exported for direct unit test — see strict-args.test.ts.
+ */
+export function isLocalSchemaTarget(target: string, keys: readonly string[]): boolean {
+  if (!/^[A-Za-z_$][\w$]*(?:\.[\w$]+|\[\d+\])*$/.test(target)) return false;
+  const root = target.split(/[.[]/)[0];
+  return root !== undefined && root.length > 0 && keys.includes(root);
+}
+
 // Exported for direct unit test alongside its sibling correction sources
 // (`nestedArgPaths`, `suggestArgName`) — see strict-args.test.ts.
 export function unknownArgHint(
@@ -1739,8 +1755,21 @@ export function unknownArgHint(
   if (keys.length === 0) return '';
   const corrections = invalidInputCorrections(issues, rawSchema, argRedirects, input);
   const redirected = corrections.filter((correction) => correction.kind === 'authored-redirect');
+  // EI-21119949290826530: an authored redirect carries TWO different meanings and only
+  // the cross-tool one was ever rendered. A target naming a path INSIDE this tool's own
+  // schema (`observation.linkTo`, `body`) is a RELOCATION — the caller sent the right
+  // value to the wrong PLACE on the right tool. A target naming another tool is the
+  // cross-tool case (EI-20281509195248260). Rendering both as "it is written by X" told
+  // a caller who merely nested a field wrongly that some OTHER tool owns their data —
+  // the opposite of the correction they need, and a dead end for a value they are
+  // holding right now. The distinction is DERIVED from the tool's own declared keys, so
+  // a newly authored redirect classifies itself with no second field to maintain.
   const redirectText = redirected
-    .map(({ rejectedArg, target }) => ` \`${rejectedArg}\` is not an arg of this tool — it is written by ${target}.`)
+    .map(({ rejectedArg, target }) =>
+      isLocalSchemaTarget(target, keys)
+        ? ` \`${rejectedArg}\` is not a top-level arg of this tool — pass it as \`${target}\` instead.`
+        : ` \`${rejectedArg}\` is not an arg of this tool — it is written by ${target}.`,
+    )
     .join('');
   const localCorrections = corrections.filter((correction) => correction.kind !== 'authored-redirect');
   const correctionText = localCorrections.length > 0
@@ -1759,8 +1788,25 @@ export function unknownArgHint(
   const reSendHint = ambientKeys.length > 0
     ? ' Re-send using only the keys above (or the dispatch-level ones just listed).'
     : ' Re-send using only the keys above.';
+  // EI-21826333890701824: `tools:invoke`'s envelope (`{ name, args }`) wrapped around a
+  // DIRECT verb call is a recognisable, recurring caller error with a specific remedy,
+  // but the generic list-the-keys message cannot express it: it truthfully reports two
+  // unknown keys and leaves the caller to infer that their whole call SHAPE — not their
+  // field names — was wrong. Fires only when this tool declares NEITHER key itself, so
+  // the meta-dispatcher that genuinely takes `name`/`args` never sees it.
+  const unknownKeys = unrecognizedArgKeys(issues, rawSchema, input);
+  const envelopeText =
+    unknownKeys.includes('name')
+    && unknownKeys.includes('args')
+    && !keys.includes('name')
+    && !keys.includes('args')
+      ? ' `name` + `args` are the `tools:invoke` ENVELOPE, not args of this tool —'
+        + ' it looks like a direct call was wrapped for dispatch. Either call this tool'
+        + ' directly with its own declared args at top level, or dispatch it through'
+        + ' `tools:invoke { name, args }`.'
+      : '';
   return (
-    ` — this tool accepts ONLY: ${keys.join(', ')}.${ambientText}${redirectText}${correctionText}` +
+    ` — this tool accepts ONLY: ${keys.join(', ')}.${ambientText}${envelopeText}${redirectText}${correctionText}` +
     ' An undeclared arg is REJECTED, not silently ignored (EI-10883): passing an arg a tool does not declare used to return ok:true' +
     ` while quietly doing something else, which is indistinguishable from success.${reSendHint}` +
     // EI-19953470656367880: an unrecognized-key rejection is ALSO the exact shape a
