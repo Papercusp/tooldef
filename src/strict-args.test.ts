@@ -14,7 +14,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { nestedArgPaths, strictArgs, suggestArgName, unknownArgHint } from './define-tool';
+import { nestedArgPaths, strictArgs, suggestArgName, toArgsJsonSchema, unknownArgHint } from './define-tool';
 
 /** Zod 4 exposes safeParse on the schema; keep the test honest about the shape. */
 function parse(schema: unknown, value: unknown): { ok: boolean; message: string } {
@@ -246,6 +246,72 @@ describe('unknownArgHint argRedirects (EI-20281509195248260)', () => {
     // CONTROL: with no input threaded through, the pre-fix misdirection is what appears —
     // this is what makes the assertion above a real measurement rather than a tautology.
     expect(unknownArgHint(rejection, presenceSchema)).toContain('`scope` for `harness`');
+  });
+});
+
+describe('unknownArgHint on a union-rooted schema (EI-22084251948568820)', () => {
+  // Mirrors capability:launch-agent's top-level `z.union([freshBranch, resumeBranch])`
+  // args shape (StandardSchemaV1.Issue, real Zod 4 output, real JSON-Schema conversion —
+  // not hand-built fixtures, so this proves the actual production path). Two independent
+  // pre-fix gaps compound here: (1) `rawSchema.properties` is undefined for a union root
+  // (the real shape is `{ anyOf: [...] }`), so the "what does this tool accept" listing
+  // came back empty; (2) an `invalid_union` issue's own top-level `.message` is Zod's
+  // generic "Invalid input" — the real "Unrecognized key" diagnosis lives in the
+  // best-matching branch's sub-issues (see `issueLeaves`/`bestUnionBranch`) — so the
+  // `/nrecognized key/i` detector never fired at all. Before this fix `unknownArgHint`
+  // returned the EMPTY STRING for every union-rooted tool on an unrecognized key: no
+  // "accepts ONLY" listing, no near-name guess, no argRedirects — the whole correction
+  // mechanism silently skipped for exactly the tools most likely to need it.
+  const freshBranch = z.strictObject({
+    brief: z.string(),
+    agent: z.string().optional(),
+  });
+  const resumeBranch = z.strictObject({
+    resume: z.object({ agentId: z.string() }),
+    brief: z.string(),
+  });
+  const schema = strictArgs(z.union([freshBranch, resumeBranch]));
+  const rawSchema = toArgsJsonSchema('test:union-tool', schema);
+
+  it('reports the merged accepted-key set for an unrecognized key on a union root (no top-level .properties)', () => {
+    const r = (schema as z.ZodTypeAny).safeParse({ brief: 'do the thing', carry: 'warm' });
+    expect(r.success).toBe(false);
+    if (r.success) return;
+    const out = unknownArgHint(r.error.issues, rawSchema);
+    // Pre-fix: this was ''. The regex never matched the union's own generic message,
+    // and even if it had, `rawSchema.properties` is undefined for `{ anyOf: [...] }` —
+    // so `keys.length === 0` short-circuited to '' regardless.
+    expect(out).not.toBe('');
+    expect(out).toContain('this tool accepts ONLY');
+    // Merged from BOTH branches — proof `mergedSchemaProperties` descended `anyOf`.
+    expect(out).toContain('brief');
+    expect(out).toContain('agent');
+    expect(out).toContain('resume');
+
+    // CONTROL, falsifiability per CLAUDE.md § "Proving a guard is falsifiable": the
+    // pre-fix logic verbatim (top-level `issue.message` + `rawSchema.properties`
+    // directly, no leaf descent, no anyOf merge) must reproduce the empty-string bug on
+    // this exact input — otherwise the assertions above are not testing anything real.
+    const legacyMsgs = r.error.issues.map((i) => i.message).join(' ');
+    expect(/nrecognized key/i.test(legacyMsgs)).toBe(false);
+    expect((rawSchema as { properties?: unknown }).properties).toBeUndefined();
+  });
+
+  it('routes an authored argRedirects entry through a union branch, not just a flat schema', () => {
+    // The exact capability:launch-agent shape: `carry` genuinely belongs elsewhere
+    // (a fleet member's own field), so the redirect must fire even though the
+    // rejection arrives nested inside an `invalid_union` issue rather than a flat
+    // `unrecognized_keys` one at the top level.
+    const r = (schema as z.ZodTypeAny).safeParse({ brief: 'do the thing', carry: 'warm' });
+    expect(r.success).toBe(false);
+    if (r.success) return;
+    const out = unknownArgHint(r.error.issues, rawSchema, {
+      carry: "loop:arm { carry } — set on the LAUNCHED agent's own recurring wake.",
+    });
+    expect(out).toContain('`carry` is not an arg of this tool');
+    expect(out).toContain('loop:arm { carry }');
+    // The redirected key must not ALSO draw a contradictory near-name guess.
+    expect(out).not.toContain('Did you mean');
   });
 });
 
