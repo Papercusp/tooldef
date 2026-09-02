@@ -54,6 +54,15 @@ export {
   serverVintageHint,
   constraintVintageHint,
 } from './server-vintage';
+// Host-registered list of dispatch-level arg keys the transport strips before a
+// tool's own schema ever validates (EI-22174225494240206) — folded into
+// `unknownArgHint`'s "accepts ONLY" list so a genuinely-accepted key never reads
+// as rejected. Default unregistered (empty list); see ambient-args.ts.
+export {
+  setAmbientArgKeysResolver,
+  resetAmbientArgKeysResolver,
+  readAmbientArgKeys,
+} from './ambient-args';
 export type {
   AgentRole,
   RoleRegistry,

@@ -69,6 +69,11 @@ export interface PayloadShapers {
   };
 }
 
+/** The arg key itself, exported so a consumer that needs to NAME it — e.g.
+ *  `unknownArgHint`'s accepted-key rendering (EI-22174225494240206) — has one
+ *  source instead of a second hand-typed `'payloadTier'` literal. */
+export const PAYLOAD_TIER_ARG = 'payloadTier' as const;
+
 export function parsePayloadTier(v: unknown): PayloadTier | undefined {
   return typeof v === 'string' && (PAYLOAD_TIERS as readonly string[]).includes(v)
     ? (v as PayloadTier)
@@ -82,10 +87,10 @@ export function parsePayloadTier(v: unknown): PayloadTier | undefined {
  */
 export function extractPayloadTier(input: unknown): { input: unknown; callTier?: PayloadTier } {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return { input };
-  const raw = (input as Record<string, unknown>).payloadTier;
+  const raw = (input as Record<string, unknown>)[PAYLOAD_TIER_ARG];
   if (raw === undefined) return { input };
   const callTier = parsePayloadTier(raw);
-  const { payloadTier: _dropped, ...rest } = input as Record<string, unknown>;
+  const { [PAYLOAD_TIER_ARG]: _dropped, ...rest } = input as Record<string, unknown>;
   return { input: rest, callTier };
 }
 

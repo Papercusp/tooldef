@@ -45,9 +45,10 @@ import {
   type InvalidInputMetadata,
 } from './dispatch-projected';
 import { serverVintageHint, constraintVintageHint } from './server-vintage';
+import { readAmbientArgKeys } from './ambient-args';
 import { buildCorrectedCall, correctedCallHint } from './corrected-call';
 import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
-import { applyPayloadTier, extractPayloadTier, resolvePayloadTier } from './payload-tier';
+import { applyPayloadTier, extractPayloadTier, resolvePayloadTier, PAYLOAD_TIER_ARG } from './payload-tier';
 import { boundWorkspaceTx } from './workspace-tx';
 import {
   parseDeltaRequest,
@@ -1745,10 +1746,23 @@ export function unknownArgHint(
   const correctionText = localCorrections.length > 0
     ? ` Did you mean ${localCorrections.map(({ rejectedArg, target }) => `\`${target}\` for \`${rejectedArg}\``).join('; ')}?`
     : '';
+  // EI-22174225494240206: dispatch-level args (`payloadTier`, and any host-registered
+  // ones — e.g. Papercusp's `projection`) are stripped by the transport BEFORE this
+  // validator ever runs, so they can never appear in `keys` above — but they ARE
+  // genuinely accepted on every call. List them separately, distinguished as
+  // dispatch-level, so this message stops instructing a caller to re-send WITHOUT a
+  // capability that actually works.
+  const ambientKeys = [PAYLOAD_TIER_ARG, ...readAmbientArgKeys()];
+  const ambientText = ambientKeys.length > 0
+    ? ` (Dispatch-level args, handled by the transport before this tool's own schema and therefore not in the list above but also accepted: ${ambientKeys.join(', ')}.)`
+    : '';
+  const reSendHint = ambientKeys.length > 0
+    ? ' Re-send using only the keys above (or the dispatch-level ones just listed).'
+    : ' Re-send using only the keys above.';
   return (
-    ` — this tool accepts ONLY: ${keys.join(', ')}.${redirectText}${correctionText}` +
+    ` — this tool accepts ONLY: ${keys.join(', ')}.${ambientText}${redirectText}${correctionText}` +
     ' An undeclared arg is REJECTED, not silently ignored (EI-10883): passing an arg a tool does not declare used to return ok:true' +
-    ' while quietly doing something else, which is indistinguishable from success. Re-send using only the keys above.' +
+    ` while quietly doing something else, which is indistinguishable from success.${reSendHint}` +
     // EI-19953470656367880: an unrecognized-key rejection is ALSO the exact shape a
     // caller sees when it (or the UI sending on its behalf) is newer than the server
     // it's talking to — a long-lived process (e.g. a Tauri desktop's own spawned
