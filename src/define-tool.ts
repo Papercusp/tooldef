@@ -885,6 +885,10 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
     payloadTierCeilingChars: input.payloadTierCeilingChars,
     // WI-37843: see ToolDefinition.ignoreSessionPayloadTier.
     ignoreSessionPayloadTier: input.ignoreSessionPayloadTier,
+    // P-016 / D-104: see ToolDefinition.argReencodings. Threading this is what makes the
+    // declaration reach `registerLegacyAsProjected`'s repair path — a field declared on the
+    // input type but dropped here would leave every registered rule silently inert.
+    argReencodings: input.argReencodings,
   };
 
   // EI-20803112372029993: make the declared shapers reachable from the catalog.
@@ -981,6 +985,10 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
     payloadTierCeilingChars: input.payloadTierCeilingChars,
     // WI-37843: see RoleToolDefinition.ignoreSessionPayloadTier.
     ignoreSessionPayloadTier: input.ignoreSessionPayloadTier,
+    // P-016 / D-104: see RoleToolDefinition.argReencodings. coord:send — the verb the whole
+    // rule was measured for — is `requirePrincipal: false`, so it lands in THIS builder;
+    // dropping the field here alone would make the shipped rule a no-op.
+    argReencodings: input.argReencodings,
     modality: input.modality,
     // EI-10883: closed shape — an undeclared arg errors instead of being silently dropped.
     args: strictArgs(input.args),
@@ -2211,17 +2219,33 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       rawSchema,
       applyPositionalWriteShim(def.name, rawSchema, stripUndefinedArgKeys(tierlessInput)),
     );
-    const parsed = await standardValidate(def.args, shimmed);
-    if (!parsed.ok) {
-      throw makeInvalidInputError(
-        def.name,
-        parsed.issues,
-        shimmed,
-        rawSchema,
-        def.guidance?.argRedirects,
-        schemaHintCache,
-      );
+    const validated = await standardValidate(def.args, shimmed);
+    // P-016 / D-104 — auto-correct-and-execute, RE-ENCODINGS only. Zero cost on both
+    // ordinary paths: a call that validates never reaches the repair, and a tool with no
+    // registered re-encodings gets an immediate null back.
+    let parsedValue: StandardSchemaV1.InferOutput<TArgs>;
+    let corrections: readonly AppliedArgCorrection[] = [];
+    if (validated.ok) {
+      parsedValue = validated.value;
+    } else {
+      const repaired = await reencodeAndRevalidate(def.args, def.argReencodings, shimmed);
+      if (!repaired) {
+        throw makeInvalidInputError(
+          def.name,
+          validated.issues,
+          shimmed,
+          rawSchema,
+          def.guidance?.argRedirects,
+          schemaHintCache,
+        );
+      }
+      parsedValue = repaired.value;
+      corrections = repaired.corrections;
     }
+    // Keeps every `parsed.value` reader below untouched.
+    const parsed = { value: parsedValue };
+    const disclose = (result: ToolResult): ToolResult =>
+      attachCorrectedDisclosure(result, corrections);
     const response = await def.handler(parsed.value, legacyCtx);
     // A raw ToolResult (MCP content shape) normally passes through untouched —
     // parity with the role-gated wrapper below. EXCEPT: on the agent-facing MCP
@@ -2235,9 +2259,9 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     if (response && typeof response === 'object' && Array.isArray((response as ToolResult).content)) {
       const reencodable = reencodableJsonPayload(response as ToolResult, ctx);
       if (reencodable !== undefined) {
-        return serializeProjectedResult({ data: reencodable } as ToolResponse, ctx, eligibility, def, readColumns, parsed.value);
+        return disclose(serializeProjectedResult({ data: reencodable } as ToolResponse, ctx, eligibility, def, readColumns, parsed.value));
       }
-      return attachRequestedStructuredContent(response as ToolResult, ctx, def);
+      return disclose(attachRequestedStructuredContent(response as ToolResult, ctx, def));
     }
     // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
     // the session/call tier before format-aware serialization. Unshaped tools
@@ -2268,7 +2292,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       // the recovery `next` — absent ⇒ the generic host-neutral wording.
       rawDispatchTemplate: ctx.rawDispatchTemplate,
     });
-    return serializeProjectedResult(shaped, ctx, eligibility, def, readColumns, parsed.value);
+    return disclose(serializeProjectedResult(shaped, ctx, eligibility, def, readColumns, parsed.value));
   };
 
   registerProjectedTool({
@@ -2368,17 +2392,33 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
       rawSchema,
       applyPositionalWriteShim(def.name, rawSchema, stripUndefinedArgKeys(tierlessInput)),
     );
-    const parsed = await standardValidate(def.args, shimmed);
-    if (!parsed.ok) {
-      throw makeInvalidInputError(
-        def.name,
-        parsed.issues,
-        shimmed,
-        rawSchema,
-        def.guidance?.argRedirects,
-        schemaHintCache,
-      );
+    const validated = await standardValidate(def.args, shimmed);
+    // P-016 / D-104 — auto-correct-and-execute, RE-ENCODINGS only. See the twin in
+    // `registerLegacyAsProjected`; both wrappers must carry it, since which one a tool
+    // lands in is a registration detail invisible to the caller whose shape it repairs.
+    let parsedValue: StandardSchemaV1.InferOutput<TArgs>;
+    let corrections: readonly AppliedArgCorrection[] = [];
+    if (validated.ok) {
+      parsedValue = validated.value;
+    } else {
+      const repaired = await reencodeAndRevalidate(def.args, def.argReencodings, shimmed);
+      if (!repaired) {
+        throw makeInvalidInputError(
+          def.name,
+          validated.issues,
+          shimmed,
+          rawSchema,
+          def.guidance?.argRedirects,
+          schemaHintCache,
+        );
+      }
+      parsedValue = repaired.value;
+      corrections = repaired.corrections;
     }
+    // Keeps every `parsed.value` reader below untouched.
+    const parsed = { value: parsedValue };
+    const disclose = (result: ToolResult): ToolResult =>
+      attachCorrectedDisclosure(result, corrections);
     // Thread the per-call tier override into the HANDLER's ctx too: tools that
     // must keep a hand-rolled JSON ToolResult (hook-consumed — coord:inbox /
     // coord:plan-events / coord:glance) adapt their DEFAULTS off
@@ -2400,9 +2440,9 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     if (out && typeof out === 'object' && Array.isArray((out as ToolResult).content)) {
       const reencodable = reencodableJsonPayload(out as ToolResult, handlerCtx);
       if (reencodable !== undefined) {
-        return serializeProjectedResult({ data: reencodable } as ToolResponse, handlerCtx, eligibility, def, readColumns, parsed.value);
+        return disclose(serializeProjectedResult({ data: reencodable } as ToolResponse, handlerCtx, eligibility, def, readColumns, parsed.value));
       }
-      return attachRequestedStructuredContent(out as ToolResult, handlerCtx, def);
+      return disclose(attachRequestedStructuredContent(out as ToolResult, handlerCtx, def));
     }
 
     // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
@@ -2435,7 +2475,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
       rawDispatchTemplate: handlerCtx.rawDispatchTemplate,
     });
     // ToolResponse envelope → format-aware MCP content[] + _meta.
-    return serializeProjectedResult(shaped, handlerCtx, eligibility, def, readColumns, parsed.value);
+    return disclose(serializeProjectedResult(shaped, handlerCtx, eligibility, def, readColumns, parsed.value));
   };
 
   registerProjectedTool({
