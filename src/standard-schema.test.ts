@@ -365,6 +365,75 @@ describe('formatIssues — union branch tie-break by fewest issues (EI-220575201
   });
 });
 
+describe('formatIssues — an unrecognized key ranks at the depth of the key it names (EI-22050255299103531, EI-22063684320590166)', () => {
+  // The sibling case to the tie-break above, and the one depth alone gets
+  // BACKWARDS. Zod files an `unrecognized_keys` issue's field name under
+  // `keys`, leaving `path` empty — so measuring depth by `path.length` scored
+  // the branch that matched everything EXCEPT one stray key at 0, and the
+  // "a depth-0 branch never wins once another located a field" rule discarded
+  // precisely the branch that had identified the caller's exact mistake.
+  // Strict objects: a plain z.object STRIPS unknown keys rather than reporting
+  // them, so only a strict branch can raise the `unrecognized_keys` issue this
+  // ranking rule is about (and only strict objects reproduce the tool schemas).
+  const shareableBranch = z.strictObject({
+    harness: z.string(),
+    shareable: z.literal(true),
+    key: z.string(),
+  });
+  const privateBranch = z.strictObject({
+    shareable: z.literal(false).optional(),
+    key: z.string(),
+  });
+  const schema = z.union([shareableBranch, privateBranch]);
+
+  it('reports only the stray key, not the unrelated required fields of a branch the caller never meant', () => {
+    // Satisfies the private branch entirely except for one legacy key.
+    const r = schema.safeParse({ key: 'launch-provenance', ttlDays: 7 });
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      const msg = formatIssues(r.error.issues);
+      expect(msg).toContain('ttlDays');
+      // The regression: the federation branch's own missing requirements must
+      // not be presented as the caller's problem.
+      expect(msg).not.toContain('harness');
+      expect(msg).not.toContain('shareable');
+    }
+  });
+
+  it('still prefers a genuinely deeper branch over a shallow stray key', () => {
+    // Guards the other direction: raising an unrecognized key to its key's
+    // depth must not let a shallow branch outrank one that located a specific
+    // NESTED field. The object branch fails two levels down; the stray-key
+    // branch names a key at depth 1, so the deeper diagnosis must still win.
+    const deepBranch = z.strictObject({ cfg: z.strictObject({ mode: z.literal('on') }) });
+    const shallowBranch = z.strictObject({ other: z.string().optional() });
+    const deepSchema = z.union([deepBranch, shallowBranch]);
+    const r = deepSchema.safeParse({ cfg: { mode: 'off' } });
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      const msg = formatIssues(r.error.issues);
+      // Only the deep branch names `mode`; the shallow branch would report
+      // `cfg` itself as an unrecognized key, so asserting on `cfg` alone
+      // could not tell the two apart.
+      expect(msg).toContain('mode');
+      expect(msg).not.toContain('Unrecognized');
+    }
+  });
+
+  it('leaves a union with no unrecognized keys scored exactly as before', () => {
+    // The rule is additive: it only re-ranks branches that carry a named key.
+    const a = z.object({ onlyA: z.literal('yes') });
+    const b = z.object({ onlyB: z.literal('yes') });
+    const r = z.union([a, b]).safeParse({});
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      const msg = formatIssues(r.error.issues);
+      expect(msg).toContain('onlyA');
+      expect(msg).not.toContain('onlyB');
+    }
+  });
+});
+
 describe('validateSync', () => {
   it('validates synchronously for sync validators', () => {
     expect(validateSync(numberBox, { n: 1 })).toEqual({ ok: true, value: { n: 1 } });
