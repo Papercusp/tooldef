@@ -356,7 +356,8 @@ describe('siblingToolArgOwner (EI-21681203906419973)', () => {
   // `scheduler:get_next` was called with `count` — a real, documented argument, of the
   // SIBLING verb its own see-also names. No revision of get_next ever declared it, so the
   // bare "accepts ONLY" rejection read as live-build/doc drift rather than a wrong target.
-  const tools = [
+  type SiblingRow = { name: string; inputSchema?: unknown; guidance?: { seeAlso?: unknown } };
+  const toolRows: SiblingRow[] = [
     {
       name: 'scheduler:get_next',
       inputSchema: { properties: { harness: {}, heldPaths: {}, states: {} } },
@@ -372,13 +373,20 @@ describe('siblingToolArgOwner (EI-21681203906419973)', () => {
     // Declares `count` but is NOT in get_next's see-also — the scope control.
     { name: 'unrelated:census', inputSchema: { properties: { count: {} } } },
   ];
+  // Production passes `resolveMcpName`; a projected row carries no `name` of its own (the
+  // registry is keyed by it), so the helper takes a by-name resolver rather than a list.
+  const lookup =
+    (rows: readonly SiblingRow[]) =>
+    (name: string): SiblingRow | null =>
+      rows.find((row) => row.name === name) ?? null;
+  const tools = lookup(toolRows);
 
   it('names the see-also sibling that declares the rejected key', () => {
     expect(siblingToolArgOwner('scheduler:get_next', 'count', tools)).toBe('work_items:claim_next');
   });
 
   it('accepts a structured see-also pointer, not just a leading-token string', () => {
-    const pointerTools = [
+    const pointerRows = [
       {
         name: 'a:one',
         inputSchema: { properties: { x: {} } },
@@ -386,7 +394,7 @@ describe('siblingToolArgOwner (EI-21681203906419973)', () => {
       },
       { name: 'b:two', inputSchema: { properties: { cursor: {} } } },
     ];
-    expect(siblingToolArgOwner('a:one', 'cursor', pointerTools)).toBe('b:two');
+    expect(siblingToolArgOwner('a:one', 'cursor', lookup(pointerRows))).toBe('b:two');
   });
 
   it('stays silent for a key no see-also sibling declares', () => {
@@ -394,13 +402,13 @@ describe('siblingToolArgOwner (EI-21681203906419973)', () => {
   });
 
   it('does NOT reach outside see-also, even when another tool declares the key', () => {
-    const narrow = tools.map((tool) =>
+    const narrow = toolRows.map((tool) =>
       tool.name === 'scheduler:get_next'
         ? { ...tool, guidance: { seeAlso: ['work_items:claimable (no count here)'] } }
         : tool,
     );
     // `unrelated:census` and `work_items:claim_next` both declare `count`; neither is linked.
-    expect(siblingToolArgOwner('scheduler:get_next', 'count', narrow)).toBeNull();
+    expect(siblingToolArgOwner('scheduler:get_next', 'count', lookup(narrow))).toBeNull();
   });
 
   it('stays silent for a function-form (runtime-resolved) see-also', () => {
@@ -408,7 +416,7 @@ describe('siblingToolArgOwner (EI-21681203906419973)', () => {
       { name: 'a:one', inputSchema: { properties: {} }, guidance: { seeAlso: 'runtime-resolved' } },
       { name: 'b:two', inputSchema: { properties: { count: {} } } },
     ];
-    expect(siblingToolArgOwner('a:one', 'count', runtime)).toBeNull();
+    expect(siblingToolArgOwner('a:one', 'count', lookup(runtime))).toBeNull();
   });
 
   it('stays silent without a tool name, and for an unregistered tool', () => {

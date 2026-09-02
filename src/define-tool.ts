@@ -32,7 +32,7 @@ import {
   projectedToolRegistryRevision,
   renderProjectedToolCall,
   registerProjectedTool,
-  listAllProjectedTools,
+  resolveMcpName,
   recordToolShapers,
   type ProjectedToolCorrectiveCall,
   type ToolFn,
@@ -1774,10 +1774,13 @@ function seeAlsoToolName(entry: unknown): string | null {
 export function siblingToolArgOwner(
   toolName: string | undefined,
   rejectedKey: string,
-  tools: readonly { name: string; inputSchema?: unknown; guidance?: { seeAlso?: unknown } }[],
+  /** By-name registry lookup — `resolveMcpName` in production, a stub in tests. The
+   *  projected row carries no `name` of its own (the registry is keyed by it), so a
+   *  resolver is the only way to get from a see-also entry to a schema. */
+  resolve: (name: string) => { inputSchema?: unknown; guidance?: { seeAlso?: unknown } } | undefined | null,
 ): string | null {
   if (!toolName) return null;
-  const self = tools.find((tool) => tool.name === toolName);
+  const self = resolve(toolName);
   const seeAlso = self?.guidance?.seeAlso;
   // Function-form seeAlso projects as the literal 'runtime-resolved' (it is computed from
   // a RESULT, which a rejected call never produced) — nothing to scope against.
@@ -1785,7 +1788,7 @@ export function siblingToolArgOwner(
   for (const entry of seeAlso) {
     const siblingName = seeAlsoToolName(entry);
     if (!siblingName || siblingName === toolName) continue;
-    const sibling = tools.find((tool) => tool.name === siblingName);
+    const sibling = resolve(siblingName);
     if (!sibling) continue;
     const props = mergedSchemaProperties(sibling.inputSchema);
     if (props && rejectedKey in props) return siblingName;
@@ -1886,7 +1889,7 @@ export function unknownArgHint(
   // wrong call LAYER, which outranks a wrong call TARGET.
   const siblingText = unknownKeys
     .flatMap((rejectedArg) => {
-      const owner = siblingToolArgOwner(toolName, rejectedArg, listAllProjectedTools());
+      const owner = siblingToolArgOwner(toolName, rejectedArg, resolveMcpName);
       return owner
         ? [` \`${rejectedArg}\` is not an arg of this tool, but \`${owner}\` (listed in this`
           + " tool's see-also) does declare it — check you did not reach for the neighbour's"
