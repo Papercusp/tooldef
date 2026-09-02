@@ -401,20 +401,6 @@ function notePreservedDrops(
   }
 }
 
-/** Union of preserved-omission path lists, in first-seen order, capped. */
-function unionPreservedPaths(
-  ...groups: ReadonlyArray<readonly string[] | undefined>
-): string[] {
-  const merged: string[] = [];
-  for (const group of groups) {
-    for (const path of group ?? []) {
-      if (merged.length >= PRESERVED_OMISSION_PATHS) return merged;
-      if (!merged.includes(path)) merged.push(path);
-    }
-  }
-  return merged;
-}
-
 /**
  * The two recovery routes an omission marker can honestly advertise.
  *
@@ -1283,23 +1269,24 @@ export function projectBoundedPayload(
         preservePaths: state.preservePaths,
       };
       const rePreview = projectValue(data, '$', 0, reState);
+      // `omittedPreserved` names fields that are MISSING FROM THIS BODY, so it is
+      // recomputed from the walk being returned rather than inherited. Carrying
+      // the discarded walk's list forward reports a field as dropped while it sits
+      // in the payload — measured: the fuller walk dropped `shipReadiness`, this
+      // narrower one clipped its bulky sibling instead and kept it. That is the
+      // opposite direction from `omittedCount`, where over-reporting is the safe
+      // side; here it manufactures a phantom absence.
+      const { omittedPreserved: _discardedPreserved, ...reBase } = leanMetadata;
       const reMetadata: BoundedPayloadProjection['_projection'] = {
-        ...leanMetadata,
+        ...reBase,
         // Count the omissions of the projection ACTUALLY RETURNED, and never
         // under-report the fuller walk that was discarded: a bounded measurement
         // that reads as a real zero is the failure mode this whole block exists to
         // prevent.
         omittedCount: Math.max(leanMetadata.omittedCount, reState.omittedCount),
-        // The narrower re-walk can drop a preserved path the fuller walk kept, so
-        // union the two rather than carrying the first walk's list forward — an
-        // absent `omittedPreserved` must mean "nothing requested went missing".
-        ...(() => {
-          const merged = unionPreservedPaths(
-            leanMetadata.omittedPreserved,
-            reState.preservedOmittedPaths,
-          );
-          return merged.length > 0 ? { omittedPreserved: merged } : {};
-        })(),
+        ...(reState.preservedOmittedPaths.length > 0
+          ? { omittedPreserved: [...reState.preservedOmittedPaths] }
+          : {}),
         returnedChars: 0,
       };
       const candidate = buildResultFrom(rePreview, reMetadata);
@@ -1344,13 +1331,13 @@ export function projectBoundedPayload(
         identityFields[key] = projectValue(sourceFields[key], `$.${key}`, 0, identityState);
       }
     }
-    const fallbackPreserved = unionPreservedPaths(
-      leanMetadata.omittedPreserved,
-      identityState.preservedOmittedPaths,
-    );
+    // Same rule as the re-walk above: describe the husk actually returned.
+    const { omittedPreserved: _supersededPreserved, ...fallbackBase } = leanMetadata;
     const fallbackMetadata = {
-      ...leanMetadata,
-      ...(fallbackPreserved.length > 0 ? { omittedPreserved: fallbackPreserved } : {}),
+      ...fallbackBase,
+      ...(identityState.preservedOmittedPaths.length > 0
+        ? { omittedPreserved: [...identityState.preservedOmittedPaths] }
+        : {}),
       returnedChars: 0,
     };
     result =

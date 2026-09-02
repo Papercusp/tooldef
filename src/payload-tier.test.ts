@@ -449,6 +449,100 @@ describe('applyPayloadTier', () => {
     ]));
   });
 
+  it('REGRESSION (EI-22186855527494865): declared preserve ORDER breaks the tie between two preserved siblings', () => {
+    // Two preserved siblings used to rank identically, so the tie fell through to
+    // INSERTION order — and on plans:get the bulky sibling (`items[].text`) is
+    // inserted before the small one (`shipReadiness`, appended last by get.ts).
+    // A large plan's items therefore ate the budget and the explicitly-requested
+    // ship verdict was dropped anyway; reordering the preserve LIST changed
+    // nothing, because both entries ranked the same.
+    const payload = {
+      results: [{
+        ok: true,
+        slug: 'a-plan',
+        items: Array.from({ length: 126 }, (_, i) => ({ id: `P-${i}`, text: 'i'.repeat(400) })),
+        shipReadiness: { satisfied: false, code: 'acceptance_ungraded' },
+      }],
+    };
+    const project = (preservePaths: string[]) =>
+      projectBoundedPayload(payload, {
+        toolName: 'plans:get',
+        tier: 'trimmed',
+        forced: true,
+        targetChars: 2_000,
+        preservePaths,
+      }) as unknown as { results: Array<Record<string, unknown>> };
+
+    // Declared FIRST — wins the budget.
+    expect(
+      project(['results[].shipReadiness', 'results[].items[].text']).results[0].shipReadiness,
+    ).toEqual({ satisfied: false, code: 'acceptance_ungraded' });
+
+    // FALSIFIABILITY CONTROL: the same field, not selected at all, is still
+    // evicted by the same budget. Without this the assertion above could pass on
+    // a payload that simply fit.
+    expect(project(['results[].items[].text']).results[0]).not.toHaveProperty('shipReadiness');
+  });
+
+  it('REGRESSION (EI-22186855527494865): a dropped preserved path is NAMED in omittedPreserved, which sample-shedding cannot take away', () => {
+    // `omitted` is a SAMPLE list the budget ladder trades away entirely (to 5,
+    // then to 0) to buy back content — so the one omission a caller cannot infer,
+    // the absence of a field they selected BY NAME, was exactly what got shed.
+    const row: Record<string, unknown> = {};
+    for (let i = 0; i < 60; i += 1) row[`k${i}`] = `value-${i}`;
+    const projected = projectBoundedPayload({ results: [row] }, {
+      toolName: 'plans:get',
+      tier: 'trimmed',
+      forced: true,
+      targetChars: 6_000,
+      // More selected keys than the trimmed tier's maxKeys (40): the tail is cut.
+      preservePaths: Array.from({ length: 60 }, (_, i) => `results[].k${i}`),
+    }) as unknown as {
+      results: Array<Record<string, unknown>>;
+      _projection: { omittedPreserved?: readonly string[]; omittedCount: number };
+    };
+
+    // Declared order decides which 40 survive.
+    expect(projected.results[0]).toHaveProperty('k0');
+    expect(projected.results[0]).not.toHaveProperty('k59');
+    // The dropped selections are named — bounded to a pointer list, not a manifest.
+    expect(projected._projection.omittedPreserved).toEqual([
+      '$.results[0].k40',
+      '$.results[0].k41',
+      '$.results[0].k42',
+      '$.results[0].k43',
+      '$.results[0].k44',
+    ]);
+    expect(projected._projection.omittedCount).toBeGreaterThanOrEqual(20);
+  });
+
+  it('REGRESSION (EI-22186855527494865): omittedPreserved describes the body actually returned, never a discarded walk', () => {
+    // The re-projection ladder can KEEP a preserved field the fuller walk dropped
+    // (it clips the bulky sibling instead of evicting the small one). Inheriting
+    // the discarded walk's list would report a field as missing while it sits in
+    // the payload — a phantom absence, the mirror of the bug being fixed.
+    const projected = projectBoundedPayload({
+      results: [{
+        ok: true,
+        id: 'r1',
+        bulkPreserved: 'B'.repeat(40_000),
+        shipReadiness: { satisfied: false, code: 'acceptance_ungraded' },
+      }],
+    }, {
+      toolName: 'plans:get',
+      tier: 'trimmed',
+      forced: true,
+      targetChars: 1_500,
+      preservePaths: ['results[].bulkPreserved', 'results[].shipReadiness'],
+    }) as unknown as {
+      results: Array<Record<string, unknown>>;
+      _projection: { omittedPreserved?: readonly string[] };
+    };
+
+    expect(projected.results[0].shipReadiness).toBeDefined();
+    expect(projected._projection.omittedPreserved).toBeUndefined();
+  });
+
   it('REGRESSION (EI-21197620758075816): rubric criterion check bindings survive the depth preview', () => {
     const criteria = Array.from({ length: 8 }, (_, i) => ({
       key: `criterion-${i}`,
