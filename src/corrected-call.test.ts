@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { buildCorrectedCall, correctedCallHint } from './corrected-call';
-import { argsAcceptedOnOtherVariant, unrecognizedArgKeys } from './define-tool';
+import {
+  argsAcceptedOnOtherVariant,
+  invalidInputCorrections,
+  unrecognizedArgKeys,
+} from './define-tool';
 import type { InvalidInputCorrection } from './dispatch-types';
 
 /**
@@ -212,6 +216,22 @@ describe('unrecognizedArgKeys on a discriminated union', () => {
     expect(unrecognizedArgKeys(unrecognizedCwd, ompLike, { cwd: '/x' })).toEqual([]);
     // An op matching no branch is equally ambiguous.
     expect(unrecognizedArgKeys(unrecognizedCwd, ompLike, { op: 'nope', cwd: '/x' })).toEqual([]);
+  });
+
+  it('never proposes a key as its own relocation target', () => {
+    // The defect the operator-core end-to-end test caught. The merged pool contains `cwd`
+    // (op=list/search/link declares it), so a name-only near-name search matches it
+    // EXACTLY for an op='get' call and returns `cwd -> cwd`. buildCorrectedCall would then
+    // setPath the value and delete the same key: the value is lost and the step claims
+    // 'relocated'. Both the branch-aware pool and the explicit self-target guard prevent
+    // it; this pins the outcome so neither can be removed silently.
+    const corrections = invalidInputCorrections(
+      unrecognizedCwd,
+      ompLike,
+      undefined,
+      { op: 'get', sessionId: 's1', cwd: '/x' },
+    );
+    expect(corrections.filter((c) => c.rejectedArg === 'cwd' && c.target === 'cwd')).toEqual([]);
   });
 
   it('end-to-end: the omp:sessions call gets a corrected call that says WHY', () => {
