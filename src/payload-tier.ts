@@ -156,6 +156,21 @@ export interface BoundedPayloadProjection {
      *  the per-path examples were shed. Absent means the sample list is as complete
      *  as GENERIC_PROJECTION_OMISSION_SAMPLES allows. */
     omittedSamplesDropped?: true;
+    /**
+     * Paths the caller EXPLICITLY selected (`preservePaths` — a `projection.pick`
+     * or a tool's own door declaration) that were nevertheless dropped.
+     *
+     * EI-22186855527494865: `omitted` is a SAMPLE list, and the sample-shedding
+     * ladder below trades it away entirely (to 5, then to 0) to buy budget back
+     * for content — so the one omission a caller cannot possibly infer, the
+     * absence of the field they asked for BY NAME, is exactly the one that gets
+     * shed. Measured on `plans:get { shipReadiness:true }`: `omittedCount:24`
+     * with `omitted:[]`, and no `shipReadiness` key, which reads as "nothing is
+     * blocking this plan" — a false green on a ship gate. This list is tiny,
+     * capped, and NEVER shed, because an unrequested field going missing is a
+     * detail while a REQUESTED one going missing inverts the reading.
+     */
+    omittedPreserved?: readonly string[];
     cursor: {
       /** Host-defined recovery cursors may page a durable spill instead of
        * re-running the producing tool. `full-detail` remains the default. */
@@ -255,6 +270,9 @@ interface ProjectionState {
    * Merged ahead of `omitted` when the metadata is assembled.
    */
   priorityOmitted: Array<{ path: string; reason: string }>;
+  /** Explicitly-preserved paths this walk dropped anyway — see
+   *  BoundedPayloadProjection._projection.omittedPreserved. */
+  preservedOmittedPaths: string[];
   active: WeakSet<object>;
   limits: { maxArray: number; maxDepth: number; maxKeys: number; maxString: number };
   /**
@@ -322,6 +340,79 @@ function preserveArrayChildPaths(
 
 function hasPreservedObjectChild(paths: readonly PreservePathSegment[][], key: string): boolean {
   return preserveObjectChildPaths(paths, key).length > 0;
+}
+
+/**
+ * Where this key sits in the caller's DECLARED preserve order — the index of the
+ * first `preservePaths` entry that selects it, or -1 when none does.
+ *
+ * EI-22186855527494865: a boolean "is preserved" flattened every selected path to
+ * ONE priority, so two preserved siblings tied and fell back to insertion order —
+ * and on `plans:get` the bulky one (`results[].items[].text`) is inserted before
+ * the small one (`results[].shipReadiness`), so a large plan's items ate the whole
+ * budget and the explicitly-requested ship verdict was still dropped. Measured: 22
+ * items survived it, 126 did not, and reordering the preserve LIST changed nothing
+ * because both entries ranked identically. Ranking by declared order makes the
+ * caller's own ordering the tie-break, which is the only signal available that says
+ * which of two requested fields matters more.
+ */
+function preservedChildRank(paths: readonly PreservePathSegment[][], key: string): number {
+  for (let i = 0; i < paths.length; i += 1) {
+    const path = paths[i];
+    if (path.length === 0 || (path[0].kind === 'key' && path[0].name === key)) return i;
+  }
+  return -1;
+}
+
+/** Cap on the paths named in `_projection.omittedPreserved` — a pointer list, not a manifest. */
+const PRESERVED_OMISSION_PATHS = 5;
+
+/**
+ * Record that an explicitly-preserved path was dropped anyway. Does NOT touch
+ * `omittedCount` — the caller has already counted this key inside its aggregate
+ * "remaining fields omitted" entry; this only makes the drop NAMEABLE.
+ */
+function notePreservedOmission(state: ProjectionState, path: string, reason: string): void {
+  if (state.priorityOmitted.length < GENERIC_PROJECTION_OMISSION_SAMPLES) {
+    state.priorityOmitted.push({ path, reason });
+  }
+  if (
+    state.preservedOmittedPaths.length < PRESERVED_OMISSION_PATHS &&
+    !state.preservedOmittedPaths.includes(path)
+  ) {
+    state.preservedOmittedPaths.push(path);
+  }
+}
+
+/** Name every explicitly-preserved key in a dropped tail of object entries. */
+function notePreservedDrops(
+  state: ProjectionState,
+  path: string,
+  dropped: ReadonlyArray<[string, unknown]>,
+  preservePaths: readonly PreservePathSegment[][],
+): void {
+  for (const [key] of dropped) {
+    if (preservedChildRank(preservePaths, key) < 0) continue;
+    notePreservedOmission(
+      state,
+      `${path}.${key}`,
+      'explicitly preserved field omitted to fit projection budget',
+    );
+  }
+}
+
+/** Union of preserved-omission path lists, in first-seen order, capped. */
+function unionPreservedPaths(
+  ...groups: ReadonlyArray<readonly string[] | undefined>
+): string[] {
+  const merged: string[] = [];
+  for (const group of groups) {
+    for (const path of group ?? []) {
+      if (merged.length >= PRESERVED_OMISSION_PATHS) return merged;
+      if (!merged.includes(path)) merged.push(path);
+    }
+  }
+  return merged;
 }
 
 /**
@@ -624,6 +715,25 @@ function identityPriority(key: string): number {
   return IDENTITY_FIELDS.has(key) ? 2 : IDENTITY_ENVELOPES.has(key) ? 1 : 0;
 }
 
+/** Base rank for an explicitly-preserved key — strictly above every identity tier. */
+const PRESERVED_PRIORITY_BASE = 100;
+
+/**
+ * Projection order for one object key: an explicitly-preserved key outranks every
+ * identity tier, and among preserved keys the caller's DECLARED order decides
+ * (earlier path wins). Falls back to `identityPriority` for everything else.
+ */
+function keyProjectionPriority(
+  preservePaths: readonly PreservePathSegment[][],
+  key: string,
+): number {
+  const rank = preservedChildRank(preservePaths, key);
+  if (rank < 0) return identityPriority(key);
+  // Floor at 6 so even a pathologically long preserve list still ranks every
+  // selected key above `id` (4) rather than sinking beneath the identity tiers.
+  return Math.max(6, PRESERVED_PRIORITY_BASE - rank);
+}
+
 function markPartial(projected: Record<string, unknown>, state: ProjectionState): void {
   if (projected[PARTIAL_FLAG_KEY] === true) return;
   projected[PARTIAL_FLAG_KEY] = true;
@@ -707,8 +817,8 @@ function projectIdentityPreview(
       )
       .sort(
         (a, b) =>
-          (hasPreservedObjectChild(preservePaths, b[0]) ? 5 : identityPriority(b[0])) -
-          (hasPreservedObjectChild(preservePaths, a[0]) ? 5 : identityPriority(a[0])),
+          keyProjectionPriority(preservePaths, b[0]) -
+          keyProjectionPriority(preservePaths, a[0]),
       );
     if (chosen.length === 0) {
       recordOmission(state, path, 'nested value omitted at projection depth limit');
@@ -721,6 +831,7 @@ function projectIdentityPreview(
       const keyCost = jsonLen(key) + 2;
       if (state.remaining < keyCost + 128) {
         recordOmission(state, `${path}.${key}`, 'remaining identity fields omitted to fit projection budget', chosen.length - chosenProjected);
+        notePreservedDrops(state, path, chosen.slice(chosenProjected), preservePaths);
         markPartial(projected, state);
         break;
       }
@@ -845,8 +956,8 @@ function projectValue(
     const prioritized = entries.length > 1
       ? [...entries].sort(
           (a, b) =>
-            (hasPreservedObjectChild(preservePaths, b[0]) ? 5 : identityPriority(b[0])) -
-            (hasPreservedObjectChild(preservePaths, a[0]) ? 5 : identityPriority(a[0])),
+            keyProjectionPriority(preservePaths, b[0]) -
+            keyProjectionPriority(preservePaths, a[0]),
         )
       : entries;
     const projected: Record<string, unknown> = {};
@@ -857,6 +968,7 @@ function projectValue(
       const keyCost = jsonLen(key) + 2;
       if (state.remaining < keyCost + 128) {
         recordOmission(state, `${path}.${key}`, 'remaining fields omitted to fit projection budget', shown.length - i);
+        notePreservedDrops(state, path, shown.slice(i), preservePaths);
         partial = true;
         break;
       }
@@ -871,6 +983,7 @@ function projectValue(
     }
     if (prioritized.length > shown.length) {
       recordOmission(state, `${path}.*`, `${prioritized.length - shown.length} object fields omitted`, prioritized.length - shown.length);
+      notePreservedDrops(state, path, prioritized.slice(shown.length), preservePaths);
     }
     if (partial) markPartial(projected, state);
     return projected;
@@ -905,6 +1018,7 @@ function projectCursorArgs(args: unknown): {
     omittedCount: 0,
     omitted: [],
     priorityOmitted: [],
+    preservedOmittedPaths: [],
     active: new WeakSet<object>(),
     limits: { maxArray: 12, maxDepth: 5, maxKeys: 40, maxString: 800 },
     // This projection BUILDS the cursor args, so it cannot point at the cursor
@@ -985,6 +1099,7 @@ export function projectBoundedPayload(
     omittedCount: 0,
     omitted: [],
     priorityOmitted: [],
+    preservedOmittedPaths: [],
     active: new WeakSet<object>(),
     limits: projectionTier === 'standard'
       ? { maxArray: 40, maxDepth: 8, maxKeys: 100, maxString: 2_500 }
@@ -1014,6 +1129,12 @@ export function projectBoundedPayload(
     // out of the sample by lower-priority field/depth entries recorded for the
     // elements that survived (EI-19965559011729712).
     omitted: [...state.priorityOmitted, ...state.omitted].slice(0, GENERIC_PROJECTION_OMISSION_SAMPLES),
+    // EI-22186855527494865: a separate, never-shed list. `omitted` above is a
+    // SAMPLE the ladder below trades away for content; a field the caller asked
+    // for BY NAME must stay nameable after that trade.
+    ...(state.preservedOmittedPaths.length > 0
+      ? { omittedPreserved: [...state.preservedOmittedPaths] }
+      : {}),
     cursor: opts.recovery?.cursor ?? {
       kind: 'full-detail',
       tool: opts.toolName,
@@ -1153,6 +1274,7 @@ export function projectBoundedPayload(
         omittedCount: 0,
         omitted: [],
         priorityOmitted: [],
+        preservedOmittedPaths: [],
         active: new WeakSet<object>(),
         limits: { maxArray: 6, maxDepth: 4, maxKeys: 24, maxString: 300 },
         // Same projection, narrower budget — the route that recovers is
@@ -1168,6 +1290,16 @@ export function projectBoundedPayload(
         // that reads as a real zero is the failure mode this whole block exists to
         // prevent.
         omittedCount: Math.max(leanMetadata.omittedCount, reState.omittedCount),
+        // The narrower re-walk can drop a preserved path the fuller walk kept, so
+        // union the two rather than carrying the first walk's list forward — an
+        // absent `omittedPreserved` must mean "nothing requested went missing".
+        ...(() => {
+          const merged = unionPreservedPaths(
+            leanMetadata.omittedPreserved,
+            reState.preservedOmittedPaths,
+          );
+          return merged.length > 0 ? { omittedPreserved: merged } : {};
+        })(),
         returnedChars: 0,
       };
       const candidate = buildResultFrom(rePreview, reMetadata);
@@ -1189,6 +1321,7 @@ export function projectBoundedPayload(
       omittedCount: 0,
       omitted: [],
       priorityOmitted: [],
+      preservedOmittedPaths: [],
       active: new WeakSet<object>(),
       limits: { maxArray: 8, maxDepth: 3, maxKeys: 20, maxString: 300 },
       // The identity-only husk drops the MOST, so its markers are the ones a
@@ -1211,7 +1344,15 @@ export function projectBoundedPayload(
         identityFields[key] = projectValue(sourceFields[key], `$.${key}`, 0, identityState);
       }
     }
-    const fallbackMetadata = { ...leanMetadata, returnedChars: 0 };
+    const fallbackPreserved = unionPreservedPaths(
+      leanMetadata.omittedPreserved,
+      identityState.preservedOmittedPaths,
+    );
+    const fallbackMetadata = {
+      ...leanMetadata,
+      ...(fallbackPreserved.length > 0 ? { omittedPreserved: fallbackPreserved } : {}),
+      returnedChars: 0,
+    };
     result =
       opts.preserveArrayRoot && Array.isArray(identityOnly)
         ? buildArrayRootResult(identityOnly, fallbackMetadata)
