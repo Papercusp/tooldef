@@ -204,7 +204,15 @@ describe('applyPayloadTier', () => {
       args: {},
       log,
     });
-    expect(out).toBe(fat); // unshaped, byte-identical
+    // `data` itself stays unshaped and byte-identical — no shaper ran, no
+    // ceiling force-shape ran. EI-22167228731928620: the envelope now ALSO
+    // carries `explicitFullRequest: true` so a downstream consumer that only
+    // sees `_meta` (the MCP transport's result-door, a separate later size
+    // pass with no visibility into this call's args) can tell `data` is the
+    // tool's true raw output and must not be re-projected generically if it
+    // overflows the transport door.
+    expect(out.data).toBe(fat.data);
+    expect(out.explicitFullRequest).toBe(true);
     expect(log).not.toHaveBeenCalled();
   });
 
