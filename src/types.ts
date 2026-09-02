@@ -378,11 +378,22 @@ export interface ToolGuidance {
    * `w.state` (really `results[0].workItem.state`, with `checkpoint` a SIBLING
    * of `workItem`). Both returned `ok:true` with every field empty.
    *
-   * This is a DOC string, deliberately not a schema: it costs nothing to add,
-   * cannot change serialization (unlike declaring `result`, which switches the
-   * response through the column encoder), and is surfaced verbatim by
-   * `tools:find` / `agent_tools:list` so an agent reads the shape BEFORE calling.
-   * Prefer it on any tool an agent is likely to batch over.
+   * This is a DOC string, deliberately not a schema: it cannot change
+   * serialization (unlike declaring `result`, which switches the response
+   * through the column encoder), and is surfaced verbatim by `tools:find` /
+   * `agent_tools:list` so an agent reads the shape BEFORE calling. Prefer it on
+   * any tool an agent is likely to batch over.
+   *
+   * ⚠ It is a COMPANION to `result`, not a substitute for it. Prose describing a
+   * response SHAPE is a second, unverifiable type system that drifts from the
+   * handler silently, so `returns` should INTERPRET a registered result (when a
+   * field is absent vs null, which branch sets what) while `result` defines the
+   * shape. Consumers may enforce that pairing — Papercusp does, at
+   * `lint:guidance-returns-schema` and in
+   * `guidance-output-schema-live-guard.test.ts` — so adding `returns` alone to a
+   * tool that registers no `result` is the one edit to avoid. This note is here
+   * because it is the surface an EDITOR of an existing tool actually reads
+   * (EI-22189589517637049).
    */
   returns?: string;
   /**
