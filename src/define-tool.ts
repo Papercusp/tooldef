@@ -2456,9 +2456,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
       if (reencodable !== undefined) {
         return disclose(serializeProjectedResult({ data: reencodable } as ToolResponse, handlerCtx, eligibility, def, readColumns, parsed.value));
       }
-      // See the twin in `registerLegacyAsProjected`: the `await` is what stops `disclose`
-      // spreading a Promise to `{}` and dropping the handler's output on a corrected call.
-      return disclose(await attachRequestedStructuredContent(out as ToolResult, handlerCtx, def));
+      return disclose(attachRequestedStructuredContent(out as ToolResult, handlerCtx, def));
     }
 
     // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
