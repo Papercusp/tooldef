@@ -265,7 +265,34 @@ export function validateSync<S extends StandardSchemaV1>(
  * a tied-depth branch means fewer respects in which that branch disagrees
  * with the input, i.e. a closer match; break further ties by declaration
  * order, as before, so this only ever sharpens an existing ambiguous case.
+ *
+ * EI-22050255299103531 / EI-22063684320590166: an `unrecognized_keys` issue
+ * DOES locate a specific field — it just records the name in `keys` rather
+ * than in `path`, so measuring depth by `path.length` alone scored it 0 and
+ * the rule above ("a depth-0 branch never wins once another located a field")
+ * discarded it by construction. That inverts the ranking in the one case
+ * where the validator has already identified the caller's exact mistake: for
+ * facts:assert's 6-way union, a private fact carrying one stray legacy key
+ * (`ttlDays`, `source_ref`) produces a branch whose ONLY complaint is that
+ * key — the closest possible match — while every sibling branch reports its
+ * own missing required fields at path-depth 1 and wins. Both reports show the
+ * result: "harness: expected string; shareable: expected true; Unrecognized
+ * key: <theirs>", which teaches the caller to add federation fields they
+ * never wanted and buries the one actionable word at the end.
+ *
+ * So count an unrecognized key at the depth of the key it names (its path,
+ * plus the one level the key itself sits at). A branch that matched
+ * everything except a stray key then ranks as the specific match it is, and
+ * the fewest-issues tie-break above selects it over branches that disagree in
+ * more respects. This only re-ranks branches that already carry a named key;
+ * a union with no unrecognized keys is scored exactly as before.
  */
+function issueDepth(issue: StandardSchemaV1.Issue): number {
+  const pathDepth = (issue.path ?? []).length;
+  const keys = (issue as IssueExtras).keys;
+  return Array.isArray(keys) && keys.length > 0 ? pathDepth + 1 : pathDepth;
+}
+
 function bestUnionBranch(
   issue: StandardSchemaV1.Issue,
 ): ReadonlyArray<StandardSchemaV1.Issue> | null {
@@ -276,7 +303,7 @@ function bestUnionBranch(
   let bestCount = Infinity;
   for (const branch of branches) {
     if (!Array.isArray(branch) || branch.length === 0) continue;
-    const depth = Math.max(...branch.map((i) => (i.path ?? []).length));
+    const depth = Math.max(...branch.map(issueDepth));
     if (depth > bestDepth || (depth === bestDepth && branch.length < bestCount)) {
       bestDepth = depth;
       bestCount = branch.length;
