@@ -19,6 +19,12 @@ import { type ZodTypeAny } from 'zod';
 import { tierFor } from './capability-tiers';
 import { toJsonSchema } from './schema-adapter';
 import { standardValidate, formatIssues, issuesAreValueLevel, issueLeaves, type StandardSchemaV1 } from './standard-schema';
+import {
+  applyArgReencodings,
+  correctedDisclosure,
+  type AppliedArgCorrection,
+  type ArgReencoding,
+} from './reencode-args';
 import { register } from './registry';
 import { collectToolEmits } from './emits-registry';
 import {
@@ -1785,6 +1791,64 @@ function makeInvalidInputError(
         : failingFieldSchemaHint(issues, rawSchema) || argsSchemaHint(rawSchema, schemaHintCache)),
     metadata,
   );
+}
+
+/**
+ * P-016 / D-104 — the EXECUTE half. Consulted ONLY after `standardValidate` has already
+ * failed: apply the tool's registered RE-ENCODINGS and re-validate the result.
+ *
+ * Returns null when nothing applied or the repair still does not validate, so the caller
+ * falls through to the ordinary `makeInvalidInputError` refusal with its ORIGINAL issues.
+ * That fallback matters: a rule that fires but leaves a different field broken must not
+ * replace the caller's real diagnosis with a confusing second-order one.
+ *
+ * Ordering is deliberate — validate first, repair second. A rule can therefore never
+ * re-shape a call that was already valid, which keeps this a repair path and not a silent
+ * behaviour change on the hot path (and costs a registered tool nothing until it refuses).
+ */
+async function reencodeAndRevalidate<S extends StandardSchemaV1>(
+  schema: S,
+  argReencodings: readonly ArgReencoding[] | undefined,
+  shimmed: unknown,
+): Promise<{
+  value: StandardSchemaV1.InferOutput<S>;
+  corrections: readonly AppliedArgCorrection[];
+} | null> {
+  const attempt = applyArgReencodings(argReencodings, shimmed);
+  if (!attempt) return null;
+  const retry = await standardValidate(schema, attempt.input);
+  if (!retry.ok) return null;
+  return { value: retry.value, corrections: attempt.corrections };
+}
+
+/**
+ * Announce an auto-correction on the result that the corrected call produced.
+ *
+ * PROMINENT means FIRST (D-105: help the reader has to scroll past is help they did not
+ * get), so the line is prepended to `content` rather than appended. The structured
+ * `corrected:[{path,sent,ran,rule}]` rides `_meta` unconditionally — that is the half
+ * EI-10883 requires, and it must not depend on a caller having negotiated
+ * `structuredContent`.
+ */
+function attachCorrectedDisclosure(
+  result: ToolResult,
+  corrections: readonly AppliedArgCorrection[],
+): ToolResult {
+  if (corrections.length === 0) return result;
+  const structured = result.structuredContent;
+  return {
+    ...result,
+    content: [{ type: 'text', text: correctedDisclosure(corrections) }, ...(result.content ?? [])],
+    ...(structured && typeof structured === 'object' && !Array.isArray(structured)
+      ? {
+          structuredContent: {
+            ...(structured as Record<string, unknown>),
+            corrected: corrections,
+          },
+        }
+      : {}),
+    _meta: { ...(result._meta ?? {}), corrected: corrections },
+  };
 }
 
 /**
