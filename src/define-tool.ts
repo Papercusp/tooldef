@@ -1739,6 +1739,59 @@ export function isLocalSchemaTarget(target: string, keys: readonly string[]): bo
   return root !== undefined && root.length > 0 && keys.includes(root);
 }
 
+/** The tool name at the head of a `seeAlso` entry (`'work_items:claim (claim a SPECIFIC id)'`). */
+function seeAlsoToolName(entry: unknown): string | null {
+  if (entry && typeof entry === 'object') {
+    const tool = (entry as { tool?: unknown }).tool;
+    return typeof tool === 'string' && tool.length > 0 ? tool : null;
+  }
+  if (typeof entry !== 'string') return null;
+  const head = /^\s*([A-Za-z][\w.-]*[:.][\w.-]+)/.exec(entry);
+  return head?.[1] ?? null;
+}
+
+/**
+ * EI-21681203906419973 — the rejected key is an exact declared arg of a SIBLING tool
+ * that this tool's own `seeAlso` already names.
+ *
+ * The measured failure: `scheduler:get_next` was called with `count`, which is a real,
+ * documented argument — of `work_items:claim_next`, the sibling self-select verb that
+ * get_next's `seeAlso` literally lists. The caller reached for the neighbour's arg on
+ * this tool and the rejection could only answer "this tool accepts ONLY: …", so the
+ * filing concluded the live build had drifted from its documentation. It had not: no
+ * revision of get_next has ever declared `count`. Naming the tool that DOES own the key
+ * turns a suspected server/doc drift into a one-line redirect.
+ *
+ * Wholly DERIVED (rung 1) — both halves already exist: this tool's authored `seeAlso`
+ * scopes the search to genuine neighbours, and the sibling's own declared schema answers
+ * whether it owns the key. Nothing new is hand-maintained, so it cannot drift out of step
+ * with either tool. Deliberately EXACT-match and seeAlso-scoped: a catalog-wide hunt for
+ * any tool declaring `count` would name a dozen unrelated verbs and be worse than silence.
+ *
+ * Exported for direct unit test — see strict-args.test.ts.
+ */
+export function siblingToolArgOwner(
+  toolName: string | undefined,
+  rejectedKey: string,
+  tools: readonly { name: string; inputSchema?: unknown; guidance?: { seeAlso?: unknown } }[],
+): string | null {
+  if (!toolName) return null;
+  const self = tools.find((tool) => tool.name === toolName);
+  const seeAlso = self?.guidance?.seeAlso;
+  // Function-form seeAlso projects as the literal 'runtime-resolved' (it is computed from
+  // a RESULT, which a rejected call never produced) — nothing to scope against.
+  if (!Array.isArray(seeAlso)) return null;
+  for (const entry of seeAlso) {
+    const siblingName = seeAlsoToolName(entry);
+    if (!siblingName || siblingName === toolName) continue;
+    const sibling = tools.find((tool) => tool.name === siblingName);
+    if (!sibling) continue;
+    const props = mergedSchemaProperties(sibling.inputSchema);
+    if (props && rejectedKey in props) return siblingName;
+  }
+  return null;
+}
+
 // Exported for direct unit test alongside its sibling correction sources
 // (`nestedArgPaths`, `suggestArgName`) — see strict-args.test.ts.
 export function unknownArgHint(
@@ -1747,6 +1800,9 @@ export function unknownArgHint(
   argRedirects?: Record<string, string | ProjectedToolCorrectiveCall>,
   /** See `invalidInputCorrections` — enables the value-admissibility filter. */
   input?: unknown,
+  /** This tool's own name, so a rejected key can be traced to a `seeAlso` sibling that
+   *  declares it (EI-21681203906419973). Omitted: the sibling leg simply stays silent. */
+  toolName?: string,
 ): string {
   const { msgs } = leafIssueSummary(issues);
   if (!/nrecognized key/i.test(msgs)) return '';
