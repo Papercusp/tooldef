@@ -129,6 +129,42 @@ describe.each([
     expect(textOf(out.result)).toContain('handler ran');
   });
 
+  it('KEEPS the whole handler payload beside the notice, every block of it', async () => {
+    // The second defect this file caught. `attachRequestedStructuredContent` is async, so the
+    // first cut handed `disclose` a PROMISE — which spreads to `{}`. Every corrected call
+    // returned the correction notice and NOTHING ELSE: the caller was told their call succeeded
+    // while its entire result was silently discarded. It reads as a passing repair right up
+    // until you look at what came back, and a single-block handler makes it easy to miss, so
+    // this asserts on a MULTI-block payload and on order.
+    let seen: unknown;
+    defineTool({
+      name: `test:reencode-payload-${slug}`,
+      capability: 'test:read',
+      description: 'fixture',
+      args: ARGS as never,
+      ...(roleGated ? { requirePrincipal: false as const, agentRoles: ['worker'] } : {}),
+      argReencodings: [UNWRAP_REFS],
+      async handler(args: unknown) {
+        seen = args;
+        return {
+          content: [
+            { type: 'text', text: 'first block' },
+            { type: 'text', text: 'second block' },
+          ],
+        };
+      },
+    } as never);
+
+    const out = await call(`test:reencode-payload-${slug}`, { refs: [{ ref: 'WI-1' }] });
+
+    expect(seen).toEqual({ refs: ['WI-1'] });
+    expect(out.result?.content?.map((c) => c.text)).toEqual([
+      expect.stringContaining('AUTO-CORRECTED AND RAN'),
+      'first block',
+      'second block',
+    ]);
+  });
+
   it('discloses the correction FIRST in the content and structurally in _meta', async () => {
     fixture(`test:reencode-discloses-${slug}`, { roleGated, reencodings: [UNWRAP_REFS] });
 

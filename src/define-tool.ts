@@ -2261,7 +2261,12 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       if (reencodable !== undefined) {
         return disclose(serializeProjectedResult({ data: reencodable } as ToolResponse, ctx, eligibility, def, readColumns, parsed.value));
       }
-      return disclose(attachRequestedStructuredContent(response as ToolResult, ctx, def));
+      // `await` is load-bearing, not tidiness: `attachRequestedStructuredContent` is async, so
+      // handing `disclose` the PROMISE spreads to `{}` and silently discards the handler's
+      // entire output — every corrected call would return the notice and nothing else. The
+      // pre-P-016 code returned the promise directly (correct from an async fn), which is
+      // exactly why wrapping it is the step that needs the await.
+      return disclose(await attachRequestedStructuredContent(response as ToolResult, ctx, def));
     }
     // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
     // the session/call tier before format-aware serialization. Unshaped tools
@@ -2442,7 +2447,9 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
       if (reencodable !== undefined) {
         return disclose(serializeProjectedResult({ data: reencodable } as ToolResponse, handlerCtx, eligibility, def, readColumns, parsed.value));
       }
-      return disclose(attachRequestedStructuredContent(out as ToolResult, handlerCtx, def));
+      // See the twin in `registerLegacyAsProjected`: the `await` is what stops `disclose`
+      // spreading a Promise to `{}` and dropping the handler's output on a corrected call.
+      return disclose(await attachRequestedStructuredContent(out as ToolResult, handlerCtx, def));
     }
 
     // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
