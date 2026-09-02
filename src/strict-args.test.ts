@@ -21,6 +21,7 @@ import {
   suggestArgName,
   toArgsJsonSchema,
   unknownArgHint,
+  siblingToolArgOwner,
 } from './define-tool';
 
 /** Zod 4 exposes safeParse on the schema; keep the test honest about the shape. */
@@ -324,6 +325,95 @@ describe('unknownArgHint tools:invoke envelope hint (EI-21826333890701824)', () 
     const out = unknownArgHint(oneKey, schema, undefined, { name: 'x' });
     expect(out).toContain('this tool accepts ONLY');
     expect(out).not.toContain('ENVELOPE');
+  });
+});
+
+describe('unknownArgHint _meta request-envelope hint (EI-21675134570053141)', () => {
+  // `_meta` rides the JSON-RPC `params`, beside the tool's `arguments` — so a caller who
+  // puts it INSIDE args gets an ordinary unrecognized-key rejection that cannot say which
+  // LAYER the key belongs to. The measured filing concluded a timed-out claim could not be
+  // replayed at all; the replay was in fact already automatic at the proxy.
+  const schema = { properties: { harness: {}, heldPaths: {}, states: {} } };
+  const issues = [{ message: 'Unrecognized key: "_meta"', keys: ['_meta'] }];
+
+  it('names the envelope AND that the key is injected for you', () => {
+    const out = unknownArgHint(issues, schema, undefined, {
+      _meta: { idempotencyKey: 'k-1' },
+    });
+    expect(out).toContain('MCP request ENVELOPE');
+    expect(out).toContain('reuses it across retries');
+  });
+
+  it('does NOT fire for a tool that genuinely declares _meta', () => {
+    const metaSchema = { properties: { _meta: {}, harness: {} } };
+    const other = [{ message: 'Unrecognized key: "nope"', keys: ['nope'] }];
+    const out = unknownArgHint(other, metaSchema, undefined, { nope: 1 });
+    expect(out).not.toContain('MCP request ENVELOPE');
+  });
+});
+
+describe('siblingToolArgOwner (EI-21681203906419973)', () => {
+  // `scheduler:get_next` was called with `count` — a real, documented argument, of the
+  // SIBLING verb its own see-also names. No revision of get_next ever declared it, so the
+  // bare "accepts ONLY" rejection read as live-build/doc drift rather than a wrong target.
+  const tools = [
+    {
+      name: 'scheduler:get_next',
+      inputSchema: { properties: { harness: {}, heldPaths: {}, states: {} } },
+      guidance: {
+        seeAlso: [
+          'work_items:claimable (how many are claimable, WITHOUT claiming)',
+          'work_items:claim_next (plain oldest-first self-select, no spec)',
+        ],
+      },
+    },
+    { name: 'work_items:claim_next', inputSchema: { properties: { harness: {}, count: {} } } },
+    { name: 'work_items:claimable', inputSchema: { properties: { harness: {} } } },
+    // Declares `count` but is NOT in get_next's see-also — the scope control.
+    { name: 'unrelated:census', inputSchema: { properties: { count: {} } } },
+  ];
+
+  it('names the see-also sibling that declares the rejected key', () => {
+    expect(siblingToolArgOwner('scheduler:get_next', 'count', tools)).toBe('work_items:claim_next');
+  });
+
+  it('accepts a structured see-also pointer, not just a leading-token string', () => {
+    const pointerTools = [
+      {
+        name: 'a:one',
+        inputSchema: { properties: { x: {} } },
+        guidance: { seeAlso: [{ tool: 'b:two', reason: 'the other lens' }] },
+      },
+      { name: 'b:two', inputSchema: { properties: { cursor: {} } } },
+    ];
+    expect(siblingToolArgOwner('a:one', 'cursor', pointerTools)).toBe('b:two');
+  });
+
+  it('stays silent for a key no see-also sibling declares', () => {
+    expect(siblingToolArgOwner('scheduler:get_next', 'bogusArg', tools)).toBeNull();
+  });
+
+  it('does NOT reach outside see-also, even when another tool declares the key', () => {
+    const narrow = tools.map((tool) =>
+      tool.name === 'scheduler:get_next'
+        ? { ...tool, guidance: { seeAlso: ['work_items:claimable (no count here)'] } }
+        : tool,
+    );
+    // `unrelated:census` and `work_items:claim_next` both declare `count`; neither is linked.
+    expect(siblingToolArgOwner('scheduler:get_next', 'count', narrow)).toBeNull();
+  });
+
+  it('stays silent for a function-form (runtime-resolved) see-also', () => {
+    const runtime = [
+      { name: 'a:one', inputSchema: { properties: {} }, guidance: { seeAlso: 'runtime-resolved' } },
+      { name: 'b:two', inputSchema: { properties: { count: {} } } },
+    ];
+    expect(siblingToolArgOwner('a:one', 'count', runtime)).toBeNull();
+  });
+
+  it('stays silent without a tool name, and for an unregistered tool', () => {
+    expect(siblingToolArgOwner(undefined, 'count', tools)).toBeNull();
+    expect(siblingToolArgOwner('nope:missing', 'count', tools)).toBeNull();
   });
 });
 
