@@ -512,6 +512,61 @@ describe('suggestArgName', () => {
     expect(suggestArgName('code', ['script', 'timeout_ms'])).toBe('script');
   });
 
+  /**
+   * EI-21670512679890540 / EI-21679236680294291 — `<declaredKey><TypeSuffix>`.
+   *
+   * Distance scores by characters, so a 4-char suffix (`plan` -> `planSlug`) exceeds
+   * the `max(len)/3` threshold of 2 and the match was refused. The caller was then
+   * told the tool "declares no counterpart" and handed a corrected call with `plan`
+   * DROPPED — invalid, since `plan` is required. Two agents hit it 2h19m apart.
+   */
+  it('maps a declared key wearing a type suffix (EI-21670512679890540)', () => {
+    expect(suggestArgName('planSlug', ['plan', 'harness'])).toBe('plan');
+    expect(suggestArgName('plan_slug', ['plan', 'harness'])).toBe('plan');
+    expect(suggestArgName('harnessName', ['plan', 'harness'])).toBe('harness');
+    expect(suggestArgName('scopeRef', ['scope', 'body'])).toBe('scope');
+  });
+
+  /**
+   * The CONTROL for the rule above, and the reason it is a closed suffix set rather
+   * than a prefix or containment test: `planetarium` starts with `plan` too. A general
+   * rule would relocate an unrelated argument onto `plan` with full confidence — the
+   * precise failure (a confident misdirection teaching a false vocabulary) that the
+   * suffix rung is meant to fix, merely pointed elsewhere.
+   */
+  it('does not treat an arbitrary prefix as a type suffix', () => {
+    expect(suggestArgName('planetarium', ['plan', 'harness'])).not.toBe('plan');
+    expect(suggestArgName('keyboard', ['key', 'harness'])).not.toBe('key');
+  });
+
+  /**
+   * ISOLATION CONTROL — proves the SUFFIX SET produced the match above, not a widened
+   * distance rule. `planSlug` and `planZorf` are both 8 chars and both sit at edit
+   * distance 4 from `plan`, past the threshold of 2; the only thing separating them is
+   * membership in ARG_TYPE_SUFFIXES. Without this pair, a future change that simply
+   * loosened the distance threshold would keep the tests above green while quietly
+   * reintroducing the confident-misdirection failure they exist to prevent.
+   */
+  it('matches on suffix-set membership, not on a loosened edit distance', () => {
+    expect(suggestArgName('planSlug', ['plan', 'harness'])).toBe('plan');
+    expect(suggestArgName('planZorf', ['plan', 'harness'])).toBeNull();
+  });
+
+  /**
+   * A suffix match must not override proof that the destination cannot hold the value
+   * (`candidateRefutesValue`): `scope` here is an enum that does not admit the slug,
+   * so the relocation is refuted and the rung stays silent rather than advising a
+   * move that would fail on the next call.
+   */
+  it('does not suffix-match onto a destination whose enum refuses the value', () => {
+    expect(
+      suggestArgName('scopeRef', ['scope', 'harness'], {
+        value: 'papercusp',
+        props: { scope: { enum: ['workspace', 'owner'] } },
+      }),
+    ).not.toBe('scope');
+  });
+
   it('maps the EI-13475 semantic near-synonyms distance alone cannot reach', () => {
     // The 2026-07-17 live incidents, verbatim: plans:new { summary } and
     // improvements:capture { harness } both got a bare key list because the
