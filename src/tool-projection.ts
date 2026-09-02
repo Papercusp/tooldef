@@ -1735,6 +1735,27 @@ function availabilityProblem(tool: ProjectedTool, context: ProjectedToolAvailabi
   return null;
 }
 
+/**
+ * Is this tool REGISTERED and admitted under `context` — asked WITHOUT throwing.
+ *
+ * The distinction this exists to draw: a redirect pointing at a tool that does not
+ * exist is a registry defect and must fail render/CI loudly, but a tool that merely
+ * is not admitted to the CURRENT role/profile/modality is an ordinary scoping fact.
+ * A renderer that walks a role-independent tool list needs to tell those apart, and
+ * `projectedToolCallContract` deliberately cannot — it throws for both.
+ *
+ * Returns false for an absent tool too, so a caller that wants the loud failure keeps
+ * using the throwing form; this is only for "should I render this extra?" decisions.
+ */
+export function projectedToolAdmitted(
+  name: string,
+  context: ProjectedToolAvailability = {},
+): boolean {
+  const tool = lookupByMcpName(name);
+  if (!tool?.expose.mcp) return false;
+  return availabilityProblem(tool, context) === null;
+}
+
 /** Resolve one exact, currently callable registry contract or fail render/CI loudly. */
 export function projectedToolCallContract(
   name: string,
