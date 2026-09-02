@@ -308,6 +308,20 @@ export interface ToolResponse<T = unknown> {
     returnedChars: number;
     omittedCount: number;
   };
+  /**
+   * Set by payload-tier shaping (payload-tier.ts) when an EXPLICIT per-call
+   * `payloadTier:'full'` (or an equivalent transport-cap exemption) skipped
+   * both the tool's own tier shaper AND the hard-ceiling force-shape — i.e.
+   * `data` is the tool's true raw, unshaped output, never trimmed by a
+   * domain-aware shaper. Mirrors `payloadProjection` above so a downstream
+   * consumer that only sees `_meta` (the per-result door, result-door.ts) can
+   * tell the caller deliberately opted out of shaping, WITHOUT parsing the
+   * serialized body. This is what lets the door choose "spill the full body
+   * and point at it" over "silently re-project it with a generic, field-blind
+   * walk that can leave LESS inline than a plain 'trimmed' call would have"
+   * (EI-22167228731928620).
+   */
+  explicitFullRequest?: boolean;
   /** Pagination cursor (for list tools that support it). */
   nextCursor?: string;
   /**

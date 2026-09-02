@@ -1355,7 +1355,18 @@ export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
   //    domain-specific shaper, then fall back to the generic bounded projection.
   //    An EXPLICIT payloadTier:'full' call opts out (see explicitFullRequest) —
   //    that is the documented escape hatch, and the UI/sync in-process path.
-  if (explicitFullRequest) return out;
+  // EI-22167228731928620: mark the response as an explicit-full opt-out, not
+  // just silently return it unshaped. Without this, the MCP transport's
+  // result-door (result-door.ts) — a SEPARATE, later size-enforcement pass
+  // with no visibility into `explicitFullRequest` at all — cannot tell this
+  // apart from an ordinary oversized payload, and re-projects it with a
+  // generic, field-blind walk when it overflows the transport door. That
+  // walk has no idea a field like `summary` deserves the priority a tool's
+  // own shaper gives it, so a caller who explicitly asked for 'full' could
+  // end up with LESS inline detail than a plain 'trimmed' call — worse, not
+  // better, than the tier they opted out of. The marker lets the door choose
+  // "spill the untouched full body and point at it" instead.
+  if (explicitFullRequest) return { ...out, explicitFullRequest: true };
   const size = jsonLen(out.data);
   if (size > ceiling) {
     const smallest = shape?.trimmed ?? shape?.standard;
