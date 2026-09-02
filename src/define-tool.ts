@@ -32,6 +32,7 @@ import {
   projectedToolRegistryRevision,
   renderProjectedToolCall,
   registerProjectedTool,
+  listAllProjectedTools,
   recordToolShapers,
   type ProjectedToolCorrectiveCall,
   type ToolFn,
@@ -1861,8 +1862,40 @@ export function unknownArgHint(
         + ' directly with its own declared args at top level, or dispatch it through'
         + ' `tools:invoke { name, args }`.'
       : '';
+  // EI-21675134570053141: `_meta` is the JSON-RPC/MCP REQUEST envelope (it sits on
+  // `params`, sibling to the tool's `arguments`), never a tool arg — so a caller who
+  // puts it inside args gets an ordinary unrecognized-key rejection that cannot say
+  // which LAYER the key belongs to. The measured filing: a timed-out
+  // `scheduler:get_next` returned an idempotency key, the caller tried to replay it as
+  // `_meta.idempotencyKey` through `tools:invoke`, was rejected, and concluded the
+  // replay was impossible. It was already automatic — the proxy injects
+  // `params._meta.idempotencyKey` once per request and reuses it across every retry so
+  // the server dedups the replay (mcp-proxy/proxy.ts), and a valid client-supplied key
+  // on the ENVELOPE is respected rather than overwritten. Fires only when the tool does
+  // not itself declare `_meta`.
+  const metaEnvelopeText =
+    unknownKeys.includes('_meta') && !keys.includes('_meta')
+      ? ' `_meta` is the MCP request ENVELOPE (it rides on the JSON-RPC `params`, beside'
+        + " the tool's `arguments`), not an arg of any tool — passing it inside args"
+        + ' rejects it here. You do not need to set `_meta.idempotencyKey` yourself: the'
+        + ' proxy injects one per request and reuses it across retries so a replay dedups'
+        + ' instead of double-applying.'
+      : '';
+  // EI-21681203906419973: the key may be a real, documented arg — of a SIBLING tool this
+  // tool's own `seeAlso` names. Rendered after the envelope legs because those diagnose a
+  // wrong call LAYER, which outranks a wrong call TARGET.
+  const siblingText = unknownKeys
+    .flatMap((rejectedArg) => {
+      const owner = siblingToolArgOwner(toolName, rejectedArg, listAllProjectedTools());
+      return owner
+        ? [` \`${rejectedArg}\` is not an arg of this tool, but \`${owner}\` (listed in this`
+          + " tool's see-also) does declare it — check you did not reach for the neighbour's"
+          + ' argument here.']
+        : [];
+    })
+    .join('');
   return (
-    ` — this tool accepts ONLY: ${keys.join(', ')}.${ambientText}${envelopeText}${redirectText}${correctionText}` +
+    ` — this tool accepts ONLY: ${keys.join(', ')}.${ambientText}${envelopeText}${metaEnvelopeText}${siblingText}${redirectText}${correctionText}` +
     ' An undeclared arg is REJECTED, not silently ignored (EI-10883): passing an arg a tool does not declare used to return ok:true' +
     ` while quietly doing something else, which is indistinguishable from success.${reSendHint}` +
     // EI-19953470656367880: an unrecognized-key rejection is ALSO the exact shape a
@@ -1904,7 +1937,7 @@ function makeInvalidInputError(
     ...(corrected ? { correctedCall: corrected } : {}),
   };
   return new InvalidInputError(
-    `invalid_args: ${formatIssues(issues, input)}${correctedCallHint(corrected)}${unknownArgHint(issues, rawSchema, argRedirects)}` +
+    `invalid_args: ${formatIssues(issues, input)}${correctedCallHint(corrected)}${unknownArgHint(issues, rawSchema, argRedirects, input, toolName)}` +
       // EI-21353729155349111: the value-level branch appends no SCHEMA (EI-10943 — a
       // caller who knows the shape and sent a bad value learns nothing from a 1,800-char
       // dump), but "the constraint that just refused you may not exist in the tree any
