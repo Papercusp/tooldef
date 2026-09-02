@@ -439,6 +439,23 @@ describe('dispatchProjectedTool', () => {
         target: 'work_items:tag { id, topic }',
         kind: 'authored-redirect',
       }],
+      // P-015 (WI-2141831) added the corrected call to this same metadata object, so it
+      // rides into BOTH the error meta and telemetry. Declared explicitly rather than
+      // relaxed to objectContaining: this deep-equal is what catches a new field entering
+      // telemetry unannounced, which is exactly how it caught this one.
+      //
+      // `tags` is DROPPED, not relocated, and that is deliberate: buildCorrectedCall skips
+      // `authored-redirect` corrections when resolving destinations (corrected-call.ts)
+      // because such a redirect points at a DIFFERENT tool, so its value cannot be moved
+      // within this call. Leaving the key would just re-trigger the same rejection; the
+      // redirect's own rendered call still says where the value belongs.
+      correctedCall: {
+        tool: 'test:invalid-input-provenance',
+        args: { id: 'WI-1', topic: 'ops' },
+        steps: [{ rejectedArg: 'tags', action: 'dropped' }],
+        rendered: expect.stringContaining('test:invalid-input-provenance('),
+        droppedUnaccepted: true,
+      },
     };
     expect(result.ok).toBe(false);
     expect(result.error?.meta?.invalidInput).toEqual(expected);

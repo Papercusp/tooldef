@@ -104,8 +104,11 @@ function fixture(
 const call = (name: string, input: unknown) =>
   dispatchProjectedTool(lookupByMcpName(name)!, name, input, ctx({ role: 'worker' }), DEPS);
 
-const textOf = (result: { content?: Array<{ type: string; text?: string }> } | undefined) =>
-  (result?.content ?? []).map((c) => c.text ?? '').join('\n');
+/** `content` is a text|image|resource union; every fixture here returns text blocks. */
+const texts = (result: { content?: readonly unknown[] } | undefined): string[] =>
+  (result?.content ?? []).map((c) => (c as { text?: string }).text ?? '');
+
+const textOf = (result: { content?: readonly unknown[] } | undefined) => texts(result).join('\n');
 
 /**
  * Both registration paths must carry the repair. Which one a tool lands in is decided by
@@ -158,11 +161,38 @@ describe.each([
     const out = await call(`test:reencode-payload-${slug}`, { refs: [{ ref: 'WI-1' }] });
 
     expect(seen).toEqual({ refs: ['WI-1'] });
-    expect(out.result?.content?.map((c) => c.text)).toEqual([
+    expect(texts(out.result)).toEqual([
       expect.stringContaining('AUTO-CORRECTED AND RAN'),
       'first block',
       'second block',
     ]);
+  });
+
+  it('keeps the payload on the JSON/serialized branch too, not just the raw-text one', async () => {
+    // The branch coverage gap the typechecker found after the suite was already green: a
+    // single-text-item JSON body takes the `serializeProjectedResult` path instead of the raw
+    // passthrough, and that producer is async as well. Four such sites carried the same
+    // promise defect while every assertion above passed, because no fixture returned JSON.
+    defineTool({
+      name: `test:reencode-json-${slug}`,
+      capability: 'test:read',
+      description: 'fixture',
+      args: ARGS as never,
+      ...(roleGated ? { requirePrincipal: false as const, agentRoles: ['worker'] } : {}),
+      argReencodings: [UNWRAP_REFS],
+      async handler() {
+        return { content: [{ type: 'text', text: JSON.stringify({ rows: [{ id: 1 }] }) }] };
+      },
+    } as never);
+
+    const out = await call(`test:reencode-json-${slug}`, { refs: [{ ref: 'WI-1' }] });
+
+    expect(out.ok).toBe(true);
+    const joined = textOf(out.result);
+    expect(joined).toContain('AUTO-CORRECTED AND RAN');
+    // The handler's actual data must still be in there — the whole point.
+    expect(joined).toContain('rows');
+    expect((out.result?._meta as { corrected?: unknown[] })?.corrected).toHaveLength(1);
   });
 
   it('discloses the correction FIRST in the content and structurally in _meta', async () => {
@@ -173,7 +203,7 @@ describe.each([
     });
 
     // PROMINENT means first: an advisory the reader scrolls past is one they did not get.
-    expect(out.result?.content?.[0]?.text).toContain('AUTO-CORRECTED AND RAN');
+    expect(texts(out.result)[0]).toContain('AUTO-CORRECTED AND RAN');
     expect(textOf(out.result)).toContain('`provenance`');
 
     // The structured half rides _meta unconditionally — EI-10883's requirement must not
@@ -204,7 +234,7 @@ describe.each([
     expect(out.ok).toBe(true);
     expect(spy).not.toHaveBeenCalled();
     expect(f.seen()).toEqual({ refs: ['WI-1'] });
-    expect(out.result?.content?.[0]?.text).not.toContain('AUTO-CORRECTED');
+    expect(texts(out.result)[0] ?? '').not.toContain('AUTO-CORRECTED');
     expect((out.result?._meta as { corrected?: unknown })?.corrected).toBeUndefined();
   });
 
