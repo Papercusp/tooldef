@@ -1536,6 +1536,65 @@ function leafIssueSummary(
 }
 
 /**
+ * For a DISCRIMINATED UNION, the properties of the single branch the caller's own args
+ * select — or undefined when the schema is not a union, or when the branch is ambiguous.
+ *
+ * WHY THIS EXISTS (measured on `omp:sessions`, the worst verb in D-104's table: 66
+ * rejections in 7d, 100% of its calls, ten agents). `mergedSchemaProperties` unions the
+ * branches' keys, which is right for "what could this tool ever accept" — the
+ * `accepts ONLY:` list — and wrong for "was THIS key accepted on THIS call". `omp:sessions`
+ * declares `cwd` on op=list/search/link but not on op=get/state, so the merged view reports
+ * `cwd` as accepted, the unrecognized-key set comes back empty, and the caller gets the
+ * schema wall D-105 was written about while the mechanism meant to help stays silent.
+ *
+ * D-105 recorded this as "a verb that does not declare `cwd`". Reading the schema shows
+ * that is not quite it: `cwd` IS declared, five times, on other branches. The correction
+ * an agent needs is therefore "not on this `op`", which is only derivable per-branch.
+ *
+ * Deliberately narrow, and it FAILS CLOSED. A branch is selected only when a `const`/`enum`
+ * discriminator matches the caller's value and exactly one branch survives; anything else
+ * falls back to the merged behaviour, which is the pre-existing conservative answer. A
+ * wrongly-selected branch would report a legitimate key as unrecognized and advise dropping
+ * the caller's data — strictly worse than the silence it replaces.
+ */
+function selectedUnionBranchProperties(
+  rawSchema: unknown,
+  input: unknown,
+): Record<string, unknown> | undefined {
+  const schema = rawSchema as
+    | { properties?: Record<string, unknown>; anyOf?: unknown; oneOf?: unknown }
+    | undefined;
+  if (schema?.properties) return undefined;
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
+  const branches = (
+    Array.isArray(schema?.anyOf) ? schema!.anyOf : Array.isArray(schema?.oneOf) ? schema!.oneOf : null
+  ) as Array<{ properties?: Record<string, unknown> }> | null;
+  if (!branches) return undefined;
+  const args = input as Record<string, unknown>;
+
+  const matches = branches.filter((branch) => {
+    const props = branch?.properties;
+    if (!props) return false;
+    let sawDiscriminator = false;
+    for (const [key, rawProp] of Object.entries(props)) {
+      const prop = rawProp as { const?: unknown; enum?: readonly unknown[] } | undefined;
+      const admissible =
+        prop && 'const' in prop
+          ? [prop.const]
+          : prop && Array.isArray(prop.enum)
+            ? prop.enum
+            : null;
+      if (!admissible) continue;
+      sawDiscriminator = true;
+      if (!(key in args) || !admissible.includes(args[key])) return false;
+    }
+    return sawDiscriminator;
+  });
+
+  return matches.length === 1 ? matches[0].properties : undefined;
+}
+
+/**
  * The keys the caller sent that this tool does not declare — the full set, INCLUDING ones
  * for which no correction target exists.
  *
@@ -1552,18 +1611,36 @@ function leafIssueSummary(
 export function unrecognizedArgKeys(
   issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
   rawSchema: unknown,
+  /** The caller's args — enables per-branch resolution on a discriminated union. */
+  input?: unknown,
 ): string[] {
   const { msgs, keys: leafKeys } = leafIssueSummary(issues);
   if (!/nrecognized key/i.test(msgs)) return [];
-  const props = mergedSchemaProperties(rawSchema);
-  const keys = props ? Object.keys(props) : [];
-  if (keys.length === 0) return [];
+  const merged = mergedSchemaProperties(rawSchema);
+  if (!merged || Object.keys(merged).length === 0) return [];
+  // Per-branch when the caller's own discriminator picks exactly one, merged otherwise.
+  const branch = input === undefined ? undefined : selectedUnionBranchProperties(rawSchema, input);
+  const keys = Object.keys(branch ?? merged);
   return [
     ...new Set([
       ...leafKeys,
       ...Array.from(msgs.matchAll(/["']([^"']+)["']/g), (match) => match[1]),
     ]),
   ].filter((key) => !keys.includes(key));
+}
+
+/**
+ * Of `keys`, those this tool DOES declare somewhere — just not on the branch the caller
+ * selected. Lets the refusal say "not on this `op`" instead of the flatly false "this tool
+ * declares no counterpart", which would send an agent hunting for a synonym that exists.
+ */
+export function argsAcceptedOnOtherVariant(
+  rawSchema: unknown,
+  keys: readonly string[],
+): string[] {
+  const merged = mergedSchemaProperties(rawSchema);
+  if (!merged) return [];
+  return keys.filter((key) => key in merged);
 }
 
 export function invalidInputCorrections(
@@ -1576,7 +1653,7 @@ export function invalidInputCorrections(
 ): InvalidInputCorrection[] {
   const props = mergedSchemaProperties(rawSchema);
   const keys = props ? Object.keys(props) : [];
-  const unknownKeys = unrecognizedArgKeys(issues, rawSchema);
+  const unknownKeys = unrecognizedArgKeys(issues, rawSchema, input);
   if (unknownKeys.length === 0) return [];
   const nested = nestedArgPaths(props);
   // EI-20281509195248260: an AUTHORED cross-tool redirect outranks both guesses
@@ -1667,11 +1744,13 @@ function makeInvalidInputError(
   // FIRST because D-105 measured that the alternative does not work: `omp:sessions`
   // already returns its entire args schema and ten agents still re-hit the same wall 66
   // times. Help the reader has to scroll past is help they did not get.
+  const unknownKeys = unrecognizedArgKeys(issues, rawSchema, input);
   const corrected = buildCorrectedCall({
     toolName,
     input,
     corrections,
-    unknownKeys: unrecognizedArgKeys(issues, rawSchema),
+    unknownKeys,
+    acceptedOnOtherVariant: argsAcceptedOnOtherVariant(rawSchema, unknownKeys),
   });
   const metadata: InvalidInputMetadata = {
     source: PROJECTED_TOOL_REGISTRY_SOURCE,

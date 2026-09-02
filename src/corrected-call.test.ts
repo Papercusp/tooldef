@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildCorrectedCall, correctedCallHint } from './corrected-call';
+import { argsAcceptedOnOtherVariant, unrecognizedArgKeys } from './define-tool';
 import type { InvalidInputCorrection } from './dispatch-types';
 
 /**
@@ -156,6 +157,85 @@ describe('buildCorrectedCall', () => {
     // then reporting a value-level failure as a tool bug.
     expect(hint).toContain('does not');
     expect(hint).toContain('guarantee');
+  });
+});
+
+/**
+ * The discriminated-union path, reproduced from the real `omp:sessions` schema — the verb
+ * D-105 named, and the worst in D-104's table (66 rejections / 7d, 100% of its calls, ten
+ * agents, ~6.6 attempts each). It declares `cwd` on op=list/search/link and NOT on
+ * op=get/state, so a merged view of the branches reports `cwd` as accepted and the whole
+ * correction mechanism stays silent on exactly the call that needed it.
+ */
+describe('unrecognizedArgKeys on a discriminated union', () => {
+  const ompLike = {
+    anyOf: [
+      {
+        properties: {
+          op: { const: 'list' },
+          limit: { type: 'number' },
+          cwd: { type: 'string' },
+        },
+      },
+      {
+        properties: {
+          op: { const: 'get' },
+          sessionId: { type: 'string' },
+          limit: { type: 'number' },
+        },
+      },
+    ],
+  };
+  const unrecognizedCwd = [{ message: 'Unrecognized key: "cwd"' }];
+
+  it('MERGED view (no input) reports cwd as accepted — the silence this fixes', () => {
+    // Pinned deliberately: this is the pre-fix behaviour, and it is still correct for the
+    // "what could this tool ever accept" question `accepts ONLY:` answers.
+    expect(unrecognizedArgKeys(unrecognizedCwd, ompLike)).toEqual([]);
+  });
+
+  it('BRANCH view flags cwd once the caller\'s own op selects the branch', () => {
+    expect(
+      unrecognizedArgKeys(unrecognizedCwd, ompLike, { op: 'get', sessionId: 's1', cwd: '/x' }),
+    ).toEqual(['cwd']);
+  });
+
+  it('leaves a key alone when the selected branch DOES declare it', () => {
+    expect(
+      unrecognizedArgKeys(unrecognizedCwd, ompLike, { op: 'list', cwd: '/x' }),
+    ).toEqual([]);
+  });
+
+  it('falls back to merged when the branch is ambiguous — fails CLOSED', () => {
+    // No discriminator value supplied, so no branch is selectable. Reporting a legitimate
+    // key as unrecognized here would advise dropping the caller's data.
+    expect(unrecognizedArgKeys(unrecognizedCwd, ompLike, { cwd: '/x' })).toEqual([]);
+    // An op matching no branch is equally ambiguous.
+    expect(unrecognizedArgKeys(unrecognizedCwd, ompLike, { op: 'nope', cwd: '/x' })).toEqual([]);
+  });
+
+  it('end-to-end: the omp:sessions call gets a corrected call that says WHY', () => {
+    const input = { op: 'get', sessionId: 's1', cwd: '/home/dev/project' };
+    const unknownKeys = unrecognizedArgKeys(unrecognizedCwd, ompLike, input);
+    const corrected = buildCorrectedCall({
+      toolName: 'omp:sessions',
+      input,
+      corrections: [],
+      unknownKeys,
+      acceptedOnOtherVariant: argsAcceptedOnOtherVariant(ompLike, unknownKeys),
+    });
+
+    expect(corrected!.args).toEqual({ op: 'get', sessionId: 's1' });
+    expect(corrected!.steps).toEqual([
+      { rejectedArg: 'cwd', action: 'dropped', acceptedOnOtherVariant: true },
+    ]);
+
+    const hint = correctedCallHint(corrected);
+    expect(hint).toContain('omp:sessions(');
+    expect(hint).toContain('"op": "get"');
+    // The precise diagnosis, not the false one. `cwd` IS declared by this tool.
+    expect(hint).toContain('NOT on the variant');
+    expect(hint).not.toContain('declares no counterpart');
   });
 });
 

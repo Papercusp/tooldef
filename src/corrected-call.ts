@@ -47,12 +47,19 @@ import type { InvalidInputCorrection } from './dispatch-types';
 export interface CorrectedCallStep {
   /** The key as the caller sent it. */
   readonly rejectedArg: string;
-  /** `relocated` — its value moved to `target`. `dropped` — nothing accepts it. */
+  /** `relocated` — its value moved to `target`. `dropped` — nothing accepts it here. */
   readonly action: 'relocated' | 'dropped';
   /** Destination for `relocated`: a top-level key, or a dotted path for a nested arg. */
   readonly target?: string;
   /** Which correction source chose the destination (absent when dropped). */
   readonly kind?: InvalidInputCorrection['kind'];
+  /**
+   * Dropped, but the tool DOES declare this key on another variant of a discriminated
+   * union — the caller picked the wrong branch, not a nonexistent arg. Distinguishing the
+   * two matters: "no counterpart" sends an agent looking for a synonym, which for
+   * `omp:sessions`'s `cwd` (declared on op=list/search/link) would be a dead end.
+   */
+  readonly acceptedOnOtherVariant?: boolean;
 }
 
 export interface CorrectedCall {
@@ -163,8 +170,11 @@ export function buildCorrectedCall(params: {
   readonly input: unknown;
   readonly corrections: readonly InvalidInputCorrection[];
   readonly unknownKeys: readonly string[];
+  /** Subset of `unknownKeys` the tool declares on a different union variant. */
+  readonly acceptedOnOtherVariant?: readonly string[];
 }): CorrectedCall | null {
   const { toolName, input, corrections, unknownKeys } = params;
+  const acceptedElsewhere = new Set(params.acceptedOnOtherVariant ?? []);
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
   if (unknownKeys.length === 0) return null;
 
@@ -196,7 +206,11 @@ export function buildCorrectedCall(params: {
       continue;
     }
     delete args[key];
-    steps.push({ rejectedArg: key, action: 'dropped' });
+    steps.push({
+      rejectedArg: key,
+      action: 'dropped',
+      ...(acceptedElsewhere.has(key) ? { acceptedOnOtherVariant: true } : {}),
+    });
   }
 
   if (steps.length === 0) return null;
@@ -220,14 +234,23 @@ export function correctedCallHint(corrected: CorrectedCall | null): string {
   const relocated = corrected.steps
     .filter((step) => step.action === 'relocated')
     .map((step) => `\`${step.rejectedArg}\` -> \`${step.target}\``);
-  const dropped = corrected.steps
-    .filter((step) => step.action === 'dropped')
+  const droppedSteps = corrected.steps.filter((step) => step.action === 'dropped');
+  const wrongVariant = droppedSteps
+    .filter((step) => step.acceptedOnOtherVariant)
+    .map((step) => `\`${step.rejectedArg}\``);
+  const unknownAnywhere = droppedSteps
+    .filter((step) => !step.acceptedOnOtherVariant)
     .map((step) => `\`${step.rejectedArg}\``);
   const changes: string[] = [];
   if (relocated.length > 0) changes.push(`moved ${relocated.join(', ')}`);
-  if (dropped.length > 0) {
+  if (unknownAnywhere.length > 0) {
     changes.push(
-      `removed ${dropped.join(', ')} (this tool declares no counterpart — the fix is to drop it, not to look for a synonym)`,
+      `removed ${unknownAnywhere.join(', ')} (this tool declares no counterpart — the fix is to drop it, not to look for a synonym)`,
+    );
+  }
+  if (wrongVariant.length > 0) {
+    changes.push(
+      `removed ${wrongVariant.join(', ')} (declared by this tool, but NOT on the variant your other args select — switch variant if you need it, do not rename it)`,
     );
   }
   return (
