@@ -1877,6 +1877,21 @@ export function projectedToolCorrectiveCalls(
   const tool = lookupByMcpName(name)!;
   return Object.entries(tool.guidance?.argRedirects ?? {}).flatMap(([rejectedArg, redirect]) => {
     if (typeof redirect === 'string') return [];
+    // A remedy this context cannot CALL is not offered to it (EI-22188204415833751). An
+    // all-profile tool may legitimately redirect into a narrower one — coord:presence's
+    // `fleet` -> fleet:assignments (profile:'engineer') — which is correct guidance for the
+    // profiles that DO admit the target. Resolving it under a profile the TARGET rejects must
+    // therefore NARROW this list, not fail the rail: _guidance-adapter.ts converts any throw
+    // from here into `return []`, so one such redirect deletes the ENTIRE ~835-page guidance
+    // corpus rather than omitting one entry, which red-pinned the fleet green-checkpoint gate.
+    //
+    // ONLY availability is skipped, and only when the target genuinely resolves. An unknown
+    // target tool, a missing required key, a bad enum, or an undeclared key still throws — that
+    // is the rail that caught the dev:restart enum placeholder (WI-2142574), and the tests at
+    // 'fails structured corrective-call conformance on missing tools, required keys, enums, and
+    // undeclared keys' hold it in place.
+    const redirectTarget = lookupByMcpName(redirect.tool);
+    if (redirectTarget?.expose.mcp && availabilityProblem(redirectTarget, context)) return [];
     const rendered = renderProjectedToolCall(redirect.tool, redirect.args, context);
     return [{
       rejectedArg,
@@ -1898,9 +1913,13 @@ export interface ProjectedToolGuidanceConformance {
 }
 
 /**
- * CI/render rail for executable guidance. Every context admitted by the source
- * tool must also admit the remedy, and every remedy must satisfy the target's
- * current required/enum/closed-object schema.
+ * CI/render rail for executable guidance. Every remedy OFFERED to a context must
+ * satisfy the target's current required/enum/closed-object schema.
+ *
+ * Note the scope of "offered": a redirect whose TARGET is not admitted in a context is
+ * withheld from that context rather than failing the rail (see projectedToolCorrectiveCalls),
+ * so an all-profile tool may redirect into a narrower one without deleting the corpus. The
+ * schema half is unconditional — an offered remedy that cannot validate is still fatal.
  */
 export function assertProjectedToolGuidanceConformance(): ProjectedToolGuidanceConformance {
   let toolsChecked = 0;

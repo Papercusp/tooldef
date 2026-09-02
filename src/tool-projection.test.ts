@@ -19,6 +19,7 @@ import {
   assertProjectedToolCallContract,
   renderProjectedToolCall,
   projectedToolCorrectiveCalls,
+  assertProjectedToolGuidanceConformance,
   ProjectedToolContractError,
   classifyEventWire,
   ToolRegistrationError,
@@ -650,6 +651,49 @@ describe('registry-derived executable tool contracts (P-002)', () => {
     expect(() => projectedToolCorrectiveCalls('source:required')).toThrow(/\.id: required/);
     expect(() => projectedToolCorrectiveCalls('source:enum')).toThrow(/not one of add/);
     expect(() => projectedToolCorrectiveCalls('source:extra')).toThrow(/\.stale: undeclared key/);
+  });
+
+  // EI-22188204415833751: an all-profile tool may legitimately redirect into a narrower one
+  // (coord:presence -> fleet:assignments). Resolving that target under a profile the TARGET does
+  // not admit used to throw, and _guidance-adapter.ts turns any conformance throw into `return []`
+  // — so one cross-profile redirect deleted ALL ~835 tool-guidance pages and red-pinned the gate.
+  it('withholds a cross-profile redirect from contexts that cannot call the target, without weakening the schema rail', () => {
+    registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'narrow:target' } },
+      profile: 'engineer',
+      inputSchema: {
+        type: 'object',
+        properties: { fleet: { type: 'string' } },
+        additionalProperties: false,
+      },
+    }));
+    // no `profile` => untagged => admitted under every profile, like coord:presence
+    registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'broad:source' } },
+      guidance: { argRedirects: { fleet: { tool: 'narrow:target', args: { fleet: '<fleet-slug>' } } } },
+    }));
+
+    // POSITIVE CONTROL: a profile that admits the target is still offered the remedy, so a
+    // passing 'power' case below cannot be explained by the redirect having been dropped for all.
+    expect(projectedToolCorrectiveCalls('broad:source', { profile: 'engineer' }))
+      .toEqual([expect.objectContaining({ rejectedArg: 'fleet', tool: 'narrow:target' })]);
+
+    // THE FIX: withheld, not fatal. Pre-fix both of these threw 'power profile is not admitted'.
+    expect(() => projectedToolCorrectiveCalls('broad:source', { profile: 'power' })).not.toThrow();
+    expect(projectedToolCorrectiveCalls('broad:source', { profile: 'power' })).toEqual([]);
+
+    // The whole-registry rail — the thing that actually red-pinned the gate — stays green.
+    expect(() => assertProjectedToolGuidanceConformance()).not.toThrow();
+
+    // NOT-WEAKENED CONTROL: a malformed remedy on an ADMITTED target must still be fatal.
+    // This is the class that caught the dev:restart enum placeholder (WI-2142574); if skipping
+    // availability ever silenced it, this assertion fails.
+    registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'broad:malformed' } },
+      guidance: { argRedirects: { fleet: { tool: 'narrow:target', args: { nope: true } } } },
+    }));
+    expect(() => projectedToolCorrectiveCalls('broad:malformed', { profile: 'engineer' }))
+      .toThrow(/undeclared key/);
   });
 });
 
