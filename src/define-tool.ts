@@ -1475,6 +1475,65 @@ export function nestedArgPaths(props: Record<string, unknown> | undefined): Map<
   return out;
 }
 
+/**
+ * Merge `properties` across every branch of a UNION-rooted JSON Schema
+ * (`anyOf`/`oneOf`), falling back to the schema's own top-level `properties`
+ * when it isn't a union.
+ *
+ * `capability:launch-agent`'s two near-identical source/fresh branches — and
+ * every other tool whose args are a top-level `z.union([...])` — render with
+ * NO top-level `properties`, only `anyOf: [...]`. Reading `rawSchema.properties`
+ * directly (the old behaviour) therefore always came back empty for a
+ * union-rooted tool, no matter how good the correction below would otherwise
+ * be: `keys.length === 0` short-circuited every caller before it could name
+ * the accepted arg set, let alone consult `argRedirects` or a nested-path
+ * relocation. See the EI-22084251948568820 cluster (EI-22078751749824171,
+ * EI-21575773427457407, EI-21723773357897744): four independent reports of
+ * `capability:launch-agent` rejecting a key with "the full anyOf schema...
+ * no field-level pointer" — the schema WAS being dumped (the `argsSchemaHint`
+ * fallback), but every correction path was silently skipped because this
+ * lookup found no keys to work from.
+ */
+function mergedSchemaProperties(rawSchema: unknown): Record<string, unknown> | undefined {
+  const schema = rawSchema as
+    | { properties?: Record<string, unknown>; anyOf?: unknown; oneOf?: unknown }
+    | undefined;
+  if (schema?.properties) return schema.properties;
+  const branches = (
+    Array.isArray(schema?.anyOf) ? schema!.anyOf : Array.isArray(schema?.oneOf) ? schema!.oneOf : null
+  ) as Array<{ properties?: Record<string, unknown> }> | null;
+  if (!branches) return undefined;
+  let merged: Record<string, unknown> | undefined;
+  for (const branch of branches) {
+    if (!branch?.properties) continue;
+    merged = { ...(merged ?? {}), ...branch.properties };
+  }
+  return merged;
+}
+
+/**
+ * Leaf-resolved issue text for the "is this an unrecognized-key rejection"
+ * check below. An `invalid_union` issue's OWN top-level `.message` is Zod's
+ * generic "Invalid input" (see `issueLeaves`'s doc on `bestUnionBranch`) — the
+ * real diagnosis (e.g. "Unrecognized key(s) in object: 'carry'") lives several
+ * levels down, in the closest-matching branch's own sub-issues. Reading
+ * `issue.message` directly (the old behaviour) therefore saw only the generic
+ * text for ANY union-rooted tool, never matched `/nrecognized key/i`, and
+ * skipped the whole correction mechanism — including an authored
+ * `argRedirects` entry — for exactly the tools most likely to need it (a
+ * union of several launch/source shapes is precisely where a caller mixes up
+ * which branch's knobs apply). Descend to the SAME leaves `formatIssues`
+ * already renders from, so the two never disagree.
+ */
+function leafIssueSummary(
+  issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
+): { msgs: string; keys: string[] } {
+  const leaves = issueLeaves((issues ?? []) as StandardSchemaV1.Issue[]);
+  const msgs = leaves.map(({ issue }) => issue.message ?? '').join(' ');
+  const keys = leaves.flatMap(({ issue }) => (issue as { keys?: readonly string[] }).keys ?? []);
+  return { msgs, keys };
+}
+
 export function invalidInputCorrections(
   issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
   rawSchema: unknown,
@@ -1483,15 +1542,15 @@ export function invalidInputCorrections(
    *  would relocate (EI-21390759884688723). Optional: absent, behaviour is name-only. */
   input?: unknown,
 ): InvalidInputCorrection[] {
-  const msgs = (issues ?? []).map((i) => i?.message ?? '').join(' ');
+  const { msgs, keys: leafKeys } = leafIssueSummary(issues);
   if (!/nrecognized key/i.test(msgs)) return [];
-  const props = (rawSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
+  const props = mergedSchemaProperties(rawSchema);
   const keys = props ? Object.keys(props) : [];
   if (keys.length === 0) return [];
   const nested = nestedArgPaths(props);
   const unknownKeys = [
     ...new Set([
-      ...(issues ?? []).flatMap((issue) => issue.keys ?? []),
+      ...leafKeys,
       ...Array.from(msgs.matchAll(/["']([^"']+)["']/g), (match) => match[1]),
     ]),
   ].filter((key) => !keys.includes(key));
@@ -1542,9 +1601,9 @@ export function unknownArgHint(
   /** See `invalidInputCorrections` — enables the value-admissibility filter. */
   input?: unknown,
 ): string {
-  const msgs = (issues ?? []).map((i) => i?.message ?? '').join(' ');
+  const { msgs } = leafIssueSummary(issues);
   if (!/nrecognized key/i.test(msgs)) return '';
-  const props = (rawSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
+  const props = mergedSchemaProperties(rawSchema);
   const keys = props ? Object.keys(props) : [];
   if (keys.length === 0) return '';
   const corrections = invalidInputCorrections(issues, rawSchema, argRedirects, input);
