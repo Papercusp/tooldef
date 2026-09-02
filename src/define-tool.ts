@@ -1348,6 +1348,15 @@ function compactArgName(value: string): string {
   return value.replace(/[^a-z0-9]/gi, '').toLowerCase();
 }
 
+/**
+ * Type descriptors that a caller appends to a declared key's own name while still
+ * naming the SAME subject (`plan` -> `planSlug`, `harness` -> `harnessName`). Consumed
+ * by `suggestArgName`'s suffix rung, which documents why this must stay a closed set
+ * rather than a general prefix or containment test. Compare compacted, so `plan_slug`
+ * and `planSlug` are one case.
+ */
+const ARG_TYPE_SUFFIXES: ReadonlySet<string> = new Set(['slug', 'ref', 'id', 'name', 'key', 'path']);
+
 function editDistance(a: string, b: string): number {
   if (a === b) return 0;
   if (a.length === 0) return b.length;
@@ -1451,6 +1460,45 @@ export function suggestArgName(
   if (semantic) {
     return accepted.find((candidate) => compactArgName(candidate) === compactArgName(semantic)) ?? semantic;
   }
+
+  /**
+   * EI-21670512679890540 / EI-21679236680294291 — a declared key wearing a TYPE SUFFIX.
+   *
+   * The edit-distance rung below scores by characters, so it penalises exactly the
+   * shape this vocabulary uses most: `<declaredKey><Suffix>`. For `planSlug` against a
+   * tool declaring `plan`, the distance is 4 (the whole suffix) while the threshold —
+   * `max(len)/3`, capped at 3 — is 2, so the match is rejected and the caller is told
+   * the tool "declares no counterpart". That sentence is FALSE here, and it is the
+   * costly half: it does not merely withhold a suggestion, it asserts no synonym exists
+   * and steers the caller to DROP the argument. `corrected-call.ts` then emitted
+   * `plan_items:status({ harness })` — a call that cannot validate, because `plan` is
+   * required and is listed as accepted in the very same message. Two agents filed this
+   * within 2h19m of each other (2026-08-28 04:43Z, 07:02Z) and both had to find `plan`
+   * by reading the accepted-keys list themselves.
+   *
+   * The suffixes are a CLOSED set of type descriptors — the argument still names the
+   * same subject, it just says what representation of it is being passed — so
+   * "`<key>` + one of these means `<key>`" is decidable without judgment, which is the
+   * same bar `candidateRefutesValue` sets for its own narrowness. A general
+   * containment or prefix rule is deliberately NOT used: it would map `plan` -> `p`
+   * and `body` -> `bo` wherever such keys exist.
+   *
+   * Ambiguity FAILS CLOSED: two declared keys both explaining the unknown name yields
+   * nothing, and the distance rung decides instead, because a confidently wrong
+   * relocation is the failure this whole function exists to avoid. With the current set
+   * that guard is unreachable rather than load-bearing — no member is a suffix of
+   * another, so at most one prefix can leave an admissible remainder — but it is what
+   * keeps the single-match check SUFFICIENT if the set ever grows a member that ends
+   * like an existing one. Value-admissibility still applies, so a suffix match cannot
+   * override an enum/const that provably refuses the caller's value.
+   */
+  const suffixMatches = accepted.filter((candidate) => {
+    const compactCandidate = compactArgName(candidate);
+    if (compactCandidate.length < 2 || compactCandidate === compactUnknown) return false;
+    if (!compactUnknown.startsWith(compactCandidate)) return false;
+    return ARG_TYPE_SUFFIXES.has(compactUnknown.slice(compactCandidate.length)) && admissible(candidate);
+  });
+  if (suffixMatches.length === 1) return suffixMatches[0];
 
   const ranked = accepted
     .filter(admissible)
