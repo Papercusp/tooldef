@@ -2244,8 +2244,15 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     }
     // Keeps every `parsed.value` reader below untouched.
     const parsed = { value: parsedValue };
-    const disclose = (result: ToolResult): ToolResult =>
-      attachCorrectedDisclosure(result, corrections);
+    // Takes a PROMISE as readily as a value, and that signature is the whole safety story.
+    // Every result producer it wraps here is async, so a synchronous `(r: ToolResult)` form
+    // silently spreads a Promise to `{}` — the caller is told their corrected call SUCCEEDED
+    // while its entire payload is discarded. Two of the six call sites were written that way
+    // and passed a green 52-assertion suite; only the typechecker found the other four, since
+    // no test happened to exercise those branches. Accepting the promise makes the mistake
+    // unrepresentable rather than leaving six sites each needing an `await` remembered.
+    const disclose = async (result: ToolResult | Promise<ToolResult>): Promise<ToolResult> =>
+      attachCorrectedDisclosure(await result, corrections);
     const response = await def.handler(parsed.value, legacyCtx);
     // A raw ToolResult (MCP content shape) normally passes through untouched —
     // parity with the role-gated wrapper below. EXCEPT: on the agent-facing MCP
@@ -2261,12 +2268,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       if (reencodable !== undefined) {
         return disclose(serializeProjectedResult({ data: reencodable } as ToolResponse, ctx, eligibility, def, readColumns, parsed.value));
       }
-      // `await` is load-bearing, not tidiness: `attachRequestedStructuredContent` is async, so
-      // handing `disclose` the PROMISE spreads to `{}` and silently discards the handler's
-      // entire output — every corrected call would return the notice and nothing else. The
-      // pre-P-016 code returned the promise directly (correct from an async fn), which is
-      // exactly why wrapping it is the step that needs the await.
-      return disclose(await attachRequestedStructuredContent(response as ToolResult, ctx, def));
+      return disclose(attachRequestedStructuredContent(response as ToolResult, ctx, def));
     }
     // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
     // the session/call tier before format-aware serialization. Unshaped tools
@@ -2422,8 +2424,15 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     }
     // Keeps every `parsed.value` reader below untouched.
     const parsed = { value: parsedValue };
-    const disclose = (result: ToolResult): ToolResult =>
-      attachCorrectedDisclosure(result, corrections);
+    // Takes a PROMISE as readily as a value, and that signature is the whole safety story.
+    // Every result producer it wraps here is async, so a synchronous `(r: ToolResult)` form
+    // silently spreads a Promise to `{}` — the caller is told their corrected call SUCCEEDED
+    // while its entire payload is discarded. Two of the six call sites were written that way
+    // and passed a green 52-assertion suite; only the typechecker found the other four, since
+    // no test happened to exercise those branches. Accepting the promise makes the mistake
+    // unrepresentable rather than leaving six sites each needing an `await` remembered.
+    const disclose = async (result: ToolResult | Promise<ToolResult>): Promise<ToolResult> =>
+      attachCorrectedDisclosure(await result, corrections);
     // Thread the per-call tier override into the HANDLER's ctx too: tools that
     // must keep a hand-rolled JSON ToolResult (hook-consumed — coord:inbox /
     // coord:plan-events / coord:glance) adapt their DEFAULTS off
