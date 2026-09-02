@@ -1651,7 +1651,17 @@ export function invalidInputCorrections(
    *  would relocate (EI-21390759884688723). Optional: absent, behaviour is name-only. */
   input?: unknown,
 ): InvalidInputCorrection[] {
-  const props = mergedSchemaProperties(rawSchema);
+  // The candidate pool for a RELOCATION must be the keys this call can actually accept —
+  // the selected union branch when the caller's discriminator picks one, merged otherwise.
+  //
+  // Using the merged pool here produced a SELF-RELOCATION on the real `omp:sessions`:
+  // `cwd` is declared on op=list/search/link, so for an op='get' call it sat in the merged
+  // pool, suggestArgName matched it exactly, and the correction came back
+  // `cwd -> cwd` (kind: 'near-name'). buildCorrectedCall then setPath'd the value and
+  // deleted the same key, so the value was silently DROPPED while the hint advised a move
+  // that is not a move. A key rejected on this branch can never be its own destination.
+  const merged = mergedSchemaProperties(rawSchema);
+  const props = (input === undefined ? undefined : selectedUnionBranchProperties(rawSchema, input)) ?? merged;
   const keys = props ? Object.keys(props) : [];
   const unknownKeys = unrecognizedArgKeys(issues, rawSchema, input);
   if (unknownKeys.length === 0) return [];
@@ -1690,6 +1700,10 @@ export function invalidInputCorrections(
         ? (input as Record<string, unknown>)[rejectedArg]
         : undefined;
     const nearName = suggestArgName(rejectedArg, keys, { value: rejectedValue, props });
+    // Defence in depth for the whole class, independent of how the pool was computed: a
+    // key relocated onto ITSELF is not a correction. buildCorrectedCall would setPath the
+    // value and then delete the same key, losing it while reporting `relocated`.
+    if (nearName === rejectedArg) return [];
     return nearName ? [{ rejectedArg, target: nearName, kind: 'near-name' }] : [];
   });
 }
