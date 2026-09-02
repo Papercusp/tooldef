@@ -372,6 +372,18 @@ export {
   type ToolDispatchOverrideFn,
 } from './dispatch-projected';
 
+/**
+ * P-015 — the shared refusal helper. Exported so a host can render or act on the corrected
+ * call itself; every tool defined through this library already inherits it in the refusal
+ * message with no per-verb wiring, which is the property the item asked for.
+ */
+export {
+  buildCorrectedCall,
+  correctedCallHint,
+  type CorrectedCall,
+  type CorrectedCallStep,
+} from './corrected-call';
+
 /** Explicit workspace-transaction contract helpers for host/nested adapters. */
 export { boundWorkspaceTx, applyWorkspaceTxContract } from './workspace-tx';
 

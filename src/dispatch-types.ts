@@ -129,6 +129,10 @@ export class WorkspaceTxUnavailableError extends Error {
   }
 }
 
+// Type-only, and reciprocated by corrected-call.ts importing InvalidInputCorrection from
+// here — a cycle that exists purely in the type graph and is erased at emit.
+import type { CorrectedCall } from './corrected-call';
+
 export interface InvalidInputCorrection {
   rejectedArg: string;
   target: string;
@@ -146,6 +150,17 @@ export interface InvalidInputMetadata {
   registryRevision: string;
   toolName: string;
   corrections: InvalidInputCorrection[];
+  /**
+   * P-015: the finished call, resolved against the args the caller actually sent —
+   * `corrections` names WHAT was wrong, this is the call that fixes it. Present only for
+   * an unrecognized-key refusal where at least one key was relocated or dropped.
+   *
+   * Structured (not just the rendered sentence in the message) so a caller can act on it
+   * mechanically. It is a REFUSAL artifact under D-104: nothing here has been executed,
+   * and it carries no promise of validating — a value-level or missing-field error is
+   * invisible to the unrecognized-key branch that produced it.
+   */
+  correctedCall?: CorrectedCall;
 }
 
 /**

@@ -39,6 +39,7 @@ import {
   type InvalidInputMetadata,
 } from './dispatch-projected';
 import { serverVintageHint, constraintVintageHint } from './server-vintage';
+import { buildCorrectedCall, correctedCallHint } from './corrected-call';
 import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
 import { applyPayloadTier, extractPayloadTier, resolvePayloadTier } from './payload-tier';
 import { boundWorkspaceTx } from './workspace-tx';
@@ -1534,6 +1535,37 @@ function leafIssueSummary(
   return { msgs, keys };
 }
 
+/**
+ * The keys the caller sent that this tool does not declare — the full set, INCLUDING ones
+ * for which no correction target exists.
+ *
+ * Extracted from `invalidInputCorrections` (rather than re-derived beside it) so the
+ * corrected-call builder and the did-you-mean hints can never disagree about which keys
+ * were rejected. A second copy of this derivation would be a code-describing value
+ * maintained by hand, and it would drift the first time the unrecognized-key message
+ * wording changes on either side.
+ *
+ * The keys WITHOUT a correction are the important half for P-015: they are the
+ * "not accepted; drop it" cases D-105 identified, which the did-you-mean path is silent
+ * about precisely because there is nothing to suggest.
+ */
+export function unrecognizedArgKeys(
+  issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
+  rawSchema: unknown,
+): string[] {
+  const { msgs, keys: leafKeys } = leafIssueSummary(issues);
+  if (!/nrecognized key/i.test(msgs)) return [];
+  const props = mergedSchemaProperties(rawSchema);
+  const keys = props ? Object.keys(props) : [];
+  if (keys.length === 0) return [];
+  return [
+    ...new Set([
+      ...leafKeys,
+      ...Array.from(msgs.matchAll(/["']([^"']+)["']/g), (match) => match[1]),
+    ]),
+  ].filter((key) => !keys.includes(key));
+}
+
 export function invalidInputCorrections(
   issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
   rawSchema: unknown,
@@ -1542,18 +1574,11 @@ export function invalidInputCorrections(
    *  would relocate (EI-21390759884688723). Optional: absent, behaviour is name-only. */
   input?: unknown,
 ): InvalidInputCorrection[] {
-  const { msgs, keys: leafKeys } = leafIssueSummary(issues);
-  if (!/nrecognized key/i.test(msgs)) return [];
   const props = mergedSchemaProperties(rawSchema);
   const keys = props ? Object.keys(props) : [];
-  if (keys.length === 0) return [];
+  const unknownKeys = unrecognizedArgKeys(issues, rawSchema);
+  if (unknownKeys.length === 0) return [];
   const nested = nestedArgPaths(props);
-  const unknownKeys = [
-    ...new Set([
-      ...leafKeys,
-      ...Array.from(msgs.matchAll(/["']([^"']+)["']/g), (match) => match[1]),
-    ]),
-  ].filter((key) => !keys.includes(key));
   // EI-20281509195248260: an AUTHORED cross-tool redirect outranks both guesses
   // below. A key whose real home is a different TOOL matches neither the nested
   // relocation nor an edit-distance near-name, so without this the caller reads
@@ -1637,14 +1662,26 @@ function makeInvalidInputError(
   argRedirects: Record<string, string | ProjectedToolCorrectiveCall> | undefined,
   schemaHintCache: { hint?: string },
 ): InvalidInputError {
+  const corrections = invalidInputCorrections(issues, rawSchema, argRedirects, input);
+  // P-015: the finished call, resolved against what the caller actually sent. Ordered
+  // FIRST because D-105 measured that the alternative does not work: `omp:sessions`
+  // already returns its entire args schema and ten agents still re-hit the same wall 66
+  // times. Help the reader has to scroll past is help they did not get.
+  const corrected = buildCorrectedCall({
+    toolName,
+    input,
+    corrections,
+    unknownKeys: unrecognizedArgKeys(issues, rawSchema),
+  });
   const metadata: InvalidInputMetadata = {
     source: PROJECTED_TOOL_REGISTRY_SOURCE,
     registryRevision: projectedToolRegistryRevision(),
     toolName,
-    corrections: invalidInputCorrections(issues, rawSchema, argRedirects, input),
+    corrections,
+    ...(corrected ? { correctedCall: corrected } : {}),
   };
   return new InvalidInputError(
-    `invalid_args: ${formatIssues(issues, input)}${unknownArgHint(issues, rawSchema, argRedirects)}` +
+    `invalid_args: ${formatIssues(issues, input)}${correctedCallHint(corrected)}${unknownArgHint(issues, rawSchema, argRedirects)}` +
       // EI-21353729155349111: the value-level branch appends no SCHEMA (EI-10943 — a
       // caller who knows the shape and sent a bad value learns nothing from a 1,800-char
       // dump), but "the constraint that just refused you may not exist in the tree any
