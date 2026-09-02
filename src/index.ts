@@ -384,6 +384,21 @@ export {
   type CorrectedCallStep,
 } from './corrected-call';
 
+/**
+ * P-016 — the EXECUTE half of D-104. A tool declares `argReencodings` and the dispatcher
+ * repairs-and-RUNS those calls, disclosing each correction. Exported so a host can author
+ * a rule beside the schema it repairs; see `reencode-args.ts` for the boundary that keeps
+ * this narrower than the refusal helper above.
+ */
+export {
+  applyArgReencodings,
+  correctedDisclosure,
+  boundValue,
+  type ArgReencoding,
+  type ArgReencodingOutcome,
+  type AppliedArgCorrection,
+} from './reencode-args';
+
 /** Explicit workspace-transaction contract helpers for host/nested adapters. */
 export { boundWorkspaceTx, applyWorkspaceTxContract } from './workspace-tx';
 

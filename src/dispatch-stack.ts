@@ -1237,6 +1237,15 @@ function extractRefusalDetails(r: { content?: Array<{ text?: string; [k: string]
 } {
   const text = r.content?.[0]?.text;
   if (typeof text !== 'string' || text.length === 0) return { code: null, message: null };
+  // A handler that self-reports `isError` hands back EITHER a structured JSON
+  // refusal OR plain prose. Structured fields are preferred, but when there are
+  // none the handler's own text is still the only statement of cause we will
+  // ever get — so keep it (bounded) instead of discarding it for a generic
+  // fallback that names nothing. Dropping it made every third-party MCP refusal
+  // (gitnexus, repomix — which refuse in prose, not JSON) land in the ledger as
+  // "tool returned isError=true without a structured refusal message", hiding
+  // real, actionable causes such as "repo X is not allowed on this bridge".
+  const proseMessage = text.trim().slice(0, REFUSAL_MESSAGE_MAX) || null;
   try {
     const parsed: unknown = JSON.parse(text);
     if (parsed && typeof parsed === 'object') {
@@ -1249,13 +1258,15 @@ function extractRefusalDetails(r: { content?: Array<{ text?: string; [k: string]
       );
       return {
         code: code ? code.slice(0, REFUSAL_CODE_MAX) : null,
-        message: message ? message.slice(0, REFUSAL_MESSAGE_MAX) : null,
+        // A structured refusal carrying a code but no message field still says
+        // more as its own JSON body than as the generic fallback.
+        message: message ? message.slice(0, REFUSAL_MESSAGE_MAX) : proseMessage,
       };
     }
   } catch {
-    /* not JSON — a refusal is still a refusal; use the bounded fallback below */
+    /* not JSON — fall through and keep the handler's own prose, bounded */
   }
-  return { code: null, message: null };
+  return { code: null, message: proseMessage };
 }
 
 /**

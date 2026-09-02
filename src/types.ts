@@ -3,6 +3,7 @@
  */
 
 import type { RolesQuota, ToolResult } from './wire';
+import type { ArgReencoding } from './reencode-args';
 import type { AgentRole } from './host-types';
 import type { z, ZodTypeAny } from 'zod';
 import type { StandardSchemaV1 } from './standard-schema';
@@ -653,6 +654,8 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
   payloadTierCeilingChars?: number;
   /** See `RoleToolDefinition.ignoreSessionPayloadTier` (WI-37843) — same opt-out, principal-gated side. */
   ignoreSessionPayloadTier?: boolean;
+  /** See `RoleToolDefinition.argReencodings` (P-016 / D-104) — same surface, principal-gated side. */
+  argReencodings?: readonly ArgReencoding[];
 }
 
 /** Input shape for `defineTool` — same as ToolDefinition minus derived fields. */
@@ -789,6 +792,8 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
   payloadTierCeilingChars?: number;
   /** See `RoleToolDefinition.ignoreSessionPayloadTier` (WI-37843) — same opt-out, principal-gated side. */
   ignoreSessionPayloadTier?: boolean;
+  /** See `RoleToolDefinition.argReencodings` (P-016 / D-104) — same surface, principal-gated side. */
+  argReencodings?: readonly ArgReencoding[];
 }
 
 /**
@@ -978,6 +983,17 @@ export interface RoleToolDefinition<
    */
   ignoreSessionPayloadTier?: boolean;
   /**
+   * P-016 / D-104 — RE-ENCODINGS this tool authorises the dispatcher to apply AND RUN when
+   * validation fails, each disclosed in the result as `corrected:[{path,sent,ran,rule}]`.
+   *
+   * Strictly narrower than `guidance.argRedirects`, which only ADVISES: a redirect is a
+   * disambiguation (we picked one candidate key), and D-104 refuses to execute those because
+   * "running a guess answers a question the caller did not ask". Only a total, deterministic
+   * re-shape with exactly ONE candidate output belongs here — see `reencode-args.ts` for the
+   * boundary, the purity contract, and why the decay measurement depends on it.
+   */
+  argReencodings?: readonly ArgReencoding[];
+  /**
    * Surfaces this tool is meaningful from. Phase 4 T3.1. The prompt-
    * assembly catalog renderer filters by the caller's modality so voice
    * surfaces only see voice-capable tools. Default — when absent — is
@@ -1088,6 +1104,8 @@ export interface RoleToolDefinitionInput<
   payloadTierCeilingChars?: number;
   /** See RoleToolDefinition.ignoreSessionPayloadTier (WI-37843). */
   ignoreSessionPayloadTier?: boolean;
+  /** See `RoleToolDefinition.argReencodings` (P-016 / D-104). */
+  argReencodings?: readonly ArgReencoding[];
   /** See RoleToolDefinition.modality. */
   modality?: ReadonlyArray<'text' | 'voice'>;
   /** See RoleToolDefinition.state. */

@@ -1233,9 +1233,40 @@ describe('self-reported refusals are recorded as refused, not ok (EI-20184794555
     expect(captured?.errorCode).toBe('similar_exists');
   });
 
-  it('marks a non-JSON refusal as refused with a bounded fallback code and message', async () => {
+  // A prose refusal has no code to lift, so the fallback CODE still applies —
+  // but the handler's own text is the only statement of cause there is, and
+  // discarding it for the generic fallback message hid real causes coming back
+  // from third-party MCP servers (gitnexus/repomix refuse in prose, not JSON).
+  it('keeps a non-JSON refusal\'s own prose as the message, under the fallback code', async () => {
     const tool = makeTool({
-      fn: async () => ({ content: [{ type: 'text', text: 'plain prose refusal' }], isError: true }),
+      fn: async () => ({
+        content: [{ type: 'text', text: 'repo "papercup" is not allowed on this bridge' }],
+        isError: true,
+      }),
+    });
+    let captured: { status?: string; errorCode?: string | null; errorMessage?: string | null } | undefined;
+    await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
+      recordInvocation: async (input) => { captured = input; },
+    }));
+    expect(captured?.status).toBe('refused');
+    expect(captured?.errorCode).toBe('handler_refusal');
+    expect(captured?.errorMessage).toBe('repo "papercup" is not allowed on this bridge');
+  });
+
+  it('bounds a pathological prose refusal instead of storing it whole', async () => {
+    const tool = makeTool({
+      fn: async () => ({ content: [{ type: 'text', text: 'x'.repeat(5000) }], isError: true }),
+    });
+    let captured: { errorMessage?: string | null } | undefined;
+    await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
+      recordInvocation: async (input) => { captured = input; },
+    }));
+    expect(captured?.errorMessage?.length).toBe(512);
+  });
+
+  it('still uses the generic fallback when the refusal carries no text at all', async () => {
+    const tool = makeTool({
+      fn: async () => ({ content: [{ type: 'text', text: '   ' }], isError: true }),
     });
     let captured: { status?: string; errorCode?: string | null; errorMessage?: string | null } | undefined;
     await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
