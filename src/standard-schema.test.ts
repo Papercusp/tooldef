@@ -420,6 +420,44 @@ describe('formatIssues — an unrecognized key ranks at the depth of the key it 
     }
   });
 
+  it('discriminates against the PRE-FIX rule, which selects the wrong branch on this very input', () => {
+    // Falsifiability control (CLAUDE.md § "Proving a guard is falsifiable":
+    // for an imported module, keep a deliberately-wrong implementation in the
+    // test rather than mutating the shared tree). `legacyDepth` is the old
+    // scoring rule verbatim — path length only. If the assertions above ever
+    // start passing under it too, they have stopped testing anything.
+    const legacyDepth = (i: { path?: ReadonlyArray<unknown> }) => (i.path ?? []).length;
+    const r = schema.safeParse({ key: 'launch-provenance', ttlDays: 7 });
+    expect(r.success).toBe(false);
+    if (r.success) return;
+    const union = r.error.issues[0] as unknown as {
+      errors?: ReadonlyArray<ReadonlyArray<{ path?: ReadonlyArray<unknown>; message: string }>>;
+    };
+    const branches = union.errors ?? [];
+    expect(branches.length).toBeGreaterThan(1);
+
+    // Under the OLD rule the stray-key branch scores 0 and loses to a branch
+    // that merely lists its own unmet requirements.
+    let legacyBest: ReadonlyArray<{ path?: ReadonlyArray<unknown>; message: string }> | null = null;
+    let bestDepth = 0;
+    for (const branch of branches) {
+      const depth = Math.max(...branch.map(legacyDepth));
+      if (depth > bestDepth) {
+        bestDepth = depth;
+        legacyBest = branch;
+      }
+    }
+    // Render like formatIssues does: the offending FIELD NAME lives in `path`,
+    // not in `message`, so joining messages alone would name no field at all.
+    const legacyMsg = (legacyBest ?? [])
+      .map((i) => [(i.path ?? []).join('.'), i.message].filter(Boolean).join(': '))
+      .join('; ');
+    expect(legacyMsg).toMatch(/harness|shareable/);
+
+    // The real implementation must NOT reproduce that selection.
+    expect(formatIssues(r.error.issues)).not.toMatch(/harness|shareable/);
+  });
+
   it('leaves a union with no unrecognized keys scored exactly as before', () => {
     // The rule is additive: it only re-ranks branches that carry a named key.
     const a = z.object({ onlyA: z.literal('yes') });
