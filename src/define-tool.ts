@@ -1309,6 +1309,23 @@ const COMMON_ARG_ALIASES: Readonly<Record<string, readonly string[]>> = {
   linkedfeatureid: ['linkedFeatureId', 'linked_feature_id'],
   owner: ['ownerEmail', 'ownerId', 'assignee', 'assign_to'],
   ownerid: ['ownerEmail', 'owner', 'assignee', 'assign_to'],
+  // ── EI-21667775013157341: `plan` is the natural short name for a plan-scoped filter,
+  // but the declared key spells out WHICH plan relation it is — `sourcePlanSlug` on
+  // work_items:list, `current_plan_slug` on coord:declare-intent. The distance rung
+  // cannot rescue that: compact('plan') vs compact('sourcePlanSlug') is 10 against a
+  // threshold of 3 (the cap), so the caller is told the tool "declares no counterpart".
+  // That sentence is FALSE, and here it is worse than a withheld hint — the natural
+  // recovery from "no such filter" is to DROP the argument, which does not fail, it
+  // silently widens the read to EVERY plan. The reporter had to find `sourcePlanSlug`
+  // by reading the accepted-keys list.
+  //
+  // Deliberately an alias entry and NOT a containment rule: the suffix rung below
+  // refuses `<unknown> contained in <declared>` for the same reason it refuses a prefix
+  // test, and the reverse direction is worse still (`id` would match any key merely
+  // spelling "id"). The exact-declared-match precedence above keeps a tool that really
+  // declares `plan` winning over this line, and `admissible` still lets a value-refuting
+  // enum veto it.
+  plan: ['sourcePlanSlug', 'current_plan_slug', 'planSlug', 'plan_slug'],
   planitem: ['plan_item', 'itemId', 'item'],
   rubricid: ['rubricRef'],
   rubricids: ['rubricRefs'],

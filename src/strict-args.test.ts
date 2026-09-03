@@ -553,6 +553,41 @@ describe('suggestArgName', () => {
   });
 
   /**
+   * EI-21667775013157341 — the REVERSE of the suffix rung above: here the CALLER's name
+   * is the short one and the DECLARED key spells out which plan relation it means
+   * (`sourcePlanSlug` on work_items:list, `current_plan_slug` on coord:declare-intent).
+   * Distance cannot rescue it — `plan` sits 10 edits from `sourceplanslug` against a
+   * threshold capped at 3 — and the containment test that would catch it is refused for
+   * the same reason the prefix test above is refused, so this is carried as a curated
+   * alias entry instead.
+   *
+   * Worth more than a saved round-trip: the natural recovery from "this tool declares no
+   * counterpart" is to DROP the filter, and dropping THIS one does not fail — it silently
+   * widens the read from one plan to every plan.
+   */
+  it('suggests the spelled-out plan key for the short name `plan`', () => {
+    expect(suggestArgName('plan', ['harness', 'q', 'sourcePlanSlug', 'limit'])).toBe('sourcePlanSlug');
+    expect(suggestArgName('plan', ['intent', 'current_plan_slug', 'items'])).toBe('current_plan_slug');
+  });
+
+  /**
+   * ISOLATION CONTROLS for the alias above — one per direction of its blast radius.
+   *
+   * A tool declaring NO plan counterpart must stay SILENT: there, "declares no
+   * counterpart" is TRUE, and manufacturing a relocation would be precisely the
+   * confident misdirection this file exists to prevent. The fixture is the real accepted
+   * set from EI-21680072657147477, which reported this same short name against
+   * plan_items:my_items — a row that must stay correctly unfixed by this change.
+   *
+   * And a tool that genuinely declares `plan` must keep its own vocabulary through the
+   * exact-declared-match precedence, never be redirected into the alias list.
+   */
+  it('stays silent with no plan counterpart, and never overrides a declared `plan`', () => {
+    expect(suggestArgName('plan', ['agent_name', 'harness'])).toBeNull();
+    expect(suggestArgName('plan', ['plan', 'sourcePlanSlug'])).toBe('plan');
+  });
+
+  /**
    * A suffix match must not override proof that the destination cannot hold the value
    * (`candidateRefutesValue`): `scope` here is an enum that does not admit the slug,
    * so the relocation is refuted and the rung stays silent rather than advising a
