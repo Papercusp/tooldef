@@ -7,10 +7,21 @@
  * declared schema (`mergedSchemaProperties(rawSchema)`) only. A dispatch-level key —
  * one the transport peels off the raw input before tooldef's validator ever sees it,
  * such as Papercusp's `projection` — can therefore never appear in that list, even
- * though it is genuinely accepted on every call. The rejection then instructed the
- * caller, in imperative terms ("Re-send using only the keys above"), to drop a
- * capability that actually works — a documented, measured cause of at least one
+ * though it is genuinely accepted ON THE PATHS THAT PEEL IT. The rejection then
+ * instructed the caller, in imperative terms ("Re-send using only the keys above"), to
+ * drop a capability that actually works — a documented, measured cause of at least one
  * agent concluding a working feature did not exist (EI-21736465978852433).
+ *
+ * ⚠ SCOPE — the keys returned here are NOT accepted on every call (EI-22283734191872163).
+ * This resolver reports what the HOST'S TRANSPORT strips; a dispatch that runs BENEATH
+ * that transport (tooldef's own `runToolOrchestration`, which is what a `code:run`
+ * script calls) peels nothing, so the list is false there. The earlier wording of this
+ * comment said "accepted on every call" and that universal reached callers as a message
+ * naming `projection` as accepted in the same breath as it rejected `projection`.
+ * `unknownArgHint` now subtracts any key that arrived as an UNRECOGNIZED key on the
+ * call being reported — the rejection is itself per-dispatch evidence that the key was
+ * not peeled — so a resolver returning a process-wide list stays correct. Keep that
+ * subtraction in mind before relying on this list for anything other than the hint.
  *
  * `payloadTier` needs NO entry here: it is tooldef's OWN framework-reserved arg
  * (see `payload-tier.ts`, stripped inside `defineTool` itself for every tool), so

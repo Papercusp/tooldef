@@ -1900,19 +1900,6 @@ export function unknownArgHint(
   const correctionText = localCorrections.length > 0
     ? ` Did you mean ${localCorrections.map(({ rejectedArg, target }) => `\`${target}\` for \`${rejectedArg}\``).join('; ')}?`
     : '';
-  // EI-22174225494240206: dispatch-level args (`payloadTier`, and any host-registered
-  // ones — e.g. Papercusp's `projection`) are stripped by the transport BEFORE this
-  // validator ever runs, so they can never appear in `keys` above — but they ARE
-  // genuinely accepted on every call. List them separately, distinguished as
-  // dispatch-level, so this message stops instructing a caller to re-send WITHOUT a
-  // capability that actually works.
-  const ambientKeys = [PAYLOAD_TIER_ARG, ...readAmbientArgKeys()];
-  const ambientText = ambientKeys.length > 0
-    ? ` (Dispatch-level args, handled by the transport before this tool's own schema and therefore not in the list above but also accepted: ${ambientKeys.join(', ')}.)`
-    : '';
-  const reSendHint = ambientKeys.length > 0
-    ? ' Re-send using only the keys above (or the dispatch-level ones just listed).'
-    : ' Re-send using only the keys above.';
   // EI-21826333890701824: `tools:invoke`'s envelope (`{ name, args }`) wrapped around a
   // DIRECT verb call is a recognisable, recurring caller error with a specific remedy,
   // but the generic list-the-keys message cannot express it: it truthfully reports two
@@ -1920,6 +1907,35 @@ export function unknownArgHint(
   // field names — was wrong. Fires only when this tool declares NEITHER key itself, so
   // the meta-dispatcher that genuinely takes `name`/`args` never sees it.
   const unknownKeys = unrecognizedArgKeys(issues, rawSchema, input);
+  // EI-22174225494240206: dispatch-level args (`payloadTier`, and any host-registered
+  // ones — e.g. Papercusp's `projection`) are stripped by the transport BEFORE this
+  // validator ever runs, so they can never appear in `keys` above. Where the transport
+  // DID peel them they are genuinely accepted, and naming them is what stops this
+  // message instructing a caller to re-send WITHOUT a capability that actually works.
+  //
+  // EI-22283734191872163: but "accepted" is PER-DISPATCH, never process-wide. The host
+  // resolver reports which keys ITS TRANSPORT strips; a dispatch running BENEATH that
+  // transport — tooldef's own `runToolOrchestration`, which is what a `code:run` script
+  // calls — peels nothing, so the very same list is false there. The message then named
+  // `projection` as "also accepted" in the same breath as it rejected `projection`,
+  // which is how the false universal in this comment's earlier wording ("accepted on
+  // every call") reached callers: it was true where it was written and false where it
+  // was also emitted.
+  //
+  // The per-dispatch answer needs no new mechanism, no host signal and no dispatch
+  // context, because THIS CALL already carries the evidence: a key that arrived as an
+  // UNRECOGNIZED key was, by construction, not peeled before validation. So subtract
+  // them. That is a MEASUREMENT of this dispatch (derived-truth rung 1) rather than a
+  // claim about the process, and it fails safe for any future non-peeling path — such a
+  // path inherits the truth automatically instead of inheriting the universal.
+  const ambientKeys = [PAYLOAD_TIER_ARG, ...readAmbientArgKeys()]
+    .filter((key) => !unknownKeys.includes(key));
+  const ambientText = ambientKeys.length > 0
+    ? ` (Dispatch-level args, handled by the transport before this tool's own schema and therefore not in the list above but also accepted: ${ambientKeys.join(', ')}.)`
+    : '';
+  const reSendHint = ambientKeys.length > 0
+    ? ' Re-send using only the keys above (or the dispatch-level ones just listed).'
+    : ' Re-send using only the keys above.';
   const envelopeText =
     unknownKeys.includes('name')
     && unknownKeys.includes('args')
