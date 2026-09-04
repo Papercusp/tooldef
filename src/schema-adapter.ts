@@ -17,17 +17,18 @@
  */
 
 import { z } from 'zod';
+import { zodToJsonSchema } from 'zod-to-json-schema';
 
 /** Convert a validator schema to a JSON Schema object. Host-supplied. */
 export type JsonSchemaAdapter = (schema: unknown) => Record<string, unknown>;
 
 /**
- * Default adapter — Zod 4's built-in `toJSONSchema`. Shipped as the default so
+ * Default adapter — zod-to-json-schema for Zod 3. Shipped as the default so
  * the conversion is zero-config for Zod consumers; swappable via
  * `setJsonSchemaAdapter`.
  */
 export const zodJsonSchemaAdapter: JsonSchemaAdapter = (schema) =>
-  (z as unknown as { toJSONSchema(s: unknown): Record<string, unknown> }).toJSONSchema(schema);
+  zodToJsonSchema(schema);
 
 let adapter: JsonSchemaAdapter = zodJsonSchemaAdapter;
 
