@@ -1271,14 +1271,6 @@ export function strictArgs<T>(schema: T): T {
   }
 }
 
-/** Bounded render of a tool's full args JSON schema, appended to invalid_args errors (P-004,
- *  code-run-batch-adoption-2026-07-12). A terse per-issue message alone leaves a schema-blind
- *  caller (e.g. a tools:invoke route with no loaded schema) probing solo, call-by-call — the
- *  2026-07-11 release-fleet burst repeated the identical wrong arg shape twice in a row. With the
- *  schema in the failure, ONE failed call teaches the whole shape, so batching becomes the cheapest
- *  way to learn it. Rendered lazily on first failure (failures are rare), cached per registration. */
-const ARGS_SCHEMA_HINT_MAX = 1800;
-
 /**
  * EI-10883 — make the closed-shape rejection TEACH, not merely fail.
  *
@@ -1998,7 +1990,6 @@ function makeInvalidInputError(
   input: unknown,
   rawSchema: unknown,
   argRedirects: Record<string, string | ProjectedToolCorrectiveCall> | undefined,
-  schemaHintCache: { hint?: string },
 ): InvalidInputError {
   const corrections = invalidInputCorrections(issues, rawSchema, argRedirects, input);
   // P-015: the finished call, resolved against what the caller actually sent. Ordered
@@ -2029,7 +2020,13 @@ function makeInvalidInputError(
       // and only when the host registered a vintage resolver.
       (issuesAreValueLevel(issues)
         ? constraintVintageHint()
-        : failingFieldSchemaHint(issues, rawSchema) || argsSchemaHint(rawSchema, schemaHintCache)),
+        : failingFieldSchemaHint(issues, rawSchema) ||
+          // WI-6661: never fall back to the whole schema. The former 1,800-char
+          // dump routinely ended mid-property, so it was both expensive and an
+          // unreliable contract. An unrecognized-key error already gets the
+          // complete accepted-key list from `unknownArgHint`; an otherwise
+          // pathless issue gets the same compact list here.
+          (unknownKeys.length === 0 ? argsFieldNamesHint(rawSchema) : '')),
     metadata,
   );
 }
@@ -2096,11 +2093,10 @@ function attachCorrectedDisclosure(
  * EI-20087434994864624 (+7 more filings of the same friction on 2026-08-10 alone) —
  * make a NESTED validation failure teach the shape it actually needs.
  *
- * `argsSchemaHint` below dumps the tool's WHOLE args schema, bounded at
- * ARGS_SCHEMA_HINT_MAX. For a top-level shape error that is exactly right. For a failure
- * several levels down it is simultaneously TOO LONG and TOO SHORT: long enough to crowd
- * the result budget, yet truncated thousands of characters before reaching the field that
- * actually failed. The caller then cannot learn the shape from the error at all.
+ * The old fallback dumped the tool's WHOLE args schema, bounded at 1,800 chars.
+ * That was simultaneously TOO LONG and TOO SHORT: long enough to crowd the result
+ * budget, yet truncated thousands of characters before reaching the field that
+ * actually failed. The caller then could not learn the shape from the error at all.
  *
  * The observed dead end (coord:send, eight independent agents): a section field rejects a
  * string, then rejects an array of strings, and the appended "full args schema" cuts off
@@ -2121,8 +2117,8 @@ function attachCorrectedDisclosure(
  *    unreachable in the flat dump to begin with (`body` is a string OR an array of
  *    richly-described sections).
  *
- * Falls back to the full dump whenever a path cannot be resolved, so this can only add
- * precision, never remove information.
+ * A path that cannot be resolved falls back to the complete top-level field-name
+ * list, never to a partial whole-schema dump (WI-6661).
  */
 const FIELD_SCHEMA_HINT_MAX = 700;
 const FIELD_SCHEMA_HINT_MAX_FIELDS = 3;
@@ -2263,23 +2259,29 @@ function failingFieldSchemaHint(
   // prints — is several levels deeper. Reading `issue.path` here silently never fires.
   for (const { segs } of issueLeaves(issues ?? [])) {
     const path = segs as ReadonlyArray<PropertyKey>;
-    // A primitive top-level arg is already adequately described by its own type
-    // error, and the full dump is still the useful fallback for it. A top-level
-    // OBJECT (or union branch with properties), however, can be far enough into a
-    // large schema that the flat dump cuts off before the field's accepted keys —
-    // exactly the coord:send `why: "..."` dead end. Render that object's shape too.
+    // A pathless issue cannot identify one field. `unknownArgHint` handles
+    // unrecognized keys; the caller below falls back to a compact accepted-key list
+    // for other root-level failures.
     if (path.length < 1) continue;
 
-    // Walk the path, remembering the deepest prefix whose node actually lists properties.
+    // Walk the path, remembering the deepest prefix whose node actually lists
+    // properties. If there is no object-shaped ancestor (the common top-level
+    // primitive case), retain the resolved leaf itself. This is the WI-6661 seam:
+    // `claimableLimit` now teaches only its integer/range schema instead of dumping
+    // every unrelated coord:orient argument before truncating mid-property.
     let nodes: unknown[] = [rawSchema];
     let bestNode: unknown;
     let bestLabel = '';
+    let leafNode: unknown;
+    let leafLabel = '';
     const labelParts: string[] = [];
     for (const seg of path) {
       nodes = stepSchema(nodes, seg);
       if (nodes.length === 0) break;
       const segKey = typeof seg === 'object' && seg !== null ? String((seg as { key: PropertyKey }).key) : String(seg);
       labelParts.push(/^\d+$/.test(segKey) ? '[]' : segKey);
+      leafNode = nodes[0];
+      leafLabel = labelParts.join('.').replace(/\.\[\]/g, '[]');
       const objectish = nodes.find((node) => hasProperties(node))
         ?? nodes.flatMap((node) => schemaUnionBranches(node)).find((node) => hasProperties(node));
       if (objectish) {
@@ -2287,11 +2289,13 @@ function failingFieldSchemaHint(
         bestLabel = labelParts.join('.').replace(/\.\[\]/g, '[]');
       }
     }
-    if (bestNode === undefined || rendered.has(bestLabel)) continue;
+    const hintNode = bestNode ?? leafNode;
+    const hintLabel = bestNode === undefined ? leafLabel : bestLabel;
+    if (hintNode === undefined || !hintLabel || rendered.has(hintLabel)) continue;
 
     let json = '';
     try {
-      json = JSON.stringify(bestNode) ?? '';
+      json = JSON.stringify(hintNode) ?? '';
     } catch {
       json = '';
     }
@@ -2302,8 +2306,8 @@ function failingFieldSchemaHint(
     // `verified` description; serializing the raw schema first can hit the
     // bounded hint before that optional field appears, leaving the caller to
     // guess the contract (EI-20232348713050420).
-    const compact = compactAcceptedObjectHint(bestNode);
-    rendered.set(bestLabel, compact ? `e.g. ${compact}; verbose schema: ${json}` : json);
+    const compact = compactAcceptedObjectHint(hintNode);
+    rendered.set(hintLabel, compact ? `e.g. ${compact}; verbose schema: ${json}` : json);
     if (rendered.size >= FIELD_SCHEMA_HINT_MAX_FIELDS) break;
   }
   if (rendered.size === 0) return '';
@@ -2311,18 +2315,10 @@ function failingFieldSchemaHint(
   return ` — the field(s) that failed, in full: ${body}`;
 }
 
-function argsSchemaHint(rawSchema: unknown, cache: { hint?: string }): string {
-  if (cache.hint === undefined) {
-    let json = '';
-    try {
-      json = JSON.stringify(rawSchema) ?? '';
-    } catch {
-      json = '';
-    }
-    if (json.length > ARGS_SCHEMA_HINT_MAX) json = `${json.slice(0, ARGS_SCHEMA_HINT_MAX)} …(truncated)`;
-    cache.hint = json.length > 0 ? ` — full args schema: ${json}` : '';
-  }
-  return cache.hint;
+/** Compact, complete fallback for a pathless shape failure (WI-6661). */
+function argsFieldNamesHint(rawSchema: unknown): string {
+  const keys = Object.keys(mergedSchemaProperties(rawSchema) ?? {});
+  return keys.length > 0 ? ` — accepted args: ${keys.join(', ')}` : '';
 }
 
 /**
@@ -2374,8 +2370,6 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
   const inputSchema = flattenForOpenAi(rawSchema);
   const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
   const readColumns = projectReadColumns(outputJsonSchema);
-  const schemaHintCache: { hint?: string } = {};
-
   const projectedFn: ToolFn = async (input, ctx) => {
     // The dispatch stack may expose `tx` as a fail-loud getter for tools that
     // did not declare `needsWorkspaceTx`. Never probe that property directly:
@@ -2474,7 +2468,6 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
           shimmed,
           rawSchema,
           def.guidance?.argRedirects,
-          schemaHintCache,
         );
       }
       parsedValue = repaired.value;
@@ -2625,8 +2618,6 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
   const inputSchema = flattenForOpenAi(rawSchema);
   const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
   const readColumns = projectReadColumns(outputJsonSchema);
-  const schemaHintCache: { hint?: string } = {};
-
   const projectedFn: ToolFn = async (input, ctx) => {
     // EI-11621: recover a client `__unparsedToolInput` envelope FIRST, so the
     // per-call tier extraction + closed-shape validation see the intended args.
@@ -2654,7 +2645,6 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
           shimmed,
           rawSchema,
           def.guidance?.argRedirects,
-          schemaHintCache,
         );
       }
       parsedValue = repaired.value;
