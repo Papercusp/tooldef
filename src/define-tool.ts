@@ -2414,6 +2414,11 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       // handlers. `contextTier` alone cannot tell a caller's `full` override
       // from the default session tier.
       ...(callTier !== undefined ? { payloadTierOverride: callTier } : {}),
+      // Source-aware reads may receive the already-parsed dispatch projection
+      // from the host transport. Keep it on the legacy handler context too:
+      // this shim is field-by-field, so omitting it would silently make
+      // projection-aware handlers fall back to full-column reads.
+      ...(ctx.sourceProjection !== undefined ? { sourceProjection: ctx.sourceProjection } : {}),
       // EI-10358: thread the caller's role + per-session id through — the outer
       // `ctx` (UnifiedToolContext) already carries both (populated by the MCP
       // dispatch layer from the spawn/su URL context), but this legacy shim
