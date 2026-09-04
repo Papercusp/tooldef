@@ -115,7 +115,7 @@ describe('ctx.publishState dispatcher integration', () => {
     );
     expect(r.ok).toBe(true);
     if (r.ok) {
-      expect((r.result.content?.[0] as { text?: string })?.text).toBe('no-publishState');
+      expect((r.result?.content?.[0] as { text?: string })?.text).toBe('no-publishState');
     }
   });
 
@@ -130,7 +130,7 @@ describe('ctx.publishState dispatcher integration', () => {
     );
     expect(r.ok).toBe(true);
     if (r.ok) {
-      expect((r.result.content?.[0] as { text?: string })?.text).toBe('no-publishState');
+      expect((r.result?.content?.[0] as { text?: string })?.text).toBe('no-publishState');
     }
   });
 
@@ -163,7 +163,7 @@ describe('ctx.publishState dispatcher integration', () => {
     );
     expect(r.ok).toBe(true);
     if (r.ok) {
-      expect((r.result.content?.[0] as { text?: string })?.text).toMatch(/^threw:/);
+      expect((r.result?.content?.[0] as { text?: string })?.text).toMatch(/^threw:/);
     }
   });
 
@@ -196,7 +196,7 @@ describe('ctx.publishState dispatcher integration', () => {
     );
     expect(r.ok).toBe(true);
     if (r.ok) {
-      expect((r.result.content?.[0] as { text?: string })?.text).toMatch(/snapshot-only/);
+      expect((r.result?.content?.[0] as { text?: string })?.text).toMatch(/snapshot-only/);
     }
   });
 

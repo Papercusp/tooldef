@@ -20,6 +20,49 @@ export type {
   ProgressCallback,
   EmitCallback,
 } from './wire';
+export type { SeeAlso, SeeAlsoEntry, SeeAlsoPointer } from './see-also';
+// Base-rate stamping (EI-19375528138828761): a filtered result carries the
+// population it was drawn from, so a slice is never read as a census.
+export type { Denominator, DenominatorSpec } from './denominator';
+export {
+  applyDenominator,
+  resolveDenominator,
+  renderDenominatorText,
+} from './denominator';
+export {
+  applySeeAlso,
+  resolveSeeAlso,
+  renderSeeAlsoText,
+  readJsonResult,
+} from './see-also';
+// Host-registered ambient result annotator (agent-managed-compaction P-013): the seam
+// the host wires its banded context gauge into. Default no-op; see result-annotator.ts.
+export type { ResultAnnotator } from './result-annotator';
+export {
+  setResultAnnotator,
+  resetResultAnnotator,
+  applyResultAnnotator,
+} from './result-annotator';
+// Host-registered "how stale is this process" resolver, surfaced as an extra
+// sentence on an `Unrecognized key` invalid_args error (EI-19953470656367880).
+export type { ServerVintage } from './server-vintage';
+export {
+  setServerVintageResolver,
+  resetServerVintageResolver,
+  readServerVintage,
+  formatVintageAge,
+  serverVintageHint,
+  constraintVintageHint,
+} from './server-vintage';
+// Host-registered list of dispatch-level arg keys the transport strips before a
+// tool's own schema ever validates (EI-22174225494240206) — folded into
+// `unknownArgHint`'s "accepts ONLY" list so a genuinely-accepted key never reads
+// as rejected. Default unregistered (empty list); see ambient-args.ts.
+export {
+  setAmbientArgKeysResolver,
+  resetAmbientArgKeysResolver,
+  readAmbientArgKeys,
+} from './ambient-args';
 export type {
   AgentRole,
   RoleRegistry,
@@ -30,12 +73,117 @@ export type {
 } from './host-types';
 
 /* ─── defineTool + sibling authoring primitives ──────────────────────── */
-export { defineTool } from './define-tool';
+export {
+  defineTool,
+  toArgsJsonSchema,
+  // The effect oracle — for static scanners that cannot execute defineTool (WI-6464).
+  inferCapabilityEffect,
+  WRITE_CAPABILITIES,
+  WRITE_CAPABILITY_SUFFIXES,
+} from './define-tool';
+// EI-19408488769901676: the HARD ceiling was defined but never re-exported, while its
+// softer sibling (the ratchet) was — so a shaper wanting to hit the budget ITSELF, and
+// thereby avoid the blind generic fall-through, had no way to reference the number it
+// must stay under except by copying it. Export it so that check can be a real assertion.
+export {
+  applyPayloadTier,
+  extractPayloadTier,
+  parsePayloadTier,
+  resolvePayloadTier,
+  resetPayloadTierRatchet,
+  projectBoundedPayload,
+  PAYLOAD_TIERS,
+  PAYLOAD_TIER_RATCHET_CHARS,
+  PAYLOAD_TIER_HARD_CEILING_CHARS,
+  type PayloadTier,
+  type PayloadShapers,
+  type PayloadShaperCtx,
+  type BoundedPayloadProjection,
+  type BoundedPayloadRecovery,
+  type ProjectBoundedPayloadOpts,
+} from './payload-tier';
 export { defineResource } from './define-resource';
 export { definePrompt } from './define-prompt';
 
+/* ─── Result serialization (token-efficient formats) ─────────────────── */
+export {
+  serializeToolResponse,
+  formatOptsFromCtx,
+  type SerializeFormatOpts,
+  type SerializedToolResult,
+} from './serialize-result';
+
+/* ─── Delta protocol — agent tool result freshness negotiation ───────── */
+export {
+  parseDeltaRequest,
+  formatDeltaRequest,
+  encodeDeltaCursor,
+  decodeDeltaCursor,
+  computeViewFingerprint,
+  contentRevision,
+  negotiateDelta,
+  setSemanticDeltaEnabledResolver,
+  resetSemanticDeltaEnabledResolver,
+  isSemanticDeltaEnabled,
+  computeRowDigest,
+  computeRowDigestUncapped,
+  computeViewChecksum,
+  diffFromDigest,
+  applySemanticDelta,
+  deltaCounts,
+  DELTA_SMALL_RESPONSE_BYTES,
+  DELTA_MAX_DIGEST_ENTRIES,
+  type DeltaMode,
+  type DeltaRequest,
+  type DeltaCursorPayload,
+  type DeltaCapability,
+  type DeltaChange,
+  type DeltaNegotiation,
+  type NegotiatedDeltaMode,
+  type DeltaFullReason,
+} from './delta-protocol';
+
+/* ─── Server-held row digests for large views (P-024) ─────────────────── */
+export {
+  putRowDigest,
+  getRowDigest,
+  resetRowDigestStore,
+  rowDigestStoreStats,
+  DIGEST_STORE_MAX_ROWS,
+  type RowDigest,
+} from './delta-digest-store';
+
 /* ─── Registries ─────────────────────────────────────────────────────── */
 export { getCatalog, lookup, _resetCatalogForTests } from './registry';
+
+/* ─── Catalogue summaries (defineGroup + derived capability map) ──────── */
+export {
+  defineGroup,
+  registerGroup,
+  lookupGroup,
+  getGroupCatalog,
+  _resetGroupCatalogForTests,
+  type GroupDefinition,
+  type GroupDefinitionInput,
+} from './define-group';
+export {
+  groupOf,
+  describeGroupFromMembers,
+  catalogueProjection,
+  renderCapabilityMap,
+  declaredGroupSlugs,
+  type CatalogueEntry,
+  type RenderCapabilityMapOptions,
+} from './catalogue-projection';
+
+/* ─── Code-execution tool-orchestration runtime (B-CX-1A / B-CX-2A) ────── */
+export * from './code-orchestration';
+export {
+  collectToolEmits,
+  getCollectedToolEmits,
+  _resetCollectedToolEmitsForTests,
+  type CollectedToolEmits,
+} from './emits-registry';
 export {
   getResourceCatalog,
   lookupResource,
@@ -47,6 +195,17 @@ export {
   lookupPrompt,
   _resetPromptCatalogForTests,
 } from './prompt-registry';
+export {
+  SLASH_PROMPT_PREFIX,
+  resolveSlashExposure,
+  slashPromptNameFor,
+  isSlashPromptName,
+  slashPromptToolName,
+  deriveSlashPromptArguments,
+  slashPromptListingFor,
+  renderSlashPrompt,
+} from './slash-projection';
+export type { SlashPromptListing } from './slash-projection';
 
 /* ─── Run / workspace lifecycle ──────────────────────────────────────── */
 export {
@@ -73,6 +232,25 @@ export type {
   VersionedSnapshot,
 } from './state-channel';
 
+/* ─── State-channel deltas (agent-tool-delta-protocol P-009) ─────────────── */
+export { diffSnapshot, applySnapshotDelta, chooseSnapshotEmission } from './state-delta';
+export type { SnapshotDelta, SnapshotEmission } from './state-delta';
+
+/* ─── Tool-result delta CLIENT (agent-tool-delta-protocol follow-up — the missing half) ─── */
+export { DeltaToolClient, dispatchWithDelta, dispatchWithConveyedDelta } from './delta-client';
+export type { DeltaResponse, DeltaIngestResult, DeltaDispatch, DeltaDispatchResult } from './delta-client';
+// Harness-side base-presence tracker (the D-006 "harness owns the base" half — when is not_modified/delta safe) — P-003.
+// `dispatchWithBasePresence` is the one-call turn-wrapper integration seam (tracker + client + guarded dispatch).
+export { BasePresenceTracker, dispatchWithBasePresence } from './base-presence';
+// base-presence's DeltaMode ('full'|'not_modified'|'delta') is a DISTINCT type from
+// delta-protocol's ('auto'|'full'|'not_modified') re-exported above — the two collided
+// under the bare name (TS2300). Disambiguate the barrel; the source module keeps its own
+// `DeltaMode` for internal consumers. (No external caller imports the bare barrel name.)
+export type { BasePresenceOptions, DeltaMode as BasePresenceDeltaMode } from './base-presence';
+// Server-side rows-array delta negotiation (the sync-resolver/SSE sibling of negotiateToolDelta) — P-006.
+export { negotiateRowsDelta } from './rows-delta';
+export type { RowsDeltaResult } from './rows-delta';
+
 /* ─── Card correlator (ctx.askUser) ──────────────────────────────────── */
 export {
   registerCard,
@@ -89,6 +267,30 @@ export {
   defaultTierResolver,
   type CapabilityTierResolver,
 } from './capability-tiers';
+
+/* ─── Entity-reference args (referential integrity at dispatch) ───────── */
+export {
+  entityRef,
+  entityRefMeta,
+  collectEntityRefs,
+  setEntityResolver,
+  clearEntityResolvers,
+  hasEntityResolver,
+  resolveEntityRefs,
+  formatEntityRefViolations,
+  setEntityEnum,
+  clearEntityEnums,
+  applyEntityRefEnums,
+  entityEnumRevision,
+  DEFAULT_MAX_ENUM_VALUES,
+  type EntityKind,
+  type EntityRefMeta,
+  type EntityRefSite,
+  type EntityResolver,
+  type EntityRefViolation,
+  type EntityEnumerator,
+  type EntityEnumOptions,
+} from './entity-ref';
 
 /* ─── Schema → JSON-Schema adapter (pluggable; default Zod) ───────────── */
 export {
@@ -114,8 +316,22 @@ export {
   toolDeclaresGate,
   listUngatedProjectedTools,
   lookupByMcpName,
+  resolveMcpName,
+  normalizeMcpName,
   lookupByHttpPath,
   listAllProjectedTools,
+  projectedToolSourceFile,
+  listDeclaredToolShapers,
+  recordToolShapers,
+  PROJECTED_TOOL_REGISTRY_SOURCE,
+  projectedToolRegistryRevision,
+  projectedToolCallContract,
+  projectedToolAdmitted,
+  assertProjectedToolCallContract,
+  renderProjectedToolCall,
+  projectedToolCorrectiveCalls,
+  assertProjectedToolGuidanceConformance,
+  ProjectedToolContractError,
   listMcpProjections,
   ToolRegistrationError,
   emitToSseSink,
@@ -126,11 +342,21 @@ export {
   type ToolExposure,
   type ToolExposureHttp,
   type ToolExposureMcp,
+  type ToolExposureSlash,
+  type ProjectedToolAvailability,
+  type ProjectedToolCallContract,
+  type ProjectedToolCorrectiveCall,
+  type ValidatedProjectedToolCorrectiveCall,
+  type ProjectedToolGuidanceConformance,
   type UnifiedToolContext,
   type GateBypass,
+  type RequestOriginMetadata,
   type MinimalEventSink,
   type PapercuspBinaryEnvelope,
   type EventWireKind,
+  // WI-37843: the host reads this to decide whether prose may be appended to a
+  // door-exempt result, so it has to cross the package boundary.
+  type ResultDoorSkipReason,
 } from './tool-projection';
 
 /* ─── Dispatcher ─────────────────────────────────────────────────────── */
@@ -140,14 +366,51 @@ export {
   defaultComputeQuotaWindow,
   UnauthorizedToolError,
   HarnessRequiredError,
+  WorkspaceTxNotDeclaredError,
+  WorkspaceTxUnavailableError,
+  InvalidInputError,
   PASS_THROUGH,
   type QuotaWindow,
   type DispatchProjectedDeps,
   type DispatchProjectedResult,
   type DispatchProjectedErrorCode,
+  type InvalidInputCorrection,
+  type InvalidInputMetadata,
   type DispatchStreamEvent,
+  type PostInvokeEvent,
+  type CapabilityEnvelopeVerdict,
   type ToolDispatchOverrideFn,
 } from './dispatch-projected';
+
+/**
+ * P-015 — the shared refusal helper. Exported so a host can render or act on the corrected
+ * call itself; every tool defined through this library already inherits it in the refusal
+ * message with no per-verb wiring, which is the property the item asked for.
+ */
+export {
+  buildCorrectedCall,
+  correctedCallHint,
+  type CorrectedCall,
+  type CorrectedCallStep,
+} from './corrected-call';
+
+/**
+ * P-016 — the EXECUTE half of D-104. A tool declares `argReencodings` and the dispatcher
+ * repairs-and-RUNS those calls, disclosing each correction. Exported so a host can author
+ * a rule beside the schema it repairs; see `reencode-args.ts` for the boundary that keeps
+ * this narrower than the refusal helper above.
+ */
+export {
+  applyArgReencodings,
+  correctedDisclosure,
+  boundValue,
+  type ArgReencoding,
+  type ArgReencodingOutcome,
+  type AppliedArgCorrection,
+} from './reencode-args';
+
+/** Explicit workspace-transaction contract helpers for host/nested adapters. */
+export { boundWorkspaceTx, applyWorkspaceTxContract } from './workspace-tx';
 
 /* ─── Resource authorization (RFC tooldef-auth-rfc Phase 1 — contract only) ─── */
 export { ownerOnly } from './authz';
@@ -174,6 +437,8 @@ export type {
   ToolContext,
   ToolDefinition,
   ToolDefinitionInput,
+  ToolEmitSpec,
+  ToolEventLike,
   ToolResponse,
   UIResourceContent,
   ResourceContext,
@@ -190,6 +455,13 @@ export type {
   CardOption,
   OpenCardSnapshot,
 } from './types';
+
+/* ─── Declarative preconditions (`requires:` — D-006) ────────────────── */
+export type {
+  ToolRequireSpec,
+  ToolPreInvokeEvent,
+  PreconditionFireRequest,
+} from './requires';
 
 /* ─── Replay buffer ──────────────────────────────────────────────────── */
 export {

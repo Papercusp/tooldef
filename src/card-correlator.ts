@@ -17,6 +17,7 @@
  * to the state channel. No double-bookkeeping (H2).
  */
 
+import { pinModuleState } from '@papercusp/module-singleton';
 import type { CardResponse, CardSpec, OpenCardSnapshot } from './types';
 import { setOpenCards } from './state-channel';
 import { onWorkspaceSwitch } from './workspace-lifecycle';
@@ -46,27 +47,36 @@ interface PendingCard<TSchema extends StandardSchemaV1 = StandardSchemaV1> {
   timeoutHandle?: ReturnType<typeof setTimeout>;
 }
 
-const __SYM = Symbol.for('papercusp.cardCorrelatorRegistry');
-type RegistryGlobals = typeof globalThis & {
-  [__SYM]?: {
-    pending: Map<string /* correlationId */, PendingCard>;
-    byRun: Map<string /* runId */, Set<string /* correlationId */>>;
-    idempotency: Map<string /* runId */, Map<string /* key */, CardResponse<any>>>;
-    lifecycleSubscribed: boolean;
-  };
-};
+/**
+ * The pin key — also the id this module reports under in
+ * `listModuleDuplications()`, so a split here shows up in the REALM-WIDE report
+ * rather than only through this module's own accessor. Unchanged from the
+ * `Symbol.for(...)` description used before the migration (EI-19479108855357092).
+ */
+const STATE_KEY = 'papercusp.cardCorrelatorRegistry';
+
+interface CardCorrelatorState {
+  pending: Map<string /* correlationId */, PendingCard>;
+  byRun: Map<string /* runId */, Set<string /* correlationId */>>;
+  idempotency: Map<string /* runId */, Map<string /* key */, CardResponse<any>>>;
+  lifecycleSubscribed: boolean;
+}
+
+/**
+ * Pinned + counted rather than hand-rolled: a hand-rolled
+ * `globalThis[Symbol.for(...)]` slot is equally correct and completely invisible
+ * to `listModuleDuplications()`. Must stay at module scope. Lifecycle
+ * subscription stays lazy in `registry()` — only the data is eager.
+ */
+const state = pinModuleState<CardCorrelatorState>(STATE_KEY, () => ({
+  pending: new Map(),
+  byRun: new Map(),
+  idempotency: new Map(),
+  lifecycleSubscribed: false,
+}));
 
 function registry() {
-  const g = globalThis as RegistryGlobals;
-  if (!g[__SYM]) {
-    g[__SYM] = {
-      pending: new Map(),
-      byRun: new Map(),
-      idempotency: new Map(),
-      lifecycleSubscribed: false,
-    };
-  }
-  const r = g[__SYM]!;
+  const r = state;
   if (!r.lifecycleSubscribed) {
     onWorkspaceSwitch((wid) => cancelPendingCardsForWorkspaceSwitch(wid));
     r.lifecycleSubscribed = true;
@@ -90,6 +100,7 @@ function pendingToOpenCard(card: PendingCard): OpenCardSnapshot {
     presentation: card.spec.presentation,
     fallbackText: card.spec.fallbackText,
     allowDecline: card.spec.allowDecline,
+    report: card.spec.report,
     createdAt: card.createdAt,
   };
 }

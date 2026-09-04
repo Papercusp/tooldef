@@ -6,11 +6,22 @@
  * once at server startup populates the catalog.
  */
 
+import { SLASH_PROMPT_PREFIX } from './slash-projection';
 import type { PromptDefinition } from './types';
 
 const CATALOG = new Map<string, PromptDefinition>();
 
 export function registerPrompt(def: PromptDefinition): void {
+  // `tool:*` is reserved for the DYNAMIC slash projection of the tool
+  // catalog (slash-exposure-tool-catalog-2026-06-12 D-006). A static prompt
+  // there would collide unpredictably as tools come and go — fail loud at
+  // registration instead.
+  if (def.name.startsWith(SLASH_PROMPT_PREFIX)) {
+    throw new Error(
+      `Prompt name "${def.name}" uses the reserved "${SLASH_PROMPT_PREFIX}" namespace ` +
+      '(dynamic slash projection of the tool catalog). Pick another group.',
+    );
+  }
   if (CATALOG.has(def.name)) {
     const existing = CATALOG.get(def.name)!;
     if (existing === def) return;

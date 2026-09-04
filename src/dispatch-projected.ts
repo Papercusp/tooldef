@@ -32,10 +32,17 @@ export {
   PASS_THROUGH,
   UnauthorizedToolError,
   HarnessRequiredError,
+  WorkspaceTxNotDeclaredError,
+  WorkspaceTxUnavailableError,
+  InvalidInputError,
   type QuotaWindow,
   type DispatchProjectedDeps,
   type DispatchProjectedErrorCode,
   type DispatchProjectedResult,
+  type InvalidInputCorrection,
+  type InvalidInputMetadata,
+  type PostInvokeEvent,
+  type CapabilityEnvelopeVerdict,
   type ToolDispatchOverrideFn,
 } from './dispatch-types';
 

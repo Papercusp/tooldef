@@ -3,15 +3,19 @@
  * Run with: npx vitest run packages/agent-mcp/src/dispatch-projected.test.ts
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
+import { defineTool } from './define-tool';
 import {
   dispatchProjectedTool,
   dispatchProjectedToolStream,
   defaultComputeQuotaWindow,
+  InvalidInputError,
   type DispatchProjectedDeps,
   type DispatchStreamEvent,
 } from './dispatch-projected';
 import {
   _resetProjectionRegistryForTests,
+  lookupByMcpName,
   type ProjectedTool,
   type UnifiedToolContext,
 } from './tool-projection';
@@ -141,6 +145,44 @@ describe('dispatchProjectedTool', () => {
     expect(bypassed.ok).toBe(true);
   });
 
+  it('appends host-provided route guidance without changing the denial', async () => {
+    const tool = makeTool({ capabilities: ['plans:write'] });
+    const principal = {
+      kind: 'system' as const,
+      slug: 'system:judge',
+      workspaceId: 'default',
+      authMethod: 'spawn-url' as const,
+      trust: 'trusted' as const,
+      capabilities: new Set<string>(),
+    };
+    const denied = await dispatchProjectedTool(
+      tool,
+      'plans:audit',
+      {},
+      MAKE_CTX({ transport: 'mcp', role: 'judge', principal }),
+      MAKE_DEPS({
+        authorizationFailureHint: ({ toolName, missingCapability }) =>
+          `Use papercusp-su tools:invoke for ${toolName} (${missingCapability}).`,
+      }),
+    );
+    expect(denied.ok).toBe(false);
+    expect(denied.error?.code).toBe('missing_capability');
+    expect(denied.error?.message).toContain('Use papercusp-su tools:invoke');
+  });
+
+  it("treats '*' as the canonical wildcard capability", async () => {
+    const tool = makeTool({ capabilities: ['secrets:read'] });
+    const principal = {
+      kind: 'system' as const, slug: 'system:operator', workspaceId: 'default',
+      authMethod: 'process-internal' as const, trust: 'trusted' as const,
+      capabilities: new Set(['*']),
+    };
+    const result = await dispatchProjectedTool(
+      tool, 'fix.tool', {}, MAKE_CTX({ principal }), MAKE_DEPS(),
+    );
+    expect(result.ok).toBe(true);
+  });
+
   it('gateBypass.quota skips the quota gate', async () => {
     const tool = makeTool({ rolesQuota: { worker: { perRun: 1 } } });
     const deps = MAKE_DEPS({ readQuotaState: vi.fn(async () => ({ count: 1 })) });
@@ -253,6 +295,44 @@ describe('dispatchProjectedTool', () => {
     expect(recorded[0]?.outputSize).toBeGreaterThan(0);
   });
 
+  it('records a canonical ToolResponse { data:{ ok:false, reason } } as call-ok plus soft-failure metadata', async () => {
+    defineTool({
+      name: 'test:soft-failure-outcome',
+      requirePrincipal: false as const,
+      capability: 'test:read',
+      args: z.object({}),
+      async handler() {
+        return { data: { ok: false, recorded: false, reason: 'transcript_not_found' } };
+      },
+    });
+    let captured: {
+      status?: string;
+      errorCode?: string | null;
+      errorMessage?: string | null;
+      metadataJson?: Record<string, unknown> | null;
+    } | undefined;
+    const result = await dispatchProjectedTool(
+      lookupByMcpName('test:soft-failure-outcome')!,
+      'test:soft-failure-outcome',
+      {},
+      MAKE_CTX(),
+      MAKE_DEPS({
+        recordInvocation: vi.fn(async (input) => { captured = input; }),
+      }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(captured).toMatchObject({
+      status: 'ok',
+      metadataJson: {
+        resultOutcome: 'soft-failure',
+        softFailureReason: 'transcript_not_found',
+      },
+    });
+    expect(captured?.errorCode).toBeUndefined();
+    expect(captured?.errorMessage).toBeUndefined();
+  });
+
   it('records handler_error when fn throws', async () => {
     const tool = makeTool({ fn: async () => { throw new Error('boom'); } });
     const recorded: string[] = [];
@@ -262,6 +342,124 @@ describe('dispatchProjectedTool', () => {
     expect(r.ok).toBe(false);
     expect(r.error?.code).toBe('handler_error');
     expect(recorded).toEqual(['error']);
+  });
+
+  it('records PostgreSQL SQLSTATE and constraint identity without changing handler_error', async () => {
+    const pgError = Object.assign(new Error('duplicate key value violates unique constraint'), {
+      code: '23505',
+      constraint: 'goals_attach_pot_one_owner',
+    });
+    const tool = makeTool({
+      fn: async (_input, ctx) => {
+        ctx.metadata?.({ requestId: 'req-1' });
+        throw pgError;
+      },
+    });
+    let captured: { errorCode?: string | null; metadataJson?: Record<string, unknown> | null } = {};
+    const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
+      recordInvocation: vi.fn(async (input) => {
+        captured = { errorCode: input.errorCode, metadataJson: input.metadataJson };
+      }),
+    }));
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe('handler_error');
+    expect(captured.errorCode).toBe('handler_error');
+    expect(captured.metadataJson).toEqual({
+      requestId: 'req-1',
+      postgres: { sqlState: '23505', constraintName: 'goals_attach_pot_one_owner' },
+    });
+  });
+
+  it('does not classify a non-SQLSTATE driver code as PostgreSQL metadata', async () => {
+    const driverError = Object.assign(new Error('connection closed'), { code: 'CONNECTION_CLOSED' });
+    const tool = makeTool({ fn: async () => { throw driverError; } });
+    let capturedMetadata: Record<string, unknown> | null | undefined;
+    await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
+      recordInvocation: vi.fn(async (input) => {
+        capturedMetadata = input.metadataJson;
+      }),
+    }));
+    expect(capturedMetadata?.postgres).toBeUndefined();
+  });
+
+  it('codes InvalidInputError as invalid_input, not handler_error (EI-334 false-structural leg)', async () => {
+    // defineTool's projected fn throws InvalidInputError on a zod-parse
+    // failure. handler_error is the STRUCTURAL telemetry class (a tool bug);
+    // a caller's bad args must surface as invalid_input (status invalid-input,
+    // HTTP 400) so the repeated-tool-error watchdog files it as caller-class.
+    const tool = makeTool({ fn: async () => { throw new InvalidInputError('invalid_args: brief: Too big'); } });
+    const recorded: Array<{ status: string; errorCode?: string | null }> = [];
+    const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
+      recordInvocation: vi.fn(async (i) => { recorded.push({ status: i.status, errorCode: i.errorCode }); }),
+    }));
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe('invalid_input');
+    expect(r.error?.message).toContain('invalid_args: brief: Too big');
+    expect(recorded).toEqual([{ status: 'invalid-input', errorCode: 'invalid_input' }]);
+  });
+
+  it('codes a foreign-instance InvalidInputError by name (dual-module-instance hosts)', async () => {
+    // Same name-based match the Unauthorized/HarnessRequired classes carry:
+    // when the host loads a second copy of this module, instanceof is false.
+    const foreign = new Error('invalid_args: nope');
+    Object.defineProperty(foreign, 'name', { value: 'InvalidInputError' });
+    const tool = makeTool({ fn: async () => { throw foreign; } });
+    const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS());
+    expect(r.error?.code).toBe('invalid_input');
+  });
+
+  it('preserves registry provenance and deterministic corrections in dispatch + telemetry', async () => {
+    defineTool({
+      name: 'test:invalid-input-provenance',
+      requirePrincipal: false as const,
+      capability: 'test:read',
+      args: z.object({ id: z.string(), topic: z.string() }),
+      guidance: { argRedirects: { tags: 'work_items:tag { id, topic }' } },
+      async handler() {
+        return { content: [{ type: 'text' as const, text: 'ok' }] };
+      },
+    });
+    let metadataJson: Record<string, unknown> | null | undefined;
+    const result = await dispatchProjectedTool(
+      lookupByMcpName('test:invalid-input-provenance')!,
+      'test:invalid-input-provenance',
+      { id: 'WI-1', topic: 'ops', tags: ['drift'] },
+      MAKE_CTX(),
+      MAKE_DEPS({
+        recordInvocation: vi.fn(async (input) => { metadataJson = input.metadataJson; }),
+      }),
+    );
+
+    const expected = {
+      source: 'projected-tool-registry',
+      registryRevision: expect.stringMatching(/^projected-tool-registry-v1:/),
+      toolName: 'test:invalid-input-provenance',
+      corrections: [{
+        rejectedArg: 'tags',
+        target: 'work_items:tag { id, topic }',
+        kind: 'authored-redirect',
+      }],
+      // P-015 (WI-2141831) added the corrected call to this same metadata object, so it
+      // rides into BOTH the error meta and telemetry. Declared explicitly rather than
+      // relaxed to objectContaining: this deep-equal is what catches a new field entering
+      // telemetry unannounced, which is exactly how it caught this one.
+      //
+      // `tags` is DROPPED, not relocated, and that is deliberate: buildCorrectedCall skips
+      // `authored-redirect` corrections when resolving destinations (corrected-call.ts)
+      // because such a redirect points at a DIFFERENT tool, so its value cannot be moved
+      // within this call. Leaving the key would just re-trigger the same rejection; the
+      // redirect's own rendered call still says where the value belongs.
+      correctedCall: {
+        tool: 'test:invalid-input-provenance',
+        args: { id: 'WI-1', topic: 'ops' },
+        steps: [{ rejectedArg: 'tags', action: 'dropped' }],
+        rendered: expect.stringContaining('test:invalid-input-provenance('),
+        droppedUnaccepted: true,
+      },
+    };
+    expect(result.ok).toBe(false);
+    expect(result.error?.meta?.invalidInput).toEqual(expected);
+    expect(metadataJson?.invalidInput).toEqual(expected);
   });
 
   it('returns timeout when fn exceeds timeoutSec', async () => {
@@ -346,14 +544,47 @@ describe('dispatchProjectedTool', () => {
     expect(recorded[0].transport).toBe('ipc');
   });
 
-  it('ok-on-abort: handler returns ok despite signal aborted → surfaces as timeout error', async () => {
+  it('errorCode (the dispatcher error CLASS) is plumbed through to recordInvocation (P-007)', async () => {
+    // watchdog-robustness P-007 / D-009: the dispatcher computes a rich error
+    // `code` then persists it on tool_invocations.error_code so the watchdog can
+    // tell a deterministic config bug from a transient crash WITHOUT parsing
+    // errorMessage. A throwing handler surfaces as code 'handler_error' — verify
+    // the class reaches the record call, not just the coarse status='error'.
+    const tool = makeTool({
+      fn: async () => { throw new Error('boom'); },
+    });
+    const recorded: Array<{ status?: string; errorCode?: string | null }> = [];
+    const deps: DispatchProjectedDeps = {
+      recordInvocation: async (input) => {
+        recorded.push({ status: input.status, errorCode: input.errorCode });
+      },
+    };
+    await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), deps);
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0].status).toBe('error');            // coarse status (unchanged)
+    expect(recorded[0].errorCode).toBe('handler_error'); // NEW: the class is preserved
+  });
+
+  it('errorCode is null on a successful call (P-007)', async () => {
+    const tool = makeTool({ fn: async () => ({ content: [{ type: 'text', text: 'ok' }] }) });
+    let captured: { status?: string; errorCode?: string | null } = {};
+    const deps: DispatchProjectedDeps = {
+      recordInvocation: async (input) => { captured = { status: input.status, errorCode: input.errorCode }; },
+    };
+    await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), deps);
+    expect(captured.status).toBe('ok');
+    expect(captured.errorCode ?? null).toBeNull();
+  });
+
+  it('ok-on-abort (MUTATION, non-low tier): handler returns ok despite signal aborted → surfaces as timeout error', async () => {
     // Round-7 follow-up: the watchdog used to fire but if the handler
     // returned normally without observing ctx.signal.aborted, the
     // dispatcher would emit `ok: true` + the partial result. That hid
     // wedged-but-non-throwing handlers from the consumer (they saw a
     // bogus `done` instead of `error: timeout`). The fix treats
-    // abort.signal.aborted as authoritative.
+    // abort.signal.aborted as authoritative — for a MUTATION (tier != 'low').
     const tool = makeTool({
+      capabilities: [], // no low-read capability the dispatcher can classify → abort stays authoritative
       timeoutSec: 60,
       idleTimeoutSec: 1,
       fn: async (_input, ctx) => {
@@ -363,6 +594,72 @@ describe('dispatchProjectedTool', () => {
         // reliably catch the abort before the handler returns.
         await new Promise((r) => setTimeout(r, 3000));
         // Returns ok despite the abort having fired.
+        return { content: [{ type: 'text', text: 'should-not-surface' }] };
+      },
+    });
+    const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS());
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe('timeout');
+  }, 10_000);
+
+  it('ok-on-abort (idempotent READ, tier low): a completed result SURFACES despite the abort (no false timeout)', async () => {
+    // The repeated-tool-error cluster (EI-98/99/105/174/175): under load the
+    // wall-clock exceeds the timeout even for a cheap read, the idle/timeout
+    // watchdog fires, the handler still returns a valid result — and discarding it
+    // as a timeout both wasted the read and flooded the improvement-watchdog with
+    // false "tool errored" signals. For a 'low' tier (idempotent read / low-stakes,
+    // no governed mutation) the completed result is safe to surface.
+    const tool = makeTool({
+      // A read: every declared capability resolves to tier 'low' (the generic
+      // default resolver maps all → 'low'), so a completed result surfaces past the deadline.
+      capabilities: ['plans:read'],
+      timeoutSec: 60,
+      idleTimeoutSec: 1,
+      fn: async () => {
+        await new Promise((r) => setTimeout(r, 3000)); // outlast the idle cap → abort fires
+        return { content: [{ type: 'text', text: 'fresh-read' }] };
+      },
+    });
+    const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS());
+    expect(r.ok).toBe(true);
+    expect((r.result?.content?.[0] as { text?: string })?.text).toBe('fresh-read');
+  }, 10_000);
+
+  it('ok-on-abort (idempotent MUTATION opt-in): a completed non-low-tier write SURFACES its success despite the abort (W6/P-007 — the 280 set-status false-timeout fix)', async () => {
+    // backend-reliability-100pct-2026-07-03 W6/P-007: a mutation whose wall-clock beat the
+    // deadline under load COMMITTED (the handler returned a result) — reporting `timeout`
+    // was a LIE that made the agent re-dispatch a write that already landed. A tool that
+    // DECLARES itself idempotent (re-apply is a safe no-op, e.g. plans:set-status) surfaces
+    // the truthful success instead. `capabilities: []` ⇒ non-low tier (as in the MUTATION
+    // test above), so ONLY the `idempotent` opt-in flips the outcome from timeout to success.
+    const tool = makeTool({
+      capabilities: [], // non-low tier — a genuine mutation, not a low-read
+      idempotent: true,
+      timeoutSec: 60,
+      idleTimeoutSec: 1,
+      fn: async () => {
+        await new Promise((r) => setTimeout(r, 3000)); // outlast the idle cap → abort fires
+        return { content: [{ type: 'text', text: 'write-committed' }] };
+      },
+    });
+    const r = await dispatchProjectedTool(tool, 'plans:set-status', {}, MAKE_CTX(), MAKE_DEPS());
+    expect(r.ok).toBe(true);
+    const first = r.result?.content?.[0];
+    expect(first?.type === 'text' ? first.text : undefined).toBe('write-committed');
+  }, 10_000);
+
+  it('ok-on-abort (idempotent opt-in REQUIRED / defaults OFF): the SAME non-low mutation with idempotent:false STILL surfaces timeout', async () => {
+    // The opt-in is load-bearing + defaults OFF: identical to the test above except
+    // idempotent:false — a write that has NOT declared itself idempotent keeps the
+    // conservative abort-authoritative behaviour (never report success for a possibly-
+    // cancelled non-idempotent write). Pins that only the explicit opt-in changes anything.
+    const tool = makeTool({
+      capabilities: [],
+      idempotent: false,
+      timeoutSec: 60,
+      idleTimeoutSec: 1,
+      fn: async () => {
+        await new Promise((r) => setTimeout(r, 3000));
         return { content: [{ type: 'text', text: 'should-not-surface' }] };
       },
     });
@@ -918,5 +1215,107 @@ describe('default-deny gate (RFC tooldef-auth Phase 3 — opt-in fail-closed pos
       tool, 'fix.tool', {}, MAKE_CTX({ role: 'worker' }), MAKE_DEPS({ defaultDeny: true }),
     );
     expect(r.ok).toBe(true);
+  });
+});
+
+describe('self-reported refusals are recorded as refused, not ok (EI-20184794555427363)', () => {
+  // A handler can fail WITHOUT throwing, by returning `isError: true`. Dispatch
+  // status used to be derived from throw-vs-return alone, so that whole class
+  // landed in the ledger as `status='ok', error_code=NULL` — indistinguishable
+  // from a call that did the work. These pin the distinction: a refusal must be
+  // legible as a failure, and a success must not regress into one.
+  const REFUSING_TOOL = () =>
+    makeTool({
+      fn: async () => ({
+        content: [{ type: 'text', text: '{"error":"similar_exists","slug":"x"}' }],
+        isError: true,
+      }),
+    });
+
+  it('records status=refused when the handler returns isError', async () => {
+    let captured: { status?: string } | undefined;
+    const r = await dispatchProjectedTool(REFUSING_TOOL(), 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
+      recordInvocation: async (input) => { captured = input; },
+    }));
+    // Dispatch itself succeeded — which is precisely why this was invisible.
+    expect(r.ok).toBe(true);
+    expect(captured?.status).toBe('refused');
+  });
+
+  it('lifts the refusal code onto error_code so refusals group without LIKE-matching a blob', async () => {
+    let captured: { errorCode?: string | null } | undefined;
+    await dispatchProjectedTool(REFUSING_TOOL(), 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
+      recordInvocation: async (input) => { captured = input; },
+    }));
+    expect(captured?.errorCode).toBe('similar_exists');
+  });
+
+  // A prose refusal has no code to lift, so the fallback CODE still applies —
+  // but the handler's own text is the only statement of cause there is, and
+  // discarding it for the generic fallback message hid real causes coming back
+  // from third-party MCP servers (gitnexus/repomix refuse in prose, not JSON).
+  it('keeps a non-JSON refusal\'s own prose as the message, under the fallback code', async () => {
+    const tool = makeTool({
+      fn: async () => ({
+        content: [{ type: 'text', text: 'repo "papercup" is not allowed on this bridge' }],
+        isError: true,
+      }),
+    });
+    let captured: { status?: string; errorCode?: string | null; errorMessage?: string | null } | undefined;
+    await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
+      recordInvocation: async (input) => { captured = input; },
+    }));
+    expect(captured?.status).toBe('refused');
+    expect(captured?.errorCode).toBe('handler_refusal');
+    expect(captured?.errorMessage).toBe('repo "papercup" is not allowed on this bridge');
+  });
+
+  it('bounds a pathological prose refusal instead of storing it whole', async () => {
+    const tool = makeTool({
+      fn: async () => ({ content: [{ type: 'text', text: 'x'.repeat(5000) }], isError: true }),
+    });
+    let captured: { errorMessage?: string | null } | undefined;
+    await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
+      recordInvocation: async (input) => { captured = input; },
+    }));
+    expect(captured?.errorMessage?.length).toBe(512);
+  });
+
+  it('still uses the generic fallback when the refusal carries no text at all', async () => {
+    const tool = makeTool({
+      fn: async () => ({ content: [{ type: 'text', text: '   ' }], isError: true }),
+    });
+    let captured: { status?: string; errorCode?: string | null; errorMessage?: string | null } | undefined;
+    await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
+      recordInvocation: async (input) => { captured = input; },
+    }));
+    expect(captured?.status).toBe('refused');
+    expect(captured?.errorCode).toBe('handler_refusal');
+    expect(captured?.errorMessage).toBe('tool returned isError=true without a structured refusal message');
+  });
+
+  it('lifts reason/message fields used by structured handler refusals', async () => {
+    const tool = makeTool({
+      fn: async () => ({
+        content: [{ type: 'text', text: JSON.stringify({ ok: false, reason: 'invalid_path', message: 'scratch URI is outside the allow-list' }) }],
+        isError: true,
+      }),
+    });
+    let captured: { status?: string; errorCode?: string | null; errorMessage?: string | null } | undefined;
+    await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
+      recordInvocation: async (input) => { captured = input; },
+    }));
+    expect(captured?.status).toBe('refused');
+    expect(captured?.errorCode).toBe('invalid_path');
+    expect(captured?.errorMessage).toBe('scratch URI is outside the allow-list');
+  });
+
+  it('leaves an ordinary success as ok with no error code (no regression)', async () => {
+    let captured: { status?: string; errorCode?: string | null } | undefined;
+    await dispatchProjectedTool(makeTool(), 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
+      recordInvocation: async (input) => { captured = input; },
+    }));
+    expect(captured?.status).toBe('ok');
+    expect(captured?.errorCode ?? null).toBeNull();
   });
 });

@@ -32,6 +32,7 @@
  *   - dispatchWorkspaceSwitch → drops all snapshots for that workspace
  */
 
+import { pinModuleState } from '@papercusp/module-singleton';
 import type { OpenCardSnapshot } from './types';
 import { onWorkspaceSwitch } from './workspace-lifecycle';
 
@@ -46,6 +47,14 @@ export interface StateSnapshot {
 
 export interface VersionedSnapshot {
   runId: string;
+  /**
+   * The workspace this run is scoped to. Carried on the wire so a stateful
+   * surface can answer a card (`/card-response` `expectedWorkspaceId`) without
+   * out-of-band knowledge of its window's workspace — the desktop chat reads it
+   * from a React prop, but headless consumers (the TUI card renderer) have no
+   * such source. Optional for back-compat with any older serialized snapshot.
+   */
+  workspaceId?: string;
   version: number;
   snapshot: StateSnapshot;
 }
@@ -65,33 +74,48 @@ interface RunEntry {
   closedAtMs: number;
 }
 
-const __SYM = Symbol.for('papercusp.stateChannelRegistry');
-type RegistryGlobals = typeof globalThis & {
-  [__SYM]?: {
-    runs: Map<string /* runId */, RunEntry>;
-    /**
-     * Workspace-scoped subscribers — fire on every mutation in any
-     * run scoped to the given workspaceId. Used by the chat-surface
-     * SSE consumer at /api/operator/state-snapshot to forward every
-     * card change without needing to know runIds in advance.
-     */
-    workspaceSubs: Map<string /* workspaceId */, Set<WorkspaceSubscriber>>;
-    gcTimer: ReturnType<typeof setInterval> | null;
-    lifecycleSubscribed: boolean;
-  };
-};
+/**
+ * The pin key — also the id this module reports under in
+ * `listModuleDuplications()`, so a split here is visible in the REALM-WIDE
+ * report rather than only through this module's own accessor. Unchanged from
+ * the `Symbol.for(...)` description used before the migration
+ * (EI-19479108855357092).
+ */
+const STATE_KEY = 'papercusp.stateChannelRegistry';
+
+interface StateChannelState {
+  runs: Map<string /* runId */, RunEntry>;
+  /**
+   * Workspace-scoped subscribers — fire on every mutation in any
+   * run scoped to the given workspaceId. Used by the chat-surface
+   * SSE consumer at /api/operator/state-snapshot to forward every
+   * card change without needing to know runIds in advance.
+   */
+  workspaceSubs: Map<string /* workspaceId */, Set<WorkspaceSubscriber>>;
+  gcTimer: ReturnType<typeof setInterval> | null;
+  lifecycleSubscribed: boolean;
+}
+
+/**
+ * Pinned + counted by `@papercusp/module-singleton` rather than hand-rolled on
+ * `globalThis[Symbol.for(...)]`. Both fix the split; only this one is VISIBLE to
+ * `listModuleDuplications()`, so the realm-wide report stops answering a clean
+ * `[]` for a module it cannot see. Must stay at module scope — `evaluations` is
+ * a module-RECORD count only if this runs once per evaluation of this body.
+ *
+ * Only the DATA is eager. Lifecycle subscription and the GC timer stay lazy in
+ * `registry()` below: arming a `setInterval` at import time would be a real
+ * behaviour change, not a refactor.
+ */
+const state = pinModuleState<StateChannelState>(STATE_KEY, () => ({
+  runs: new Map(),
+  workspaceSubs: new Map(),
+  gcTimer: null,
+  lifecycleSubscribed: false,
+}));
 
 function registry() {
-  const g = globalThis as RegistryGlobals;
-  if (!g[__SYM]) {
-    g[__SYM] = {
-      runs: new Map(),
-      workspaceSubs: new Map(),
-      gcTimer: null,
-      lifecycleSubscribed: false,
-    };
-  }
-  const r = g[__SYM]!;
+  const r = state;
   if (!r.lifecycleSubscribed) {
     onWorkspaceSwitch((wid) => dropStateSnapshotsForWorkspaceSwitch(wid));
     r.lifecycleSubscribed = true;
@@ -119,6 +143,7 @@ function emit(entry: RunEntry): void {
   // mutate; deep-cloning arbitrary toolState shapes is too expensive).
   const vs: VersionedSnapshot = {
     runId: entry.runId,
+    workspaceId: entry.workspaceId,
     version: entry.version,
     snapshot: {
       openCards: [...entry.snapshot.openCards],
@@ -211,6 +236,7 @@ export function getSnapshot(runId: string): VersionedSnapshot | null {
   if (!entry) return null;
   return {
     runId: entry.runId,
+    workspaceId: entry.workspaceId,
     version: entry.version,
     snapshot: entry.snapshot,
   };
@@ -232,7 +258,12 @@ export function subscribe(runId: string, cb: Subscriber): () => void {
   // Emit current state immediately so new connections get the snapshot.
   // Isolate throw — see emit() — so a buggy subscriber can't kill the caller.
   try {
-    cb({ runId: entry.runId, version: entry.version, snapshot: entry.snapshot });
+    cb({
+      runId: entry.runId,
+      workspaceId: entry.workspaceId,
+      version: entry.version,
+      snapshot: entry.snapshot,
+    });
   } catch (e) {
     console.warn('[state-channel] subscriber threw on initial emit', { runId: entry.runId, error: e });
   }
@@ -290,6 +321,7 @@ export function snapshotWorkspace(workspaceId: string): VersionedSnapshot[] {
     if (entry.workspaceId === workspaceId) {
       out.push({
         runId: entry.runId,
+        workspaceId: entry.workspaceId,
         version: entry.version,
         snapshot: entry.snapshot,
       });

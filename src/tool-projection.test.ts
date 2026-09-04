@@ -6,14 +6,27 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import {
   registerProjectedTool,
+  unregisterProjectedToolsForPlugin,
   lookupByMcpName,
+  resolveMcpName,
+  normalizeMcpName,
   lookupByHttpPath,
   listAllProjectedTools,
   listMcpProjections,
+  PROJECTED_TOOL_REGISTRY_SOURCE,
+  projectedToolRegistryRevision,
+  projectedToolAdmitted,
+  projectedToolCallContract,
+  assertProjectedToolCallContract,
+  renderProjectedToolCall,
+  projectedToolCorrectiveCalls,
+  assertProjectedToolGuidanceConformance,
+  ProjectedToolContractError,
   classifyEventWire,
   ToolRegistrationError,
   _resetProjectionRegistryForTests,
   type ProjectedTool,
+  type UnifiedToolContext,
 } from './tool-projection';
 
 const noop: ProjectedTool['fn'] = async () => ({
@@ -31,6 +44,94 @@ const baseTool = (over: Partial<ProjectedTool> = {}): ProjectedTool => ({
 });
 
 afterEach(() => _resetProjectionRegistryForTests());
+
+describe('empty agent role allowlists', () => {
+  it('treats an empty allowlist as deny-all in listings and contract availability', () => {
+    registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'owner:ui-only' } },
+      agentRoles: [],
+    }));
+    expect(listMcpProjections('operator').map((tool) => tool.name)).not.toContain('owner:ui-only');
+    expect(projectedToolAdmitted('owner:ui-only', { role: 'operator' })).toBe(false);
+    expect(() => projectedToolCallContract('owner:ui-only', { role: 'operator' }))
+      .toThrow(/role operator is not admitted/);
+  });
+});
+
+describe('UnifiedToolContext principal provenance', () => {
+  it('accepts the canonical metadata carried by transport adapters', () => {
+    const principal: NonNullable<UnifiedToolContext['principal']> = {
+      kind: 'harness',
+      slug: 'system:worker',
+      workspaceId: 'ws',
+      authMethod: 'spawn-url',
+      trust: 'trusted',
+      capabilities: new Set(),
+    };
+    expect(principal).toMatchObject({
+      kind: 'harness',
+      authMethod: 'spawn-url',
+      trust: 'trusted',
+    });
+  });
+});
+
+describe('normalizeMcpName (WI-3930)', () => {
+  it('collapses the colon, underscore, and fully-mangled forms to ONE key', () => {
+    const canonical = normalizeMcpName('curation:state-of-pot');
+    expect(normalizeMcpName('curation_state-of-pot')).toBe(canonical);
+    expect(normalizeMcpName('mcp__papercusp-su__curation_state-of-pot')).toBe(canonical);
+    expect(normalizeMcpName('CURATION:STATE-OF-POT')).toBe(canonical); // case-insensitive
+  });
+
+  it('strips only the mcp__<server>__ wrapper, not a real leading segment', () => {
+    expect(normalizeMcpName('mcp__papercusp-su__rubrics_list')).toBe('rubrics:list');
+    expect(normalizeMcpName('rubrics:list')).toBe('rubrics:list');
+  });
+
+  it('leaves a distinct name distinct (no false collision)', () => {
+    expect(normalizeMcpName('rubrics:list')).not.toBe(normalizeMcpName('rubrics:get'));
+  });
+});
+
+describe('resolveMcpName (WI-3930 — tolerant tool-name resolution)', () => {
+  // The registered name is canonical colon form; agents commonly paste the
+  // underscore/group_verb or fully client-mangled form they see advertised.
+  const register = () =>
+    registerProjectedTool(baseTool({ expose: { mcp: { name: 'curation:state-of-pot' } } }));
+
+  it('resolves the exact canonical (colon) name — the unchanged fast path', () => {
+    register();
+    expect(resolveMcpName('curation:state-of-pot')).toBeDefined();
+  });
+
+  it('resolves the underscore / group_verb form', () => {
+    register();
+    expect(resolveMcpName('curation_state-of-pot')).toBeDefined();
+  });
+
+  it('resolves the fully client-mangled mcp__server__ form', () => {
+    register();
+    expect(resolveMcpName('mcp__papercusp-su__curation_state-of-pot')).toBeDefined();
+  });
+
+  it('returns undefined for a genuine typo (no fabricated match)', () => {
+    register();
+    expect(resolveMcpName('curatoin:state-of-pot')).toBeUndefined();
+    expect(resolveMcpName('curation:completely-different')).toBeUndefined();
+  });
+
+  it('refuses to guess when the normalized form is AMBIGUOUS (two tools collide)', () => {
+    // Two DISTINCT registered names that fold to the same normalized key.
+    registerProjectedTool(baseTool({ pluginName: 'p1', expose: { mcp: { name: 'x:a-b' } } }));
+    registerProjectedTool(baseTool({ pluginName: 'p2', expose: { mcp: { name: 'x:a_b' } } }));
+    // Exact still works for each…
+    expect(resolveMcpName('x:a-b')).toBeDefined();
+    expect(resolveMcpName('x:a_b')).toBeDefined();
+    // …but a form that isn't either exact name and folds to both → no guess.
+    expect(resolveMcpName('mcp__srv__x_a_b')).toBeUndefined();
+  });
+});
 
 describe('registerProjectedTool', () => {
   it('registers a tool with both http + mcp exposure', () => {
@@ -129,6 +230,45 @@ describe('registerProjectedTool', () => {
       expose: { mcp: { name: 'b.x' }, http: { path: '/api/dup' } },
     }))).toThrow(/HTTP path "\/api\/dup" claimed by plugins "a" and "b"/);
   });
+
+  // EI-14: two STRUCTURALLY-DIFFERENT tools sharing an MCP name WITHIN one
+  // plugin namespace (every built-in shares pluginName 'agent-mcp') used to
+  // slip past the cross-plugin guard — the later import silently replaced the
+  // earlier tool with no signal. This is how the bare `coord:ask` shadowed the
+  // knowledge-first `coord:ask` in prod. It must now fail loud.
+  it('rejects same-name different-tool collisions within one plugin (EI-14)', () => {
+    registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'coord:ask' } },
+      description: 'Knowledge-first: search existing knowledge, then open a question.',
+    }));
+    expect(() => registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'coord:ask' } },
+      description: 'Ask the human owner directly and wait a bounded time.',
+    }))).toThrow(/silently shadows the first/);
+  });
+
+  it('allows a structurally-identical re-registration (HMR / double-import)', () => {
+    const def = (): ProjectedTool => baseTool({
+      expose: { mcp: { name: 'fix.reimport' } },
+      description: 'same tool, re-evaluated',
+      inputSchema: { type: 'object', properties: { a: { type: 'string' } } },
+    });
+    registerProjectedTool(def());
+    // A fresh-but-identical object (what a module re-eval produces) replaces silently.
+    expect(() => registerProjectedTool(def())).not.toThrow();
+    expect(lookupByMcpName('fix.reimport')).toBeDefined();
+  });
+
+  it('rejects same-path different-tool collisions within one plugin (EI-14)', () => {
+    registerProjectedTool(baseTool({
+      expose: { http: { path: '/api/agent-tools/coord/ask' } },
+      description: 'knowledge-first',
+    }));
+    expect(() => registerProjectedTool(baseTool({
+      expose: { http: { path: '/api/agent-tools/coord/ask' } },
+      description: 'ask-owner',
+    }))).toThrow(/silently shadows the first/);
+  });
 });
 
 describe('listAllProjectedTools', () => {
@@ -161,7 +301,7 @@ describe('listMcpProjections', () => {
     expect(workerView).toEqual(['a.worker', 'c.any']);
   });
 
-  it('exposes name + description + inputSchema only when events is absent', () => {
+  it('exposes the executable contract plus shared registry provenance when events is absent', () => {
     registerProjectedTool(baseTool({
       description: 'desc x',
       inputSchema: { type: 'object', properties: { foo: { type: 'string' } } },
@@ -173,10 +313,35 @@ describe('listMcpProjections', () => {
       name: 'x.tool',
       description: 'desc x',
       inputSchema: { type: 'object', properties: { foo: { type: 'string' } } },
+      _meta: {
+        'papercusp/toolRegistryRevision': projectedToolRegistryRevision(),
+        'papercusp/toolRegistrySource': 'projected-tool-registry',
+      },
     });
     // capabilities, roles, etc. NOT exposed in listing — agents see only the contract.
-    expect((list[0] as Record<string, unknown>).capabilities).toBeUndefined();
-    expect((list[0] as Record<string, unknown>).events).toBeUndefined();
+    expect((list[0] as unknown as Record<string, unknown>).capabilities).toBeUndefined();
+    expect((list[0] as unknown as Record<string, unknown>).events).toBeUndefined();
+  });
+
+  it('uses one order-independent revision and changes with every agent-facing contract surface', () => {
+    const a = baseTool({
+      expose: { mcp: { name: 'rev:a' } },
+      inputSchema: { type: 'object', properties: { x: { type: 'string' } }, required: ['x'] },
+      outputJsonSchema: { type: 'object', properties: { result: { type: 'string' } } },
+      guidance: { when: 'Use rev:a for text.', returns: '{ result }' },
+    });
+    const b = baseTool({ expose: { mcp: { name: 'rev:b' } } });
+    expect(projectedToolRegistryRevision([a, b])).toBe(projectedToolRegistryRevision([b, a]));
+    for (const changed of [
+      { ...a, description: 'changed description' },
+      { ...a, inputSchema: { type: 'object', properties: { x: { type: 'number' } }, required: ['x'] } },
+      { ...a, outputJsonSchema: { type: 'object', properties: { result: { type: 'number' } } } },
+      { ...a, guidance: { ...a.guidance, when: 'Use rev:a for voice.' } },
+      { ...a, guidance: { ...a.guidance, returns: '{ stale_result }' } },
+      { ...a, guidance: { ...a.guidance, seeAlso: ['rev:b'] } },
+    ]) {
+      expect(projectedToolRegistryRevision([a, b])).not.toBe(projectedToolRegistryRevision([changed, b]));
+    }
   });
 
   it('surfaces events schemas as JSON-Schema when the tool declares them', () => {
@@ -312,6 +477,237 @@ describe('listMcpProjections', () => {
       expect(names).toContain('eng.b');
     });
 
+  });
+});
+
+describe('registry-derived executable tool contracts (P-002)', () => {
+  it('returns the accepted call schema, registered result schema, aliases, and registry provenance', () => {
+    const inputSchema = {
+      type: 'object',
+      properties: { current_plan_slug: { type: 'string' } },
+      required: ['current_plan_slug'],
+      additionalProperties: false,
+    };
+    const outputJsonSchema = {
+      type: 'object',
+      properties: { accepted: { type: 'boolean' } },
+      required: ['accepted'],
+    };
+    registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'coord:declare-intent' } },
+      description: 'Declare a coordination intent.',
+      inputSchema,
+      outputJsonSchema,
+      guidance: {
+        returns: '{ stale_authored_shape }',
+        argRedirects: { planSlug: 'current_plan_slug' },
+      },
+    }));
+
+    expect(projectedToolCallContract('coord:declare-intent')).toEqual({
+      source: PROJECTED_TOOL_REGISTRY_SOURCE,
+      revision: projectedToolRegistryRevision(),
+      name: 'coord:declare-intent',
+      description: 'Declare a coordination intent.',
+      inputSchema,
+      returns: { source: 'registered-output-schema', outputJsonSchema },
+      aliases: {
+        planSlug: { target: 'current_plan_slug', provenance: 'authored-tool-guidance' },
+      },
+    });
+  });
+
+  it('uses authored return guidance only when no registered output schema exists', () => {
+    registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'legacy:result' } },
+      guidance: { returns: '  { legacy, rows:[...] }  ' },
+    }));
+    registerProjectedTool(baseTool({ expose: { mcp: { name: 'runtime:untyped' } } }));
+
+    expect(projectedToolCallContract('legacy:result').returns).toEqual({
+      source: 'authored-tool-guidance',
+      description: '{ legacy, rows:[...] }',
+    });
+    expect(projectedToolCallContract('runtime:untyped').returns).toEqual({ source: 'undeclared' });
+  });
+
+  it('invalidates the cached registry revision after register and unregister mutations', () => {
+    registerProjectedTool(baseTool({ expose: { mcp: { name: 'revision:first' } } }));
+    const before = projectedToolRegistryRevision();
+    expect(projectedToolRegistryRevision()).toBe(before);
+
+    registerProjectedTool(baseTool({
+      pluginName: 'temporary-contract',
+      expose: { mcp: { name: 'revision:second' } },
+    }));
+    const afterRegister = projectedToolRegistryRevision();
+    expect(afterRegister).not.toBe(before);
+
+    expect(unregisterProjectedToolsForPlugin('temporary-contract')).toBe(1);
+    expect(projectedToolRegistryRevision()).toBe(before);
+  });
+
+  it('renders only calls that satisfy required, enum, and undeclared-key constraints', () => {
+    registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'work_items:complete' } },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          state: { type: 'string', enum: ['done', 'resolved'] },
+        },
+        required: ['id', 'state'],
+        additionalProperties: false,
+      },
+    }));
+
+    expect(renderProjectedToolCall('work_items:complete', { id: 'WI-1', state: 'done' }))
+      .toBe('work_items:complete {"id":"WI-1","state":"done"}');
+    expect(() => assertProjectedToolCallContract('work_items:complete', { state: 'done' }))
+      .toThrow(/\$\.id: required/);
+    expect(() => assertProjectedToolCallContract('work_items:complete', { id: 'WI-1', state: 'closed' }))
+      .toThrow(/not one of done\|resolved/);
+    expect(() => assertProjectedToolCallContract('work_items:complete', {
+      id: 'WI-1', state: 'done', completion: 'extra',
+    })).toThrow(/\$\.completion: undeclared key/);
+  });
+
+  it('fails closed when the tool is absent or excluded by role, profile, or modality', () => {
+    registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'fleet:restricted' } },
+      agentRoles: ['worker'],
+      profile: 'engineer',
+      modality: ['text'],
+    }));
+
+    expect(projectedToolCallContract('fleet:restricted', {
+      role: 'worker', profile: 'engineer', modality: 'text',
+    }).name).toBe('fleet:restricted');
+    expect(() => projectedToolCallContract('fleet:restricted', { role: 'architect' }))
+      .toThrow(/role architect is not admitted/);
+    expect(() => projectedToolCallContract('fleet:restricted', { profile: 'power' }))
+      .toThrow(/power profile is not admitted/);
+    expect(() => projectedToolCallContract('fleet:restricted', { modality: 'voice' }))
+      .toThrow(/modality voice is not admitted/);
+    expect(() => projectedToolCallContract('fleet:missing'))
+      .toThrow(ProjectedToolContractError);
+  });
+
+  it('validates structured corrective calls against target schema and client admission', () => {
+    registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'work_items:tag' } },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          topic: { type: 'string' },
+          mode: { type: 'string', enum: ['add', 'remove'] },
+        },
+        required: ['id', 'topic', 'mode'],
+        additionalProperties: false,
+      },
+      agentRoles: ['worker'],
+      profile: 'engineer',
+      modality: ['text'],
+    }));
+    registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'work_items:update' } },
+      agentRoles: ['worker'],
+      profile: 'engineer',
+      modality: ['text'],
+      guidance: {
+        argRedirects: {
+          tags: {
+            tool: 'work_items:tag',
+            args: { id: '<work-item-id>', topic: '<topic>', mode: 'add' },
+            note: 'the canonical tag writer',
+          },
+        },
+      },
+    }));
+
+    expect(projectedToolCorrectiveCalls('work_items:update', {
+      role: 'worker', profile: 'engineer', modality: 'text',
+    })).toEqual([expect.objectContaining({
+      rejectedArg: 'tags',
+      tool: 'work_items:tag',
+      args: { id: '<work-item-id>', topic: '<topic>', mode: 'add' },
+      note: 'the canonical tag writer',
+      source: PROJECTED_TOOL_REGISTRY_SOURCE,
+      registryRevision: projectedToolRegistryRevision(),
+      rendered: 'work_items:tag {"id":"<work-item-id>","topic":"<topic>","mode":"add"}',
+    })]);
+    expect(() => projectedToolCorrectiveCalls('work_items:update', { role: 'architect' }))
+      .toThrow(/role architect is not admitted/);
+    expect(() => projectedToolCorrectiveCalls('work_items:update', { role: 'worker', modality: 'voice' }))
+      .toThrow(/modality voice is not admitted/);
+  });
+
+  it('fails structured corrective-call conformance on missing tools, required keys, enums, and undeclared keys', () => {
+    const targetSchema = {
+      type: 'object',
+      properties: { id: { type: 'string' }, mode: { type: 'string', enum: ['add'] } },
+      required: ['id', 'mode'],
+      additionalProperties: false,
+    };
+    registerProjectedTool(baseTool({ expose: { mcp: { name: 'target:write' } }, inputSchema: targetSchema }));
+    const source = (name: string, tool: string, args: Record<string, unknown>) => registerProjectedTool(baseTool({
+      expose: { mcp: { name } },
+      guidance: { argRedirects: { stale: { tool, args } } },
+    }));
+
+    source('source:missing', 'target:missing', { id: 'x', mode: 'add' });
+    source('source:required', 'target:write', { mode: 'add' });
+    source('source:enum', 'target:write', { id: 'x', mode: 'remove' });
+    source('source:extra', 'target:write', { id: 'x', mode: 'add', stale: true });
+
+    expect(() => projectedToolCorrectiveCalls('source:missing')).toThrow(/tool contract unavailable/);
+    expect(() => projectedToolCorrectiveCalls('source:required')).toThrow(/\.id: required/);
+    expect(() => projectedToolCorrectiveCalls('source:enum')).toThrow(/not one of add/);
+    expect(() => projectedToolCorrectiveCalls('source:extra')).toThrow(/\.stale: undeclared key/);
+  });
+
+  // EI-22188204415833751: an all-profile tool may legitimately redirect into a narrower one
+  // (coord:presence -> fleet:assignments). Resolving that target under a profile the TARGET does
+  // not admit used to throw, and _guidance-adapter.ts turns any conformance throw into `return []`
+  // — so one cross-profile redirect deleted ALL ~835 tool-guidance pages and red-pinned the gate.
+  it('withholds a cross-profile redirect from contexts that cannot call the target, without weakening the schema rail', () => {
+    registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'narrow:target' } },
+      profile: 'engineer',
+      inputSchema: {
+        type: 'object',
+        properties: { fleet: { type: 'string' } },
+        additionalProperties: false,
+      },
+    }));
+    // no `profile` => untagged => admitted under every profile, like coord:presence
+    registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'broad:source' } },
+      guidance: { argRedirects: { fleet: { tool: 'narrow:target', args: { fleet: '<fleet-slug>' } } } },
+    }));
+
+    // POSITIVE CONTROL: a profile that admits the target is still offered the remedy, so a
+    // passing 'power' case below cannot be explained by the redirect having been dropped for all.
+    expect(projectedToolCorrectiveCalls('broad:source', { profile: 'engineer' }))
+      .toEqual([expect.objectContaining({ rejectedArg: 'fleet', tool: 'narrow:target' })]);
+
+    // THE FIX: withheld, not fatal. Pre-fix both of these threw 'power profile is not admitted'.
+    expect(() => projectedToolCorrectiveCalls('broad:source', { profile: 'power' })).not.toThrow();
+    expect(projectedToolCorrectiveCalls('broad:source', { profile: 'power' })).toEqual([]);
+
+    // The whole-registry rail — the thing that actually red-pinned the gate — stays green.
+    expect(() => assertProjectedToolGuidanceConformance()).not.toThrow();
+
+    // NOT-WEAKENED CONTROL: a malformed remedy on an ADMITTED target must still be fatal.
+    // This is the class that caught the dev:restart enum placeholder (WI-2142574); if skipping
+    // availability ever silenced it, this assertion fails.
+    registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'broad:malformed' } },
+      guidance: { argRedirects: { fleet: { tool: 'narrow:target', args: { nope: true } } } },
+    }));
+    expect(() => projectedToolCorrectiveCalls('broad:malformed', { profile: 'engineer' }))
+      .toThrow(/undeclared key/);
   });
 });
 
