@@ -21,9 +21,11 @@ import { toJsonSchema } from './schema-adapter';
 import { standardValidate, formatIssues, issuesAreValueLevel, issueLeaves, type StandardSchemaV1 } from './standard-schema';
 import {
   applyArgReencodings,
+  boundValue,
   correctedDisclosure,
   type AppliedArgCorrection,
   type ArgReencoding,
+  type ArgReencodingOutcome,
 } from './reencode-args';
 import { register } from './registry';
 import { collectToolEmits } from './emits-registry';
@@ -664,6 +666,77 @@ export function applyHarnessArgAlias(argsJsonSchema: Record<string, unknown>, in
   if (!props || !('harness_slug' in props) || 'harness' in props) return input;
   const { harness, ...rest } = rec;
   return { ...rest, harness_slug: harness };
+}
+
+const SNAKE_CASE_ARG_KEY = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/;
+const LOWER_CAMEL_ARG_KEY = /^[a-z][A-Za-z0-9]*$/;
+
+function snakeToLowerCamel(value: string): string {
+  return value.replace(/_([a-z0-9])/g, (_match, char: string) => char.toUpperCase());
+}
+
+function casingTwin(left: string, right: string): boolean {
+  if (SNAKE_CASE_ARG_KEY.test(left) && LOWER_CAMEL_ARG_KEY.test(right) && /[A-Z]/.test(right)) {
+    return snakeToLowerCamel(left) === right;
+  }
+  if (SNAKE_CASE_ARG_KEY.test(right) && LOWER_CAMEL_ARG_KEY.test(left) && /[A-Z]/.test(left)) {
+    return snakeToLowerCamel(right) === left;
+  }
+  return false;
+}
+
+/**
+ * EI-19301104986780991 — exact snake_case <-> lowerCamelCase compatibility.
+ *
+ * The tool catalogue legitimately uses both conventions (`timeout_sec` on
+ * checkpoint:await, `timeoutSec` on code:run; `related_msg_id` beside
+ * `wakeOnReply` on coord:send). A caller that learned one spelling therefore
+ * paid a guaranteed rejection round-trip on the sibling tool even when its
+ * value and intent were otherwise complete.
+ *
+ * This is deliberately narrower than a did-you-mean rename. It runs only on
+ * the validation-failure path, only for an exact bijective casing twin, only
+ * when exactly one declared key matches, and never when the caller also sent
+ * the canonical key. Semantic aliases, near names, conflicts, and genuinely
+ * unknown keys still reach the EI-10883 strict refusal unchanged. The caller's
+ * object is never mutated, and the existing D-104 correction disclosure names
+ * the re-encoding on the successful result.
+ */
+export function applyCasingArgAliases(
+  argsJsonSchema: Record<string, unknown>,
+  input: unknown,
+): ArgReencodingOutcome | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  const rec = input as Record<string, unknown>;
+  const properties =
+    selectedUnionBranchProperties(argsJsonSchema, input) ?? mergedSchemaProperties(argsJsonSchema);
+  if (!properties) return null;
+
+  const declaredKeys = Object.keys(properties);
+  const claimedTargets = new Set<string>();
+  const corrections: AppliedArgCorrection[] = [];
+  let rewritten: Record<string, unknown> | null = null;
+
+  for (const source of Object.keys(rec)) {
+    if (source in properties) continue;
+    const matches = declaredKeys.filter((target) => casingTwin(source, target));
+    if (matches.length !== 1) continue;
+    const target = matches[0]!;
+    if (target in rec || claimedTargets.has(target)) continue;
+
+    rewritten ??= { ...rec };
+    delete rewritten[source];
+    rewritten[target] = rec[source];
+    claimedTargets.add(target);
+    corrections.push({
+      path: source,
+      sent: { [source]: boundValue(rec[source]) },
+      ran: { [target]: boundValue(rec[source]) },
+      rule: 'args.exact-casing-alias',
+    });
+  }
+
+  return rewritten ? { input: rewritten, corrections } : null;
 }
 
 /**
@@ -2046,17 +2119,24 @@ function makeInvalidInputError(
  */
 async function reencodeAndRevalidate<S extends StandardSchemaV1>(
   schema: S,
+  rawSchema: Record<string, unknown>,
   argReencodings: readonly ArgReencoding[] | undefined,
   shimmed: unknown,
 ): Promise<{
   value: StandardSchemaV1.InferOutput<S>;
   corrections: readonly AppliedArgCorrection[];
 } | null> {
-  const attempt = applyArgReencodings(argReencodings, shimmed);
-  if (!attempt) return null;
-  const retry = await standardValidate(schema, attempt.input);
+  const casingAttempt = applyCasingArgAliases(rawSchema, shimmed);
+  const authoredAttempt = applyArgReencodings(argReencodings, casingAttempt?.input ?? shimmed);
+  if (!casingAttempt && !authoredAttempt) return null;
+  const repairedInput = authoredAttempt?.input ?? casingAttempt!.input;
+  const corrections = [
+    ...(casingAttempt?.corrections ?? []),
+    ...(authoredAttempt?.corrections ?? []),
+  ];
+  const retry = await standardValidate(schema, repairedInput);
   if (!retry.ok) return null;
-  return { value: retry.value, corrections: attempt.corrections };
+  return { value: retry.value, corrections };
 }
 
 /**
@@ -2460,7 +2540,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     if (validated.ok) {
       parsedValue = validated.value;
     } else {
-      const repaired = await reencodeAndRevalidate(def.args, def.argReencodings, shimmed);
+      const repaired = await reencodeAndRevalidate(def.args, rawSchema, def.argReencodings, shimmed);
       if (!repaired) {
         throw makeInvalidInputError(
           def.name,
@@ -2637,7 +2717,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     if (validated.ok) {
       parsedValue = validated.value;
     } else {
-      const repaired = await reencodeAndRevalidate(def.args, def.argReencodings, shimmed);
+      const repaired = await reencodeAndRevalidate(def.args, rawSchema, def.argReencodings, shimmed);
       if (!repaired) {
         throw makeInvalidInputError(
           def.name,
