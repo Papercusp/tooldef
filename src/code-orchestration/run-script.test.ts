@@ -76,6 +76,37 @@ describe('runOrchestrationScript (B-CX-1A)', () => {
     expect(r.error).toMatch(/TypeScript type annotations/);
   });
 
+  // EI-22099400033832378: the guidance above used to be appended to EVERY compile_error.
+  // A script with NO TypeScript in it — a stray paren, an unclosed brace — was told to
+  // strip type annotations it does not contain, i.e. the tool asserting a DIAGNOSIS where
+  // it only had an OBSERVATION. The sibling test above is the other half of this pair: it
+  // pins that a genuine TypeScript script still receives the guidance, so this narrowing
+  // cannot be "fixed" by simply deleting the hint.
+  it('does NOT blame TypeScript for a compile error in a script that contains none', async () => {
+    const r = await runOrchestrationScript(
+      `const rows = [1, 2, 3];\nconst double = (x) => { return x * 2; ) };\nreturn rows.map(double).join(',');`,
+      facade({}),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/compile_error/);
+    expect(r.error).not.toMatch(/plain JavaScript only/);
+    expect(r.error).not.toMatch(/TypeScript/);
+  });
+
+  it('locates a compile error with the offending source line and caret', async () => {
+    const r = await runOrchestrationScript(
+      `const rows = [1, 2, 3];\nconst double = (x) => { return x * 2; ) };\nreturn rows.map(double).join(',');`,
+      facade({}),
+    );
+    expect(r.ok).toBe(false);
+    // The offending line itself, so the caller can find it without counting lines.
+    expect(r.error).toMatch(/return x \* 2; \)/);
+    expect(r.error).toContain('^');
+    // NEVER the wrapper-relative line number: the harness prelude sits above the caller's
+    // body, so 'evalmachine.<anonymous>:<n>' names a line the author never wrote.
+    expect(r.error).not.toMatch(/evalmachine/);
+  });
+
   it('enforces the wall-clock timeout on an async hang', async () => {
     const r = await runOrchestrationScript(
       `await new Promise(() => {}); return 1;`,

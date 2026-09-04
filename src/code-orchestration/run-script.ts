@@ -677,12 +677,42 @@ const WORKER_SRC = `(() => {
       { displayErrors: true },
     );
   } catch (err) {
+    // EI-21909921686340240 added the plain-JavaScript guidance below because TypeScript-only
+    // syntax fails here with an opaque V8 SyntaxError. EI-22099400033832378: it was appended
+    // to EVERY compile_error, so a script containing no TypeScript at all — a stray paren, an
+    // unclosed brace — was told to strip type annotations it does not have. That is the tool
+    // asserting a DIAGNOSIS ("this is a TypeScript problem") where it only has an OBSERVATION
+    // ("this did not parse"), and a caller who can see their own plain-JS script reads it as
+    // the tool misdiagnosing its input. Gate it on the script actually SHOWING TypeScript
+    // syntax: the case that guidance was written for still gets it, the rest no longer do.
+    //
+    // No backslashes in the pattern on purpose — this whole block is inside the WORKER_SRC
+    // template literal, where every backslash must be doubled to survive to the worker.
+    const tsSyntax = /(^|[^A-Za-z0-9_$])(interface|enum|implements|declare|namespace) |: *(string|number|boolean|any|unknown|never|void) *[,)=;>&|]|: *(string|number|boolean|any|unknown|never|void)$|(^|[^A-Za-z0-9_$])as +(const|string|number|boolean|any|unknown)([^A-Za-z0-9_$]|$)/m.test(String(script));
+    // V8's SyntaxError stack opens with 'evalmachine.<anonymous>:<n>', then the offending
+    // SOURCE LINE, then a caret marking the column. Surface those two lines, never the line
+    // NUMBER: it counts from the top of the wrapped source, and the harness prelude sits
+    // above the caller's body, so the number points at a line the author never wrote. The
+    // source line plus caret locate the fault exactly and need no offset arithmetic to stay
+    // honest if the prelude ever changes length.
+    let frame = '';
+    const stackLines = String((err && err.stack) || '').split('\\n');
+    if (
+      stackLines.length > 2 &&
+      stackLines[0].indexOf('evalmachine.') === 0 &&
+      stackLines[2].indexOf('^') >= 0
+    ) {
+      frame = ' -- at:\\n' + stackLines[1] + '\\n' + stackLines[2];
+    }
     parentPort.postMessage({
       t: 'error',
       error:
         'compile_error: ' +
         ((err && err.message) || String(err)) +
-        ' -- code:run scripts are plain JavaScript only (no TypeScript type annotations, interfaces, or "as" casts); strip them and retry',
+        frame +
+        (tsSyntax
+          ? ' -- code:run scripts are plain JavaScript only (no TypeScript type annotations, interfaces, or "as" casts); strip them and retry'
+          : ''),
     });
     return;
   }
