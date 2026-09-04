@@ -247,6 +247,12 @@ export interface ToolContext<Tx = any> {
    */
   payloadTierOverride?: import('./payload-tier').PayloadTier;
   /**
+   * Host-provided parsed dispatch projection for source-aware reads. Kept
+   * opaque in the storage-agnostic tooldef layer; hosts may use it to push a
+   * caller-selected field projection into a read query.
+   */
+  sourceProjection?: unknown;
+  /**
    * Calling agent role, when the transport carries one (EI-10358). Threaded
    * through from the outer `UnifiedToolContext.role` by
    * `registerLegacyAsProjected`'s `legacyCtx` — NOT resolved from `principal`,

@@ -371,6 +371,14 @@ export interface UnifiedToolContext {
    */
   payloadTierOverride?: import('./payload-tier').PayloadTier;
   /**
+   * Host-provided parsed dispatch projection for source-aware reads. The
+   * generic tooldef package keeps this opaque because projection syntax is
+   * host-owned; a transport may thread it to a handler that can push a
+   * caller-selected field projection into its storage query. It is metadata,
+   * never a validated tool argument.
+   */
+  sourceProjection?: unknown;
+  /**
    * True when this call's result does NOT cross the agent-facing transport and
    * therefore must not be force-shaped by `applyPayloadTier`'s hard ceiling
    * (EI-18719561823587590). Set by an IN-PROCESS consumer that reads the data
@@ -636,6 +644,14 @@ export interface UnifiedToolContext {
   featureId?: string | null;
   chunkId?: string | null;
   runId?: string;
+  /**
+   * Explicit proof that this caller has an interactive card responder.
+   * Workspace/run identity alone is not sufficient: headless, MCP, and
+   * non-chat in-process calls may also carry both fields but have nowhere to
+   * render or answer a card. Transport adapters for interactive chat surfaces
+   * set this to true; absent means card prompting is unavailable.
+   */
+  interactiveCardCapability?: true;
   spawnId?: string;
   parentSpawnId?: string | null;
   /**

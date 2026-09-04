@@ -61,6 +61,31 @@ describe('registerLegacyAsProjected — role/uiClientId threading (EI-10358)', (
     expect(received?.uiClientId).toBe('su-abc123');
   });
 
+  it('threads the host source projection into the legacy handler context', async () => {
+    const sourceProjection = { pick: ['results[].workItem.state'] };
+    let received: ToolContext | undefined;
+    defineTool({
+      name: 'test:legacy-ctx-source-projection',
+      capability: 'test:read',
+      description: 'fixture',
+      args: z.object({}),
+      async handler(_args, handlerCtx) {
+        received = handlerCtx;
+        return { content: [{ type: 'text', text: 'ok' }] };
+      },
+    });
+
+    await dispatchProjectedTool(
+      lookupByMcpName('test:legacy-ctx-source-projection')!,
+      'test:legacy-ctx-source-projection',
+      {},
+      ctx({ sourceProjection }),
+      DEPS,
+    );
+
+    expect(received?.sourceProjection).toEqual(sourceProjection);
+  });
+
   it('omits role/uiClientId (not undefined-valued keys) when the outer ctx carries neither', async () => {
     let received: (ToolContext & { role?: string; uiClientId?: string | null }) | undefined;
     defineTool({
