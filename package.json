@@ -43,7 +43,7 @@
     "@papercusp/rules": "*"
   },
   "scripts": {
-    "test": "vitest",
+    "test": "vitest run",
     "build": "tsc -p tsconfig.build.json"
   }
 }

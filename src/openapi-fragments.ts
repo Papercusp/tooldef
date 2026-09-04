@@ -292,7 +292,12 @@ function stripJsonSchemaMeta(schema: Record<string, unknown>): Record<string, un
 function zodToJsonSchemaSafe(schema: unknown): Record<string, unknown> {
   try {
     const raw = toJsonSchema(schema);
-    return stripJsonSchemaMeta(raw);
+    const stripped = stripJsonSchemaMeta(raw);
+    // Detect schemas that cannot be represented (empty after stripping $schema).
+    if (Object.keys(stripped).length === 0) {
+      return { description: 'Schema not representable in JSON Schema.' };
+    }
+    return stripped;
   } catch {
     return { description: 'Schema not representable in JSON Schema.' };
   }
