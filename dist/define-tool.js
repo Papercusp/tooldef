@@ -17,7 +17,7 @@
 import { tierFor } from './capability-tiers';
 import { toJsonSchema } from './schema-adapter';
 import { standardValidate, formatIssues, issuesAreValueLevel, issueLeaves } from './standard-schema';
-import { applyArgReencodings, correctedDisclosure, } from './reencode-args';
+import { applyArgReencodings, boundValue, correctedDisclosure, } from './reencode-args';
 import { register } from './registry';
 import { collectToolEmits } from './emits-registry';
 import { PROJECTED_TOOL_REGISTRY_SOURCE, projectedToolRegistryRevision, renderProjectedToolCall, registerProjectedTool, resolveMcpName, recordToolShapers, } from './tool-projection';
@@ -596,6 +596,70 @@ export function applyHarnessArgAlias(argsJsonSchema, input) {
     const { harness, ...rest } = rec;
     return { ...rest, harness_slug: harness };
 }
+const SNAKE_CASE_ARG_KEY = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/;
+const LOWER_CAMEL_ARG_KEY = /^[a-z][A-Za-z0-9]*$/;
+function snakeToLowerCamel(value) {
+    return value.replace(/_([a-z0-9])/g, (_match, char) => char.toUpperCase());
+}
+function casingTwin(left, right) {
+    if (SNAKE_CASE_ARG_KEY.test(left) && LOWER_CAMEL_ARG_KEY.test(right) && /[A-Z]/.test(right)) {
+        return snakeToLowerCamel(left) === right;
+    }
+    if (SNAKE_CASE_ARG_KEY.test(right) && LOWER_CAMEL_ARG_KEY.test(left) && /[A-Z]/.test(left)) {
+        return snakeToLowerCamel(right) === left;
+    }
+    return false;
+}
+/**
+ * EI-19301104986780991 — exact snake_case <-> lowerCamelCase compatibility.
+ *
+ * The tool catalogue legitimately uses both conventions (`timeout_sec` on
+ * checkpoint:await, `timeoutSec` on code:run; `related_msg_id` beside
+ * `wakeOnReply` on coord:send). A caller that learned one spelling therefore
+ * paid a guaranteed rejection round-trip on the sibling tool even when its
+ * value and intent were otherwise complete.
+ *
+ * This is deliberately narrower than a did-you-mean rename. It runs only on
+ * the validation-failure path, only for an exact bijective casing twin, only
+ * when exactly one declared key matches, and never when the caller also sent
+ * the canonical key. Semantic aliases, near names, conflicts, and genuinely
+ * unknown keys still reach the EI-10883 strict refusal unchanged. The caller's
+ * object is never mutated, and the existing D-104 correction disclosure names
+ * the re-encoding on the successful result.
+ */
+export function applyCasingArgAliases(argsJsonSchema, input) {
+    if (!input || typeof input !== 'object' || Array.isArray(input))
+        return null;
+    const rec = input;
+    const properties = selectedUnionBranchProperties(argsJsonSchema, input) ?? mergedSchemaProperties(argsJsonSchema);
+    if (!properties)
+        return null;
+    const declaredKeys = Object.keys(properties);
+    const claimedTargets = new Set();
+    const corrections = [];
+    let rewritten = null;
+    for (const source of Object.keys(rec)) {
+        if (source in properties)
+            continue;
+        const matches = declaredKeys.filter((target) => casingTwin(source, target));
+        if (matches.length !== 1)
+            continue;
+        const target = matches[0];
+        if (target in rec || claimedTargets.has(target))
+            continue;
+        rewritten ??= { ...rec };
+        delete rewritten[source];
+        rewritten[target] = rec[source];
+        claimedTargets.add(target);
+        corrections.push({
+            path: source,
+            sent: { [source]: boundValue(rec[source]) },
+            ran: { [target]: boundValue(rec[source]) },
+            rule: 'args.exact-casing-alias',
+        });
+    }
+    return rewritten ? { input: rewritten, corrections } : null;
+}
 /**
  * EI-11621 — unwrap a client `__unparsedToolInput` envelope BEFORE validation.
  *
@@ -1140,13 +1204,6 @@ export function strictArgs(schema) {
         return schema;
     }
 }
-/** Bounded render of a tool's full args JSON schema, appended to invalid_args errors (P-004,
- *  code-run-batch-adoption-2026-07-12). A terse per-issue message alone leaves a schema-blind
- *  caller (e.g. a tools:invoke route with no loaded schema) probing solo, call-by-call — the
- *  2026-07-11 release-fleet burst repeated the identical wrong arg shape twice in a row. With the
- *  schema in the failure, ONE failed call teaches the whole shape, so batching becomes the cheapest
- *  way to learn it. Rendered lazily on first failure (failures are rare), cached per registration. */
-const ARGS_SCHEMA_HINT_MAX = 1800;
 /**
  * EI-10883 — make the closed-shape rejection TEACH, not merely fail.
  *
@@ -1824,7 +1881,7 @@ toolName) {
         // app" instead of "I typo'd an arg".
         serverVintageHint());
 }
-function makeInvalidInputError(toolName, issues, input, rawSchema, argRedirects, schemaHintCache) {
+function makeInvalidInputError(toolName, issues, input, rawSchema, argRedirects) {
     const corrections = invalidInputCorrections(issues, rawSchema, argRedirects, input);
     // P-015: the finished call, resolved against what the caller actually sent. Ordered
     // FIRST because D-105 measured that the alternative does not work: `omp:sessions`
@@ -1853,7 +1910,13 @@ function makeInvalidInputError(toolName, issues, input, rawSchema, argRedirects,
         // and only when the host registered a vintage resolver.
         (issuesAreValueLevel(issues)
             ? constraintVintageHint()
-            : failingFieldSchemaHint(issues, rawSchema) || argsSchemaHint(rawSchema, schemaHintCache)), metadata);
+            : failingFieldSchemaHint(issues, rawSchema) ||
+                // WI-6661: never fall back to the whole schema. The former 1,800-char
+                // dump routinely ended mid-property, so it was both expensive and an
+                // unreliable contract. An unrecognized-key error already gets the
+                // complete accepted-key list from `unknownArgHint`; an otherwise
+                // pathless issue gets the same compact list here.
+                (unknownKeys.length === 0 ? argsFieldNamesHint(rawSchema) : '')), metadata);
 }
 /**
  * P-016 / D-104 — the EXECUTE half. Consulted ONLY after `standardValidate` has already
@@ -1868,14 +1931,20 @@ function makeInvalidInputError(toolName, issues, input, rawSchema, argRedirects,
  * re-shape a call that was already valid, which keeps this a repair path and not a silent
  * behaviour change on the hot path (and costs a registered tool nothing until it refuses).
  */
-async function reencodeAndRevalidate(schema, argReencodings, shimmed) {
-    const attempt = applyArgReencodings(argReencodings, shimmed);
-    if (!attempt)
+async function reencodeAndRevalidate(schema, rawSchema, argReencodings, shimmed) {
+    const casingAttempt = applyCasingArgAliases(rawSchema, shimmed);
+    const authoredAttempt = applyArgReencodings(argReencodings, casingAttempt?.input ?? shimmed);
+    if (!casingAttempt && !authoredAttempt)
         return null;
-    const retry = await standardValidate(schema, attempt.input);
+    const repairedInput = authoredAttempt?.input ?? casingAttempt.input;
+    const corrections = [
+        ...(casingAttempt?.corrections ?? []),
+        ...(authoredAttempt?.corrections ?? []),
+    ];
+    const retry = await standardValidate(schema, repairedInput);
     if (!retry.ok)
         return null;
-    return { value: retry.value, corrections: attempt.corrections };
+    return { value: retry.value, corrections };
 }
 /**
  * Announce an auto-correction on the result that the corrected call produced.
@@ -1908,11 +1977,10 @@ function attachCorrectedDisclosure(result, corrections) {
  * EI-20087434994864624 (+7 more filings of the same friction on 2026-08-10 alone) —
  * make a NESTED validation failure teach the shape it actually needs.
  *
- * `argsSchemaHint` below dumps the tool's WHOLE args schema, bounded at
- * ARGS_SCHEMA_HINT_MAX. For a top-level shape error that is exactly right. For a failure
- * several levels down it is simultaneously TOO LONG and TOO SHORT: long enough to crowd
- * the result budget, yet truncated thousands of characters before reaching the field that
- * actually failed. The caller then cannot learn the shape from the error at all.
+ * The old fallback dumped the tool's WHOLE args schema, bounded at 1,800 chars.
+ * That was simultaneously TOO LONG and TOO SHORT: long enough to crowd the result
+ * budget, yet truncated thousands of characters before reaching the field that
+ * actually failed. The caller then could not learn the shape from the error at all.
  *
  * The observed dead end (coord:send, eight independent agents): a section field rejects a
  * string, then rejects an array of strings, and the appended "full args schema" cuts off
@@ -1933,8 +2001,8 @@ function attachCorrectedDisclosure(result, corrections) {
  *    unreachable in the flat dump to begin with (`body` is a string OR an array of
  *    richly-described sections).
  *
- * Falls back to the full dump whenever a path cannot be resolved, so this can only add
- * precision, never remove information.
+ * A path that cannot be resolved falls back to the complete top-level field-name
+ * list, never to a partial whole-schema dump (WI-6661).
  */
 const FIELD_SCHEMA_HINT_MAX = 700;
 const FIELD_SCHEMA_HINT_MAX_FIELDS = 3;
@@ -2081,17 +2149,21 @@ function failingFieldSchemaHint(issues, rawSchema) {
     // prints — is several levels deeper. Reading `issue.path` here silently never fires.
     for (const { segs } of issueLeaves(issues ?? [])) {
         const path = segs;
-        // A primitive top-level arg is already adequately described by its own type
-        // error, and the full dump is still the useful fallback for it. A top-level
-        // OBJECT (or union branch with properties), however, can be far enough into a
-        // large schema that the flat dump cuts off before the field's accepted keys —
-        // exactly the coord:send `why: "..."` dead end. Render that object's shape too.
+        // A pathless issue cannot identify one field. `unknownArgHint` handles
+        // unrecognized keys; the caller below falls back to a compact accepted-key list
+        // for other root-level failures.
         if (path.length < 1)
             continue;
-        // Walk the path, remembering the deepest prefix whose node actually lists properties.
+        // Walk the path, remembering the deepest prefix whose node actually lists
+        // properties. If there is no object-shaped ancestor (the common top-level
+        // primitive case), retain the resolved leaf itself. This is the WI-6661 seam:
+        // `claimableLimit` now teaches only its integer/range schema instead of dumping
+        // every unrelated coord:orient argument before truncating mid-property.
         let nodes = [rawSchema];
         let bestNode;
         let bestLabel = '';
+        let leafNode;
+        let leafLabel = '';
         const labelParts = [];
         for (const seg of path) {
             nodes = stepSchema(nodes, seg);
@@ -2099,6 +2171,8 @@ function failingFieldSchemaHint(issues, rawSchema) {
                 break;
             const segKey = typeof seg === 'object' && seg !== null ? String(seg.key) : String(seg);
             labelParts.push(/^\d+$/.test(segKey) ? '[]' : segKey);
+            leafNode = nodes[0];
+            leafLabel = labelParts.join('.').replace(/\.\[\]/g, '[]');
             const objectish = nodes.find((node) => hasProperties(node))
                 ?? nodes.flatMap((node) => schemaUnionBranches(node)).find((node) => hasProperties(node));
             if (objectish) {
@@ -2106,11 +2180,13 @@ function failingFieldSchemaHint(issues, rawSchema) {
                 bestLabel = labelParts.join('.').replace(/\.\[\]/g, '[]');
             }
         }
-        if (bestNode === undefined || rendered.has(bestLabel))
+        const hintNode = bestNode ?? leafNode;
+        const hintLabel = bestNode === undefined ? leafLabel : bestLabel;
+        if (hintNode === undefined || !hintLabel || rendered.has(hintLabel))
             continue;
         let json = '';
         try {
-            json = JSON.stringify(bestNode) ?? '';
+            json = JSON.stringify(hintNode) ?? '';
         }
         catch {
             json = '';
@@ -2124,8 +2200,8 @@ function failingFieldSchemaHint(issues, rawSchema) {
         // `verified` description; serializing the raw schema first can hit the
         // bounded hint before that optional field appears, leaving the caller to
         // guess the contract (EI-20232348713050420).
-        const compact = compactAcceptedObjectHint(bestNode);
-        rendered.set(bestLabel, compact ? `e.g. ${compact}; verbose schema: ${json}` : json);
+        const compact = compactAcceptedObjectHint(hintNode);
+        rendered.set(hintLabel, compact ? `e.g. ${compact}; verbose schema: ${json}` : json);
         if (rendered.size >= FIELD_SCHEMA_HINT_MAX_FIELDS)
             break;
     }
@@ -2134,20 +2210,10 @@ function failingFieldSchemaHint(issues, rawSchema) {
     const body = [...rendered.entries()].map(([label, json]) => `\`${label}\` accepts ${json}`).join(' · ');
     return ` — the field(s) that failed, in full: ${body}`;
 }
-function argsSchemaHint(rawSchema, cache) {
-    if (cache.hint === undefined) {
-        let json = '';
-        try {
-            json = JSON.stringify(rawSchema) ?? '';
-        }
-        catch {
-            json = '';
-        }
-        if (json.length > ARGS_SCHEMA_HINT_MAX)
-            json = `${json.slice(0, ARGS_SCHEMA_HINT_MAX)} …(truncated)`;
-        cache.hint = json.length > 0 ? ` — full args schema: ${json}` : '';
-    }
-    return cache.hint;
+/** Compact, complete fallback for a pathless shape failure (WI-6661). */
+function argsFieldNamesHint(rawSchema) {
+    const keys = Object.keys(mergedSchemaProperties(rawSchema) ?? {});
+    return keys.length > 0 ? ` — accepted args: ${keys.join(', ')}` : '';
 }
 /**
  * Convert a tool's `args` to JSON Schema — failing LOUD and, crucially, NAMED.
@@ -2192,7 +2258,6 @@ function registerLegacyAsProjected(def, expose, sourceFile) {
     const inputSchema = flattenForOpenAi(rawSchema);
     const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
     const readColumns = projectReadColumns(outputJsonSchema);
-    const schemaHintCache = {};
     const projectedFn = async (input, ctx) => {
         // The dispatch stack may expose `tx` as a fail-loud getter for tools that
         // did not declare `needsWorkspaceTx`. Never probe that property directly:
@@ -2275,9 +2340,9 @@ function registerLegacyAsProjected(def, expose, sourceFile) {
             parsedValue = validated.value;
         }
         else {
-            const repaired = await reencodeAndRevalidate(def.args, def.argReencodings, shimmed);
+            const repaired = await reencodeAndRevalidate(def.args, rawSchema, def.argReencodings, shimmed);
             if (!repaired) {
-                throw makeInvalidInputError(def.name, validated.issues, shimmed, rawSchema, def.guidance?.argRedirects, schemaHintCache);
+                throw makeInvalidInputError(def.name, validated.issues, shimmed, rawSchema, def.guidance?.argRedirects);
             }
             parsedValue = repaired.value;
             corrections = repaired.corrections;
@@ -2420,7 +2485,6 @@ function registerRoleGatedAsProjected(def, expose, sourceFile) {
     const inputSchema = flattenForOpenAi(rawSchema);
     const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
     const readColumns = projectReadColumns(outputJsonSchema);
-    const schemaHintCache = {};
     const projectedFn = async (input, ctx) => {
         // EI-11621: recover a client `__unparsedToolInput` envelope FIRST, so the
         // per-call tier extraction + closed-shape validation see the intended args.
@@ -2438,9 +2502,9 @@ function registerRoleGatedAsProjected(def, expose, sourceFile) {
             parsedValue = validated.value;
         }
         else {
-            const repaired = await reencodeAndRevalidate(def.args, def.argReencodings, shimmed);
+            const repaired = await reencodeAndRevalidate(def.args, rawSchema, def.argReencodings, shimmed);
             if (!repaired) {
-                throw makeInvalidInputError(def.name, validated.issues, shimmed, rawSchema, def.guidance?.argRedirects, schemaHintCache);
+                throw makeInvalidInputError(def.name, validated.issues, shimmed, rawSchema, def.guidance?.argRedirects);
             }
             parsedValue = repaired.value;
             corrections = repaired.corrections;

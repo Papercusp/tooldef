@@ -278,13 +278,12 @@ export function issuePath(issue) {
  * knows the tool's shape and simply sent a value one field would not accept (too long,
  * a bad enum value, a malformed string).
  *
- * EI-10943: this is the signal that a full args-schema dump is pure context burn. The
- * dump (P-004) earns its keep for a SHAPE-blind caller — an unrecognized key, an omitted
- * required field — where one failure should teach the whole contract. But a 1,800-char
- * schema appended to "foundDuring: too long — 3 chars over the 120-char limit" teaches
- * nothing the caller did not already know, and it lands in the context of the agent least
- * able to spare it. An unnamed-path issue (a whole-object refinement) is treated as a
- * shape problem, so it keeps the schema.
+ * EI-10943: this is the signal that even field-scoped shape guidance is unnecessary.
+ * A caller that sent the right key and merely missed a value constraint already gets the
+ * actionable limit/enum/format diagnosis. Shape-blind callers instead receive only the
+ * failing field schema or a compact accepted-key list (WI-6661), never the former
+ * 1,800-character whole-schema dump. An unnamed-path issue (a whole-object refinement)
+ * remains a shape problem, so it keeps that compact guidance.
  */
 export function issuesAreValueLevel(issues) {
     if (issues.length === 0)
