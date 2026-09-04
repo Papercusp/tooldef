@@ -534,10 +534,13 @@ const ctxBindingsStep: DispatchStep = {
       });
     };
 
-    // askUser — installed only when ctx has a workspaceId + runId for
-    // card-correlator to scope cleanup against.
+    // askUser — installed only when the caller explicitly proves it has an
+    // interactive card responder, in addition to the workspace/run identity
+    // needed for card-correlator cleanup. WorkspaceId + runId alone are also
+    // present on headless/MCP/non-chat calls and must not make those callers
+    // wait for a responder that does not exist.
     let askUser: UnifiedToolContext['askUser'] | undefined;
-    if (ctx.workspaceId && ctx.runId) {
+    if (ctx.interactiveCardCapability && ctx.workspaceId && ctx.runId) {
       const wsId = ctx.workspaceId;
       const runId = ctx.runId;
       openRun({ workspaceId: wsId, runId });

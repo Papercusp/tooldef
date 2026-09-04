@@ -69,6 +69,7 @@ const MAKE_CTX = (over: Partial<UnifiedToolContext> = {}): UnifiedToolContext =>
   featureId: null,
   chunkId: 'ck_X',
   runId: 'run_X',
+  interactiveCardCapability: true,
   spawnId: 'spw_X',
   parentSpawnId: null,
   ...over,
@@ -92,7 +93,7 @@ describe('ctx.askUser dispatcher integration', () => {
     _resetProjectionRegistryForTests();
   });
 
-  it('askUser is wired when ctx has workspaceId + runId; resolves on /card-response submit', async () => {
+  it('askUser is wired when ctx proves an interactive responder; resolves on /card-response submit', async () => {
     const tool = makeAskTool();
     const dispatchPromise = dispatchProjectedTool(
       tool,
@@ -182,6 +183,23 @@ describe('ctx.askUser dispatcher integration', () => {
       const c = (result.result.content?.[0] as { text?: string })?.text;
       expect(c).toBe('no-askUser');
     }
+  });
+
+  it('askUser is NOT installed when ctx lacks the interactive-card capability', async () => {
+    const tool = makeAskTool();
+    const result = await dispatchProjectedTool(
+      tool,
+      'test:ask',
+      {},
+      MAKE_CTX({ interactiveCardCapability: undefined }),
+      MAKE_DEPS(),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok && result.result) {
+      const c = (result.result.content?.[0] as { text?: string })?.text;
+      expect(c).toBe('no-askUser');
+    }
+    expect(getSnapshot('run_X')).toBeNull();
   });
 
   it('askUser resolves cancel when dispatcher aborts the run; pending card cleaned up', async () => {
