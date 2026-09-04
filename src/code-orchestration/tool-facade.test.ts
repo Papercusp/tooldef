@@ -148,6 +148,7 @@ describe('roleScopedToolNames (code:run / code:tools facade scoping)', () => {
     mkRoleTool('work_items:get', ['worker', 'operator']),
     mkRoleTool('operator:rate_limit_config', ['operator']), // operator-only
     mkRoleTool('docs:get'), // role-open (no agentRoles)
+    mkRoleTool('owner:ui-only', []), // explicit deny-all
     mkRoleTool('code:run', ['worker', 'operator']),
     mkRoleTool('code:tools', ['worker', 'operator']),
   ];
@@ -157,6 +158,7 @@ describe('roleScopedToolNames (code:run / code:tools facade scoping)', () => {
     expect(allowed.has('plans:list')).toBe(true);
     expect(allowed.has('work_items:get')).toBe(true);
     expect(allowed.has('docs:get')).toBe(true); // role-open: included for any role
+    expect(allowed.has('owner:ui-only')).toBe(false); // empty allowlist: denied for every role
     expect(allowed.has('operator:rate_limit_config')).toBe(false); // operator-only: excluded for worker
   });
 
@@ -180,6 +182,7 @@ describe('roleScopedToolNames (code:run / code:tools facade scoping)', () => {
   it('a null/unknown role still gets role-open tools but no role-gated ones', () => {
     const allowed = roleScopedToolNames(TOOLS, null);
     expect(allowed.has('docs:get')).toBe(true); // role-open
+    expect(allowed.has('owner:ui-only')).toBe(false); // explicit deny-all
     expect(allowed.has('plans:list')).toBe(false); // role-gated, no role to match
   });
 });

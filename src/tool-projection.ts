@@ -1741,7 +1741,7 @@ export class ProjectedToolContractError extends Error {
 }
 
 function availabilityProblem(tool: ProjectedTool, context: ProjectedToolAvailability): string | null {
-  if (context.role && tool.agentRoles?.length && !tool.agentRoles.includes(context.role)) {
+  if (context.role && tool.agentRoles && !tool.agentRoles.includes(context.role)) {
     return `role ${context.role} is not admitted`;
   }
   if (context.profile === 'power' && tool.profile === 'engineer') return 'power profile is not admitted';

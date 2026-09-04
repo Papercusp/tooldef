@@ -15,6 +15,7 @@ import {
   listMcpProjections,
   PROJECTED_TOOL_REGISTRY_SOURCE,
   projectedToolRegistryRevision,
+  projectedToolAdmitted,
   projectedToolCallContract,
   assertProjectedToolCallContract,
   renderProjectedToolCall,
@@ -43,6 +44,19 @@ const baseTool = (over: Partial<ProjectedTool> = {}): ProjectedTool => ({
 });
 
 afterEach(() => _resetProjectionRegistryForTests());
+
+describe('empty agent role allowlists', () => {
+  it('treats an empty allowlist as deny-all in listings and contract availability', () => {
+    registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'owner:ui-only' } },
+      agentRoles: [],
+    }));
+    expect(listMcpProjections('operator').map((tool) => tool.name)).not.toContain('owner:ui-only');
+    expect(projectedToolAdmitted('owner:ui-only', { role: 'operator' })).toBe(false);
+    expect(() => projectedToolCallContract('owner:ui-only', { role: 'operator' }))
+      .toThrow(/role operator is not admitted/);
+  });
+});
 
 describe('UnifiedToolContext principal provenance', () => {
   it('accepts the canonical metadata carried by transport adapters', () => {
