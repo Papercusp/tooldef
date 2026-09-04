@@ -16,7 +16,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
-import { defineTool } from './define-tool';
+import { applyCasingArgAliases, defineTool } from './define-tool';
 import { dispatchProjectedTool, type DispatchProjectedDeps } from './dispatch-projected';
 import {
   _resetProjectionRegistryForTests,
@@ -110,6 +110,58 @@ const texts = (result: { content?: readonly unknown[] } | undefined): string[] =
 
 const textOf = (result: { content?: readonly unknown[] } | undefined) => texts(result).join('\n');
 
+describe('exact casing aliases', () => {
+  it('re-encodes an exact lowerCamelCase spelling to the declared snake_case key', () => {
+    const out = applyCasingArgAliases(
+      { type: 'object', properties: { timeout_sec: { type: 'number' } } },
+      { timeoutSec: 90 },
+    );
+
+    expect(out?.input).toEqual({ timeout_sec: 90 });
+    expect(out?.corrections).toEqual([
+      expect.objectContaining({
+        path: 'timeoutSec',
+        sent: { timeoutSec: 90 },
+        ran: { timeout_sec: 90 },
+        rule: 'args.exact-casing-alias',
+      }),
+    ]);
+  });
+
+  it('re-encodes an exact snake_case spelling to the declared lowerCamelCase key', () => {
+    const out = applyCasingArgAliases(
+      { type: 'object', properties: { wakeOnReply: { type: 'boolean' } } },
+      { wake_on_reply: true },
+    );
+
+    expect(out?.input).toEqual({ wakeOnReply: true });
+  });
+
+  it('never overrides a canonical key or guesses from a merely similar name', () => {
+    const schema = { type: 'object', properties: { timeout_sec: { type: 'number' } } };
+    expect(applyCasingArgAliases(schema, { timeout_sec: 30, timeoutSec: 90 })).toBeNull();
+    expect(applyCasingArgAliases(schema, { timeoutSecs: 90 })).toBeNull();
+    expect(applyCasingArgAliases(schema, { timeoutsec: 90 })).toBeNull();
+  });
+
+  it('selects the caller-matched union branch instead of borrowing a key from another branch', () => {
+    const schema = {
+      anyOf: [
+        { properties: { op: { const: 'wait' }, timeout_sec: { type: 'number' } } },
+        { properties: { op: { const: 'run' }, timeoutSec: { type: 'number' } } },
+      ],
+    };
+    expect(applyCasingArgAliases(schema, { op: 'wait', timeoutSec: 90 })?.input).toEqual({
+      op: 'wait',
+      timeout_sec: 90,
+    });
+    expect(applyCasingArgAliases(schema, { op: 'run', timeout_sec: 90 })?.input).toEqual({
+      op: 'run',
+      timeoutSec: 90,
+    });
+  });
+});
+
 /**
  * Both registration paths must carry the repair. Which one a tool lands in is decided by
  * `requirePrincipal: false` — a registration detail entirely invisible to the caller whose
@@ -130,6 +182,36 @@ describe.each([
     expect(out.ok).toBe(true);
     expect(f.seen()).toEqual({ refs: ['WI-1', 'WI-2'] });
     expect(textOf(out.result)).toContain('handler ran');
+  });
+
+  it('accepts an exact casing twin through the real dispatcher and discloses it', async () => {
+    const name = `test:casing-alias-${slug}`;
+    let seen: unknown;
+    defineTool({
+      name,
+      capability: 'test:read',
+      description: 'fixture',
+      args: z.object({ timeout_sec: z.number().int().positive() }) as never,
+      ...(roleGated ? { requirePrincipal: false as const, agentRoles: ['worker'] } : {}),
+      async handler(args: unknown) {
+        seen = args;
+        return { content: [{ type: 'text', text: 'handler ran' }] };
+      },
+    } as never);
+
+    const out = await call(name, { timeoutSec: 90 });
+
+    expect(out.ok).toBe(true);
+    expect(seen).toEqual({ timeout_sec: 90 });
+    expect(texts(out.result)[0]).toContain('AUTO-CORRECTED AND RAN');
+    expect(texts(out.result)[0]).toContain('args.exact-casing-alias');
+    expect((out.result?._meta as { corrected?: unknown[] })?.corrected).toEqual([
+      expect.objectContaining({
+        path: 'timeoutSec',
+        sent: { timeoutSec: 90 },
+        ran: { timeout_sec: 90 },
+      }),
+    ]);
   });
 
   it('KEEPS the whole handler payload beside the notice, every block of it', async () => {
