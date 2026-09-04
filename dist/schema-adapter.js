@@ -8,7 +8,8 @@
  * through the adapter registered here instead of calling a validator library
  * directly.
  *
- * The default is the Zod adapter (Zod 4's built-in `z.toJSONSchema`), so the
+ * The default is the version-aware Zod adapter (Zod 4's built-in
+ * `z.toJSONSchema`, with `zod-to-json-schema` only for a Zod 3 host), so the
  * Papercusp host — and every existing tool — keeps working with zero changes.
  * A host using Valibot / ArkType / etc. registers its own adapter at startup
  * via `setJsonSchemaAdapter`, before its tools self-register (the schema is
@@ -16,12 +17,19 @@
  * capability-tier resolver — see capability-tiers.ts).
  */
 import { z } from 'zod';
+import { zodToJsonSchema } from 'zod-to-json-schema';
 /**
- * Default adapter — Zod 4's built-in `toJSONSchema`. Shipped as the default so
- * the conversion is zero-config for Zod consumers; swappable via
- * `setJsonSchemaAdapter`.
+ * Default adapter — use Zod 4's native converter when it exists and retain the
+ * legacy converter solely as the Zod 3 fallback. `zod-to-json-schema@3`
+ * accepts a Zod 4 value but emits only `{ $schema }`, so capability detection
+ * must happen before conversion rather than by catching an exception.
  */
-export const zodJsonSchemaAdapter = (schema) => z.toJSONSchema(schema);
+export const zodJsonSchemaAdapter = (schema) => {
+    const native = z.toJSONSchema;
+    return typeof native === 'function'
+        ? native(schema)
+        : zodToJsonSchema(schema);
+};
 let adapter = zodJsonSchemaAdapter;
 /** Register the host's schema→JSON-Schema adapter. Call once at startup. */
 export function setJsonSchemaAdapter(fn) {

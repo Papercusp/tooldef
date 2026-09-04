@@ -23,6 +23,18 @@ describe('default (Zod) adapter', () => {
     });
   });
 
+  it('does not degrade a Zod 4 object to the legacy converter\'s metadata-only output', () => {
+    const out = zodJsonSchemaAdapter(z.object({ timeout_sec: z.number().int().positive() }));
+
+    expect(out).toMatchObject({
+      type: 'object',
+      properties: { timeout_sec: { type: 'integer' } },
+      required: ['timeout_sec'],
+      additionalProperties: false,
+    });
+    expect(Object.keys(out).filter((key) => key !== '$schema')).not.toHaveLength(0);
+  });
+
   it('zodJsonSchemaAdapter is the active adapter by default', () => {
     const direct = zodJsonSchemaAdapter(z.object({ a: z.string() }));
     const viaActive = toJsonSchema(z.object({ a: z.string() }));

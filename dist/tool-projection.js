@@ -53,23 +53,18 @@ export const RESERVED_EVENT_NAMES = [
  */
 export function classifyEventWire(schema) {
     // Binary check: detect `z.instanceof(Uint8Array)` by probing the
-    // schema with a real Uint8Array. Zod 4 represents instanceof as
-    // `{ type: 'custom', fn }` with the Class captured in the fn closure,
-    // so structural _def sniffing isn't reliable. The probe is cheap
+    // schema with a real Uint8Array. Different Zod versions represent instanceof
+    // differently (_def.type: 'custom' in v4, ZodEffects in v3), so we probe
+    // structurally instead of relying on _def inspection. The probe is cheap
     // (one parse) and runs once per declared event at register time.
-    //
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const def = schema?._def;
-    if (def?.type === 'custom') {
-        try {
-            const probe = schema.safeParse(new Uint8Array(0));
-            const rejectsObject = !schema.safeParse({}).success;
-            if (probe.success && rejectsObject)
-                return 'binary';
-        }
-        catch {
-            /* fall through to JSON */
-        }
+    try {
+        const probe = schema.safeParse(new Uint8Array(0));
+        const rejectsObject = !schema.safeParse({}).success;
+        if (probe.success && rejectsObject)
+            return 'binary';
+    }
+    catch {
+        /* fall through to JSON */
     }
     try {
         // Pluggable schema→JSON-Schema (P-021); same path as inputSchema serialization.
