@@ -1,4 +1,8 @@
 export const PAYLOAD_TIERS = ['trimmed', 'standard', 'full'];
+/** The arg key itself, exported so a consumer that needs to NAME it — e.g.
+ *  `unknownArgHint`'s accepted-key rendering (EI-22174225494240206) — has one
+ *  source instead of a second hand-typed `'payloadTier'` literal. */
+export const PAYLOAD_TIER_ARG = 'payloadTier';
 export function parsePayloadTier(v) {
     return typeof v === 'string' && PAYLOAD_TIERS.includes(v)
         ? v
@@ -12,11 +16,11 @@ export function parsePayloadTier(v) {
 export function extractPayloadTier(input) {
     if (!input || typeof input !== 'object' || Array.isArray(input))
         return { input };
-    const raw = input.payloadTier;
+    const raw = input[PAYLOAD_TIER_ARG];
     if (raw === undefined)
         return { input };
     const callTier = parsePayloadTier(raw);
-    const { payloadTier: _dropped, ...rest } = input;
+    const { [PAYLOAD_TIER_ARG]: _dropped, ...rest } = input;
     return { input: rest, callTier };
 }
 /** Per-call override outranks the session tier; absent both ⇒ full. */
@@ -108,6 +112,52 @@ function preserveArrayChildPaths(paths, index) {
 }
 function hasPreservedObjectChild(paths, key) {
     return preserveObjectChildPaths(paths, key).length > 0;
+}
+/**
+ * Where this key sits in the caller's DECLARED preserve order — the index of the
+ * first `preservePaths` entry that selects it, or -1 when none does.
+ *
+ * EI-22186855527494865: a boolean "is preserved" flattened every selected path to
+ * ONE priority, so two preserved siblings tied and fell back to insertion order —
+ * and on `plans:get` the bulky one (`results[].items[].text`) is inserted before
+ * the small one (`results[].shipReadiness`), so a large plan's items ate the whole
+ * budget and the explicitly-requested ship verdict was still dropped. Measured: 22
+ * items survived it, 126 did not, and reordering the preserve LIST changed nothing
+ * because both entries ranked identically. Ranking by declared order makes the
+ * caller's own ordering the tie-break, which is the only signal available that says
+ * which of two requested fields matters more.
+ */
+function preservedChildRank(paths, key) {
+    for (let i = 0; i < paths.length; i += 1) {
+        const path = paths[i];
+        if (path.length === 0 || (path[0].kind === 'key' && path[0].name === key))
+            return i;
+    }
+    return -1;
+}
+/** Cap on the paths named in `_projection.omittedPreserved` — a pointer list, not a manifest. */
+const PRESERVED_OMISSION_PATHS = 5;
+/**
+ * Record that an explicitly-preserved path was dropped anyway. Does NOT touch
+ * `omittedCount` — the caller has already counted this key inside its aggregate
+ * "remaining fields omitted" entry; this only makes the drop NAMEABLE.
+ */
+function notePreservedOmission(state, path, reason) {
+    if (state.priorityOmitted.length < GENERIC_PROJECTION_OMISSION_SAMPLES) {
+        state.priorityOmitted.push({ path, reason });
+    }
+    if (state.preservedOmittedPaths.length < PRESERVED_OMISSION_PATHS &&
+        !state.preservedOmittedPaths.includes(path)) {
+        state.preservedOmittedPaths.push(path);
+    }
+}
+/** Name every explicitly-preserved key in a dropped tail of object entries. */
+function notePreservedDrops(state, path, dropped, preservePaths) {
+    for (const [key] of dropped) {
+        if (preservedChildRank(preservePaths, key) < 0)
+            continue;
+        notePreservedOmission(state, `${path}.${key}`, 'explicitly preserved field omitted to fit projection budget');
+    }
 }
 /**
  * The two recovery routes an omission marker can honestly advertise.
@@ -389,6 +439,21 @@ function identityPriority(key) {
         return 3;
     return IDENTITY_FIELDS.has(key) ? 2 : IDENTITY_ENVELOPES.has(key) ? 1 : 0;
 }
+/** Base rank for an explicitly-preserved key — strictly above every identity tier. */
+const PRESERVED_PRIORITY_BASE = 100;
+/**
+ * Projection order for one object key: an explicitly-preserved key outranks every
+ * identity tier, and among preserved keys the caller's DECLARED order decides
+ * (earlier path wins). Falls back to `identityPriority` for everything else.
+ */
+function keyProjectionPriority(preservePaths, key) {
+    const rank = preservedChildRank(preservePaths, key);
+    if (rank < 0)
+        return identityPriority(key);
+    // Floor at 6 so even a pathologically long preserve list still ranks every
+    // selected key above `id` (4) rather than sinking beneath the identity tiers.
+    return Math.max(6, PRESERVED_PRIORITY_BASE - rank);
+}
 function markPartial(projected, state) {
     if (projected[PARTIAL_FLAG_KEY] === true)
         return;
@@ -450,8 +515,8 @@ function projectIdentityPreview(value, path, depth, state, preservePaths = state
             .filter(([key]) => IDENTITY_FIELDS.has(key) ||
             IDENTITY_ENVELOPES.has(key) ||
             hasPreservedObjectChild(preservePaths, key))
-            .sort((a, b) => (hasPreservedObjectChild(preservePaths, b[0]) ? 5 : identityPriority(b[0])) -
-            (hasPreservedObjectChild(preservePaths, a[0]) ? 5 : identityPriority(a[0])));
+            .sort((a, b) => keyProjectionPriority(preservePaths, b[0]) -
+            keyProjectionPriority(preservePaths, a[0]));
         if (chosen.length === 0) {
             recordOmission(state, path, 'nested value omitted at projection depth limit');
             return omissionMarker(state.recoveryPointer, 'depth limit');
@@ -462,6 +527,7 @@ function projectIdentityPreview(value, path, depth, state, preservePaths = state
             const keyCost = jsonLen(key) + 2;
             if (state.remaining < keyCost + 128) {
                 recordOmission(state, `${path}.${key}`, 'remaining identity fields omitted to fit projection budget', chosen.length - chosenProjected);
+                notePreservedDrops(state, path, chosen.slice(chosenProjected), preservePaths);
                 markPartial(projected, state);
                 break;
             }
@@ -573,8 +639,8 @@ function projectValue(value, path, depth, state, preservePaths = state.preserveP
         // NORMAL (non-depth-limited) path with the same IDENTITY_FIELDS priority.
         const entries = Object.entries(value);
         const prioritized = entries.length > 1
-            ? [...entries].sort((a, b) => (hasPreservedObjectChild(preservePaths, b[0]) ? 5 : identityPriority(b[0])) -
-                (hasPreservedObjectChild(preservePaths, a[0]) ? 5 : identityPriority(a[0])))
+            ? [...entries].sort((a, b) => keyProjectionPriority(preservePaths, b[0]) -
+                keyProjectionPriority(preservePaths, a[0]))
             : entries;
         const projected = {};
         const shown = prioritized.slice(0, state.limits.maxKeys);
@@ -584,6 +650,7 @@ function projectValue(value, path, depth, state, preservePaths = state.preserveP
             const keyCost = jsonLen(key) + 2;
             if (state.remaining < keyCost + 128) {
                 recordOmission(state, `${path}.${key}`, 'remaining fields omitted to fit projection budget', shown.length - i);
+                notePreservedDrops(state, path, shown.slice(i), preservePaths);
                 partial = true;
                 break;
             }
@@ -592,6 +659,7 @@ function projectValue(value, path, depth, state, preservePaths = state.preserveP
         }
         if (prioritized.length > shown.length) {
             recordOmission(state, `${path}.*`, `${prioritized.length - shown.length} object fields omitted`, prioritized.length - shown.length);
+            notePreservedDrops(state, path, prioritized.slice(shown.length), preservePaths);
         }
         if (partial)
             markPartial(projected, state);
@@ -623,6 +691,7 @@ function projectCursorArgs(args) {
         omittedCount: 0,
         omitted: [],
         priorityOmitted: [],
+        preservedOmittedPaths: [],
         active: new WeakSet(),
         limits: { maxArray: 12, maxDepth: 5, maxKeys: 40, maxString: 800 },
         // This projection BUILDS the cursor args, so it cannot point at the cursor
@@ -692,6 +761,7 @@ export function projectBoundedPayload(data, opts) {
         omittedCount: 0,
         omitted: [],
         priorityOmitted: [],
+        preservedOmittedPaths: [],
         active: new WeakSet(),
         limits: projectionTier === 'standard'
             ? { maxArray: 40, maxDepth: 8, maxKeys: 100, maxString: 2_500 }
@@ -721,6 +791,12 @@ export function projectBoundedPayload(data, opts) {
         // out of the sample by lower-priority field/depth entries recorded for the
         // elements that survived (EI-19965559011729712).
         omitted: [...state.priorityOmitted, ...state.omitted].slice(0, GENERIC_PROJECTION_OMISSION_SAMPLES),
+        // EI-22186855527494865: a separate, never-shed list. `omitted` above is a
+        // SAMPLE the ladder below trades away for content; a field the caller asked
+        // for BY NAME must stay nameable after that trade.
+        ...(state.preservedOmittedPaths.length > 0
+            ? { omittedPreserved: [...state.preservedOmittedPaths] }
+            : {}),
         cursor: opts.recovery?.cursor ?? {
             kind: 'full-detail',
             tool: opts.toolName,
@@ -852,6 +928,7 @@ export function projectBoundedPayload(data, opts) {
                 omittedCount: 0,
                 omitted: [],
                 priorityOmitted: [],
+                preservedOmittedPaths: [],
                 active: new WeakSet(),
                 limits: { maxArray: 6, maxDepth: 4, maxKeys: 24, maxString: 300 },
                 // Same projection, narrower budget — the route that recovers is
@@ -860,13 +937,24 @@ export function projectBoundedPayload(data, opts) {
                 preservePaths: state.preservePaths,
             };
             const rePreview = projectValue(data, '$', 0, reState);
+            // `omittedPreserved` names fields that are MISSING FROM THIS BODY, so it is
+            // recomputed from the walk being returned rather than inherited. Carrying
+            // the discarded walk's list forward reports a field as dropped while it sits
+            // in the payload — measured: the fuller walk dropped `shipReadiness`, this
+            // narrower one clipped its bulky sibling instead and kept it. That is the
+            // opposite direction from `omittedCount`, where over-reporting is the safe
+            // side; here it manufactures a phantom absence.
+            const { omittedPreserved: _discardedPreserved, ...reBase } = leanMetadata;
             const reMetadata = {
-                ...leanMetadata,
+                ...reBase,
                 // Count the omissions of the projection ACTUALLY RETURNED, and never
                 // under-report the fuller walk that was discarded: a bounded measurement
                 // that reads as a real zero is the failure mode this whole block exists to
                 // prevent.
                 omittedCount: Math.max(leanMetadata.omittedCount, reState.omittedCount),
+                ...(reState.preservedOmittedPaths.length > 0
+                    ? { omittedPreserved: [...reState.preservedOmittedPaths] }
+                    : {}),
                 returnedChars: 0,
             };
             const candidate = buildResultFrom(rePreview, reMetadata);
@@ -884,6 +972,7 @@ export function projectBoundedPayload(data, opts) {
             omittedCount: 0,
             omitted: [],
             priorityOmitted: [],
+            preservedOmittedPaths: [],
             active: new WeakSet(),
             limits: { maxArray: 8, maxDepth: 3, maxKeys: 20, maxString: 300 },
             // The identity-only husk drops the MOST, so its markers are the ones a
@@ -905,7 +994,15 @@ export function projectBoundedPayload(data, opts) {
                 identityFields[key] = projectValue(sourceFields[key], `$.${key}`, 0, identityState);
             }
         }
-        const fallbackMetadata = { ...leanMetadata, returnedChars: 0 };
+        // Same rule as the re-walk above: describe the husk actually returned.
+        const { omittedPreserved: _supersededPreserved, ...fallbackBase } = leanMetadata;
+        const fallbackMetadata = {
+            ...fallbackBase,
+            ...(identityState.preservedOmittedPaths.length > 0
+                ? { omittedPreserved: [...identityState.preservedOmittedPaths] }
+                : {}),
+            returnedChars: 0,
+        };
         result =
             opts.preserveArrayRoot && Array.isArray(identityOnly)
                 ? buildArrayRootResult(identityOnly, fallbackMetadata)
@@ -1003,8 +1100,19 @@ export function applyPayloadTier(opts) {
     //    domain-specific shaper, then fall back to the generic bounded projection.
     //    An EXPLICIT payloadTier:'full' call opts out (see explicitFullRequest) —
     //    that is the documented escape hatch, and the UI/sync in-process path.
+    // EI-22167228731928620: mark the response as an explicit-full opt-out, not
+    // just silently return it unshaped. Without this, the MCP transport's
+    // result-door (result-door.ts) — a SEPARATE, later size-enforcement pass
+    // with no visibility into `explicitFullRequest` at all — cannot tell this
+    // apart from an ordinary oversized payload, and re-projects it with a
+    // generic, field-blind walk when it overflows the transport door. That
+    // walk has no idea a field like `summary` deserves the priority a tool's
+    // own shaper gives it, so a caller who explicitly asked for 'full' could
+    // end up with LESS inline detail than a plain 'trimmed' call — worse, not
+    // better, than the tier they opted out of. The marker lets the door choose
+    // "spill the untouched full body and point at it" instead.
     if (explicitFullRequest)
-        return out;
+        return { ...out, explicitFullRequest: true };
     const size = jsonLen(out.data);
     if (size > ceiling) {
         const smallest = shape?.trimmed ?? shape?.standard;

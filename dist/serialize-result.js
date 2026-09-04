@@ -171,6 +171,12 @@ export function serializeToolResponse(response, opts) {
         // projection without parsing the body.
         if (response.payloadProjection !== undefined)
             _meta.payloadProjection = response.payloadProjection;
+        // EI-22167228731928620: surface the explicit-full opt-out in `_meta` too,
+        // for the same reason as `payloadProjection` above — the per-result door
+        // (result-door.ts) reads only `_meta` and must be able to tell this body
+        // is the tool's true raw output before deciding how to bound it.
+        if (response.explicitFullRequest !== undefined)
+            _meta.explicitFullRequest = response.explicitFullRequest;
     }
     const data = response.data ?? response;
     // Freshness negotiation (agent-tool-delta-protocol-2026-06-22, P-005). A

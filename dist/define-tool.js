@@ -17,13 +17,16 @@
 import { tierFor } from './capability-tiers';
 import { toJsonSchema } from './schema-adapter';
 import { standardValidate, formatIssues, issuesAreValueLevel, issueLeaves } from './standard-schema';
+import { applyArgReencodings, correctedDisclosure, } from './reencode-args';
 import { register } from './registry';
 import { collectToolEmits } from './emits-registry';
-import { PROJECTED_TOOL_REGISTRY_SOURCE, projectedToolRegistryRevision, renderProjectedToolCall, registerProjectedTool, recordToolShapers, } from './tool-projection';
+import { PROJECTED_TOOL_REGISTRY_SOURCE, projectedToolRegistryRevision, renderProjectedToolCall, registerProjectedTool, resolveMcpName, recordToolShapers, } from './tool-projection';
 import { UnauthorizedToolError, InvalidInputError, } from './dispatch-projected';
 import { serverVintageHint, constraintVintageHint } from './server-vintage';
+import { readAmbientArgKeys } from './ambient-args';
+import { buildCorrectedCall, correctedCallHint } from './corrected-call';
 import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
-import { applyPayloadTier, extractPayloadTier, resolvePayloadTier } from './payload-tier';
+import { applyPayloadTier, extractPayloadTier, resolvePayloadTier, PAYLOAD_TIER_ARG } from './payload-tier';
 import { boundWorkspaceTx } from './workspace-tx';
 import { parseDeltaRequest, computeViewFingerprint, contentRevision, negotiateDelta, decodeDeltaCursor, computeRowDigest, computeViewChecksum, diffFromDigest, deltaCounts, isSemanticDeltaEnabled, DELTA_SMALL_RESPONSE_BYTES, computeRowDigestUncapped, } from './delta-protocol';
 import { putRowDigest, getRowDigest } from './delta-digest-store';
@@ -766,6 +769,10 @@ function definePrincipalGatedTool(input) {
         payloadTierCeilingChars: input.payloadTierCeilingChars,
         // WI-37843: see ToolDefinition.ignoreSessionPayloadTier.
         ignoreSessionPayloadTier: input.ignoreSessionPayloadTier,
+        // P-016 / D-104: see ToolDefinition.argReencodings. Threading this is what makes the
+        // declaration reach `registerLegacyAsProjected`'s repair path — a field declared on the
+        // input type but dropped here would leave every registered rule silently inert.
+        argReencodings: input.argReencodings,
     };
     // EI-20803112372029993: make the declared shapers reachable from the catalog.
     // `def.shape` is otherwise closed over by the dispatch handler below and by
@@ -853,6 +860,10 @@ function defineRoleGatedTool(input) {
         payloadTierCeilingChars: input.payloadTierCeilingChars,
         // WI-37843: see RoleToolDefinition.ignoreSessionPayloadTier.
         ignoreSessionPayloadTier: input.ignoreSessionPayloadTier,
+        // P-016 / D-104: see RoleToolDefinition.argReencodings. coord:send — the verb the whole
+        // rule was measured for — is `requirePrincipal: false`, so it lands in THIS builder;
+        // dropping the field here alone would make the shipped rule a no-op.
+        argReencodings: input.argReencodings,
         modality: input.modality,
         // EI-10883: closed shape — an undeclared arg errors instead of being silently dropped.
         args: strictArgs(input.args),
@@ -1166,6 +1177,23 @@ const COMMON_ARG_ALIASES = {
     linkedfeatureid: ['linkedFeatureId', 'linked_feature_id'],
     owner: ['ownerEmail', 'ownerId', 'assignee', 'assign_to'],
     ownerid: ['ownerEmail', 'owner', 'assignee', 'assign_to'],
+    // ── EI-21667775013157341: `plan` is the natural short name for a plan-scoped filter,
+    // but the declared key spells out WHICH plan relation it is — `sourcePlanSlug` on
+    // work_items:list, `current_plan_slug` on coord:declare-intent. The distance rung
+    // cannot rescue that: compact('plan') vs compact('sourcePlanSlug') is 10 against a
+    // threshold of 3 (the cap), so the caller is told the tool "declares no counterpart".
+    // That sentence is FALSE, and here it is worse than a withheld hint — the natural
+    // recovery from "no such filter" is to DROP the argument, which does not fail, it
+    // silently widens the read to EVERY plan. The reporter had to find `sourcePlanSlug`
+    // by reading the accepted-keys list.
+    //
+    // Deliberately an alias entry and NOT a containment rule: the suffix rung below
+    // refuses `<unknown> contained in <declared>` for the same reason it refuses a prefix
+    // test, and the reverse direction is worse still (`id` would match any key merely
+    // spelling "id"). The exact-declared-match precedence above keeps a tool that really
+    // declares `plan` winning over this line, and `admissible` still lets a value-refuting
+    // enum veto it.
+    plan: ['sourcePlanSlug', 'current_plan_slug', 'planSlug', 'plan_slug'],
     planitem: ['plan_item', 'itemId', 'item'],
     rubricid: ['rubricRef'],
     rubricids: ['rubricRefs'],
@@ -1203,6 +1231,14 @@ const COMMON_ARG_ALIASES = {
 function compactArgName(value) {
     return value.replace(/[^a-z0-9]/gi, '').toLowerCase();
 }
+/**
+ * Type descriptors that a caller appends to a declared key's own name while still
+ * naming the SAME subject (`plan` -> `planSlug`, `harness` -> `harnessName`). Consumed
+ * by `suggestArgName`'s suffix rung, which documents why this must stay a closed set
+ * rather than a general prefix or containment test. Compare compacted, so `plan_slug`
+ * and `planSlug` are one case.
+ */
+const ARG_TYPE_SUFFIXES = new Set(['slug', 'ref', 'id', 'name', 'key', 'path']);
 function editDistance(a, b) {
     if (a === b)
         return 0;
@@ -1296,6 +1332,47 @@ export function suggestArgName(unknown, accepted, opts) {
     if (semantic) {
         return accepted.find((candidate) => compactArgName(candidate) === compactArgName(semantic)) ?? semantic;
     }
+    /**
+     * EI-21670512679890540 / EI-21679236680294291 — a declared key wearing a TYPE SUFFIX.
+     *
+     * The edit-distance rung below scores by characters, so it penalises exactly the
+     * shape this vocabulary uses most: `<declaredKey><Suffix>`. For `planSlug` against a
+     * tool declaring `plan`, the distance is 4 (the whole suffix) while the threshold —
+     * `max(len)/3`, capped at 3 — is 2, so the match is rejected and the caller is told
+     * the tool "declares no counterpart". That sentence is FALSE here, and it is the
+     * costly half: it does not merely withhold a suggestion, it asserts no synonym exists
+     * and steers the caller to DROP the argument. `corrected-call.ts` then emitted
+     * `plan_items:status({ harness })` — a call that cannot validate, because `plan` is
+     * required and is listed as accepted in the very same message. Two agents filed this
+     * within 2h19m of each other (2026-08-28 04:43Z, 07:02Z) and both had to find `plan`
+     * by reading the accepted-keys list themselves.
+     *
+     * The suffixes are a CLOSED set of type descriptors — the argument still names the
+     * same subject, it just says what representation of it is being passed — so
+     * "`<key>` + one of these means `<key>`" is decidable without judgment, which is the
+     * same bar `candidateRefutesValue` sets for its own narrowness. A general
+     * containment or prefix rule is deliberately NOT used: it would map `plan` -> `p`
+     * and `body` -> `bo` wherever such keys exist.
+     *
+     * Ambiguity FAILS CLOSED: two declared keys both explaining the unknown name yields
+     * nothing, and the distance rung decides instead, because a confidently wrong
+     * relocation is the failure this whole function exists to avoid. With the current set
+     * that guard is unreachable rather than load-bearing — no member is a suffix of
+     * another, so at most one prefix can leave an admissible remainder — but it is what
+     * keeps the single-match check SUFFICIENT if the set ever grows a member that ends
+     * like an existing one. Value-admissibility still applies, so a suffix match cannot
+     * override an enum/const that provably refuses the caller's value.
+     */
+    const suffixMatches = accepted.filter((candidate) => {
+        const compactCandidate = compactArgName(candidate);
+        if (compactCandidate.length < 2 || compactCandidate === compactUnknown)
+            return false;
+        if (!compactUnknown.startsWith(compactCandidate))
+            return false;
+        return ARG_TYPE_SUFFIXES.has(compactUnknown.slice(compactCandidate.length)) && admissible(candidate);
+    });
+    if (suffixMatches.length === 1)
+        return suffixMatches[0];
     const ranked = accepted
         .filter(admissible)
         .map((candidate) => ({ candidate, distance: editDistance(compactUnknown, compactArgName(candidate)) }))
@@ -1338,24 +1415,178 @@ export function nestedArgPaths(props) {
     }
     return out;
 }
+/**
+ * Merge `properties` across every branch of a UNION-rooted JSON Schema
+ * (`anyOf`/`oneOf`), falling back to the schema's own top-level `properties`
+ * when it isn't a union.
+ *
+ * `capability:launch-agent`'s two near-identical source/fresh branches — and
+ * every other tool whose args are a top-level `z.union([...])` — render with
+ * NO top-level `properties`, only `anyOf: [...]`. Reading `rawSchema.properties`
+ * directly (the old behaviour) therefore always came back empty for a
+ * union-rooted tool, no matter how good the correction below would otherwise
+ * be: `keys.length === 0` short-circuited every caller before it could name
+ * the accepted arg set, let alone consult `argRedirects` or a nested-path
+ * relocation. See the EI-22084251948568820 cluster (EI-22078751749824171,
+ * EI-21575773427457407, EI-21723773357897744): four independent reports of
+ * `capability:launch-agent` rejecting a key with "the full anyOf schema...
+ * no field-level pointer" — the schema WAS being dumped (the `argsSchemaHint`
+ * fallback), but every correction path was silently skipped because this
+ * lookup found no keys to work from.
+ */
+function mergedSchemaProperties(rawSchema) {
+    const schema = rawSchema;
+    if (schema?.properties)
+        return schema.properties;
+    const branches = (Array.isArray(schema?.anyOf) ? schema.anyOf : Array.isArray(schema?.oneOf) ? schema.oneOf : null);
+    if (!branches)
+        return undefined;
+    let merged;
+    for (const branch of branches) {
+        if (!branch?.properties)
+            continue;
+        merged = { ...(merged ?? {}), ...branch.properties };
+    }
+    return merged;
+}
+/**
+ * Leaf-resolved issue text for the "is this an unrecognized-key rejection"
+ * check below. An `invalid_union` issue's OWN top-level `.message` is Zod's
+ * generic "Invalid input" (see `issueLeaves`'s doc on `bestUnionBranch`) — the
+ * real diagnosis (e.g. "Unrecognized key(s) in object: 'carry'") lives several
+ * levels down, in the closest-matching branch's own sub-issues. Reading
+ * `issue.message` directly (the old behaviour) therefore saw only the generic
+ * text for ANY union-rooted tool, never matched `/nrecognized key/i`, and
+ * skipped the whole correction mechanism — including an authored
+ * `argRedirects` entry — for exactly the tools most likely to need it (a
+ * union of several launch/source shapes is precisely where a caller mixes up
+ * which branch's knobs apply). Descend to the SAME leaves `formatIssues`
+ * already renders from, so the two never disagree.
+ */
+function leafIssueSummary(issues) {
+    const leaves = issueLeaves((issues ?? []));
+    const msgs = leaves.map(({ issue }) => issue.message ?? '').join(' ');
+    const keys = leaves.flatMap(({ issue }) => issue.keys ?? []);
+    return { msgs, keys };
+}
+/**
+ * For a DISCRIMINATED UNION, the properties of the single branch the caller's own args
+ * select — or undefined when the schema is not a union, or when the branch is ambiguous.
+ *
+ * WHY THIS EXISTS (measured on `omp:sessions`, the worst verb in D-104's table: 66
+ * rejections in 7d, 100% of its calls, ten agents). `mergedSchemaProperties` unions the
+ * branches' keys, which is right for "what could this tool ever accept" — the
+ * `accepts ONLY:` list — and wrong for "was THIS key accepted on THIS call". `omp:sessions`
+ * declares `cwd` on op=list/search/link but not on op=get/state, so the merged view reports
+ * `cwd` as accepted, the unrecognized-key set comes back empty, and the caller gets the
+ * schema wall D-105 was written about while the mechanism meant to help stays silent.
+ *
+ * D-105 recorded this as "a verb that does not declare `cwd`". Reading the schema shows
+ * that is not quite it: `cwd` IS declared, five times, on other branches. The correction
+ * an agent needs is therefore "not on this `op`", which is only derivable per-branch.
+ *
+ * Deliberately narrow, and it FAILS CLOSED. A branch is selected only when a `const`/`enum`
+ * discriminator matches the caller's value and exactly one branch survives; anything else
+ * falls back to the merged behaviour, which is the pre-existing conservative answer. A
+ * wrongly-selected branch would report a legitimate key as unrecognized and advise dropping
+ * the caller's data — strictly worse than the silence it replaces.
+ */
+function selectedUnionBranchProperties(rawSchema, input) {
+    const schema = rawSchema;
+    if (schema?.properties)
+        return undefined;
+    if (!input || typeof input !== 'object' || Array.isArray(input))
+        return undefined;
+    const branches = (Array.isArray(schema?.anyOf) ? schema.anyOf : Array.isArray(schema?.oneOf) ? schema.oneOf : null);
+    if (!branches)
+        return undefined;
+    const args = input;
+    const matches = branches.filter((branch) => {
+        const props = branch?.properties;
+        if (!props)
+            return false;
+        let sawDiscriminator = false;
+        for (const [key, rawProp] of Object.entries(props)) {
+            const prop = rawProp;
+            const admissible = prop && 'const' in prop
+                ? [prop.const]
+                : prop && Array.isArray(prop.enum)
+                    ? prop.enum
+                    : null;
+            if (!admissible)
+                continue;
+            sawDiscriminator = true;
+            if (!(key in args) || !admissible.includes(args[key]))
+                return false;
+        }
+        return sawDiscriminator;
+    });
+    return matches.length === 1 ? matches[0].properties : undefined;
+}
+/**
+ * The keys the caller sent that this tool does not declare — the full set, INCLUDING ones
+ * for which no correction target exists.
+ *
+ * Extracted from `invalidInputCorrections` (rather than re-derived beside it) so the
+ * corrected-call builder and the did-you-mean hints can never disagree about which keys
+ * were rejected. A second copy of this derivation would be a code-describing value
+ * maintained by hand, and it would drift the first time the unrecognized-key message
+ * wording changes on either side.
+ *
+ * The keys WITHOUT a correction are the important half for P-015: they are the
+ * "not accepted; drop it" cases D-105 identified, which the did-you-mean path is silent
+ * about precisely because there is nothing to suggest.
+ */
+export function unrecognizedArgKeys(issues, rawSchema, 
+/** The caller's args — enables per-branch resolution on a discriminated union. */
+input) {
+    const { msgs, keys: leafKeys } = leafIssueSummary(issues);
+    if (!/nrecognized key/i.test(msgs))
+        return [];
+    const merged = mergedSchemaProperties(rawSchema);
+    if (!merged || Object.keys(merged).length === 0)
+        return [];
+    // Per-branch when the caller's own discriminator picks exactly one, merged otherwise.
+    const branch = input === undefined ? undefined : selectedUnionBranchProperties(rawSchema, input);
+    const keys = Object.keys(branch ?? merged);
+    return [
+        ...new Set([
+            ...leafKeys,
+            ...Array.from(msgs.matchAll(/["']([^"']+)["']/g), (match) => match[1]),
+        ]),
+    ].filter((key) => !keys.includes(key));
+}
+/**
+ * Of `keys`, those this tool DOES declare somewhere — just not on the branch the caller
+ * selected. Lets the refusal say "not on this `op`" instead of the flatly false "this tool
+ * declares no counterpart", which would send an agent hunting for a synonym that exists.
+ */
+export function argsAcceptedOnOtherVariant(rawSchema, keys) {
+    const merged = mergedSchemaProperties(rawSchema);
+    if (!merged)
+        return [];
+    return keys.filter((key) => key in merged);
+}
 export function invalidInputCorrections(issues, rawSchema, argRedirects, 
 /** The caller's raw args, so a near-name guess can be checked against the value it
  *  would relocate (EI-21390759884688723). Optional: absent, behaviour is name-only. */
 input) {
-    const msgs = (issues ?? []).map((i) => i?.message ?? '').join(' ');
-    if (!/nrecognized key/i.test(msgs))
-        return [];
-    const props = rawSchema?.properties;
+    // The candidate pool for a RELOCATION must be the keys this call can actually accept —
+    // the selected union branch when the caller's discriminator picks one, merged otherwise.
+    //
+    // Using the merged pool here produced a SELF-RELOCATION on the real `omp:sessions`:
+    // `cwd` is declared on op=list/search/link, so for an op='get' call it sat in the merged
+    // pool, suggestArgName matched it exactly, and the correction came back
+    // `cwd -> cwd` (kind: 'near-name'). buildCorrectedCall then setPath'd the value and
+    // deleted the same key, so the value was silently DROPPED while the hint advised a move
+    // that is not a move. A key rejected on this branch can never be its own destination.
+    const merged = mergedSchemaProperties(rawSchema);
+    const props = (input === undefined ? undefined : selectedUnionBranchProperties(rawSchema, input)) ?? merged;
     const keys = props ? Object.keys(props) : [];
-    if (keys.length === 0)
+    const unknownKeys = unrecognizedArgKeys(issues, rawSchema, input);
+    if (unknownKeys.length === 0)
         return [];
     const nested = nestedArgPaths(props);
-    const unknownKeys = [
-        ...new Set([
-            ...(issues ?? []).flatMap((issue) => issue.keys ?? []),
-            ...Array.from(msgs.matchAll(/["']([^"']+)["']/g), (match) => match[1]),
-        ]),
-    ].filter((key) => !keys.includes(key));
     // EI-20281509195248260: an AUTHORED cross-tool redirect outranks both guesses
     // below. A key whose real home is a different TOOL matches neither the nested
     // relocation nor an edit-distance near-name, so without this the caller reads
@@ -1390,33 +1621,201 @@ input) {
             ? input[rejectedArg]
             : undefined;
         const nearName = suggestArgName(rejectedArg, keys, { value: rejectedValue, props });
+        // Defence in depth for the whole class, independent of how the pool was computed: a
+        // key relocated onto ITSELF is not a correction. buildCorrectedCall would setPath the
+        // value and then delete the same key, losing it while reporting `relocated`.
+        if (nearName === rejectedArg)
+            return [];
         return nearName ? [{ rejectedArg, target: nearName, kind: 'near-name' }] : [];
     });
+}
+/**
+ * Does an authored redirect target name a path inside THIS tool's own schema (a
+ * RELOCATION, e.g. `observation.linkTo` or `body`) rather than another tool (a
+ * CROSS-TOOL redirect, e.g. `work_items:tag { id, topic }`)? Derived from the tool's
+ * own declared keys, so the two cases never need a hand-maintained flag alongside the
+ * redirect. A rendered tool call always carries a space, `{` or `:`, so it can never
+ * be mistaken for a dotted local path.
+ *
+ * Exported for direct unit test — see strict-args.test.ts.
+ */
+export function isLocalSchemaTarget(target, keys) {
+    if (!/^[A-Za-z_$][\w$]*(?:\.[\w$]+|\[\d+\])*$/.test(target))
+        return false;
+    const root = target.split(/[.[]/)[0];
+    return root !== undefined && root.length > 0 && keys.includes(root);
+}
+/** The tool name at the head of a `seeAlso` entry (`'work_items:claim (claim a SPECIFIC id)'`). */
+function seeAlsoToolName(entry) {
+    if (entry && typeof entry === 'object') {
+        const tool = entry.tool;
+        return typeof tool === 'string' && tool.length > 0 ? tool : null;
+    }
+    if (typeof entry !== 'string')
+        return null;
+    const head = /^\s*([A-Za-z][\w.-]*[:.][\w.-]+)/.exec(entry);
+    return head?.[1] ?? null;
+}
+/**
+ * EI-21681203906419973 — the rejected key is an exact declared arg of a SIBLING tool
+ * that this tool's own `seeAlso` already names.
+ *
+ * The measured failure: `scheduler:get_next` was called with `count`, which is a real,
+ * documented argument — of `work_items:claim_next`, the sibling self-select verb that
+ * get_next's `seeAlso` literally lists. The caller reached for the neighbour's arg on
+ * this tool and the rejection could only answer "this tool accepts ONLY: …", so the
+ * filing concluded the live build had drifted from its documentation. It had not: no
+ * revision of get_next has ever declared `count`. Naming the tool that DOES own the key
+ * turns a suspected server/doc drift into a one-line redirect.
+ *
+ * Wholly DERIVED (rung 1) — both halves already exist: this tool's authored `seeAlso`
+ * scopes the search to genuine neighbours, and the sibling's own declared schema answers
+ * whether it owns the key. Nothing new is hand-maintained, so it cannot drift out of step
+ * with either tool. Deliberately EXACT-match and seeAlso-scoped: a catalog-wide hunt for
+ * any tool declaring `count` would name a dozen unrelated verbs and be worse than silence.
+ *
+ * Exported for direct unit test — see strict-args.test.ts.
+ */
+export function siblingToolArgOwner(toolName, rejectedKey, 
+/** By-name registry lookup — `resolveMcpName` in production, a stub in tests. The
+ *  projected row carries no `name` of its own (the registry is keyed by it), so a
+ *  resolver is the only way to get from a see-also entry to a schema. */
+resolve) {
+    if (!toolName)
+        return null;
+    const self = resolve(toolName);
+    const seeAlso = self?.guidance?.seeAlso;
+    // Function-form seeAlso projects as the literal 'runtime-resolved' (it is computed from
+    // a RESULT, which a rejected call never produced) — nothing to scope against.
+    if (!Array.isArray(seeAlso))
+        return null;
+    for (const entry of seeAlso) {
+        const siblingName = seeAlsoToolName(entry);
+        if (!siblingName || siblingName === toolName)
+            continue;
+        const sibling = resolve(siblingName);
+        if (!sibling)
+            continue;
+        const props = mergedSchemaProperties(sibling.inputSchema);
+        if (props && rejectedKey in props)
+            return siblingName;
+    }
+    return null;
 }
 // Exported for direct unit test alongside its sibling correction sources
 // (`nestedArgPaths`, `suggestArgName`) — see strict-args.test.ts.
 export function unknownArgHint(issues, rawSchema, argRedirects, 
 /** See `invalidInputCorrections` — enables the value-admissibility filter. */
-input) {
-    const msgs = (issues ?? []).map((i) => i?.message ?? '').join(' ');
+input, 
+/** This tool's own name, so a rejected key can be traced to a `seeAlso` sibling that
+ *  declares it (EI-21681203906419973). Omitted: the sibling leg simply stays silent. */
+toolName) {
+    const { msgs } = leafIssueSummary(issues);
     if (!/nrecognized key/i.test(msgs))
         return '';
-    const props = rawSchema?.properties;
+    const props = mergedSchemaProperties(rawSchema);
     const keys = props ? Object.keys(props) : [];
     if (keys.length === 0)
         return '';
     const corrections = invalidInputCorrections(issues, rawSchema, argRedirects, input);
     const redirected = corrections.filter((correction) => correction.kind === 'authored-redirect');
+    // EI-21119949290826530: an authored redirect carries TWO different meanings and only
+    // the cross-tool one was ever rendered. A target naming a path INSIDE this tool's own
+    // schema (`observation.linkTo`, `body`) is a RELOCATION — the caller sent the right
+    // value to the wrong PLACE on the right tool. A target naming another tool is the
+    // cross-tool case (EI-20281509195248260). Rendering both as "it is written by X" told
+    // a caller who merely nested a field wrongly that some OTHER tool owns their data —
+    // the opposite of the correction they need, and a dead end for a value they are
+    // holding right now. The distinction is DERIVED from the tool's own declared keys, so
+    // a newly authored redirect classifies itself with no second field to maintain.
     const redirectText = redirected
-        .map(({ rejectedArg, target }) => ` \`${rejectedArg}\` is not an arg of this tool — it is written by ${target}.`)
+        .map(({ rejectedArg, target }) => isLocalSchemaTarget(target, keys)
+        ? ` \`${rejectedArg}\` is not a top-level arg of this tool — pass it as \`${target}\` instead.`
+        : ` \`${rejectedArg}\` is not an arg of this tool — it is written by ${target}.`)
         .join('');
     const localCorrections = corrections.filter((correction) => correction.kind !== 'authored-redirect');
     const correctionText = localCorrections.length > 0
         ? ` Did you mean ${localCorrections.map(({ rejectedArg, target }) => `\`${target}\` for \`${rejectedArg}\``).join('; ')}?`
         : '';
-    return (` — this tool accepts ONLY: ${keys.join(', ')}.${redirectText}${correctionText}` +
+    // EI-21826333890701824: `tools:invoke`'s envelope (`{ name, args }`) wrapped around a
+    // DIRECT verb call is a recognisable, recurring caller error with a specific remedy,
+    // but the generic list-the-keys message cannot express it: it truthfully reports two
+    // unknown keys and leaves the caller to infer that their whole call SHAPE — not their
+    // field names — was wrong. Fires only when this tool declares NEITHER key itself, so
+    // the meta-dispatcher that genuinely takes `name`/`args` never sees it.
+    const unknownKeys = unrecognizedArgKeys(issues, rawSchema, input);
+    // EI-22174225494240206: dispatch-level args (`payloadTier`, and any host-registered
+    // ones — e.g. Papercusp's `projection`) are stripped by the transport BEFORE this
+    // validator ever runs, so they can never appear in `keys` above. Where the transport
+    // DID peel them they are genuinely accepted, and naming them is what stops this
+    // message instructing a caller to re-send WITHOUT a capability that actually works.
+    //
+    // EI-22283734191872163: but "accepted" is PER-DISPATCH, never process-wide. The host
+    // resolver reports which keys ITS TRANSPORT strips; a dispatch running BENEATH that
+    // transport — tooldef's own `runToolOrchestration`, which is what a `code:run` script
+    // calls — peels nothing, so the very same list is false there. The message then named
+    // `projection` as "also accepted" in the same breath as it rejected `projection`,
+    // which is how the false universal in this comment's earlier wording ("accepted on
+    // every call") reached callers: it was true where it was written and false where it
+    // was also emitted.
+    //
+    // The per-dispatch answer needs no new mechanism, no host signal and no dispatch
+    // context, because THIS CALL already carries the evidence: a key that arrived as an
+    // UNRECOGNIZED key was, by construction, not peeled before validation. So subtract
+    // them. That is a MEASUREMENT of this dispatch (derived-truth rung 1) rather than a
+    // claim about the process, and it fails safe for any future non-peeling path — such a
+    // path inherits the truth automatically instead of inheriting the universal.
+    const ambientKeys = [PAYLOAD_TIER_ARG, ...readAmbientArgKeys()]
+        .filter((key) => !unknownKeys.includes(key));
+    const ambientText = ambientKeys.length > 0
+        ? ` (Dispatch-level args, handled by the transport before this tool's own schema and therefore not in the list above but also accepted: ${ambientKeys.join(', ')}.)`
+        : '';
+    const reSendHint = ambientKeys.length > 0
+        ? ' Re-send using only the keys above (or the dispatch-level ones just listed).'
+        : ' Re-send using only the keys above.';
+    const envelopeText = unknownKeys.includes('name')
+        && unknownKeys.includes('args')
+        && !keys.includes('name')
+        && !keys.includes('args')
+        ? ' `name` + `args` are the `tools:invoke` ENVELOPE, not args of this tool —'
+            + ' it looks like a direct call was wrapped for dispatch. Either call this tool'
+            + ' directly with its own declared args at top level, or dispatch it through'
+            + ' `tools:invoke { name, args }`.'
+        : '';
+    // EI-21675134570053141: `_meta` is the JSON-RPC/MCP REQUEST envelope (it sits on
+    // `params`, sibling to the tool's `arguments`), never a tool arg — so a caller who
+    // puts it inside args gets an ordinary unrecognized-key rejection that cannot say
+    // which LAYER the key belongs to. The measured filing: a timed-out
+    // `scheduler:get_next` returned an idempotency key, the caller tried to replay it as
+    // `_meta.idempotencyKey` through `tools:invoke`, was rejected, and concluded the
+    // replay was impossible. It was already automatic — the proxy injects
+    // `params._meta.idempotencyKey` once per request and reuses it across every retry so
+    // the server dedups the replay (mcp-proxy/proxy.ts), and a valid client-supplied key
+    // on the ENVELOPE is respected rather than overwritten. Fires only when the tool does
+    // not itself declare `_meta`.
+    const metaEnvelopeText = unknownKeys.includes('_meta') && !keys.includes('_meta')
+        ? ' `_meta` is the MCP request ENVELOPE (it rides on the JSON-RPC `params`, beside'
+            + " the tool's `arguments`), not an arg of any tool — passing it inside args"
+            + ' rejects it here. You do not need to set `_meta.idempotencyKey` yourself: the'
+            + ' proxy injects one per request and reuses it across retries so a replay dedups'
+            + ' instead of double-applying.'
+        : '';
+    // EI-21681203906419973: the key may be a real, documented arg — of a SIBLING tool this
+    // tool's own `seeAlso` names. Rendered after the envelope legs because those diagnose a
+    // wrong call LAYER, which outranks a wrong call TARGET.
+    const siblingText = unknownKeys
+        .flatMap((rejectedArg) => {
+        const owner = siblingToolArgOwner(toolName, rejectedArg, resolveMcpName);
+        return owner
+            ? [` \`${rejectedArg}\` is not an arg of this tool, but \`${owner}\` (listed in this`
+                    + " tool's see-also) does declare it — check you did not reach for the neighbour's"
+                    + ' argument here.']
+            : [];
+    })
+        .join('');
+    return (` — this tool accepts ONLY: ${keys.join(', ')}.${ambientText}${envelopeText}${metaEnvelopeText}${siblingText}${redirectText}${correctionText}` +
         ' An undeclared arg is REJECTED, not silently ignored (EI-10883): passing an arg a tool does not declare used to return ok:true' +
-        ' while quietly doing something else, which is indistinguishable from success. Re-send using only the keys above.' +
+        ` while quietly doing something else, which is indistinguishable from success.${reSendHint}` +
         // EI-19953470656367880: an unrecognized-key rejection is ALSO the exact shape a
         // caller sees when it (or the UI sending on its behalf) is newer than the server
         // it's talking to — a long-lived process (e.g. a Tauri desktop's own spawned
@@ -1426,13 +1825,27 @@ input) {
         serverVintageHint());
 }
 function makeInvalidInputError(toolName, issues, input, rawSchema, argRedirects, schemaHintCache) {
+    const corrections = invalidInputCorrections(issues, rawSchema, argRedirects, input);
+    // P-015: the finished call, resolved against what the caller actually sent. Ordered
+    // FIRST because D-105 measured that the alternative does not work: `omp:sessions`
+    // already returns its entire args schema and ten agents still re-hit the same wall 66
+    // times. Help the reader has to scroll past is help they did not get.
+    const unknownKeys = unrecognizedArgKeys(issues, rawSchema, input);
+    const corrected = buildCorrectedCall({
+        toolName,
+        input,
+        corrections,
+        unknownKeys,
+        acceptedOnOtherVariant: argsAcceptedOnOtherVariant(rawSchema, unknownKeys),
+    });
     const metadata = {
         source: PROJECTED_TOOL_REGISTRY_SOURCE,
         registryRevision: projectedToolRegistryRevision(),
         toolName,
-        corrections: invalidInputCorrections(issues, rawSchema, argRedirects, input),
+        corrections,
+        ...(corrected ? { correctedCall: corrected } : {}),
     };
-    return new InvalidInputError(`invalid_args: ${formatIssues(issues, input)}${unknownArgHint(issues, rawSchema, argRedirects)}` +
+    return new InvalidInputError(`invalid_args: ${formatIssues(issues, input)}${correctedCallHint(corrected)}${unknownArgHint(issues, rawSchema, argRedirects, input, toolName)}` +
         // EI-21353729155349111: the value-level branch appends no SCHEMA (EI-10943 — a
         // caller who knows the shape and sent a bad value learns nothing from a 1,800-char
         // dump), but "the constraint that just refused you may not exist in the tree any
@@ -1441,6 +1854,55 @@ function makeInvalidInputError(toolName, issues, input, rawSchema, argRedirects,
         (issuesAreValueLevel(issues)
             ? constraintVintageHint()
             : failingFieldSchemaHint(issues, rawSchema) || argsSchemaHint(rawSchema, schemaHintCache)), metadata);
+}
+/**
+ * P-016 / D-104 — the EXECUTE half. Consulted ONLY after `standardValidate` has already
+ * failed: apply the tool's registered RE-ENCODINGS and re-validate the result.
+ *
+ * Returns null when nothing applied or the repair still does not validate, so the caller
+ * falls through to the ordinary `makeInvalidInputError` refusal with its ORIGINAL issues.
+ * That fallback matters: a rule that fires but leaves a different field broken must not
+ * replace the caller's real diagnosis with a confusing second-order one.
+ *
+ * Ordering is deliberate — validate first, repair second. A rule can therefore never
+ * re-shape a call that was already valid, which keeps this a repair path and not a silent
+ * behaviour change on the hot path (and costs a registered tool nothing until it refuses).
+ */
+async function reencodeAndRevalidate(schema, argReencodings, shimmed) {
+    const attempt = applyArgReencodings(argReencodings, shimmed);
+    if (!attempt)
+        return null;
+    const retry = await standardValidate(schema, attempt.input);
+    if (!retry.ok)
+        return null;
+    return { value: retry.value, corrections: attempt.corrections };
+}
+/**
+ * Announce an auto-correction on the result that the corrected call produced.
+ *
+ * PROMINENT means FIRST (D-105: help the reader has to scroll past is help they did not
+ * get), so the line is prepended to `content` rather than appended. The structured
+ * `corrected:[{path,sent,ran,rule}]` rides `_meta` unconditionally — that is the half
+ * EI-10883 requires, and it must not depend on a caller having negotiated
+ * `structuredContent`.
+ */
+function attachCorrectedDisclosure(result, corrections) {
+    if (corrections.length === 0)
+        return result;
+    const structured = result.structuredContent;
+    return {
+        ...result,
+        content: [{ type: 'text', text: correctedDisclosure(corrections) }, ...(result.content ?? [])],
+        ...(structured && typeof structured === 'object' && !Array.isArray(structured)
+            ? {
+                structuredContent: {
+                    ...structured,
+                    corrected: corrections,
+                },
+            }
+            : {}),
+        _meta: { ...(result._meta ?? {}), corrected: corrections },
+    };
 }
 /**
  * EI-20087434994864624 (+7 more filings of the same friction on 2026-08-10 alone) —
@@ -1767,6 +2229,11 @@ function registerLegacyAsProjected(def, expose, sourceFile) {
             // handlers. `contextTier` alone cannot tell a caller's `full` override
             // from the default session tier.
             ...(callTier !== undefined ? { payloadTierOverride: callTier } : {}),
+            // Source-aware reads may receive the already-parsed dispatch projection
+            // from the host transport. Keep it on the legacy handler context too:
+            // this shim is field-by-field, so omitting it would silently make
+            // projection-aware handlers fall back to full-column reads.
+            ...(ctx.sourceProjection !== undefined ? { sourceProjection: ctx.sourceProjection } : {}),
             // EI-10358: thread the caller's role + per-session id through — the outer
             // `ctx` (UnifiedToolContext) already carries both (populated by the MCP
             // dispatch layer from the spawn/su URL context), but this legacy shim
@@ -1798,10 +2265,33 @@ function registerLegacyAsProjected(def, expose, sourceFile) {
             ...(ctx.telemetrySurface ? { telemetrySurface: ctx.telemetrySurface } : {}),
         };
         const shimmed = applyHarnessArgAlias(rawSchema, applyPositionalWriteShim(def.name, rawSchema, stripUndefinedArgKeys(tierlessInput)));
-        const parsed = await standardValidate(def.args, shimmed);
-        if (!parsed.ok) {
-            throw makeInvalidInputError(def.name, parsed.issues, shimmed, rawSchema, def.guidance?.argRedirects, schemaHintCache);
+        const validated = await standardValidate(def.args, shimmed);
+        // P-016 / D-104 — auto-correct-and-execute, RE-ENCODINGS only. Zero cost on both
+        // ordinary paths: a call that validates never reaches the repair, and a tool with no
+        // registered re-encodings gets an immediate null back.
+        let parsedValue;
+        let corrections = [];
+        if (validated.ok) {
+            parsedValue = validated.value;
         }
+        else {
+            const repaired = await reencodeAndRevalidate(def.args, def.argReencodings, shimmed);
+            if (!repaired) {
+                throw makeInvalidInputError(def.name, validated.issues, shimmed, rawSchema, def.guidance?.argRedirects, schemaHintCache);
+            }
+            parsedValue = repaired.value;
+            corrections = repaired.corrections;
+        }
+        // Keeps every `parsed.value` reader below untouched.
+        const parsed = { value: parsedValue };
+        // Takes a PROMISE as readily as a value, and that signature is the whole safety story.
+        // Every result producer it wraps here is async, so a synchronous `(r: ToolResult)` form
+        // silently spreads a Promise to `{}` — the caller is told their corrected call SUCCEEDED
+        // while its entire payload is discarded. Two of the six call sites were written that way
+        // and passed a green 52-assertion suite; only the typechecker found the other four, since
+        // no test happened to exercise those branches. Accepting the promise makes the mistake
+        // unrepresentable rather than leaving six sites each needing an `await` remembered.
+        const disclose = async (result) => attachCorrectedDisclosure(await result, corrections);
         const response = await def.handler(parsed.value, legacyCtx);
         // A raw ToolResult (MCP content shape) normally passes through untouched —
         // parity with the role-gated wrapper below. EXCEPT: on the agent-facing MCP
@@ -1815,9 +2305,9 @@ function registerLegacyAsProjected(def, expose, sourceFile) {
         if (response && typeof response === 'object' && Array.isArray(response.content)) {
             const reencodable = reencodableJsonPayload(response, ctx);
             if (reencodable !== undefined) {
-                return serializeProjectedResult({ data: reencodable }, ctx, eligibility, def, readColumns, parsed.value);
+                return disclose(serializeProjectedResult({ data: reencodable }, ctx, eligibility, def, readColumns, parsed.value));
             }
-            return attachRequestedStructuredContent(response, ctx, def);
+            return disclose(attachRequestedStructuredContent(response, ctx, def));
         }
         // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
         // the session/call tier before format-aware serialization. Unshaped tools
@@ -1848,7 +2338,7 @@ function registerLegacyAsProjected(def, expose, sourceFile) {
             // the recovery `next` — absent ⇒ the generic host-neutral wording.
             rawDispatchTemplate: ctx.rawDispatchTemplate,
         });
-        return serializeProjectedResult(shaped, ctx, eligibility, def, readColumns, parsed.value);
+        return disclose(serializeProjectedResult(shaped, ctx, eligibility, def, readColumns, parsed.value));
     };
     registerProjectedTool({
         pluginName: 'agent-mcp',
@@ -1938,10 +2428,33 @@ function registerRoleGatedAsProjected(def, expose, sourceFile) {
         // validation (context-trimming-tiers D-004; not part of any tool's schema).
         const { input: tierlessInput, callTier } = extractPayloadTier(unwrapUnparsedToolInput(input));
         const shimmed = applyHarnessArgAlias(rawSchema, applyPositionalWriteShim(def.name, rawSchema, stripUndefinedArgKeys(tierlessInput)));
-        const parsed = await standardValidate(def.args, shimmed);
-        if (!parsed.ok) {
-            throw makeInvalidInputError(def.name, parsed.issues, shimmed, rawSchema, def.guidance?.argRedirects, schemaHintCache);
+        const validated = await standardValidate(def.args, shimmed);
+        // P-016 / D-104 — auto-correct-and-execute, RE-ENCODINGS only. See the twin in
+        // `registerLegacyAsProjected`; both wrappers must carry it, since which one a tool
+        // lands in is a registration detail invisible to the caller whose shape it repairs.
+        let parsedValue;
+        let corrections = [];
+        if (validated.ok) {
+            parsedValue = validated.value;
         }
+        else {
+            const repaired = await reencodeAndRevalidate(def.args, def.argReencodings, shimmed);
+            if (!repaired) {
+                throw makeInvalidInputError(def.name, validated.issues, shimmed, rawSchema, def.guidance?.argRedirects, schemaHintCache);
+            }
+            parsedValue = repaired.value;
+            corrections = repaired.corrections;
+        }
+        // Keeps every `parsed.value` reader below untouched.
+        const parsed = { value: parsedValue };
+        // Takes a PROMISE as readily as a value, and that signature is the whole safety story.
+        // Every result producer it wraps here is async, so a synchronous `(r: ToolResult)` form
+        // silently spreads a Promise to `{}` — the caller is told their corrected call SUCCEEDED
+        // while its entire payload is discarded. Two of the six call sites were written that way
+        // and passed a green 52-assertion suite; only the typechecker found the other four, since
+        // no test happened to exercise those branches. Accepting the promise makes the mistake
+        // unrepresentable rather than leaving six sites each needing an `await` remembered.
+        const disclose = async (result) => attachCorrectedDisclosure(await result, corrections);
         // Thread the per-call tier override into the HANDLER's ctx too: tools that
         // must keep a hand-rolled JSON ToolResult (hook-consumed — coord:inbox /
         // coord:plan-events / coord:glance) adapt their DEFAULTS off
@@ -1961,9 +2474,9 @@ function registerRoleGatedAsProjected(def, expose, sourceFile) {
         if (out && typeof out === 'object' && Array.isArray(out.content)) {
             const reencodable = reencodableJsonPayload(out, handlerCtx);
             if (reencodable !== undefined) {
-                return serializeProjectedResult({ data: reencodable }, handlerCtx, eligibility, def, readColumns, parsed.value);
+                return disclose(serializeProjectedResult({ data: reencodable }, handlerCtx, eligibility, def, readColumns, parsed.value));
             }
-            return attachRequestedStructuredContent(out, handlerCtx, def);
+            return disclose(attachRequestedStructuredContent(out, handlerCtx, def));
         }
         // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
         // the session/call tier before format-aware serialization. Unshaped tools
@@ -1995,7 +2508,7 @@ function registerRoleGatedAsProjected(def, expose, sourceFile) {
             rawDispatchTemplate: handlerCtx.rawDispatchTemplate,
         });
         // ToolResponse envelope → format-aware MCP content[] + _meta.
-        return serializeProjectedResult(shaped, handlerCtx, eligibility, def, readColumns, parsed.value);
+        return disclose(serializeProjectedResult(shaped, handlerCtx, eligibility, def, readColumns, parsed.value));
     };
     registerProjectedTool({
         pluginName: 'agent-mcp',

@@ -16,6 +16,11 @@ export { applyDenominator, resolveDenominator, renderDenominatorText, } from './
 export { applySeeAlso, resolveSeeAlso, renderSeeAlsoText, readJsonResult, } from './see-also';
 export { setResultAnnotator, resetResultAnnotator, applyResultAnnotator, } from './result-annotator';
 export { setServerVintageResolver, resetServerVintageResolver, readServerVintage, formatVintageAge, serverVintageHint, constraintVintageHint, } from './server-vintage';
+// Host-registered list of dispatch-level arg keys the transport strips before a
+// tool's own schema ever validates (EI-22174225494240206) — folded into
+// `unknownArgHint`'s "accepts ONLY" list so a genuinely-accepted key never reads
+// as rejected. Default unregistered (empty list); see ambient-args.ts.
+export { setAmbientArgKeysResolver, resetAmbientArgKeysResolver, readAmbientArgKeys, } from './ambient-args';
 /* ─── defineTool + sibling authoring primitives ──────────────────────── */
 export { defineTool, toArgsJsonSchema, 
 // The effect oracle — for static scanners that cannot execute defineTool (WI-6464).
@@ -68,9 +73,22 @@ export { toJsonSchema, setJsonSchemaAdapter, zodJsonSchemaAdapter, } from './sch
 /* ─── Standard Schema validation (validator-agnostic) ────────────────── */
 export { standardValidate, validateSync, formatIssues, } from './standard-schema';
 /* ─── Projected-tool registry (the function-as-truth core) ───────────── */
-export { registerProjectedTool, unregisterProjectedToolsForPlugin, toolDeclaresGate, listUngatedProjectedTools, lookupByMcpName, resolveMcpName, normalizeMcpName, lookupByHttpPath, listAllProjectedTools, projectedToolSourceFile, listDeclaredToolShapers, recordToolShapers, PROJECTED_TOOL_REGISTRY_SOURCE, projectedToolRegistryRevision, projectedToolCallContract, assertProjectedToolCallContract, renderProjectedToolCall, projectedToolCorrectiveCalls, assertProjectedToolGuidanceConformance, ProjectedToolContractError, listMcpProjections, ToolRegistrationError, emitToSseSink, isPapercuspBinaryEnvelope, _resetProjectionRegistryForTests, } from './tool-projection';
+export { registerProjectedTool, unregisterProjectedToolsForPlugin, toolDeclaresGate, listUngatedProjectedTools, lookupByMcpName, resolveMcpName, normalizeMcpName, lookupByHttpPath, listAllProjectedTools, projectedToolSourceFile, listDeclaredToolShapers, recordToolShapers, PROJECTED_TOOL_REGISTRY_SOURCE, projectedToolRegistryRevision, projectedToolCallContract, projectedToolAdmitted, assertProjectedToolCallContract, renderProjectedToolCall, projectedToolCorrectiveCalls, assertProjectedToolGuidanceConformance, ProjectedToolContractError, listMcpProjections, ToolRegistrationError, emitToSseSink, isPapercuspBinaryEnvelope, _resetProjectionRegistryForTests, } from './tool-projection';
 /* ─── Dispatcher ─────────────────────────────────────────────────────── */
 export { dispatchProjectedTool, dispatchProjectedToolStream, defaultComputeQuotaWindow, UnauthorizedToolError, HarnessRequiredError, WorkspaceTxNotDeclaredError, WorkspaceTxUnavailableError, InvalidInputError, PASS_THROUGH, } from './dispatch-projected';
+/**
+ * P-015 — the shared refusal helper. Exported so a host can render or act on the corrected
+ * call itself; every tool defined through this library already inherits it in the refusal
+ * message with no per-verb wiring, which is the property the item asked for.
+ */
+export { buildCorrectedCall, correctedCallHint, } from './corrected-call';
+/**
+ * P-016 — the EXECUTE half of D-104. A tool declares `argReencodings` and the dispatcher
+ * repairs-and-RUNS those calls, disclosing each correction. Exported so a host can author
+ * a rule beside the schema it repairs; see `reencode-args.ts` for the boundary that keeps
+ * this narrower than the refusal helper above.
+ */
+export { applyArgReencodings, correctedDisclosure, boundValue, } from './reencode-args';
 /** Explicit workspace-transaction contract helpers for host/nested adapters. */
 export { boundWorkspaceTx, applyWorkspaceTxContract } from './workspace-tx';
 /* ─── Resource authorization (RFC tooldef-auth-rfc Phase 1 — contract only) ─── */

@@ -432,11 +432,26 @@ export function projectedToolRegistryRevision(tools) {
             return [];
         return [{
                 name,
+                description: tool.description,
                 inputSchema: tool.discoveryInputSchema ?? tool.inputSchema,
+                outputJsonSchema: tool.outputJsonSchema ?? null,
                 agentRoles: [...(tool.agentRoles ?? [])].sort(),
                 profile: tool.profile ?? 'all',
                 modality: [...(tool.modality ?? ['text', 'voice'])].sort(),
-                argRedirects: tool.guidance?.argRedirects ?? {},
+                guidance: {
+                    when: tool.guidance?.when ?? null,
+                    notWhen: tool.guidance?.notWhen ?? null,
+                    chaining: tool.guidance?.chaining ?? null,
+                    returns: tool.guidance?.returns ?? null,
+                    argRedirects: tool.guidance?.argRedirects ?? {},
+                    byRole: tool.guidance?.byRole ?? {},
+                    // Function-form result links are runtime-only truth and cannot be
+                    // serialized into a stable catalog revision. Static links can and
+                    // should invalidate every cached guidance projection when changed.
+                    seeAlso: typeof tool.guidance?.seeAlso === 'function'
+                        ? 'runtime-resolved'
+                        : tool.guidance?.seeAlso ?? null,
+                },
             }];
     })
         .sort((a, b) => a.name.localeCompare(b.name));
@@ -463,6 +478,24 @@ function availabilityProblem(tool, context) {
     }
     return null;
 }
+/**
+ * Is this tool REGISTERED and admitted under `context` — asked WITHOUT throwing.
+ *
+ * The distinction this exists to draw: a redirect pointing at a tool that does not
+ * exist is a registry defect and must fail render/CI loudly, but a tool that merely
+ * is not admitted to the CURRENT role/profile/modality is an ordinary scoping fact.
+ * A renderer that walks a role-independent tool list needs to tell those apart, and
+ * `projectedToolCallContract` deliberately cannot — it throws for both.
+ *
+ * Returns false for an absent tool too, so a caller that wants the loud failure keeps
+ * using the throwing form; this is only for "should I render this extra?" decisions.
+ */
+export function projectedToolAdmitted(name, context = {}) {
+    const tool = lookupByMcpName(name);
+    if (!tool?.expose.mcp)
+        return false;
+    return availabilityProblem(tool, context) === null;
+}
 /** Resolve one exact, currently callable registry contract or fail render/CI loudly. */
 export function projectedToolCallContract(name, context = {}) {
     const tool = lookupByMcpName(name);
@@ -475,7 +508,13 @@ export function projectedToolCallContract(name, context = {}) {
         source: PROJECTED_TOOL_REGISTRY_SOURCE,
         revision: projectedToolRegistryRevision(),
         name,
+        description: tool.description,
         inputSchema: tool.discoveryInputSchema ?? tool.inputSchema,
+        returns: tool.outputJsonSchema
+            ? { source: 'registered-output-schema', outputJsonSchema: tool.outputJsonSchema }
+            : tool.guidance?.returns?.trim()
+                ? { source: 'authored-tool-guidance', description: tool.guidance.returns.trim() }
+                : { source: 'undeclared' },
         aliases: Object.fromEntries(Object.entries(tool.guidance?.argRedirects ?? {})
             .filter((entry) => typeof entry[1] === 'string')
             .map(([key, target]) => [
@@ -570,6 +609,22 @@ export function projectedToolCorrectiveCalls(name, context = {}) {
     return Object.entries(tool.guidance?.argRedirects ?? {}).flatMap(([rejectedArg, redirect]) => {
         if (typeof redirect === 'string')
             return [];
+        // A remedy this context cannot CALL is not offered to it (EI-22188204415833751). An
+        // all-profile tool may legitimately redirect into a narrower one — coord:presence's
+        // `fleet` -> fleet:assignments (profile:'engineer') — which is correct guidance for the
+        // profiles that DO admit the target. Resolving it under a profile the TARGET rejects must
+        // therefore NARROW this list, not fail the rail: _guidance-adapter.ts converts any throw
+        // from here into `return []`, so one such redirect deletes the ENTIRE ~835-page guidance
+        // corpus rather than omitting one entry, which red-pinned the fleet green-checkpoint gate.
+        //
+        // ONLY availability is skipped, and only when the target genuinely resolves. An unknown
+        // target tool, a missing required key, a bad enum, or an undeclared key still throws — that
+        // is the rail that caught the dev:restart enum placeholder (WI-2142574), and the tests at
+        // 'fails structured corrective-call conformance on missing tools, required keys, enums, and
+        // undeclared keys' hold it in place.
+        const redirectTarget = lookupByMcpName(redirect.tool);
+        if (redirectTarget?.expose.mcp && availabilityProblem(redirectTarget, context))
+            return [];
         const rendered = renderProjectedToolCall(redirect.tool, redirect.args, context);
         return [{
                 rejectedArg,
@@ -583,9 +638,13 @@ export function projectedToolCorrectiveCalls(name, context = {}) {
     });
 }
 /**
- * CI/render rail for executable guidance. Every context admitted by the source
- * tool must also admit the remedy, and every remedy must satisfy the target's
- * current required/enum/closed-object schema.
+ * CI/render rail for executable guidance. Every remedy OFFERED to a context must
+ * satisfy the target's current required/enum/closed-object schema.
+ *
+ * Note the scope of "offered": a redirect whose TARGET is not admitted in a context is
+ * withheld from that context rather than failing the rail (see projectedToolCorrectiveCalls),
+ * so an all-profile tool may redirect into a narrower one without deleting the corpus. The
+ * schema half is unconditional — an offered remedy that cannot validate is still fatal.
  */
 export function assertProjectedToolGuidanceConformance() {
     let toolsChecked = 0;
