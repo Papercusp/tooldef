@@ -13,6 +13,7 @@ import {
   runDispatchStack,
   type DispatchStepName,
 } from './dispatch-stack';
+import { type PostInvokeEvent } from './dispatch-types';
 import { z } from 'zod';
 import { clearEntityResolvers, entityRef, setEntityResolver } from './entity-ref';
 import {
@@ -506,7 +507,7 @@ describe('P-041 kernel enforcement seats', () => {
 
   it('runs preflight before decorators and refuses before the handler on an explicit deny', async () => {
     const order: string[] = [];
-    const handler = vi.fn(async () => ({ content: [{ type: 'text', text: 'should-not-run' }] }));
+    const handler = vi.fn(async () => ({ content: [{ type: 'text' as const, text: 'should-not-run' }] }));
     const result = await runDispatchStack(
       makeTool({ fn: handler }),
       'fixture:write',
@@ -529,7 +530,7 @@ describe('P-041 kernel enforcement seats', () => {
     const phases: string[] = [];
     let handlerContext: UnifiedToolContext | undefined;
     let recorded: { executionRevision?: unknown } | undefined;
-    let observed: { executionRevision?: unknown } | undefined;
+    let observed: PostInvokeEvent | undefined;
     const result = await runDispatchStack(
       makeTool({
         capabilities: ['fixture:write'],
@@ -575,7 +576,7 @@ describe('P-041 kernel enforcement seats', () => {
 
   it('honors a revocation that appears between preflight and final enforce', async () => {
     const phases: string[] = [];
-    const handler = vi.fn(async () => ({ content: [{ type: 'text', text: 'must-not-run' }] }));
+    const handler = vi.fn(async () => ({ content: [{ type: 'text' as const, text: 'must-not-run' }] }));
     const result = await runDispatchStack(
       makeTool({ fn: handler }),
       'fixture:write',
