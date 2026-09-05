@@ -18,6 +18,10 @@
  */
 import { DEFAULT_DISPATCH_STACK, runDispatchStack, } from './dispatch-stack';
 export { defaultComputeQuotaWindow, PASS_THROUGH, UnauthorizedToolError, HarnessRequiredError, WorkspaceTxNotDeclaredError, WorkspaceTxUnavailableError, InvalidInputError, } from './dispatch-types';
+// Re-export the D-030 seam beside the dispatcher entrypoint so hosts that
+// historically imported all dispatch contracts from this module do not need
+// a source-path migration.
+export { KERNEL_ENFORCEMENT_SCHEMA, sameKernelRevision, sameExecutionRevision, kernelRevisionKey, executionRevisionKey, normalizeKernelEnforcementResult, evaluateKernelEnforcement, evaluateKernelDecision, isKernelDenied, appliedExecutionRevision, actualExecutionRevision, enforceKernelBoundary, runAtKernelBoundary, wrapKernelSpawn, wrapNativeSpawn, createKernelEnforcementPort, createKernelPolicyPort, allowKernelEnforcement, KernelEnforcementDeniedError, } from './kernel-enforcement';
 export { DEFAULT_DISPATCH_STACK, withReplacedStep, } from './dispatch-stack';
 /* ─── Dispatcher entrypoint ──────────────────────────────────────────── */
 /**

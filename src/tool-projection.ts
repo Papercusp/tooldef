@@ -27,6 +27,13 @@ import type {
 } from './wire';
 import type { AgentRole, Capability, PluginSpawn } from './host-types';
 import type { PayloadShapers } from './payload-tier';
+import type {
+  KernelBoundary,
+  KernelContextState,
+  KernelEnforcementResult,
+  KernelExecutionRevision,
+  KernelOwnershipRequirement,
+} from './kernel-enforcement';
 
 /**
  * WHY a tool's result skips the per-result door (`applyResultDoor`). This is a
@@ -430,6 +437,33 @@ export interface UnifiedToolContext {
   codeMode?: boolean;
   /** Aborts on per-tool timeout, parent cancellation, or shutdown. */
   signal: AbortSignal;
+
+  /**
+   * Optional host-selected execution seat for the P-041 kernel port.  A
+   * transport may set this explicitly (for example `reaction` or
+   * `indirect-dispatch`); the generic dispatcher otherwise uses `dispatch`.
+   * `dispatchBoundary` is a compatibility alias for early adapters.
+   */
+  kernelBoundary?: KernelBoundary;
+  dispatchBoundary?: KernelBoundary;
+  /** Resource/claim ownership evidence resolved by the host for this call. */
+  kernelOwnership?: KernelOwnershipRequirement;
+  /** Optional host snapshot used by the operator adapter's policy resolver. */
+  kernelState?: KernelContextState;
+  /** Revision the caller asks the boundary to use, if one was selected. */
+  requestedExecutionRevision?: KernelExecutionRevision | null;
+  /** Revision the host has already applied before this call began. */
+  appliedExecutionRevision?: KernelExecutionRevision | null;
+  /**
+   * Actual revision stamped by the dispatcher after final enforcement.  This
+   * is absent on the original context and is populated on `handlerCtx`; it is
+   * never a desired/prepared-only value.
+   */
+  executionRevision?: KernelExecutionRevision | null;
+  /** Last normalized kernel decision visible to the handler/telemetry. */
+  kernelEnforcement?: KernelEnforcementResult | null;
+  /** Preflight decision paired with `kernelEnforcement` on handler contexts. */
+  kernelPreflight?: KernelEnforcementResult | null;
   /**
    * Stream progress events. Thin alias over `emit('progress', { progress, total, message? })`.
    * Tools using the standard pct/msg shape should prefer this; tools

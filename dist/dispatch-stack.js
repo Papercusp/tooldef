@@ -1244,6 +1244,19 @@ async function recordTelemetry(exec, result) {
     const isKernelDenial = kernelPreflight?.decision === 'deny' || kernelEnforcement?.decision === 'deny';
     if (!isGateDenial && !isKernelDenial && !windowKey)
         return;
+    // Keep the original context byte-for-byte on the legacy/no-port path. Once
+    // a kernel decision exists, hand sinks the enriched context as well as the
+    // dedicated fields so old consumers that inspect `input.ctx` see the same
+    // applied revision as newer consumers using `input.executionRevision`.
+    const attributedCtx = kernelPreflight || kernelEnforcement || executionRevision
+        ? {
+            ...ctx,
+            kernelPreflight,
+            kernelEnforcement,
+            executionRevision,
+            ...(executionRevision ? { appliedExecutionRevision: executionRevision } : {}),
+        }
+        : ctx;
     const kernelFields = kernelPreflight || kernelEnforcement || executionRevision
         ? {
             executionRevision,
@@ -1316,7 +1329,7 @@ async function recordTelemetry(exec, result) {
             await deps.recordInvocation({
                 toolName,
                 pluginName: tool.pluginName,
-                ctx,
+                ctx: attributedCtx,
                 windowKey: windowKey ?? '',
                 callId,
                 durationMs: Date.now() - startedAt,
@@ -1342,7 +1355,7 @@ async function recordTelemetry(exec, result) {
             await deps.recordInvocation({
                 toolName,
                 pluginName: tool.pluginName,
-                ctx,
+                ctx: attributedCtx,
                 windowKey: windowKey ?? '',
                 callId,
                 durationMs: Date.now() - startedAt,
@@ -1445,12 +1458,21 @@ export async function runDispatchStack(tool, toolName, input, ctx, deps, stack =
         // so a reaction can never delay or break its trigger.
         if (deps.postInvoke) {
             try {
+                const eventCtx = exec.kernelPreflight || exec.kernelEnforcement || exec.executionRevision
+                    ? {
+                        ...ctx,
+                        kernelPreflight: exec.kernelPreflight,
+                        kernelEnforcement: exec.kernelEnforcement,
+                        executionRevision: exec.executionRevision,
+                        ...(exec.executionRevision ? { appliedExecutionRevision: exec.executionRevision } : {}),
+                    }
+                    : ctx;
                 deps.postInvoke({
                     toolName,
                     pluginName: tool.pluginName,
                     args: input,
                     result: settled,
-                    ctx,
+                    ctx: eventCtx,
                     durationMs: Date.now() - exec.startedAt,
                     capabilities: tool.capabilities,
                     envelopeVerdict: exec.envelopeVerdict,

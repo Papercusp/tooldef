@@ -15,6 +15,11 @@ import type { RolesQuota, ToolResult } from './wire';
 import type { UnifiedToolContext } from './tool-projection';
 import type { AuthAuditEvent } from './authz';
 import type { PreconditionFireRequest } from './requires';
+import type {
+  KernelEnforcementPort,
+  KernelEnforcementResult,
+  KernelExecutionRevision,
+} from './kernel-enforcement';
 
 /* ─── Quota windowing ────────────────────────────────────────────────── */
 
@@ -271,6 +276,16 @@ export interface PostInvokeEvent {
    * ledger then records posture 'auto').
    */
   envelopeVerdict?: CapabilityEnvelopeVerdict | null;
+  /**
+   * The host kernel's preflight decision, when a kernel port was wired.  This
+   * is deliberately additive: hosts that have not adopted P-041 still receive
+   * the exact old event shape.
+   */
+  kernelPreflight?: KernelEnforcementResult | null;
+  /** The final decision immediately before the handler crossed its boundary. */
+  kernelEnforcement?: KernelEnforcementResult | null;
+  /** Only an actually applied enforce-phase revision is reported here. */
+  executionRevision?: KernelExecutionRevision | null;
 }
 
 /**
@@ -305,6 +320,16 @@ export interface DispatchStartEvent {
 }
 
 export interface DispatchProjectedDeps {
+  /**
+   * Host-owned kernel enforcement port (identities-v1 D-030).  The generic
+   * dispatcher supplies two observations for each call: a `preflight` before
+   * any decorators/handler side effects and an `enforce` immediately before
+   * invoke.  An absent port is behavior-neutral; an explicit deny is always
+   * fail-closed.  `kernelPolicy` is retained as a migration alias for hosts
+   * that used the earlier name while the contract was being extracted.
+   */
+  kernelEnforcement?: KernelEnforcementPort;
+  kernelPolicy?: KernelEnforcementPort;
   /**
    * Add actionable, host-specific routing guidance to a capability denial.
    * Synchronous and best-effort: a hint must never change the denial itself.
@@ -431,6 +456,11 @@ export interface DispatchProjectedDeps {
      * before completion and passes it here.
      */
     metadataJson?: Record<string, unknown> | null;
+    /** Actual applied execution revision, never desired/prepared state. */
+    executionRevision?: KernelExecutionRevision | null;
+    /** Kernel decisions are included for an auditable, structured trail. */
+    kernelPreflight?: KernelEnforcementResult | null;
+    kernelEnforcement?: KernelEnforcementResult | null;
   }): Promise<void>;
   /**
    * Sink for resource-authorization decisions (RFC tooldef-auth Phase 1b). The

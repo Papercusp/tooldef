@@ -59,6 +59,16 @@ import {
   type DispatchProjectedErrorCode,
   type DispatchProjectedResult,
 } from './dispatch-types';
+import {
+  appliedExecutionRevision,
+  evaluateKernelEnforcement,
+  isKernelDenied,
+  type KernelBoundary,
+  type KernelEnforcementPort,
+  type KernelEnforcementResult,
+  type KernelExecutionRevision,
+  type KernelOwnershipRequirement,
+} from './kernel-enforcement';
 import { evaluateDataCondition } from '@papercusp/rules';
 import type { ToolPreInvokeEvent, ToolRequireSpec } from './requires';
 import { applyWorkspaceTxContract } from './workspace-tx';
@@ -66,6 +76,7 @@ import { applyWorkspaceTxContract } from './workspace-tx';
 /* ─── Step names ─────────────────────────────────────────────────────── */
 
 export type DispatchStepName =
+  | 'kernel-preflight'
   | 'default-deny'
   | 'role-allowlist'
   | 'capability-check'
@@ -80,6 +91,7 @@ export type DispatchStepName =
   | 'idle-watchdog'
   | 'replay-buffer'
   | 'ctx-bindings'
+  | 'kernel-enforce'
   | 'invoke';
 
 /* ─── Per-call mutable state ─────────────────────────────────────────── */
@@ -135,6 +147,14 @@ export interface DispatchExecution {
   // ─── written by 'capability-envelope' step ──────────────────────────
   /** The capability-envelope verdict (B-06), threaded into the postInvoke event. Null until set. */
   envelopeVerdict: CapabilityEnvelopeVerdict | null;
+
+  // ─── written by the P-041 kernel steps ──────────────────────────────
+  /** Host decision observed before any dispatch decorators/side effects. */
+  kernelPreflight: KernelEnforcementResult | null;
+  /** Host decision observed immediately before invoke crosses the boundary. */
+  kernelEnforcement: KernelEnforcementResult | null;
+  /** Actual applied revision, suitable for handler/event/telemetry attribution. */
+  executionRevision: KernelExecutionRevision | null;
 
   // ─── written by 'invoke' step ───────────────────────────────────────
   handlerResult: ToolResult | null;
@@ -196,6 +216,9 @@ function initExecution(
     handlerCtx: contractCtx,
     handlerResult: null,
     envelopeVerdict: null,
+    kernelPreflight: null,
+    kernelEnforcement: null,
+    executionRevision: null,
   };
 }
 
@@ -214,6 +237,93 @@ export interface DispatchStep {
 }
 
 /* ─── Steps ──────────────────────────────────────────────────────────── */
+
+function kernelPort(exec: DispatchExecution): KernelEnforcementPort | undefined {
+  return exec.deps.kernelEnforcement ?? exec.deps.kernelPolicy;
+}
+
+function kernelBoundaryFor(ctx: UnifiedToolContext): KernelBoundary {
+  return ctx.kernelBoundary ?? ctx.dispatchBoundary ?? (ctx.reactionCause
+    ? 'reaction'
+    : ctx.codeMode || ctx.telemetrySurface === 'tools:invoke'
+      ? 'indirect-dispatch'
+      : 'dispatch');
+}
+
+function kernelRequestedRevision(ctx: UnifiedToolContext): KernelExecutionRevision | null {
+  return ctx.requestedExecutionRevision ?? ctx.kernelState?.requestedRevision ?? null;
+}
+
+function kernelAppliedRevision(ctx: UnifiedToolContext): KernelExecutionRevision | null {
+  return ctx.appliedExecutionRevision ?? ctx.kernelState?.appliedRevision ?? ctx.kernelState?.activation?.applied ?? null;
+}
+
+function kernelOwnership(ctx: UnifiedToolContext): KernelOwnershipRequirement | undefined {
+  return ctx.kernelOwnership ?? ctx.kernelState?.ownership;
+}
+
+function kernelRequest(
+  exec: DispatchExecution,
+  phase: 'preflight' | 'enforce',
+  ctx: UnifiedToolContext = exec.ctx,
+): Parameters<KernelEnforcementPort>[0] {
+  return {
+    phase,
+    boundary: kernelBoundaryFor(ctx),
+    toolName: exec.toolName,
+    capabilities: exec.tool.capabilities,
+    args: exec.input,
+    ctx,
+    callId: exec.callId,
+    appliedRevision: kernelAppliedRevision(ctx),
+    requestedRevision: kernelRequestedRevision(ctx),
+    ownership: kernelOwnership(ctx),
+    operation: exec.toolName,
+  };
+}
+
+function kernelDenial(
+  exec: DispatchExecution,
+  phase: 'preflight' | 'enforce',
+  decision: KernelEnforcementResult,
+): DispatchProjectedResult {
+  const detail = decision.reason || decision.code || 'policy denied the operation';
+  return {
+    ok: false,
+    error: {
+      // Keep the established public authorization error code while preserving
+      // the kernel-specific reason in structured metadata. Existing transports
+      // therefore remain compatible, and operators can still distinguish a
+      // stale/revoked kernel denial from a tool-level authorize denial.
+      code: 'authorization_denied' as DispatchProjectedErrorCode,
+      message: `Kernel ${phase} denied tool "${exec.toolName}": ${detail}`,
+      meta: {
+        tool: exec.toolName,
+        kernelPhase: phase,
+        kernelCode: decision.code ?? null,
+        kernelDecision: decision,
+      },
+    },
+  };
+}
+
+/**
+ * P-041 preflight. This is intentionally the first stack entry: a host can
+ * validate ownership, activation and revocation before any other gate or
+ * decorator gets a chance to touch mutable state. An unwired port is a true
+ * no-op, preserving the generic package's old behavior.
+ */
+const kernelPreflightStep: DispatchStep = {
+  name: 'kernel-preflight',
+  async run(exec) {
+    const port = kernelPort(exec);
+    if (!port) return null;
+    const decision = await evaluateKernelEnforcement(port, kernelRequest(exec, 'preflight'));
+    exec.kernelPreflight = decision;
+    if (isKernelDenied(decision)) return kernelDenial(exec, 'preflight', decision);
+    return null;
+  },
+};
 
 /**
  * Default-deny gate (RFC tooldef-auth Phase 3, decision D1). Runs first.
@@ -612,6 +722,39 @@ const ctxBindingsStep: DispatchStep = {
       ...(publishState ? { publishState } : {}),
     });
 
+    return null;
+  },
+};
+
+/**
+ * P-041 final enforcement.  This is deliberately after all decorators have
+ * prepared the handler context and immediately before `invoke`; a revocation
+ * or permission reduction observed while a call was being prepared therefore
+ * cannot be bypassed by a stale preflight result.
+ */
+const kernelEnforceStep: DispatchStep = {
+  name: 'kernel-enforce',
+  async run(exec) {
+    const port = kernelPort(exec);
+    if (!port) return null;
+    const decision = await evaluateKernelEnforcement(
+      port,
+      kernelRequest(exec, 'enforce', exec.handlerCtx),
+    );
+    exec.kernelEnforcement = decision;
+    if (isKernelDenied(decision)) return kernelDenial(exec, 'enforce', decision);
+
+    // Only an explicitly applied enforce-phase revision is execution truth.
+    // Desired/prepared values remain visible to the host result but can never
+    // be stamped onto the handler context or telemetry as "what ran".
+    exec.executionRevision = appliedExecutionRevision(decision, 'enforce');
+    exec.handlerCtx = {
+      ...exec.handlerCtx,
+      kernelPreflight: exec.kernelPreflight,
+      kernelEnforcement: decision,
+      executionRevision: exec.executionRevision,
+      ...(exec.executionRevision ? { appliedExecutionRevision: exec.executionRevision } : {}),
+    };
     return null;
   },
 };
@@ -1085,6 +1228,8 @@ const entityCheckStep: DispatchStep = {
  * the first one to return a `DispatchProjectedResult` short-circuits.
  *
  * Ordering invariants:
+ *   - `kernel-preflight` is first so ownership/activation/revocation can be
+ *     checked before any other gate, decorator, or handler side effect.
  *   - All gates (role / capability / harness / quota / authorize /
  *     preconditions) come first so denials are cheap (no timer arming, no
  *     buffer allocation, no ctx wrappers). `authorize` runs last among the
@@ -1105,10 +1250,13 @@ const entityCheckStep: DispatchStep = {
  *     emit refreshes `lastEmitMs`.
  *   - `replay-buffer` runs before `ctx-bindings` because the wrapped
  *     emit pushes into the buffer.
- *   - `ctx-bindings` is the last decorator before `invoke`.
+ *   - `ctx-bindings` is the last decorator before `kernel-enforce`.
+ *   - `kernel-enforce` is immediately before `invoke`, so a changed policy
+ *     cannot be hidden behind a stale preflight result.
  *   - `invoke` is always terminal.
  */
 export const DEFAULT_DISPATCH_STACK: ReadonlyArray<DispatchStep> = Object.freeze([
+  kernelPreflightStep,
   defaultDenyStep,
   roleAllowlistStep,
   capabilityCheckStep,
@@ -1123,6 +1271,7 @@ export const DEFAULT_DISPATCH_STACK: ReadonlyArray<DispatchStep> = Object.freeze
   idleWatchdogStep,
   replayBufferStep,
   ctxBindingsStep,
+  kernelEnforceStep,
   invokeStep,
 ]);
 
@@ -1282,7 +1431,20 @@ async function recordTelemetry(
   exec: DispatchExecution,
   result: DispatchProjectedResult,
 ): Promise<void> {
-  const { deps, tool, toolName, ctx, windowKey, input, startedAt, eventCount, callId } = exec;
+  const {
+    deps,
+    tool,
+    toolName,
+    ctx,
+    windowKey,
+    input,
+    startedAt,
+    eventCount,
+    callId,
+    kernelPreflight,
+    kernelEnforcement,
+    executionRevision,
+  } = exec;
   if (!deps.recordInvocation) return;
   // Gate denials (no windowKey required); successes + handler errors
   // require windowKey to match pre-refactor behavior (was guarded by
@@ -1306,7 +1468,31 @@ async function recordTelemetry(
       code === 'missing_capability' ||
       code === 'capability_denied' ||
       code === 'quota_exceeded');
-  if (!isGateDenial && !windowKey) return;
+  const isKernelDenial = kernelPreflight?.decision === 'deny' || kernelEnforcement?.decision === 'deny';
+  if (!isGateDenial && !isKernelDenial && !windowKey) return;
+
+  // Keep the original context byte-for-byte on the legacy/no-port path. Once
+  // a kernel decision exists, hand sinks the enriched context as well as the
+  // dedicated fields so old consumers that inspect `input.ctx` see the same
+  // applied revision as newer consumers using `input.executionRevision`.
+  const attributedCtx = kernelPreflight || kernelEnforcement || executionRevision
+    ? {
+        ...ctx,
+        kernelPreflight,
+        kernelEnforcement,
+        executionRevision,
+        ...(executionRevision ? { appliedExecutionRevision: executionRevision } : {}),
+      }
+    : ctx;
+
+  const kernelFields =
+    kernelPreflight || kernelEnforcement || executionRevision
+      ? {
+          executionRevision,
+          kernelPreflight,
+          kernelEnforcement,
+        }
+      : {};
 
   const metadataJson = mergeDispatchErrorMetadata(finalizeMetadata(exec), result);
 
@@ -1374,7 +1560,7 @@ async function recordTelemetry(
       await deps.recordInvocation({
         toolName,
         pluginName: tool.pluginName,
-        ctx,
+        ctx: attributedCtx,
         windowKey: windowKey ?? '',
         callId,
         durationMs: Date.now() - startedAt,
@@ -1393,12 +1579,13 @@ async function recordTelemetry(
         args: input,
         eventCount,
         metadataJson: metaWithFormat,
+        ...kernelFields,
       });
     } else {
       await deps.recordInvocation({
         toolName,
         pluginName: tool.pluginName,
-        ctx,
+        ctx: attributedCtx,
         windowKey: windowKey ?? '',
         callId,
         durationMs: Date.now() - startedAt,
@@ -1411,6 +1598,7 @@ async function recordTelemetry(
         args: input,
         eventCount,
         metadataJson,
+        ...kernelFields,
       });
     }
   } catch {
@@ -1509,15 +1697,27 @@ export async function runDispatchStack(
     // so a reaction can never delay or break its trigger.
     if (deps.postInvoke) {
       try {
+        const eventCtx = exec.kernelPreflight || exec.kernelEnforcement || exec.executionRevision
+          ? {
+              ...ctx,
+              kernelPreflight: exec.kernelPreflight,
+              kernelEnforcement: exec.kernelEnforcement,
+              executionRevision: exec.executionRevision,
+              ...(exec.executionRevision ? { appliedExecutionRevision: exec.executionRevision } : {}),
+            }
+          : ctx;
         deps.postInvoke({
           toolName,
           pluginName: tool.pluginName,
           args: input,
           result: settled,
-          ctx,
+          ctx: eventCtx,
           durationMs: Date.now() - exec.startedAt,
           capabilities: tool.capabilities,
           envelopeVerdict: exec.envelopeVerdict,
+          kernelPreflight: exec.kernelPreflight,
+          kernelEnforcement: exec.kernelEnforcement,
+          executionRevision: exec.executionRevision,
         });
       } catch {
         // a reaction must never break its trigger

@@ -52,6 +52,7 @@ afterEach(() => _resetProjectionRegistryForTests());
 describe('DEFAULT_DISPATCH_STACK — enumeration', () => {
   it('runs steps in this exact order: gates → timeout → idle → buffer → bindings → invoke', () => {
     const expected: DispatchStepName[] = [
+      'kernel-preflight',
       'default-deny',
       'role-allowlist',
       'capability-check',
@@ -66,6 +67,7 @@ describe('DEFAULT_DISPATCH_STACK — enumeration', () => {
       'idle-watchdog',
       'replay-buffer',
       'ctx-bindings',
+      'kernel-enforce',
       'invoke',
     ];
     expect(DEFAULT_DISPATCH_STACK.map((s) => s.name)).toEqual(expected);
@@ -496,6 +498,138 @@ describe('runDispatchStack — custom stack', () => {
       }),
     });
     expect(capturedMeta?.deltaServed).toBe(false);
+  });
+});
+
+describe('P-041 kernel enforcement seats', () => {
+  const applied = { specificationRevision: 'spec-applied', stateRevision: 'state-7' };
+
+  it('runs preflight before decorators and refuses before the handler on an explicit deny', async () => {
+    const order: string[] = [];
+    const handler = vi.fn(async () => ({ content: [{ type: 'text', text: 'should-not-run' }] }));
+    const result = await runDispatchStack(
+      makeTool({ fn: handler }),
+      'fixture:write',
+      { id: 'x' },
+      MAKE_CTX(),
+      {
+        kernelEnforcement: async (request) => {
+          order.push(request.phase);
+          return { decision: 'deny', code: 'revoked', reason: 'revoked by owner' };
+        },
+      },
+    );
+    expect(result).toMatchObject({ ok: false, error: { code: 'authorization_denied' } });
+    expect(result.error?.message).toContain('revoked by owner');
+    expect(order).toEqual(['preflight']);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('re-checks immediately before invoke and stamps only an applied revision', async () => {
+    const phases: string[] = [];
+    let handlerContext: UnifiedToolContext | undefined;
+    let recorded: { executionRevision?: unknown } | undefined;
+    let observed: { executionRevision?: unknown } | undefined;
+    const result = await runDispatchStack(
+      makeTool({
+        capabilities: ['fixture:write'],
+        fn: async (_input, ctx) => {
+          handlerContext = ctx;
+          return { content: [{ type: 'text', text: 'ok' }] };
+        },
+      }),
+      'fixture:write',
+      {},
+      MAKE_CTX({ requestedExecutionRevision: applied }),
+      {
+        kernelEnforcement: async (request) => {
+          phases.push(request.phase);
+          if (request.phase === 'preflight') {
+            return { decision: 'allow', availability: 'available', applied: false };
+          }
+          return {
+            decision: 'allow',
+            availability: 'available',
+            applied: true,
+            executionRevision: applied,
+            revisionSource: 'applied',
+          };
+        },
+        recordInvocation: async (input) => {
+          recorded = input;
+        },
+        postInvoke: (event) => {
+          observed = event;
+        },
+      },
+    );
+    expect(result.ok).toBe(true);
+    expect(phases).toEqual(['preflight', 'enforce']);
+    expect(handlerContext?.executionRevision).toEqual(applied);
+    expect(recorded?.executionRevision).toEqual(applied);
+    expect(observed?.executionRevision).toEqual(applied);
+    expect(observed?.ctx.executionRevision).toEqual(applied);
+    expect(observed?.kernelPreflight).toMatchObject({ decision: 'allow' });
+    expect(observed?.kernelEnforcement).toMatchObject({ decision: 'allow', revisionSource: 'applied' });
+  });
+
+  it('honors a revocation that appears between preflight and final enforce', async () => {
+    const phases: string[] = [];
+    const handler = vi.fn(async () => ({ content: [{ type: 'text', text: 'must-not-run' }] }));
+    const result = await runDispatchStack(
+      makeTool({ fn: handler }),
+      'fixture:write',
+      {},
+      MAKE_CTX(),
+      {
+        kernelEnforcement: async (request) => {
+          phases.push(request.phase);
+          return request.phase === 'preflight'
+            ? { decision: 'allow', availability: 'available', applied: true }
+            : { decision: 'deny', code: 'revoked', reason: 'revoked while preparing call' };
+        },
+      },
+    );
+    expect(result).toMatchObject({ ok: false, error: { code: 'authorization_denied' } });
+    expect(result.error?.message).toContain('revoked while preparing call');
+    expect(phases).toEqual(['preflight', 'enforce']);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('labels reaction and indirect calls at the shared kernel seat', async () => {
+    const boundaries: string[] = [];
+    await runDispatchStack(
+      makeTool(),
+      'fixture:reaction',
+      {},
+      MAKE_CTX({ reactionCause: { depth: 1, chain: ['r-1'], ruleId: 'r-1' } }),
+      { kernelEnforcement: (request) => { boundaries.push(request.boundary); return { decision: 'allow' }; } },
+    );
+    expect(boundaries).toEqual(['reaction', 'reaction']);
+  });
+
+  it('does not attribute a desired/prepared revision as execution truth', async () => {
+    let captured: { executionRevision?: unknown } | undefined;
+    const result = await runDispatchStack(
+      makeTool({ fn: async () => ({ content: [{ type: 'text', text: 'ok' }] }) }),
+      'fixture:read',
+      {},
+      MAKE_CTX(),
+      {
+        kernelEnforcement: async (request) => request.phase === 'preflight'
+          ? { decision: 'allow', availability: 'available', applied: false }
+          : {
+              decision: 'allow',
+              availability: 'available',
+              applied: false,
+              executionRevision: applied,
+              revisionSource: 'prepared',
+            },
+        recordInvocation: async (input) => { captured = input; },
+      },
+    );
+    expect(result.ok).toBe(true);
+    expect(captured?.executionRevision).toBeNull();
   });
 });
 

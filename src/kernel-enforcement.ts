@@ -66,6 +66,34 @@ export interface KernelOwnershipRequirement {
   resourceOwnerId?: string | null;
 }
 
+/**
+ * Optional activation snapshot carried by a host context.  The generic layer
+ * does not interpret storage or lifecycle rows; it only gives an adapter a
+ * typed place to expose the already-resolved truth at the enforcement seat.
+ */
+export interface KernelActivationSnapshot {
+  desired?: KernelExecutionRevision | null;
+  prepared?: KernelExecutionRevision | null;
+  applied?: KernelExecutionRevision | null;
+  status?: 'desired' | 'prepared' | 'applied' | 'failed';
+  failure?: string | null;
+}
+
+/**
+ * Host-resolved state that can be threaded through `UnifiedToolContext`.
+ * `revoked` is explicit rather than inferred from a missing row: an
+ * unavailable optional store remains an unavailable allow, while a host that
+ * knows a session/identity was revoked can fail closed immediately.
+ */
+export interface KernelContextState {
+  revoked?: boolean;
+  activation?: KernelActivationSnapshot | null;
+  ownership?: KernelOwnershipRequirement;
+  appliedRevision?: KernelExecutionRevision | null;
+  requestedRevision?: KernelExecutionRevision | null;
+  policyRevision?: string | null;
+}
+
 /** Input to the host policy decision point. */
 export interface KernelEnforcementRequest {
   phase: KernelEnforcementPhase;
@@ -306,4 +334,3 @@ export const createKernelPolicyPort = createKernelEnforcementPort;
 export function allowKernelEnforcement(): KernelEnforcementResult {
   return EMPTY_ALLOW;
 }
-

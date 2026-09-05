@@ -72,6 +72,44 @@ export type {
   PluginSpawnResult,
 } from './host-types';
 
+/* ─── Kernel enforcement / identity activation seam (D-030) ──────────── */
+export {
+  KERNEL_ENFORCEMENT_SCHEMA,
+  sameKernelRevision,
+  sameExecutionRevision,
+  kernelRevisionKey,
+  executionRevisionKey,
+  normalizeKernelEnforcementResult,
+  evaluateKernelEnforcement,
+  evaluateKernelDecision,
+  isKernelDenied,
+  appliedExecutionRevision,
+  actualExecutionRevision,
+  enforceKernelBoundary,
+  runAtKernelBoundary,
+  wrapKernelSpawn,
+  wrapNativeSpawn,
+  createKernelEnforcementPort,
+  createKernelPolicyPort,
+  allowKernelEnforcement,
+  KernelEnforcementDeniedError,
+} from './kernel-enforcement';
+export type {
+  KernelEnforcementPhase,
+  KernelBoundary,
+  KernelDecision,
+  KernelAvailability,
+  KernelExecutionRevision,
+  KernelActivationRevision,
+  KernelOwnershipRequirement,
+  KernelActivationSnapshot,
+  KernelContextState,
+  KernelEnforcementRequest,
+  KernelEnforcementResult,
+  KernelEnforcementPort,
+  KernelPolicyPort,
+} from './kernel-enforcement';
+
 /* ─── defineTool + sibling authoring primitives ──────────────────────── */
 export {
   defineTool,
