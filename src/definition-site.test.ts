@@ -39,6 +39,37 @@ describe('definition-site capture', () => {
     expect(tool?.sourceFile).not.toMatch(/define-tool\.[cm]?ts$/);
   });
 
+  it('captures an absolute FILESYSTEM PATH, never a file:// URL', () => {
+    defineTool({
+      name: 'stalenesstest:path-form',
+      requirePrincipal: false,
+      capability: 'harness:read',
+      description: 'fixture',
+      args: z.object({}),
+      handler: async () => ({ ok: true }),
+    } as never);
+
+    const sourceFile = projectedToolSourceFile('stalenesstest:path-form');
+    expect(sourceFile).toBeTruthy();
+
+    // `ProjectedTool.sourceFile` is documented as an absolute PATH, and every host
+    // consumer relativizes it against a repo root by string prefix. Under ESM the raw
+    // stack frame is a `file://` URL, which fails that comparison SILENTLY and in the
+    // direction that reads as a legitimate answer — "this file is outside the repo" —
+    // so the consumer's verdict degrades to `unknown` for every tool while nothing
+    // errors. Measured 2026-09-05 (P-003 / EI-22450280531836927): 884 of 1,078 open
+    // tool-failure filings, i.e. 100% of those whose subject resolved at all.
+    expect(sourceFile!.startsWith('file:')).toBe(false);
+    expect(sourceFile!.startsWith('/')).toBe(true);
+
+    // The property that actually matters to a consumer: a plain prefix comparison
+    // against an ancestor directory succeeds. This is the exact operation
+    // `relativizeToRepo` performs in operator-core, restated here so the contract is
+    // guarded at the field's SOURCE and not only at one host that happens to use it.
+    const ancestor = sourceFile!.slice(0, sourceFile!.lastIndexOf('/'));
+    expect(sourceFile!.startsWith(`${ancestor}/`)).toBe(true);
+  });
+
   it('resolves a source file through every name spelling a reporter might use', () => {
     defineTool({
       name: 'stalenesstest:multi-form',
