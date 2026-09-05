@@ -464,6 +464,10 @@ export interface ToolGuidance {
    * reads only when/notWhen/chaining), so it costs zero prompt weight and is
    * paid for only on the failure path that needs it.
    *
+   * Verification note: `unknownArgHint` consumes the JSON-Schema form of `args`,
+   * not the source Zod object; validate redirects through the registry-backed
+   * `packages/operator-core/lib/prompt-assembly.test.ts`, not a bare scratch import.
+   *
    * Example: `{ tags: 'work_items:tag { id, topic } — the ONLY writer for the
    * claim-spec-visible tags field' }`
    */
