@@ -164,6 +164,12 @@ export interface RouteContext<TInput = undefined> {
   input: TInput;
   /** Path parameters (`/harness/:slug` → `{ slug }`). */
   params: Record<string, string>;
+  /**
+   * The transport's socket peer address, when the host adapter exposes one.
+   * This is deliberately not derived from caller-controlled forwarding
+   * headers; handlers that need client identity should use this value.
+   */
+  peerAddress?: string | null;
   /** Telemetry-bound logger. */
   log: (level: 'info' | 'warn' | 'error', msg: string, meta?: Record<string, unknown>) => void;
   /** Abort signal — fires at `timeoutSec`. Handlers racing I/O should pass it through. */
