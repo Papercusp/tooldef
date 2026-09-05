@@ -693,6 +693,8 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
   ignoreSessionPayloadTier?: boolean;
   /** See `RoleToolDefinition.argReencodings` (P-016 / D-104) — same surface, principal-gated side. */
   argReencodings?: readonly ArgReencoding[];
+  /** See `RoleToolDefinition.argPreconditions` (EI-19486111655110215) — same surface, principal-gated side. */
+  argPreconditions?: (rawInput: unknown) => readonly string[];
 }
 
 /** Input shape for `defineTool` — same as ToolDefinition minus derived fields. */
@@ -831,6 +833,8 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
   ignoreSessionPayloadTier?: boolean;
   /** See `RoleToolDefinition.argReencodings` (P-016 / D-104) — same surface, principal-gated side. */
   argReencodings?: readonly ArgReencoding[];
+  /** See `RoleToolDefinition.argPreconditions` (EI-19486111655110215) — same surface, principal-gated side. */
+  argPreconditions?: (rawInput: unknown) => readonly string[];
 }
 
 /**
@@ -1030,6 +1034,29 @@ export interface RoleToolDefinition<
    * boundary, the purity contract, and why the decay measurement depends on it.
    */
   argReencodings?: readonly ArgReencoding[];
+  /**
+   * EI-19486111655110215 — CROSS-PHASE requirements, reported ALONGSIDE a schema failure.
+   *
+   * Zod already reports every SCHEMA issue at once, so a caller who sends two bad fields
+   * learns both in one round-trip. What it cannot see is a requirement enforced in the
+   * HANDLER, after the schema has parsed — typically one that is CONDITIONAL on a value
+   * knowable only post-parse. `work_items:complete` is the measured case: `assumptions` is
+   * required only when the call carries close intent, which can be inferred from
+   * `completion.status`, so the check deliberately lives at handler time and the field is
+   * `.optional()` in the schema. The two failures therefore occupy different PHASES, and a
+   * caller who fixes the schema error is refused a second time for a reason the first
+   * refusal already had every input needed to name. Filing agent measured three attempts
+   * for one close; note that the item's own suggested fix (non-abort-early zod) could not
+   * have worked, because only one of the two failures is a zod issue at all.
+   *
+   * A tool declares the check here; the dispatcher evaluates it against the RAW input when
+   * validation fails and appends each returned line to the refusal. It runs ONLY on the
+   * already-failing path, so a valid call pays nothing. It must be PURE and TOTAL: it sees
+   * unvalidated input of any shape and must never throw (the dispatcher isolates it anyway,
+   * because a diagnostic that masks the real error would be worse than the gap it fills).
+   * Return `[]` when nothing further would fail.
+   */
+  argPreconditions?: (rawInput: unknown) => readonly string[];
   /**
    * Surfaces this tool is meaningful from. Phase 4 T3.1. The prompt-
    * assembly catalog renderer filters by the caller's modality so voice
