@@ -2454,22 +2454,58 @@ function argsFieldNamesHint(rawSchema: unknown): string {
  * tool, no file, nothing to grep (observed: `Transforms cannot be represented in JSON
  * Schema`, which reads like an unrelated infra/zod break and was mis-triaged as one).
  *
- * The overwhelmingly common cause is a TRAILING `.transform()` in the args schema, whose
- * output type JSON Schema cannot express. Refinements (`.refine` / `.superRefine`) and
+ * The two common causes are a TRAILING `.transform()` (whose output type JSON Schema
+ * cannot express) and `z.custom<T>()`. Refinements (`.refine` / `.superRefine`) and
  * `preprocess` are all representable and fine.
  */
+
+/**
+ * Pick the remedy that matches the CAUSE the converter actually reported.
+ *
+ * The adapter error names the offending CONSTRUCT ("Custom types cannot be represented
+ * in JSON Schema") but never the way out, and the two common causes have DISJOINT
+ * remedies — so one hardcoded hint is affirmatively wrong for whichever cause it does not
+ * describe. Observed: a `z.custom<T>()` author was told to "terminate the transform with
+ * `.pipe()`", advice that cannot apply because there is no transform. The reader then
+ * reaches for the next construct that compiles, and the natural next pick (`z.unknown()`)
+ * is representable but infers `unknown` — which will not assign to T — so the cause-blind
+ * hint costs a second failed attempt in a different check.
+ */
+function argsRemedyFor(causeMessage: string): string {
+  if (/custom type/i.test(causeMessage)) {
+    return (
+      `This one is a \`z.custom<T>()\`: it typechecks CLEANLY — no compiler or lint sees it — and is ` +
+      `unrepresentable. If the field is accepted but never read (a compat passthrough that only has to ` +
+      `survive a \`.strict()\` round-trip), use \`z.any()\`: representable, and still assignable to T. ` +
+      `\`z.unknown()\` is representable too, but infers \`unknown\`, which will NOT assign to T. ` +
+      `Otherwise restate the shape in real Zod, so the contract is actually advertised to callers.`
+    );
+  }
+  if (/transform/i.test(causeMessage)) {
+    return (
+      `This one is a trailing \`.transform()\` — do that normalization in the HANDLER instead ` +
+      `(read the value, resolve it there), or, if a transform is genuinely required, terminate it with ` +
+      `\`.pipe(<schema>)\` so the OUTPUT stays representable.`
+    );
+  }
+  return (
+    `The usual causes are a trailing \`.transform()\` — do that normalization in the HANDLER, or ` +
+    `terminate it with \`.pipe(<schema>)\` — and \`z.custom<T>()\`, for which \`z.any()\` is the ` +
+    `representable stand-in on a passthrough field.`
+  );
+}
+
 export function toArgsJsonSchema(toolName: string, args: StandardSchemaV1): Record<string, unknown> {
   try {
     return toJsonSchema(args);
   } catch (err) {
+    const cause = (err as Error).message;
     throw new Error(
       `Tool "${toolName}": its \`args\` schema cannot be represented in JSON Schema — ` +
-        `${(err as Error).message}. This is FATAL FOR THE WHOLE TOOL CATALOG, not just this tool: ` +
+        `${cause}. This is FATAL FOR THE WHOLE TOOL CATALOG, not just this tool: ` +
         `the conversion runs at registration and again (unguarded) when tools/list is served, so a ` +
         `single unrepresentable schema breaks tool discovery for every client. ` +
-        `The usual cause is a trailing \`.transform()\` — do that normalization in the HANDLER instead ` +
-        `(read the value, resolve it there), or, if a transform is genuinely required, terminate it with ` +
-        `\`.pipe(<schema>)\` so the OUTPUT stays representable. Refinements are always fine.`,
+        `${argsRemedyFor(cause)} Refinements are always fine.`,
     );
   }
 }
