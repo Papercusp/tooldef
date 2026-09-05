@@ -753,6 +753,27 @@ describe('nestedArgPaths (WI-38059) — a relocation, not a typo', () => {
     expect(nestedArgPaths(undefined).size).toBe(0);
   });
 
+  it('cannot see into a FREE-FORM RECORD, which is why some relocations still need an authored redirect', () => {
+    // `z.record(z.string(), z.unknown())` renders as `{ type:'object',
+    // additionalProperties:{} }` with NO `properties` map, so there is nothing to
+    // walk and this rung correctly declines. That is not a defect — the schema
+    // genuinely does not declare the child — but it means a key whose real home is
+    // inside such a record (the measured case: work_items:create `paths` ->
+    // `payload.paths`) gets no pointer from EITHER guess and needs an entry in the
+    // tool's own `guidance.argRedirects`. Pinned here so that a later change making
+    // this rung walk records is a deliberate decision with a failing test, not a
+    // silent one that quietly makes those redirects redundant.
+    const nested = nestedArgPaths({
+      title: { type: 'string' },
+      payload: { type: 'object', propertyNames: { type: 'string' }, additionalProperties: {} },
+    });
+    expect(nested.size).toBe(0);
+    expect(nested.get('paths')).toBeUndefined();
+    // ...and the distance rung has nothing to offer either, so the redirect is the
+    // only rung left. Both halves matter: either one alone would still leave a hint.
+    expect(suggestArgName('paths', ['title', 'payload'])).toBeNull();
+  });
+
   it('is first-declaration-wins on a collision, and never claims a top-level name', () => {
     // Deliberately narrow: this exists to name an obvious relocation, not to search
     // a schema tree. An ambiguous child resolves to the first parent that declared
