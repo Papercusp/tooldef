@@ -837,6 +837,11 @@ function definePrincipalGatedTool(input) {
         // declaration reach `registerLegacyAsProjected`'s repair path — a field declared on the
         // input type but dropped here would leave every registered rule silently inert.
         argReencodings: input.argReencodings,
+        // EI-19486111655110215: see ToolDefinition.argPreconditions. Threaded for the SAME
+        // reason as argReencodings directly above — that field shipped INERT once because it
+        // was declared on every interface and then dropped by this one-field-at-a-time copy
+        // (EI-22172195473893352). A declaration without this line type-checks and does nothing.
+        argPreconditions: input.argPreconditions,
     };
     // EI-20803112372029993: make the declared shapers reachable from the catalog.
     // `def.shape` is otherwise closed over by the dispatch handler below and by
@@ -928,6 +933,10 @@ function defineRoleGatedTool(input) {
         // rule was measured for — is `requirePrincipal: false`, so it lands in THIS builder;
         // dropping the field here alone would make the shipped rule a no-op.
         argReencodings: input.argReencodings,
+        // EI-19486111655110215: see RoleToolDefinition.argPreconditions. `work_items:complete`
+        // — the verb this was measured on — is `requirePrincipal: false`, so it lands in THIS
+        // builder; dropping the field here alone would make the shipped check a no-op.
+        argPreconditions: input.argPreconditions,
         modality: input.modality,
         // EI-10883: closed shape — an undeclared arg errors instead of being silently dropped.
         args: strictArgs(input.args),
@@ -1881,7 +1890,7 @@ toolName) {
         // app" instead of "I typo'd an arg".
         serverVintageHint());
 }
-function makeInvalidInputError(toolName, issues, input, rawSchema, argRedirects) {
+function makeInvalidInputError(toolName, issues, input, rawSchema, argRedirects, argPreconditions) {
     const corrections = invalidInputCorrections(issues, rawSchema, argRedirects, input);
     // P-015: the finished call, resolved against what the caller actually sent. Ordered
     // FIRST because D-105 measured that the alternative does not work: `omp:sessions`
@@ -1916,7 +1925,36 @@ function makeInvalidInputError(toolName, issues, input, rawSchema, argRedirects)
                 // unreliable contract. An unrecognized-key error already gets the
                 // complete accepted-key list from `unknownArgHint`; an otherwise
                 // pathless issue gets the same compact list here.
-                (unknownKeys.length === 0 ? argsFieldNamesHint(rawSchema) : '')), metadata);
+                (unknownKeys.length === 0 ? argsFieldNamesHint(rawSchema) : '')) +
+        crossPhaseRequirementHint(argPreconditions, input), metadata);
+}
+/**
+ * EI-19486111655110215 — append the CROSS-PHASE requirements this call would ALSO fail,
+ * so a caller fixing the schema error is not refused a second time for a reason this
+ * refusal already knew. See `RoleToolDefinition.argPreconditions` for why these cannot
+ * simply be moved into the schema (they are conditional on post-parse values).
+ *
+ * Isolated on purpose: this runs on input that FAILED validation, so it is the one place
+ * in the refusal path guaranteed to see arbitrary shapes. A diagnostic that threw here
+ * would replace a precise schema error with a stack trace — strictly worse than the gap
+ * it exists to close — so a throwing or non-array precondition is dropped silently.
+ */
+function crossPhaseRequirementHint(argPreconditions, input) {
+    if (typeof argPreconditions !== 'function')
+        return '';
+    let lines;
+    try {
+        lines = argPreconditions(input);
+    }
+    catch {
+        return '';
+    }
+    if (!Array.isArray(lines))
+        return '';
+    const kept = lines.filter((line) => typeof line === 'string' && line.trim().length > 0);
+    if (kept.length === 0)
+        return '';
+    return ` — ALSO required for this call (would fail on your next attempt): ${kept.join(' · ')}`;
 }
 /**
  * P-016 / D-104 — the EXECUTE half. Consulted ONLY after `standardValidate` has already
@@ -2342,7 +2380,7 @@ function registerLegacyAsProjected(def, expose, sourceFile) {
         else {
             const repaired = await reencodeAndRevalidate(def.args, rawSchema, def.argReencodings, shimmed);
             if (!repaired) {
-                throw makeInvalidInputError(def.name, validated.issues, shimmed, rawSchema, def.guidance?.argRedirects);
+                throw makeInvalidInputError(def.name, validated.issues, shimmed, rawSchema, def.guidance?.argRedirects, def.argPreconditions);
             }
             parsedValue = repaired.value;
             corrections = repaired.corrections;
@@ -2504,7 +2542,7 @@ function registerRoleGatedAsProjected(def, expose, sourceFile) {
         else {
             const repaired = await reencodeAndRevalidate(def.args, rawSchema, def.argReencodings, shimmed);
             if (!repaired) {
-                throw makeInvalidInputError(def.name, validated.issues, shimmed, rawSchema, def.guidance?.argRedirects);
+                throw makeInvalidInputError(def.name, validated.issues, shimmed, rawSchema, def.guidance?.argRedirects, def.argPreconditions);
             }
             parsedValue = repaired.value;
             corrections = repaired.corrections;
