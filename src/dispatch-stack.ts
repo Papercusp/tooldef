@@ -748,13 +748,20 @@ const kernelEnforceStep: DispatchStep = {
     // Desired/prepared values remain visible to the host result but can never
     // be stamped onto the handler context or telemetry as "what ran".
     exec.executionRevision = appliedExecutionRevision(decision, 'enforce');
-    exec.handlerCtx = {
+    // The spread below is the LAST decorator spread before `invoke`, so it must
+    // reapply the workspace-tx contract: `applyWorkspaceTxContract` installs
+    // `tx` as a deliberately NON-ENUMERABLE getter, and object spread copies
+    // only enumerable own properties — so spreading without reapplying DROPS
+    // the guard entirely and `ctx.tx` then reads `undefined` in the handler
+    // instead of throwing WorkspaceTxNotDeclaredError. That is fail-open: an
+    // undeclared `ctx.tx` access stops being a loud contract error everywhere.
+    exec.handlerCtx = applyWorkspaceTxContract(exec.tool, exec.toolName, {
       ...exec.handlerCtx,
       kernelPreflight: exec.kernelPreflight,
       kernelEnforcement: decision,
       executionRevision: exec.executionRevision,
       ...(exec.executionRevision ? { appliedExecutionRevision: exec.executionRevision } : {}),
-    };
+    });
     return null;
   },
 };
