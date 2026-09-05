@@ -1170,6 +1170,8 @@ export interface RoleToolDefinitionInput<
   ignoreSessionPayloadTier?: boolean;
   /** See `RoleToolDefinition.argReencodings` (P-016 / D-104). */
   argReencodings?: readonly ArgReencoding[];
+  /** See `RoleToolDefinition.argPreconditions` (EI-19486111655110215). */
+  argPreconditions?: (rawInput: unknown) => readonly string[];
   /** See RoleToolDefinition.modality. */
   modality?: ReadonlyArray<'text' | 'voice'>;
   /** See RoleToolDefinition.state. */
