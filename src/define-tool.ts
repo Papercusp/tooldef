@@ -127,6 +127,45 @@ export type { RouteDefinition } from './types';
  * take the first frame outside it. Correct at any delegation depth, and it stays
  * correct when this file is refactored again.
  */
+/**
+ * A stack frame's file, as an absolute FILESYSTEM PATH.
+ *
+ * `getFileName()` returns a `file://` URL under ESM and a bare path under CJS, but
+ * `ProjectedTool.sourceFile` is documented as an absolute PATH, and every host consumer
+ * resolves it against a repo root by string-prefix comparison. A URL fails that
+ * comparison — and fails it QUIETLY, in the direction that looks like a legitimate
+ * answer: the host reports "this file is outside the repo" rather than erroring, so a
+ * verdict built on it degrades to `unknown` for EVERY tool with nothing failing anywhere.
+ *
+ * Measured 2026-09-05 (P-003 / EI-22450280531836927): `toolSchemaStaleness` in
+ * operator-core answered `unknown/source-outside-repo` for 884 of 1,078 open
+ * tool-failure filings — 100% of the ones whose subject resolved at all — because
+ * `relativizeToRepo('file:///home/.../x.ts', '/home/.../papercusp')` is null by
+ * construction. Its unit tests never caught it: they inject a `sourceFileFor` stub that
+ * returns a plain path, so the one seam that carries the URL was the one seam never
+ * exercised.
+ *
+ * Converted here, at the field's source, so no consumer has to know which module system
+ * registered a tool. Deliberately dependency-free (no `node:url`): this lib ships a
+ * browser-safe barrel.
+ */
+function definitionSitePath(file: string): string {
+  // Only the local-file form. A `file://host/share` UNC URL has no path equivalent here
+  // and is left exactly as it came, rather than being mangled into a plausible-looking
+  // absolute path — an unusable value must stay recognisably unusable.
+  if (!file.startsWith('file:///')) return file;
+  let path = file.slice('file://'.length);
+  // A Windows drive URL is `file:///C:/x`; the leading slash is part of the URL grammar,
+  // not the path.
+  if (/^\/[A-Za-z]:/.test(path)) path = path.slice(1);
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    // A malformed escape is not a reason to lose the frame entirely.
+    return path;
+  }
+}
+
 function captureDefinitionSite(): string | null {
   const ErrorAny = Error as unknown as {
     prepareStackTrace?: (err: Error, stack: unknown[]) => unknown;
@@ -148,7 +187,7 @@ function captureDefinitionSite(): string | null {
       if (selfFile && file === selfFile) continue;
       // Node internals ('node:internal/...') are never a definition site.
       if (file.startsWith('node:')) continue;
-      return file;
+      return definitionSitePath(file);
     }
     return null;
   } catch {
