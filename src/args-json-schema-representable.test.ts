@@ -71,6 +71,42 @@ describe('args schemas must be JSON-Schema-representable', () => {
     expect(msg).toMatch(/handler|pipe/i); // the remedy
   });
 
+  /**
+   * The SECOND unrepresentable construct, and the one that gets mis-remedied.
+   *
+   * `z.custom<T>()` is invisible to every check an author normally runs — it is perfectly
+   * well-typed, so `tsc` is affirmatively green — and it surfaces only when some suite
+   * happens to import the catalog. The message must therefore carry the way OUT, and the
+   * way out is not the transform remedy: a reader told to "terminate it with `.pipe()`"
+   * has been handed a step that cannot be performed, and the natural next pick
+   * (`z.unknown()`) merely trades a catalog break for a TS2322 at the assignment.
+   */
+  it('names the offending tool AND gives the custom-type remedy when its args carry z.custom()', () => {
+    const name = uniq('guard:custom_type_');
+
+    let msg = '';
+    try {
+      defineTool({
+        name,
+        requirePrincipal: false,
+        capability: 'test:read',
+        args: z.object({ passthrough: z.custom<{ tag: string }>().nullish() }),
+        handler: async () => ({ content: [{ type: 'text' as const, text: 'ok' }] }),
+      });
+    } catch (err) {
+      msg = (err as Error).message;
+    }
+
+    expect(msg).toContain(name); // which tool
+    expect(msg).toMatch(/custom/i); // the cause, as the converter reported it
+    expect(msg).toMatch(/z\.any\(\)/); // the remedy that actually applies
+
+    // Load-bearing: the remedy must be CAUSE-SPECIFIC, not the transform boilerplate.
+    // Before the cause-aware branch this message told a z.custom author to terminate a
+    // transform that does not exist, so this assertion is what distinguishes the two.
+    expect(msg).not.toMatch(/\.pipe\(/);
+  });
+
   it('accepts the representable constructs: refinements, preprocess, and a piped transform', () => {
     // .superRefine — how a tool should validate a field alias (no value rewriting).
     expect(() =>
@@ -113,6 +149,26 @@ describe('args schemas must be JSON-Schema-representable', () => {
         handler: async () => ({ content: [{ type: 'text' as const, text: 'ok' }] }),
       }),
     ).not.toThrow();
+
+    // CALIBRATION for the z.custom case above: both rungs the remedy names must really
+    // convert. Without this the custom test is satisfiable by a guard that rejects every
+    // loosely-typed field, which would make the advice it prints unfollowable.
+    for (const [label, schema] of [
+      ['any', z.any()],
+      ['unknown', z.unknown()],
+    ] as const) {
+      expect(
+        () =>
+          defineTool({
+            name: uniq(`guard:representable_${label}_`),
+            requirePrincipal: false,
+            capability: 'test:read',
+            args: z.object({ passthrough: schema.nullish() }),
+            handler: async () => ({ content: [{ type: 'text' as const, text: 'ok' }] }),
+          }),
+        `z.${label}() must stay representable — the z.custom remedy names it as the way out`,
+      ).not.toThrow();
+    }
   });
 
   /**
@@ -156,15 +212,25 @@ describe('args schemas must be JSON-Schema-representable', () => {
 
   /*
    * DELIBERATELY NOT HERE: a catalog-wide "every registered tool is representable" sweep.
-   * It looks like the obvious companion test and it is a trap — under vitest the registry
-   * holds only ~40 of the ~590 tools (nothing imports the full catalog), so it passes by
-   * iterating almost nothing and ships VACUOUSLY GREEN, buying false assurance against
-   * exactly the failure it appears to cover. su-f69a7079 measured this and su-02434335
-   * removed an earlier copy of it; it is recorded here so the next reader does not
-   * helpfully add it back a third time.
+   * It looks like the obvious companion test and IN THIS PROJECT it is a trap — this is a
+   * generic package with no consumer catalog in scope, so its registry holds only the
+   * handful of tools these tests themselves define. A sweep here passes by iterating
+   * almost nothing and ships VACUOUSLY GREEN, buying false assurance against exactly the
+   * failure it appears to cover. su-f69a7079 measured this and su-02434335 removed an
+   * earlier copy; recorded so the next reader does not helpfully add it back a third time.
    *
-   * The guarantee is enforced where it is cheap and total instead: at registration (the
-   * guard above) and at the two tools/list conversion sites, which now call the same
-   * named-throw wrapper rather than a raw z.toJSONSchema.
+   * ⚠ SCOPE — do not read that as "a catalog sweep is always vacuous", and do not delete a
+   * consumer's sweep as this known trap. A sweep IS sound wherever something actually
+   * imports the full catalog first, and one lives there:
+   * packages/operator-core/lib/__tests__/tool-input-schema-rejection.test.ts (superproject
+   * path) does `import '../agent-tools/index'` and has caught two real regressions
+   * (EI-20081950141743058, EI-21930203761949555). Note WHERE its totality comes from: the
+   * import itself converts every tool at registration, so an unrepresentable schema fails
+   * that file at COLLECTION; the explicit loop over getCatalog() covers only the legacy
+   * built-ins. The import is the total guarantee, the loop is the named report.
+   *
+   * So the guarantee is enforced where it is cheap and total: at registration (the guards
+   * above) and at the tools/list conversion sites, which call this same named-throw
+   * wrapper rather than a raw z.toJSONSchema.
    */
 });
