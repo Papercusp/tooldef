@@ -21,6 +21,8 @@ export { setServerVintageResolver, resetServerVintageResolver, readServerVintage
 // `unknownArgHint`'s "accepts ONLY" list so a genuinely-accepted key never reads
 // as rejected. Default unregistered (empty list); see ambient-args.ts.
 export { setAmbientArgKeysResolver, resetAmbientArgKeysResolver, readAmbientArgKeys, } from './ambient-args';
+/* ─── Kernel enforcement / identity activation seam (D-030) ──────────── */
+export { KERNEL_ENFORCEMENT_SCHEMA, sameKernelRevision, sameExecutionRevision, kernelRevisionKey, executionRevisionKey, normalizeKernelEnforcementResult, evaluateKernelEnforcement, evaluateKernelDecision, isKernelDenied, appliedExecutionRevision, actualExecutionRevision, enforceKernelBoundary, runAtKernelBoundary, wrapKernelSpawn, wrapNativeSpawn, createKernelEnforcementPort, createKernelPolicyPort, allowKernelEnforcement, KernelEnforcementDeniedError, } from './kernel-enforcement';
 /* ─── defineTool + sibling authoring primitives ──────────────────────── */
 export { defineTool, toArgsJsonSchema, 
 // The effect oracle — for static scanners that cannot execute defineTool (WI-6464).

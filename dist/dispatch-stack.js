@@ -30,6 +30,7 @@ import { validateSync, formatIssues } from './standard-schema';
 import { tierFor } from './capability-tiers';
 import { collectEntityRefs, formatEntityRefViolations, resolveEntityRefs, } from './entity-ref';
 import { PASS_THROUGH, HarnessRequiredError, InvalidInputError, UnauthorizedToolError, defaultComputeQuotaWindow, } from './dispatch-types';
+import { appliedExecutionRevision, evaluateKernelEnforcement, isKernelDenied, } from './kernel-enforcement';
 import { evaluateDataCondition } from '@papercusp/rules';
 import { applyWorkspaceTxContract } from './workspace-tx';
 /**
@@ -79,9 +80,85 @@ function initExecution(tool, toolName, input, ctx, deps) {
         handlerCtx: contractCtx,
         handlerResult: null,
         envelopeVerdict: null,
+        kernelPreflight: null,
+        kernelEnforcement: null,
+        executionRevision: null,
     };
 }
 /* ─── Steps ──────────────────────────────────────────────────────────── */
+function kernelPort(exec) {
+    return exec.deps.kernelEnforcement ?? exec.deps.kernelPolicy;
+}
+function kernelBoundaryFor(ctx) {
+    return ctx.kernelBoundary ?? ctx.dispatchBoundary ?? (ctx.reactionCause
+        ? 'reaction'
+        : ctx.codeMode || ctx.telemetrySurface === 'tools:invoke'
+            ? 'indirect-dispatch'
+            : 'dispatch');
+}
+function kernelRequestedRevision(ctx) {
+    return ctx.requestedExecutionRevision ?? ctx.kernelState?.requestedRevision ?? null;
+}
+function kernelAppliedRevision(ctx) {
+    return ctx.appliedExecutionRevision ?? ctx.kernelState?.appliedRevision ?? ctx.kernelState?.activation?.applied ?? null;
+}
+function kernelOwnership(ctx) {
+    return ctx.kernelOwnership ?? ctx.kernelState?.ownership;
+}
+function kernelRequest(exec, phase, ctx = exec.ctx) {
+    return {
+        phase,
+        boundary: kernelBoundaryFor(ctx),
+        toolName: exec.toolName,
+        capabilities: exec.tool.capabilities,
+        args: exec.input,
+        ctx,
+        callId: exec.callId,
+        appliedRevision: kernelAppliedRevision(ctx),
+        requestedRevision: kernelRequestedRevision(ctx),
+        ownership: kernelOwnership(ctx),
+        operation: exec.toolName,
+    };
+}
+function kernelDenial(exec, phase, decision) {
+    const detail = decision.reason || decision.code || 'policy denied the operation';
+    return {
+        ok: false,
+        error: {
+            // Keep the established public authorization error code while preserving
+            // the kernel-specific reason in structured metadata. Existing transports
+            // therefore remain compatible, and operators can still distinguish a
+            // stale/revoked kernel denial from a tool-level authorize denial.
+            code: 'authorization_denied',
+            message: `Kernel ${phase} denied tool "${exec.toolName}": ${detail}`,
+            meta: {
+                tool: exec.toolName,
+                kernelPhase: phase,
+                kernelCode: decision.code ?? null,
+                kernelDecision: decision,
+            },
+        },
+    };
+}
+/**
+ * P-041 preflight. This is intentionally the first stack entry: a host can
+ * validate ownership, activation and revocation before any other gate or
+ * decorator gets a chance to touch mutable state. An unwired port is a true
+ * no-op, preserving the generic package's old behavior.
+ */
+const kernelPreflightStep = {
+    name: 'kernel-preflight',
+    async run(exec) {
+        const port = kernelPort(exec);
+        if (!port)
+            return null;
+        const decision = await evaluateKernelEnforcement(port, kernelRequest(exec, 'preflight'));
+        exec.kernelPreflight = decision;
+        if (isKernelDenied(decision))
+            return kernelDenial(exec, 'preflight', decision);
+        return null;
+    },
+};
 /**
  * Default-deny gate (RFC tooldef-auth Phase 3, decision D1). Runs first.
  *
@@ -470,6 +547,36 @@ const ctxBindingsStep = {
             ...(askUser ? { askUser } : {}),
             ...(publishState ? { publishState } : {}),
         });
+        return null;
+    },
+};
+/**
+ * P-041 final enforcement.  This is deliberately after all decorators have
+ * prepared the handler context and immediately before `invoke`; a revocation
+ * or permission reduction observed while a call was being prepared therefore
+ * cannot be bypassed by a stale preflight result.
+ */
+const kernelEnforceStep = {
+    name: 'kernel-enforce',
+    async run(exec) {
+        const port = kernelPort(exec);
+        if (!port)
+            return null;
+        const decision = await evaluateKernelEnforcement(port, kernelRequest(exec, 'enforce', exec.handlerCtx));
+        exec.kernelEnforcement = decision;
+        if (isKernelDenied(decision))
+            return kernelDenial(exec, 'enforce', decision);
+        // Only an explicitly applied enforce-phase revision is execution truth.
+        // Desired/prepared values remain visible to the host result but can never
+        // be stamped onto the handler context or telemetry as "what ran".
+        exec.executionRevision = appliedExecutionRevision(decision, 'enforce');
+        exec.handlerCtx = {
+            ...exec.handlerCtx,
+            kernelPreflight: exec.kernelPreflight,
+            kernelEnforcement: decision,
+            executionRevision: exec.executionRevision,
+            ...(exec.executionRevision ? { appliedExecutionRevision: exec.executionRevision } : {}),
+        };
         return null;
     },
 };
@@ -932,6 +1039,8 @@ const entityCheckStep = {
  * the first one to return a `DispatchProjectedResult` short-circuits.
  *
  * Ordering invariants:
+ *   - `kernel-preflight` is first so ownership/activation/revocation can be
+ *     checked before any other gate, decorator, or handler side effect.
  *   - All gates (role / capability / harness / quota / authorize /
  *     preconditions) come first so denials are cheap (no timer arming, no
  *     buffer allocation, no ctx wrappers). `authorize` runs last among the
@@ -952,10 +1061,13 @@ const entityCheckStep = {
  *     emit refreshes `lastEmitMs`.
  *   - `replay-buffer` runs before `ctx-bindings` because the wrapped
  *     emit pushes into the buffer.
- *   - `ctx-bindings` is the last decorator before `invoke`.
+ *   - `ctx-bindings` is the last decorator before `kernel-enforce`.
+ *   - `kernel-enforce` is immediately before `invoke`, so a changed policy
+ *     cannot be hidden behind a stale preflight result.
  *   - `invoke` is always terminal.
  */
 export const DEFAULT_DISPATCH_STACK = Object.freeze([
+    kernelPreflightStep,
     defaultDenyStep,
     roleAllowlistStep,
     capabilityCheckStep,
@@ -970,6 +1082,7 @@ export const DEFAULT_DISPATCH_STACK = Object.freeze([
     idleWatchdogStep,
     replayBufferStep,
     ctxBindingsStep,
+    kernelEnforceStep,
     invokeStep,
 ]);
 /* ─── Customization ──────────────────────────────────────────────────── */
@@ -1105,7 +1218,7 @@ function extractRefusalDetails(r) {
  * recordInvocation errors are swallowed.
  */
 async function recordTelemetry(exec, result) {
-    const { deps, tool, toolName, ctx, windowKey, input, startedAt, eventCount, callId } = exec;
+    const { deps, tool, toolName, ctx, windowKey, input, startedAt, eventCount, callId, kernelPreflight, kernelEnforcement, executionRevision, } = exec;
     if (!deps.recordInvocation)
         return;
     // Gate denials (no windowKey required); successes + handler errors
@@ -1128,8 +1241,16 @@ async function recordTelemetry(exec, result) {
             code === 'missing_capability' ||
             code === 'capability_denied' ||
             code === 'quota_exceeded');
-    if (!isGateDenial && !windowKey)
+    const isKernelDenial = kernelPreflight?.decision === 'deny' || kernelEnforcement?.decision === 'deny';
+    if (!isGateDenial && !isKernelDenial && !windowKey)
         return;
+    const kernelFields = kernelPreflight || kernelEnforcement || executionRevision
+        ? {
+            executionRevision,
+            kernelPreflight,
+            kernelEnforcement,
+        }
+        : {};
     const metadataJson = mergeDispatchErrorMetadata(finalizeMetadata(exec), result);
     try {
         if (result.ok && result.result) {
@@ -1214,6 +1335,7 @@ async function recordTelemetry(exec, result) {
                 args: input,
                 eventCount,
                 metadataJson: metaWithFormat,
+                ...kernelFields,
             });
         }
         else {
@@ -1233,6 +1355,7 @@ async function recordTelemetry(exec, result) {
                 args: input,
                 eventCount,
                 metadataJson,
+                ...kernelFields,
             });
         }
     }
@@ -1331,6 +1454,9 @@ export async function runDispatchStack(tool, toolName, input, ctx, deps, stack =
                     durationMs: Date.now() - exec.startedAt,
                     capabilities: tool.capabilities,
                     envelopeVerdict: exec.envelopeVerdict,
+                    kernelPreflight: exec.kernelPreflight,
+                    kernelEnforcement: exec.kernelEnforcement,
+                    executionRevision: exec.executionRevision,
                 });
             }
             catch {
