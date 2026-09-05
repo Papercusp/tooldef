@@ -1811,7 +1811,12 @@ export function unrecognizedArgKeys(
   const { msgs, keys: leafKeys } = leafIssueSummary(issues);
   if (!/nrecognized key/i.test(msgs)) return [];
   const merged = mergedSchemaProperties(rawSchema);
-  if (!merged || Object.keys(merged).length === 0) return [];
+  // An empty object schema is still a readable schema. `z.object({})` declares no
+  // keys, but it rejects every caller-supplied key and may carry an authored
+  // corrective-call redirect for those keys (for example `fleet:list`'s ambient
+  // workspace/harness guidance). Dropping this case makes those redirects
+  // unreachable and leaves the caller with only a bare "accepts ONLY:" refusal.
+  if (!merged) return [];
   // Per-branch when the caller's own discriminator picks exactly one, merged otherwise.
   const branch = input === undefined ? undefined : selectedUnionBranchProperties(rawSchema, input);
   const keys = Object.keys(branch ?? merged);

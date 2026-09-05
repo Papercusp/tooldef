@@ -462,6 +462,55 @@ describe('dispatchProjectedTool', () => {
     expect(metadataJson?.invalidInput).toEqual(expected);
   });
 
+  it('emits a corrected call for an authored redirect on a zero-key schema', async () => {
+    defineTool({
+      name: 'test:zero-key-redirect',
+      requirePrincipal: false as const,
+      capability: 'test:read',
+      args: z.object({}),
+      guidance: {
+        argRedirects: {
+          workspace: {
+            tool: 'test:zero-key-redirect',
+            args: {},
+            note: 'this tool resolves workspace ambiently and accepts no workspace argument',
+          },
+        },
+      },
+      async handler() {
+        return { content: [{ type: 'text' as const, text: 'ok' }] };
+      },
+    });
+
+    const result = await dispatchProjectedTool(
+      lookupByMcpName('test:zero-key-redirect')!,
+      'test:zero-key-redirect',
+      { workspace: 'papercusp-workspace' },
+      MAKE_CTX(),
+      MAKE_DEPS(),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error?.code).toBe('invalid_input');
+    expect(result.error?.message).toContain(
+      'CORRECTED CALL — send this: test:zero-key-redirect({  })',
+    );
+    expect(result.error?.message).toContain('removed `workspace`');
+    expect(result.error?.meta?.invalidInput).toMatchObject({
+      corrections: [
+        expect.objectContaining({
+          rejectedArg: 'workspace',
+          kind: 'authored-redirect',
+          target: expect.stringContaining('ambiently'),
+        }),
+      ],
+      correctedCall: expect.objectContaining({
+        args: {},
+        steps: [{ rejectedArg: 'workspace', action: 'dropped' }],
+      }),
+    });
+  });
+
   it('returns timeout when fn exceeds timeoutSec', async () => {
     const tool = makeTool({
       timeoutSec: 0.05,
