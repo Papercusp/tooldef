@@ -118,6 +118,12 @@ export {
   inferCapabilityEffect,
   WRITE_CAPABILITIES,
   WRITE_CAPABILITY_SUFFIXES,
+  // P-002: lets a tool's own contract test assert that each authored
+  // `argRedirects` target really resolves to a declared key on that tool —
+  // the difference between the relocation phrasing and wrongly telling the
+  // caller another tool owns their data.
+  isLocalSchemaTarget,
+  splitLocalSchemaTarget,
 } from './define-tool';
 // EI-19408488769901676: the HARD ceiling was defined but never re-exported, while its
 // softer sibling (the ratchet) was — so a shaper wanting to hit the budget ITSELF, and

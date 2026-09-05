@@ -1874,9 +1874,47 @@ export function invalidInputCorrections(
  * Exported for direct unit test — see strict-args.test.ts.
  */
 export function isLocalSchemaTarget(target: string, keys: readonly string[]): boolean {
-  if (!/^[A-Za-z_$][\w$]*(?:\.[\w$]+|\[\d+\])*$/.test(target)) return false;
-  const root = target.split(/[.[]/)[0];
-  return root !== undefined && root.length > 0 && keys.includes(root);
+  return splitLocalSchemaTarget(target, keys) !== null;
+}
+
+/** The separator between a redirect's destination PATH and its explanatory note. */
+const REDIRECT_NOTE_SEPARATOR = ' — ';
+
+/**
+ * Split an authored redirect target into its local destination PATH and an optional
+ * explanatory NOTE, or return null when the target does not name a path on this tool.
+ *
+ * WHY (P-002 / WI-2145856): `isLocalSchemaTarget` used to test the WHOLE target string
+ * against the path regex, so any target carrying explanation classified as CROSS-TOOL
+ * and rendered "`x` is not an arg of this tool — it is written by <the whole sentence>".
+ * That forced every author into a false choice: a bare key (correct phrasing, no
+ * teaching) or a sentence (the teaching, wrongly attributed to some other tool). A
+ * same-tool relocation WITH an explanation — the common case — was unrepresentable.
+ *
+ * This is not hypothetical or new: `coord:send`'s own shipped redirects are authored as
+ * `body[].premises — put it inside a section: …` and were being rendered with the
+ * cross-tool sentence, which is precisely the misattribution EI-21119949290826530 fixed
+ * for bare targets and EI-22179796827760943 re-reported. Measured against the live
+ * function before this change: of five representative targets only the bare `detail`
+ * classified local.
+ *
+ * The split is on the FIRST occurrence of the note separator, so a note may itself
+ * contain dashes. A target with no separator keeps the previous whole-string behaviour
+ * exactly, which is what makes every already-authored bare target byte-identical.
+ */
+export function splitLocalSchemaTarget(
+  target: string,
+  keys: readonly string[],
+): { path: string; note: string } | null {
+  const separatorAt = target.indexOf(REDIRECT_NOTE_SEPARATOR);
+  const path = separatorAt === -1 ? target : target.slice(0, separatorAt);
+  const note = separatorAt === -1 ? '' : target.slice(separatorAt + REDIRECT_NOTE_SEPARATOR.length).trim();
+  // `[]` joins `[0]` here: an array-valued destination is normally addressed by shape
+  // (`body[].premises`), not by index, and that is the form authors actually write.
+  if (!/^[A-Za-z_$][\w$]*(?:\.[\w$]+|\[\d*\])*$/.test(path)) return null;
+  const root = path.split(/[.[]/)[0];
+  if (root === undefined || root.length === 0 || !keys.includes(root)) return null;
+  return { path, note };
 }
 
 /** The tool name at the head of a `seeAlso` entry (`'work_items:claim (claim a SPECIFIC id)'`). */
@@ -1964,11 +2002,18 @@ export function unknownArgHint(
   // holding right now. The distinction is DERIVED from the tool's own declared keys, so
   // a newly authored redirect classifies itself with no second field to maintain.
   const redirectText = redirected
-    .map(({ rejectedArg, target }) =>
-      isLocalSchemaTarget(target, keys)
-        ? ` \`${rejectedArg}\` is not a top-level arg of this tool — pass it as \`${target}\` instead.`
-        : ` \`${rejectedArg}\` is not an arg of this tool — it is written by ${target}.`,
-    )
+    .map(({ rejectedArg, target }) => {
+      // P-002: a local target may carry an explanatory note after ` — `. Rendering
+      // the note OUTSIDE the backticks is the whole point: inside them it reads as
+      // part of the key name the caller should type.
+      const local = splitLocalSchemaTarget(target, keys);
+      if (local) {
+        return ` \`${rejectedArg}\` is not a top-level arg of this tool — pass it as \`${local.path}\` instead${
+          local.note ? `: ${local.note}` : '.'
+        }`;
+      }
+      return ` \`${rejectedArg}\` is not an arg of this tool — it is written by ${target}.`;
+    })
     .join('');
   const localCorrections = corrections.filter((correction) => correction.kind !== 'authored-redirect');
   const correctionText = localCorrections.length > 0
