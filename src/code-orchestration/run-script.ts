@@ -747,9 +747,24 @@ const WORKER_SRC = `(() => {
       // tools.*/capability:* calls in the script already ran; ones ordered AFTER this point were
       // never dispatched (see strandedWrites in the wrapping tool result). Same rewrite pattern
       // as the dynamic-import case above -- named + actionable instead of a bare ReferenceError.
+      // EI-22453933607371328: structuredClone is likewise a host global, not a JavaScript
+      // intrinsic, so the restricted VM intentionally omits it. A caller using it for the
+      // JSON-only values that can cross the code:run tool boundary otherwise gets a bare
+      // ReferenceError and no hint that JSON.parse(JSON.stringify(value)) is the supported copy
+      // pattern.
+      // EI-22457052636046949: Buffer is another host global omitted from the restricted VM.
+      // Result-door/capability:read pages are already exposed as base64 strings, so callers
+      // should decode them with the VM-local atob helper and Uint8Array instead of retrying
+      // Buffer.from() and receiving a bare ReferenceError.
+      const bufferMatch = /^Buffer is not defined$/.exec(msg);
+      const structuredCloneMatch = /^structuredClone is not defined$/.exec(msg);
       const timerMatch = /^(setTimeout|setInterval) is not defined$/.exec(msg);
       const friendly = /dynamic import callback/i.test(msg)
         ? 'dynamic_import_unsupported: code:run cannot import()/require() repo modules or node builtins -- only tools.ns.verb(args) is exposed (the role tool whitelist IS the sandbox security boundary, same reason require/process are absent). Use capability:bash + npx tsx for direct module/DB access outside that whitelist.'
+        : bufferMatch
+        ? 'buffer_unsupported: code:run has no ambient Buffer -- scripts run in a restricted VM with JSON/Math/Promise intrinsics only; for base64 pages returned by capability:read or result-door recovery, use atob(page.data) and Uint8Array.from(binary, (character) => character.charCodeAt(0)).'
+        : structuredCloneMatch
+        ? 'structured_clone_unsupported: code:run has no ambient structuredClone -- scripts run in a restricted VM with JSON/Math/Promise intrinsics only; for JSON-only tool results and args, use JSON.parse(JSON.stringify(value)).'
         : timerMatch
         ? timerMatch[1] + '_unsupported: code:run has no ambient ' + timerMatch[1] + ' -- the vm sandbox exposes only await sleep(ms) for a bounded async delay (capped per call; resolves with the actual ms waited, so a careful script can self-correct). For a REPEATING delay, loop with await sleep(ms) between iterations instead of setInterval. Any tools.*/capability:* calls ordered after this point in the script were never dispatched -- check strandedWrites in the result.'
         : msg;

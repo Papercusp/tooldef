@@ -195,6 +195,48 @@ describe('runOrchestrationScript (B-CX-1A)', () => {
     expect(r.error).toMatch(/^dynamic_import_unsupported:/);
   });
 
+  // EI-22453933607371328: structuredClone is a host global, not a VM intrinsic, so the
+  // restricted code:run sandbox intentionally omits it. The raw ReferenceError was actionable
+  // only to someone who already knew the sandbox implementation; name the boundary and give the
+  // supported JSON-only copy pattern instead.
+  it('rewrites structuredClone into named guidance for JSON-only values', async () => {
+    const r = await runOrchestrationScript(
+      `const copied = structuredClone({ prior: { score: 1 } }); return copied;`,
+      facade({}),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/^structured_clone_unsupported:/);
+    expect(r.error).not.toMatch(/^structuredClone is not defined$/);
+    expect(r.error).toMatch(/JSON\.parse\(JSON\.stringify\(value\)\)/);
+  });
+
+  // EI-22457052636046949: Buffer is a Node host global, not a VM intrinsic. Result-door
+  // recovery scripts receive base64 pages from capability:read, so the useful replacement is
+  // the VM-local atob helper plus Uint8Array rather than a bare "Buffer is not defined" error.
+  it('rewrites Buffer access into named guidance for base64 page recovery', async () => {
+    const read = vi.fn(async () => ({
+      ok: true,
+      encoding: 'base64',
+      data: 'aGVsbG8=',
+      byte_offset: 0,
+      byte_length: 5,
+      total_bytes: 5,
+      eof: true,
+      next_cursor: null,
+    }));
+    const r = await runOrchestrationScript(
+      `const page = await tools.capability.read({ file_path: '/tmp/spill.md', byte_offset: 0, byte_limit: 4096 });
+       return Buffer.from(page.data, 'base64').toString('utf8');`,
+      facade({ capability: { read } }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/^buffer_unsupported:/);
+    expect(r.error).not.toMatch(/^Buffer is not defined$/);
+    expect(r.error).toMatch(/atob\(page\.data\)/);
+    expect(r.error).toMatch(/Uint8Array/);
+    expect(read).toHaveBeenCalledOnce();
+  });
+
   // EI-7839 / EI-20385364997159134 / EI-21867145325617024 (and other recurring reports of the
   // same root cause): setTimeout is deliberately absent from the vm context (sleep(ms) is the
   // documented replacement), so a script calling it threw a bare, unrewritten "setTimeout is not
