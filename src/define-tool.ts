@@ -36,7 +36,9 @@ import {
   registerProjectedTool,
   resolveMcpName,
   recordToolShapers,
+  isProjectedToolDrop,
   type ProjectedToolCorrectiveCall,
+  type ProjectedToolArgRedirect,
   type ToolFn,
   type ToolExposure,
   type UnifiedToolContext,
@@ -1845,7 +1847,7 @@ export function argsAcceptedOnOtherVariant(
 export function invalidInputCorrections(
   issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
   rawSchema: unknown,
-  argRedirects?: Record<string, string | ProjectedToolCorrectiveCall>,
+  argRedirects?: Record<string, ProjectedToolArgRedirect>,
   /** The caller's raw args, so a near-name guess can be checked against the value it
    *  would relocate (EI-21390759884688723). Optional: absent, behaviour is name-only. */
   input?: unknown,
@@ -1878,6 +1880,14 @@ export function invalidInputCorrections(
       return [{ rejectedArg, target: redirect, kind: 'authored-redirect' }];
     }
     if (redirect && typeof redirect === 'object') {
+      if (isProjectedToolDrop(redirect)) {
+        return [{
+          rejectedArg,
+          target: '',
+          kind: 'authored-drop',
+          note: typeof redirect.note === 'string' ? redirect.note : '',
+        }];
+      }
       const registryRevision = projectedToolRegistryRevision();
       const rendered = renderProjectedToolCall(redirect.tool, redirect.args);
       return [{
@@ -2022,7 +2032,7 @@ export function siblingToolArgOwner(
 export function unknownArgHint(
   issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
   rawSchema: unknown,
-  argRedirects?: Record<string, string | ProjectedToolCorrectiveCall>,
+  argRedirects?: Record<string, ProjectedToolArgRedirect>,
   /** See `invalidInputCorrections` — enables the value-admissibility filter. */
   input?: unknown,
   /** This tool's own name, so a rejected key can be traced to a `seeAlso` sibling that
@@ -2035,7 +2045,9 @@ export function unknownArgHint(
   const keys = props ? Object.keys(props) : [];
   if (keys.length === 0) return '';
   const corrections = invalidInputCorrections(issues, rawSchema, argRedirects, input);
-  const redirected = corrections.filter((correction) => correction.kind === 'authored-redirect');
+  const redirected = corrections.filter(
+    (correction) => correction.kind === 'authored-redirect' || correction.kind === 'authored-drop',
+  );
   // EI-21119949290826530: an authored redirect carries TWO different meanings and only
   // the cross-tool one was ever rendered. A target naming a path INSIDE this tool's own
   // schema (`observation.linkTo`, `body`) is a RELOCATION — the caller sent the right
@@ -2046,7 +2058,12 @@ export function unknownArgHint(
   // holding right now. The distinction is DERIVED from the tool's own declared keys, so
   // a newly authored redirect classifies itself with no second field to maintain.
   const redirectText = redirected
-    .map(({ rejectedArg, target }) => {
+    .map(({ rejectedArg, target, kind, note }) => {
+      if (kind === 'authored-drop') {
+        return ` \`${rejectedArg}\` is not an arg of this tool — drop the key${
+          note ? `: ${note}` : '.'
+        }`;
+      }
       // P-002: a local target may carry an explanatory note after ` — `. Rendering
       // the note OUTSIDE the backticks is the whole point: inside them it reads as
       // part of the key name the caller should type.
@@ -2059,7 +2076,9 @@ export function unknownArgHint(
       return ` \`${rejectedArg}\` is not an arg of this tool — it is written by ${target}.`;
     })
     .join('');
-  const localCorrections = corrections.filter((correction) => correction.kind !== 'authored-redirect');
+  const localCorrections = corrections.filter(
+    (correction) => correction.kind !== 'authored-redirect' && correction.kind !== 'authored-drop',
+  );
   const correctionText = localCorrections.length > 0
     ? ` Did you mean ${localCorrections.map(({ rejectedArg, target }) => `\`${target}\` for \`${rejectedArg}\``).join('; ')}?`
     : '';
@@ -2160,7 +2179,7 @@ function makeInvalidInputError(
   issues: ReadonlyArray<StandardSchemaV1.Issue>,
   input: unknown,
   rawSchema: unknown,
-  argRedirects: Record<string, string | ProjectedToolCorrectiveCall> | undefined,
+  argRedirects: Record<string, ProjectedToolArgRedirect> | undefined,
   argPreconditions?: (rawInput: unknown) => readonly string[],
 ): InvalidInputError {
   const corrections = invalidInputCorrections(issues, rawSchema, argRedirects, input);

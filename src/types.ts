@@ -471,7 +471,7 @@ export interface ToolGuidance {
    * Example: `{ tags: 'work_items:tag { id, topic } — the ONLY writer for the
    * claim-spec-visible tags field' }`
    */
-  argRedirects?: Record<string, string | ToolGuidanceCorrectiveCall>;
+  argRedirects?: Record<string, string | ToolGuidanceCorrectiveCall | ToolGuidanceDrop>;
   /**
    * Per-role override. Set ONLY the fields that differ from the base
    * guidance; shallowly merged at projection time. Use sparingly — most
@@ -493,6 +493,16 @@ export interface ToolGuidanceCorrectiveCall {
   tool: string;
   args: Record<string, unknown>;
   note?: string;
+}
+
+/**
+ * An authored invalid-input remedy for a key with no replacement destination.
+ * This explicit shape keeps a prose drop instruction from being misread as a
+ * cross-tool redirect by the failure-path renderer.
+ */
+export interface ToolGuidanceDrop {
+  drop: true;
+  note: string;
 }
 
 /**

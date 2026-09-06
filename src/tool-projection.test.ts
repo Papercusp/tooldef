@@ -643,6 +643,23 @@ describe('registry-derived executable tool contracts (P-002)', () => {
       .toThrow(/modality voice is not admitted/);
   });
 
+  it('does not treat explicit drop remedies as executable corrective calls', () => {
+    registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'source:drop' } },
+      guidance: {
+        argRedirects: {
+          mode: {
+            drop: true,
+            note: 'this source has no mode concept; omit the key',
+          },
+        },
+      },
+    }));
+
+    expect(projectedToolCorrectiveCalls('source:drop')).toEqual([]);
+    expect(() => assertProjectedToolGuidanceConformance()).not.toThrow();
+  });
+
   it('fails structured corrective-call conformance on missing tools, required keys, enums, and undeclared keys', () => {
     const targetSchema = {
       type: 'object',

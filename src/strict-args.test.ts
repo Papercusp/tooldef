@@ -236,6 +236,20 @@ describe('unknownArgHint argRedirects (EI-20281509195248260)', () => {
     expect(out).not.toContain('is not an arg of this tool');
   });
 
+  it('renders an explicit authored drop remedy instead of a cross-tool misattribution', () => {
+    const out = unknownArgHint(issues, schema, {
+      tags: {
+        drop: true,
+        note: 'this tool has no tags concept; omit the key and retry with the declared fields',
+      },
+    });
+    expect(out).toContain('`tags` is not an arg of this tool');
+    expect(out).toContain('drop the key');
+    expect(out).toContain('this tool has no tags concept');
+    expect(out).not.toContain('it is written by');
+    expect(out).not.toContain('Did you mean');
+  });
+
   it('END-TO-END: the rendered hint routes around a value-incompatible target (EI-21390759884688723)', () => {
     // The whole point of EI-10883's loud rejection is that ONE failed call teaches the
     // corrected call. A hint naming a target that cannot hold the value inverts that,

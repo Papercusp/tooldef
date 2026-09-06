@@ -141,7 +141,9 @@ import type { CorrectedCall } from './corrected-call';
 export interface InvalidInputCorrection {
   rejectedArg: string;
   target: string;
-  kind: 'authored-redirect' | 'nested-path' | 'near-name';
+  kind: 'authored-redirect' | 'authored-drop' | 'nested-path' | 'near-name';
+  /** Authored explanation for an explicit drop remedy. */
+  note?: string;
   call?: {
     tool: string;
     args: Record<string, unknown>;
