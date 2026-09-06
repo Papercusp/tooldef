@@ -20,7 +20,7 @@ import { standardValidate, formatIssues, issuesAreValueLevel, issueLeaves } from
 import { applyArgReencodings, boundValue, correctedDisclosure, } from './reencode-args';
 import { register } from './registry';
 import { collectToolEmits } from './emits-registry';
-import { PROJECTED_TOOL_REGISTRY_SOURCE, projectedToolRegistryRevision, renderProjectedToolCall, registerProjectedTool, resolveMcpName, recordToolShapers, } from './tool-projection';
+import { PROJECTED_TOOL_REGISTRY_SOURCE, projectedToolRegistryRevision, renderProjectedToolCall, registerProjectedTool, resolveMcpName, recordToolShapers, isProjectedToolDrop, } from './tool-projection';
 import { UnauthorizedToolError, InvalidInputError, } from './dispatch-projected';
 import { serverVintageHint, constraintVintageHint } from './server-vintage';
 import { readAmbientArgKeys } from './ambient-args';
@@ -60,6 +60,47 @@ import { analyzeSchema, projectReadColumns, projectWriteColumns, reconstructArgs
  * take the first frame outside it. Correct at any delegation depth, and it stays
  * correct when this file is refactored again.
  */
+/**
+ * A stack frame's file, as an absolute FILESYSTEM PATH.
+ *
+ * `getFileName()` returns a `file://` URL under ESM and a bare path under CJS, but
+ * `ProjectedTool.sourceFile` is documented as an absolute PATH, and every host consumer
+ * resolves it against a repo root by string-prefix comparison. A URL fails that
+ * comparison — and fails it QUIETLY, in the direction that looks like a legitimate
+ * answer: the host reports "this file is outside the repo" rather than erroring, so a
+ * verdict built on it degrades to `unknown` for EVERY tool with nothing failing anywhere.
+ *
+ * Measured 2026-09-05 (P-003 / EI-22450280531836927): `toolSchemaStaleness` in
+ * operator-core answered `unknown/source-outside-repo` for 884 of 1,078 open
+ * tool-failure filings — 100% of the ones whose subject resolved at all — because
+ * `relativizeToRepo('file:///home/.../x.ts', '/home/.../papercusp')` is null by
+ * construction. Its unit tests never caught it: they inject a `sourceFileFor` stub that
+ * returns a plain path, so the one seam that carries the URL was the one seam never
+ * exercised.
+ *
+ * Converted here, at the field's source, so no consumer has to know which module system
+ * registered a tool. Deliberately dependency-free (no `node:url`): this lib ships a
+ * browser-safe barrel.
+ */
+function definitionSitePath(file) {
+    // Only the local-file form. A `file://host/share` UNC URL has no path equivalent here
+    // and is left exactly as it came, rather than being mangled into a plausible-looking
+    // absolute path — an unusable value must stay recognisably unusable.
+    if (!file.startsWith('file:///'))
+        return file;
+    let path = file.slice('file://'.length);
+    // A Windows drive URL is `file:///C:/x`; the leading slash is part of the URL grammar,
+    // not the path.
+    if (/^\/[A-Za-z]:/.test(path))
+        path = path.slice(1);
+    try {
+        return decodeURIComponent(path);
+    }
+    catch {
+        // A malformed escape is not a reason to lose the frame entirely.
+        return path;
+    }
+}
 function captureDefinitionSite() {
     const ErrorAny = Error;
     const orig = ErrorAny.prepareStackTrace;
@@ -83,7 +124,7 @@ function captureDefinitionSite() {
             // Node internals ('node:internal/...') are never a definition site.
             if (file.startsWith('node:'))
                 continue;
-            return file;
+            return definitionSitePath(file);
         }
         return null;
     }
@@ -1610,7 +1651,12 @@ input) {
     if (!/nrecognized key/i.test(msgs))
         return [];
     const merged = mergedSchemaProperties(rawSchema);
-    if (!merged || Object.keys(merged).length === 0)
+    // An empty object schema is still a readable schema. `z.object({})` declares no
+    // keys, but it rejects every caller-supplied key and may carry an authored
+    // corrective-call redirect for those keys (for example `fleet:list`'s ambient
+    // workspace/harness guidance). Dropping this case makes those redirects
+    // unreachable and leaves the caller with only a bare "accepts ONLY:" refusal.
+    if (!merged)
         return [];
     // Per-branch when the caller's own discriminator picks exactly one, merged otherwise.
     const branch = input === undefined ? undefined : selectedUnionBranchProperties(rawSchema, input);
@@ -1666,6 +1712,14 @@ input) {
             return [{ rejectedArg, target: redirect, kind: 'authored-redirect' }];
         }
         if (redirect && typeof redirect === 'object') {
+            if (isProjectedToolDrop(redirect)) {
+                return [{
+                        rejectedArg,
+                        target: '',
+                        kind: 'authored-drop',
+                        note: typeof redirect.note === 'string' ? redirect.note : '',
+                    }];
+            }
             const registryRevision = projectedToolRegistryRevision();
             const rendered = renderProjectedToolCall(redirect.tool, redirect.args);
             return [{
@@ -1706,10 +1760,44 @@ input) {
  * Exported for direct unit test — see strict-args.test.ts.
  */
 export function isLocalSchemaTarget(target, keys) {
-    if (!/^[A-Za-z_$][\w$]*(?:\.[\w$]+|\[\d+\])*$/.test(target))
-        return false;
-    const root = target.split(/[.[]/)[0];
-    return root !== undefined && root.length > 0 && keys.includes(root);
+    return splitLocalSchemaTarget(target, keys) !== null;
+}
+/** The separator between a redirect's destination PATH and its explanatory note. */
+const REDIRECT_NOTE_SEPARATOR = ' — ';
+/**
+ * Split an authored redirect target into its local destination PATH and an optional
+ * explanatory NOTE, or return null when the target does not name a path on this tool.
+ *
+ * WHY (P-002 / WI-2145856): `isLocalSchemaTarget` used to test the WHOLE target string
+ * against the path regex, so any target carrying explanation classified as CROSS-TOOL
+ * and rendered "`x` is not an arg of this tool — it is written by <the whole sentence>".
+ * That forced every author into a false choice: a bare key (correct phrasing, no
+ * teaching) or a sentence (the teaching, wrongly attributed to some other tool). A
+ * same-tool relocation WITH an explanation — the common case — was unrepresentable.
+ *
+ * This is not hypothetical or new: `coord:send`'s own shipped redirects are authored as
+ * `body[].premises — put it inside a section: …` and were being rendered with the
+ * cross-tool sentence, which is precisely the misattribution EI-21119949290826530 fixed
+ * for bare targets and EI-22179796827760943 re-reported. Measured against the live
+ * function before this change: of five representative targets only the bare `detail`
+ * classified local.
+ *
+ * The split is on the FIRST occurrence of the note separator, so a note may itself
+ * contain dashes. A target with no separator keeps the previous whole-string behaviour
+ * exactly, which is what makes every already-authored bare target byte-identical.
+ */
+export function splitLocalSchemaTarget(target, keys) {
+    const separatorAt = target.indexOf(REDIRECT_NOTE_SEPARATOR);
+    const path = separatorAt === -1 ? target : target.slice(0, separatorAt);
+    const note = separatorAt === -1 ? '' : target.slice(separatorAt + REDIRECT_NOTE_SEPARATOR.length).trim();
+    // `[]` joins `[0]` here: an array-valued destination is normally addressed by shape
+    // (`body[].premises`), not by index, and that is the form authors actually write.
+    if (!/^[A-Za-z_$][\w$]*(?:\.[\w$]+|\[\d*\])*$/.test(path))
+        return null;
+    const root = path.split(/[.[]/)[0];
+    if (root === undefined || root.length === 0 || !keys.includes(root))
+        return null;
+    return { path, note };
 }
 /** The tool name at the head of a `seeAlso` entry (`'work_items:claim (claim a SPECIFIC id)'`). */
 function seeAlsoToolName(entry) {
@@ -1784,7 +1872,7 @@ toolName) {
     if (keys.length === 0)
         return '';
     const corrections = invalidInputCorrections(issues, rawSchema, argRedirects, input);
-    const redirected = corrections.filter((correction) => correction.kind === 'authored-redirect');
+    const redirected = corrections.filter((correction) => correction.kind === 'authored-redirect' || correction.kind === 'authored-drop');
     // EI-21119949290826530: an authored redirect carries TWO different meanings and only
     // the cross-tool one was ever rendered. A target naming a path INSIDE this tool's own
     // schema (`observation.linkTo`, `body`) is a RELOCATION — the caller sent the right
@@ -1795,11 +1883,21 @@ toolName) {
     // holding right now. The distinction is DERIVED from the tool's own declared keys, so
     // a newly authored redirect classifies itself with no second field to maintain.
     const redirectText = redirected
-        .map(({ rejectedArg, target }) => isLocalSchemaTarget(target, keys)
-        ? ` \`${rejectedArg}\` is not a top-level arg of this tool — pass it as \`${target}\` instead.`
-        : ` \`${rejectedArg}\` is not an arg of this tool — it is written by ${target}.`)
+        .map(({ rejectedArg, target, kind, note }) => {
+        if (kind === 'authored-drop') {
+            return ` \`${rejectedArg}\` is not an arg of this tool — drop the key${note ? `: ${note}` : '.'}`;
+        }
+        // P-002: a local target may carry an explanatory note after ` — `. Rendering
+        // the note OUTSIDE the backticks is the whole point: inside them it reads as
+        // part of the key name the caller should type.
+        const local = splitLocalSchemaTarget(target, keys);
+        if (local) {
+            return ` \`${rejectedArg}\` is not a top-level arg of this tool — pass it as \`${local.path}\` instead${local.note ? `: ${local.note}` : '.'}`;
+        }
+        return ` \`${rejectedArg}\` is not an arg of this tool — it is written by ${target}.`;
+    })
         .join('');
-    const localCorrections = corrections.filter((correction) => correction.kind !== 'authored-redirect');
+    const localCorrections = corrections.filter((correction) => correction.kind !== 'authored-redirect' && correction.kind !== 'authored-drop');
     const correctionText = localCorrections.length > 0
         ? ` Did you mean ${localCorrections.map(({ rejectedArg, target }) => `\`${target}\` for \`${rejectedArg}\``).join('; ')}?`
         : '';
@@ -2267,22 +2365,50 @@ function argsFieldNamesHint(rawSchema) {
  * tool, no file, nothing to grep (observed: `Transforms cannot be represented in JSON
  * Schema`, which reads like an unrelated infra/zod break and was mis-triaged as one).
  *
- * The overwhelmingly common cause is a TRAILING `.transform()` in the args schema, whose
- * output type JSON Schema cannot express. Refinements (`.refine` / `.superRefine`) and
+ * The two common causes are a TRAILING `.transform()` (whose output type JSON Schema
+ * cannot express) and `z.custom<T>()`. Refinements (`.refine` / `.superRefine`) and
  * `preprocess` are all representable and fine.
  */
+/**
+ * Pick the remedy that matches the CAUSE the converter actually reported.
+ *
+ * The adapter error names the offending CONSTRUCT ("Custom types cannot be represented
+ * in JSON Schema") but never the way out, and the two common causes have DISJOINT
+ * remedies — so one hardcoded hint is affirmatively wrong for whichever cause it does not
+ * describe. Observed: a `z.custom<T>()` author was told to "terminate the transform with
+ * `.pipe()`", advice that cannot apply because there is no transform. The reader then
+ * reaches for the next construct that compiles, and the natural next pick (`z.unknown()`)
+ * is representable but infers `unknown` — which will not assign to T — so the cause-blind
+ * hint costs a second failed attempt in a different check.
+ */
+function argsRemedyFor(causeMessage) {
+    if (/custom type/i.test(causeMessage)) {
+        return (`This one is a \`z.custom<T>()\`: it typechecks CLEANLY — no compiler or lint sees it — and is ` +
+            `unrepresentable. If the field is accepted but never read (a compat passthrough that only has to ` +
+            `survive a \`.strict()\` round-trip), use \`z.any()\`: representable, and still assignable to T. ` +
+            `\`z.unknown()\` is representable too, but infers \`unknown\`, which will NOT assign to T. ` +
+            `Otherwise restate the shape in real Zod, so the contract is actually advertised to callers.`);
+    }
+    if (/transform/i.test(causeMessage)) {
+        return (`This one is a trailing \`.transform()\` — do that normalization in the HANDLER instead ` +
+            `(read the value, resolve it there), or, if a transform is genuinely required, terminate it with ` +
+            `\`.pipe(<schema>)\` so the OUTPUT stays representable.`);
+    }
+    return (`The usual causes are a trailing \`.transform()\` — do that normalization in the HANDLER, or ` +
+        `terminate it with \`.pipe(<schema>)\` — and \`z.custom<T>()\`, for which \`z.any()\` is the ` +
+        `representable stand-in on a passthrough field.`);
+}
 export function toArgsJsonSchema(toolName, args) {
     try {
         return toJsonSchema(args);
     }
     catch (err) {
+        const cause = err.message;
         throw new Error(`Tool "${toolName}": its \`args\` schema cannot be represented in JSON Schema — ` +
-            `${err.message}. This is FATAL FOR THE WHOLE TOOL CATALOG, not just this tool: ` +
+            `${cause}. This is FATAL FOR THE WHOLE TOOL CATALOG, not just this tool: ` +
             `the conversion runs at registration and again (unguarded) when tools/list is served, so a ` +
             `single unrepresentable schema breaks tool discovery for every client. ` +
-            `The usual cause is a trailing \`.transform()\` — do that normalization in the HANDLER instead ` +
-            `(read the value, resolve it there), or, if a transform is genuinely required, terminate it with ` +
-            `\`.pipe(<schema>)\` so the OUTPUT stays representable. Refinements are always fine.`);
+            `${argsRemedyFor(cause)} Refinements are always fine.`);
     }
 }
 function registerLegacyAsProjected(def, expose, sourceFile) {

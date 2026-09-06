@@ -597,6 +597,13 @@ export function renderProjectedToolCall(name, args, context = {}) {
     assertProjectedToolCallContract(name, args, context);
     return `${name} ${JSON.stringify(args)}`;
 }
+/** Return whether an authored redirect explicitly tells the caller to drop its key. */
+export function isProjectedToolDrop(value) {
+    return (!!value &&
+        typeof value === 'object' &&
+        !Array.isArray(value) &&
+        value.drop === true);
+}
 /** Validate and render every structured rejected-arg remedy on one source tool. */
 export function projectedToolCorrectiveCalls(name, context = {}) {
     projectedToolCallContract(name, context);
@@ -604,6 +611,12 @@ export function projectedToolCorrectiveCalls(name, context = {}) {
     return Object.entries(tool.guidance?.argRedirects ?? {}).flatMap(([rejectedArg, redirect]) => {
         if (typeof redirect === 'string')
             return [];
+        if (isProjectedToolDrop(redirect)) {
+            if (typeof redirect.note !== 'string' || redirect.note.trim().length === 0) {
+                throw new ProjectedToolContractError(`invalid drop redirect for ${name}.${rejectedArg}: note must be non-empty`);
+            }
+            return [];
+        }
         // A remedy this context cannot CALL is not offered to it (EI-22188204415833751). An
         // all-profile tool may legitimately redirect into a narrower one — coord:presence's
         // `fleet` -> fleet:assignments (profile:'engineer') — which is correct guidance for the

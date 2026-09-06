@@ -104,7 +104,7 @@ export function buildCorrectedCall(params) {
     // `unknownArgHint` already emits, remains the answer for where the value belongs.
     const byArg = new Map();
     for (const correction of corrections) {
-        if (correction.kind === 'authored-redirect')
+        if (correction.kind === 'authored-redirect' || correction.kind === 'authored-drop')
             continue;
         if (!byArg.has(correction.rejectedArg))
             byArg.set(correction.rejectedArg, correction);

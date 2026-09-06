@@ -26,7 +26,12 @@ export { KERNEL_ENFORCEMENT_SCHEMA, sameKernelRevision, sameExecutionRevision, k
 /* ─── defineTool + sibling authoring primitives ──────────────────────── */
 export { defineTool, toArgsJsonSchema, 
 // The effect oracle — for static scanners that cannot execute defineTool (WI-6464).
-inferCapabilityEffect, WRITE_CAPABILITIES, WRITE_CAPABILITY_SUFFIXES, } from './define-tool';
+inferCapabilityEffect, WRITE_CAPABILITIES, WRITE_CAPABILITY_SUFFIXES, 
+// P-002: lets a tool's own contract test assert that each authored
+// `argRedirects` target really resolves to a declared key on that tool —
+// the difference between the relocation phrasing and wrongly telling the
+// caller another tool owns their data.
+isLocalSchemaTarget, splitLocalSchemaTarget, } from './define-tool';
 // EI-19408488769901676: the HARD ceiling was defined but never re-exported, while its
 // softer sibling (the ratchet) was — so a shaper wanting to hit the budget ITSELF, and
 // thereby avoid the blind generic fall-through, had no way to reference the number it
@@ -75,7 +80,7 @@ export { toJsonSchema, setJsonSchemaAdapter, zodJsonSchemaAdapter, } from './sch
 /* ─── Standard Schema validation (validator-agnostic) ────────────────── */
 export { standardValidate, validateSync, formatIssues, } from './standard-schema';
 /* ─── Projected-tool registry (the function-as-truth core) ───────────── */
-export { registerProjectedTool, unregisterProjectedToolsForPlugin, toolDeclaresGate, listUngatedProjectedTools, lookupByMcpName, resolveMcpName, normalizeMcpName, lookupByHttpPath, listAllProjectedTools, projectedToolSourceFile, listDeclaredToolShapers, recordToolShapers, PROJECTED_TOOL_REGISTRY_SOURCE, projectedToolRegistryRevision, projectedToolCallContract, projectedToolAdmitted, assertProjectedToolCallContract, renderProjectedToolCall, projectedToolCorrectiveCalls, assertProjectedToolGuidanceConformance, ProjectedToolContractError, listMcpProjections, ToolRegistrationError, emitToSseSink, isPapercuspBinaryEnvelope, _resetProjectionRegistryForTests, } from './tool-projection';
+export { registerProjectedTool, unregisterProjectedToolsForPlugin, toolDeclaresGate, listUngatedProjectedTools, lookupByMcpName, resolveMcpName, normalizeMcpName, lookupByHttpPath, listAllProjectedTools, projectedToolSourceFile, listDeclaredToolShapers, recordToolShapers, PROJECTED_TOOL_REGISTRY_SOURCE, projectedToolRegistryRevision, projectedToolCallContract, projectedToolAdmitted, assertProjectedToolCallContract, renderProjectedToolCall, projectedToolCorrectiveCalls, isProjectedToolDrop, assertProjectedToolGuidanceConformance, ProjectedToolContractError, listMcpProjections, ToolRegistrationError, emitToSseSink, isPapercuspBinaryEnvelope, _resetProjectionRegistryForTests, } from './tool-projection';
 /* ─── Dispatcher ─────────────────────────────────────────────────────── */
 export { dispatchProjectedTool, dispatchProjectedToolStream, defaultComputeQuotaWindow, UnauthorizedToolError, HarnessRequiredError, WorkspaceTxNotDeclaredError, WorkspaceTxUnavailableError, InvalidInputError, PASS_THROUGH, } from './dispatch-projected';
 /**
