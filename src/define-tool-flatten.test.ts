@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+import { dataConditionSchema } from '@papercusp/rules';
 import { flattenForOpenAi, toArgsJsonSchema } from './define-tool';
 
 describe('flattenForOpenAi', () => {
@@ -76,5 +77,23 @@ describe('flattenForOpenAi', () => {
     });
 
     expect(flattened.properties).toEqual({ value: { not: { type: 'string' } } });
+  });
+
+  it('keeps recursive definitions when flattening a union with a nested lazy schema', () => {
+    const raw = toArgsJsonSchema(
+      'test:recursive-filter',
+      z.union([
+        z.object({ pattern: z.string(), payload_filter: dataConditionSchema.optional() }),
+        z.object({ pattern: z.string(), predicate: z.string() }),
+      ]),
+    );
+    const flattened = flattenForOpenAi(raw);
+    const properties = flattened.properties as Record<string, Record<string, unknown>>;
+    const payloadFilter = properties.payload_filter;
+    const definitions = flattened.$defs as Record<string, unknown> | undefined;
+
+    expect(payloadFilter?.$ref).toMatch(/^#\/\$defs\//);
+    expect(definitions).toBeDefined();
+    expect(definitions?.[String(payloadFilter?.$ref).slice('#/$defs/'.length)]).toBeDefined();
   });
 });

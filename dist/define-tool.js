@@ -1130,12 +1130,22 @@ export function flattenForOpenAi(schema) {
         }
     }
     const required = [...requiredSets[0]].filter((p) => requiredSets.every((s) => s.has(p)));
+    // A recursive nested schema (for example rules' dataConditionSchema) is
+    // emitted as a `$ref` into the root `$defs` map. The union flattening above
+    // replaces the root `anyOf`/`oneOf` with a new object, so dropping `$defs`
+    // here leaves every such property dangling (`#/$defs/__schema0`) and makes
+    // the published tool schema unusable to clients that validate references.
+    // Keep the definitions alongside the flattened object; they are still valid
+    // JSON Schema and preserve the recursive contract for the client.
+    const definitions = schema.$defs;
+    const hasDefinitions = definitions !== null && typeof definitions === 'object' && !Array.isArray(definitions);
     return {
         type: 'object',
         properties: mergedProps,
         ...(required.length > 0 ? { required } : {}),
         additionalProperties: false,
         description: typeof schema.description === 'string' ? schema.description : undefined,
+        ...(hasDefinitions ? { $defs: definitions } : {}),
     };
 }
 /**
