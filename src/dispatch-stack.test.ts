@@ -129,6 +129,25 @@ describe('workspace transaction contract (EI-18808330244321407)', () => {
     expect(result.result?.content[0]).toMatchObject({ text: 'WorkspaceTxNotDeclaredError' });
   });
 
+  it('preserves the undeclared-tx guard after the final kernel decorator spread', async () => {
+    const phases: string[] = [];
+    const result = await runDispatchStack(
+      txNameTool(),
+      'fix.tool',
+      {},
+      MAKE_CTX(),
+      {
+        kernelEnforcement: async (request) => {
+          phases.push(request.phase);
+          return { decision: 'allow', availability: 'available' };
+        },
+      },
+    );
+    expect(result.ok).toBe(true);
+    expect(phases).toEqual(['preflight', 'enforce']);
+    expect(result.result?.content[0]).toMatchObject({ text: 'WorkspaceTxNotDeclaredError' });
+  });
+
   it('preserves a real host-bound tx for a declared consumer', async () => {
     const result = await runDispatchStack(
       txNameTool({ needsWorkspaceTx: true }),
