@@ -174,6 +174,22 @@ describe('runOrchestrationScript (B-CX-1A)', () => {
     expect(read).toHaveBeenCalledOnce();
   });
 
+  it('encodes binary snapshot values with VM-local btoa without exposing Buffer', async () => {
+    const bytes = Uint8Array.from([0, 255, 1, 128, 226, 156, 147]);
+    const expected = Buffer.from(bytes).toString('base64');
+    const r = await runOrchestrationScript(
+      "const binary = String.fromCharCode(0, 255, 1, 128, 226, 156, 147); " +
+        "return { encoded: btoa(binary), btoaType: typeof btoa, bufferType: typeof Buffer };",
+      facade({}),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.result).toEqual({
+      encoded: expected,
+      btoaType: 'function',
+      bufferType: 'undefined',
+    });
+  });
+
   it('reassembles UTF-8 capability:read pages with a VM-local TextDecoder', async () => {
     const bytes = new TextEncoder().encode('spill recovery ✅ café — résumé');
     const split = bytes.findIndex((byte) => byte >= 0xc0);

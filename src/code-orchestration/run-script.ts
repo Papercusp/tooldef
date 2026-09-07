@@ -657,6 +657,29 @@ const WORKER_SRC = `(() => {
     "  }\\n" +
     "  return output;\\n" +
     '}\\n' +
+    // btoa is deliberately defined in the VM realm alongside atob. Keep the
+    // helper host-independent so callers can encode a compact ASCII/binary
+    // snapshot for a capability:bash command without exposing Node's Buffer.
+    'globalThis.btoa = (input) => {\\n' +
+    "  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';\\n" +
+    '  const value = String(input);\\n' +
+    '  let output = "";\\n' +
+    '  for (let i = 0; i < value.length; i += 3) {\\n' +
+    '    const c0 = value.charCodeAt(i);\\n' +
+    '    const hasC1 = i + 1 < value.length;\\n' +
+    '    const hasC2 = i + 2 < value.length;\\n' +
+    '    const c1 = hasC1 ? value.charCodeAt(i + 1) : 0;\\n' +
+    '    const c2 = hasC2 ? value.charCodeAt(i + 2) : 0;\\n' +
+    '    if (c0 > 0xff || (hasC1 && c1 > 0xff) || (hasC2 && c2 > 0xff)) {\\n' +
+    "      throw new Error('InvalidCharacterError: the string to be encoded contains characters outside of the Latin1 range');\\n" +
+    '    }\\n' +
+    '    output += alphabet.charAt(c0 >> 2);\\n' +
+    '    output += alphabet.charAt(((c0 & 3) << 4) | (c1 >> 4));\\n' +
+    '    output += hasC1 ? alphabet.charAt(((c1 & 15) << 2) | (c2 >> 6)) : "=";\\n' +
+    '    output += hasC2 ? alphabet.charAt(c2 & 63) : "=";\\n' +
+    '  }\\n' +
+    '  return output;\\n' +
+    '}\\n' +
     // TextDecoder is a host global in Node, not a JavaScript intrinsic, and passing Node's
     // constructor into the VM would expose a host Function. Keep the decode seam realm-local so
     // scripts can reassemble UTF-8 result-door/capability:read pages without reopening the host.
