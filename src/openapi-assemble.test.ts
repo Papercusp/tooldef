@@ -55,6 +55,18 @@ describe('assembleOpenApiDocument', () => {
     expect((paths['/api/one.tool'] as { post: unknown }).post).toBeDefined();
   });
 
+  it('uses each tool\'s declared HTTP path in the assembled document', () => {
+    const doc = assembleOpenApiDocument([
+      makeTool({
+        expose: {
+          mcp: { name: 'health:ack' },
+          http: { path: '/api/agent-tools/health/ack', methods: ['POST'] },
+        },
+      }),
+    ]);
+    expect(Object.keys(doc.paths as Record<string, unknown>)).toEqual(['/api/agent-tools/health/ack']);
+  });
+
   it('sorts paths by operation name for byte-stable output', () => {
     const doc = assembleOpenApiDocument([
       makeTool({ expose: { mcp: { name: 'zebra.tool' } } }),
