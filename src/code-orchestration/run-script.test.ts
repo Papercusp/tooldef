@@ -174,6 +174,41 @@ describe('runOrchestrationScript (B-CX-1A)', () => {
     expect(read).toHaveBeenCalledOnce();
   });
 
+  it('reassembles UTF-8 capability:read pages with a VM-local TextDecoder', async () => {
+    const bytes = new TextEncoder().encode('spill recovery ✅ café — résumé');
+    const split = bytes.findIndex((byte) => byte >= 0xc0);
+    const first = bytes.slice(0, split + 1);
+    const second = bytes.slice(split + 1);
+    const page = (chunk: Uint8Array, eof: boolean) => ({
+      ok: true,
+      encoding: 'base64',
+      byte_offset: 0,
+      byte_length: chunk.length,
+      total_bytes: bytes.length,
+      eof,
+      data: Buffer.from(chunk).toString('base64'),
+      next_cursor: eof ? null : { byte_offset: first.length },
+    });
+    const read = vi.fn()
+      .mockResolvedValueOnce(page(first, false))
+      .mockResolvedValueOnce(page(second, true));
+    const r = await runOrchestrationScript(
+      `const first = await tools.capability.read({ file_path: '/tmp/spill.md', byte_offset: 0, byte_limit: 4096 });
+       const second = await tools.capability.read({ file_path: '/tmp/spill.md', byte_offset: first.next_cursor.byte_offset, byte_limit: 4096 });
+       const binary = atob(first.data) + atob(second.data);
+       const decoded = new TextDecoder('utf-8').decode(Uint8Array.from(binary, (character) => character.charCodeAt(0)));
+       return { decoded, decoderType: typeof TextDecoder, bufferType: typeof Buffer };`,
+      facade({ capability: { read } }),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.result).toEqual({
+      decoded: 'spill recovery ✅ café — résumé',
+      decoderType: 'function',
+      bufferType: 'undefined',
+    });
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
   // EI-19294786663902075: the vm context has no importModuleDynamically callback, so a script's
   // `await import(...)` throws the V8-internal "A dynamic import callback was not specified."
   // before the specifier is even looked at -- which reads like a bad path, not a sandbox limit.
