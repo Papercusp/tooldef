@@ -258,6 +258,27 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     expect(r.partial).toBe(false); // EI-7784: no rejected write ⇒ not partial
   });
 
+  it('classifies a write tool invoked with its own dryRun:true as a preview, not a settled mutation', async () => {
+    const amend = mkTool('rubrics:amend', 'write', async () =>
+      json({ ok: true, dryRun: true, preview: { revision: 7 } }),
+    );
+    const r = await runToolOrchestration(
+      `await tools.rubrics.amend({ rubricRef: 'bar', dryRun: true }); return 'preview';`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [amend] },
+    );
+
+    expect(r.ok).toBe(true);
+    expect(r.plannedMutations).toEqual([
+      { tool: 'rubrics:amend', args: { rubricRef: 'bar', dryRun: true } },
+    ]);
+    expect(r.writeAttempts).toEqual([
+      { index: 0, tool: 'rubrics:amend', disposition: 'preview' },
+    ]);
+    expect(r.callRecords).toEqual([
+      expect.objectContaining({ tool: 'rubrics:amend', effect: 'write', disposition: 'preview' }),
+    ]);
+  });
+
   // EI-7669: a write-effect call can dispatch fine (no throw — realDispatch only throws on a
   // dispatch-level failure) yet report its OWN semantic rejection (ok: false in its result body,
   // e.g. work_items:set_state's completion-integrity check). A script that doesn't inspect every

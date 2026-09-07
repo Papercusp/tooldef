@@ -97,6 +97,8 @@ export interface PlannedMutation {
 export type WriteAttemptDisposition =
   | 'in_flight'
   | 'settled'
+  /** The write-class tool ran in its own preview/dry-run mode and did not apply state. */
+  | 'preview'
   | 'semantic_rejected'
   | 'rejected'
   | 'uncertain';
@@ -131,6 +133,8 @@ export type OrchestrationCallDisposition =
   | 'planned'
   | 'in_flight'
   | 'settled'
+  /** The write-class tool ran in its own preview/dry-run mode and did not apply state. */
+  | 'preview'
   | 'semantic_rejected'
   | 'rejected'
   | 'uncertain';
@@ -475,6 +479,20 @@ function isBulkPartialFailure(
   if (typeof counts !== 'object' || counts === null) return false;
   const failed = (counts as Record<string, unknown>).failed;
   return typeof failed === 'number' && failed > 0;
+}
+
+/**
+ * A write-class tool can be dispatched by a non-dry-run orchestration while asking the tool
+ * itself for a preview (for example `rubrics:amend({ dryRun: true })`). The outer orchestration
+ * dry-run gate cannot see that intent: it only knows the tool's registry effect. Keep the check
+ * deliberately top-level and exact, and accept the returned marker as a compatibility fallback
+ * for tools that normalize/default their preview flag before returning.
+ */
+function isChildPreview(args: unknown, result: unknown): boolean {
+  const hasDryRunMarker = (value: unknown): boolean =>
+    typeof value === 'object' && value !== null && !Array.isArray(value) &&
+    (value as Record<string, unknown>).dryRun === true;
+  return hasDryRunMarker(args) || hasDryRunMarker(result);
 }
 
 const OUTPUT_REFERENCE_SHA_RE = /^[0-9a-f]{64}$/i;
@@ -843,8 +861,9 @@ export async function runToolOrchestration(
           okFalseMutations.push({ tool: name, args, result });
         }
       } else if (writeAttempt) {
-        writeAttempt.disposition = 'settled';
-        callRecord.disposition = 'settled';
+        const preview = isChildPreview(args, result);
+        writeAttempt.disposition = preview ? 'preview' : 'settled';
+        callRecord.disposition = preview ? 'preview' : 'settled';
       } else {
         callRecord.disposition = 'settled';
       }
