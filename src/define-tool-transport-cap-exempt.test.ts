@@ -2,8 +2,9 @@
  * EI-18719561823587590: `applyPayloadTier` shapes in two INDEPENDENT steps —
  * (1) tier shaping, and (2) a HARD CEILING that force-applies the generic
  * bounded projection to any result over `PAYLOAD_TIER_HARD_CEILING_CHARS`
- * REGARDLESS of the resolved tier. Step 2's only exit was an explicit per-call
- * `payloadTier:'full'` arg.
+ * REGARDLESS of the resolved tier. Step 2's exit is a caller-selected full tier
+ * (`payloadTier:'full'` per call or `ctx_tier=full` for the session) or an
+ * in-process transport-cap exemption.
  *
  * That gap silently truncated `code:run`'s INTERMEDIATE results. A prior fix
  * (EI-18699443874201617) cleared `ctx.contextTier` for inner calls, which skips
@@ -167,12 +168,12 @@ describe('transportCapExempt — the hard-ceiling exit for in-process consumers 
 
   /**
    * Direction-of-error guard. The exemption must not become a blanket
-   * uncapping: an ordinary transport caller — including one whose SESSION tier
-   * resolves to 'full' — must still be capped, because an over-cap payload on
-   * the MCP transport is a hard failure. Only the explicit per-call
-   * `payloadTier:'full'` arg (WI-5078) and this ctx flag are exits.
+   * uncapping: an ordinary transport caller with a bounded session tier must
+   * still be capped, because an over-cap payload on the MCP transport is a hard
+   * failure. A caller-selected full tier — per-call `payloadTier:'full'` or
+   * session `ctx_tier=full` (WI-5078) — and this ctx flag are exits.
    */
-  it('a session-level full tier is still NOT an exemption — only the explicit arg or the ctx flag', async () => {
+  it('a caller-selected session-level full tier stamps the result-door exemption', async () => {
     defineTool({
       name: 'test:cap-session-full',
       capability: 'test:read',
@@ -190,7 +191,8 @@ describe('transportCapExempt — the hard-ceiling exit for in-process consumers 
       DEPS,
     );
     const data = readBack(res);
-    expect(data.visibleRows).toBeLessThan(ROW_COUNT);
-    expect(data.truncated).toBe(true);
+    expect(data.visibleRows).toBe(ROW_COUNT);
+    expect(data.hasNeedle).toBe(true);
+    expect(data.truncated).toBe(false);
   });
 });

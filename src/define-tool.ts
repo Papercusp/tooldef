@@ -2789,12 +2789,17 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       tier: resolvePayloadTier(callTier, ctx.contextTier, {
         ignoreSessionTier: def.ignoreSessionPayloadTier,
       }),
-      // An explicit per-call payloadTier:'full' is the documented escape hatch
-      // out of shaping AND the hard ceiling (WI-5078) — only the arg counts,
-      // never a defaulted/session 'full'. A ctx-borne `transportCapExempt`
-      // consumer (code:run's inner dispatch — the result never reaches an
-      // agent's context) gets the same exemption (EI-18719561823587590).
-      explicitFullRequest: callTier === 'full' || ctx.transportCapExempt === true,
+      // A caller-selected full tier is the documented escape hatch out of
+      // shaping AND the hard ceiling (WI-5078): it can arrive as a per-call
+      // payloadTier:'full' or as the session's explicit ctx_tier=full choice.
+      // The latter must be stamped too, because the downstream result-door
+      // sees only serialized metadata and otherwise generically re-projects
+      // the raw body (EI-22586965566163070). A ctx-borne
+      // `transportCapExempt` consumer (code:run's inner dispatch — the result
+      // never reaches an agent's context) gets the same exemption
+      // (EI-18719561823587590).
+      explicitFullRequest:
+        callTier === 'full' || ctx.contextTier === 'full' || ctx.transportCapExempt === true,
       // WI-37843: a tool may raise its OWN hard ceiling (coord:orient, the
       // session-bootstrap read, whose full payload IS the value). Absent ⇒ the
       // shared PAYLOAD_TIER_HARD_CEILING_CHARS, unchanged for every other tool.
@@ -2976,12 +2981,17 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
       tier: resolvePayloadTier(callTier, handlerCtx.contextTier, {
         ignoreSessionTier: def.ignoreSessionPayloadTier,
       }),
-      // An explicit per-call payloadTier:'full' is the documented escape hatch
-      // out of shaping AND the hard ceiling (WI-5078) — only the arg counts,
-      // never a defaulted/session 'full'. A ctx-borne `transportCapExempt`
-      // consumer (code:run's inner dispatch — the result never reaches an
-      // agent's context) gets the same exemption (EI-18719561823587590).
-      explicitFullRequest: callTier === 'full' || handlerCtx.transportCapExempt === true,
+      // A caller-selected full tier is the documented escape hatch out of
+      // shaping AND the hard ceiling (WI-5078): it can arrive as a per-call
+      // payloadTier:'full' or as the session's explicit ctx_tier=full choice.
+      // The latter must be stamped too, because the downstream result-door
+      // sees only serialized metadata and otherwise generically re-projects
+      // the raw body (EI-22586965566163070). A ctx-borne
+      // `transportCapExempt` consumer (code:run's inner dispatch — the result
+      // never reaches an agent's context) gets the same exemption
+      // (EI-18719561823587590).
+      explicitFullRequest:
+        callTier === 'full' || handlerCtx.contextTier === 'full' || handlerCtx.transportCapExempt === true,
       // WI-37843: a tool may raise its OWN hard ceiling (coord:orient, the
       // session-bootstrap read, whose full payload IS the value). Absent ⇒ the
       // shared PAYLOAD_TIER_HARD_CEILING_CHARS, unchanged for every other tool.
