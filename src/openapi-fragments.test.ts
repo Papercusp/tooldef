@@ -18,9 +18,22 @@ const makeTool = (over: Partial<ProjectedTool> = {}): ProjectedTool => ({
 });
 
 describe('toolToOpenApiFragment — path + operation', () => {
-  it('puts the tool name verbatim into the path (colon preserved)', () => {
+  it('uses the MCP name as a fallback path when no HTTP path is declared', () => {
     const frag = toolToOpenApiFragment('operator:scan', makeTool());
     expect(frag.path).toBe('/api/operator:scan');
+  });
+
+  it('uses the declared HTTP path instead of synthesizing one from the MCP name', () => {
+    const frag = toolToOpenApiFragment(
+      'health:ack',
+      makeTool({
+        expose: {
+          mcp: { name: 'health:ack' },
+          http: { path: '/api/agent-tools/health/ack', methods: ['POST'] },
+        },
+      }),
+    );
+    expect(frag.path).toBe('/api/agent-tools/health/ack');
   });
 
   it('uses a custom pathPrefix when provided', () => {

@@ -12,7 +12,9 @@
  *   - Q2 discriminator: `event` field comes from the SSE `event:` line;
  *     schemas include it as a required string-literal property so the
  *     parsed shape carries the discriminator.
- *   - Q3 tool-name path: colons preserved (`/api/operator:scan`).
+ *   - Q3 tool HTTP path: use the declared `expose.http.path`; the MCP name
+ *     remains the operation id. A name-derived fallback is kept for MCP-only
+ *     projected tools for backwards-compatible document assembly.
  *   - Q5 vendor extensions: `x-papercusp-*`.
  *   - Q6 plugin tools: same shape as built-ins.
  *
@@ -33,8 +35,8 @@ export function componentKey(name: string): string {
 
 export interface OpenApiFragment {
   /**
-   * Path entry — keyed under `paths['/api/<toolname>']` in the
-   * assembled document.
+   * Path entry — keyed under the projected tool's declared HTTP path, or
+   * `/api/<toolname>` for an MCP-only fallback.
    */
   path: string;
   /**
@@ -68,7 +70,11 @@ export function toolToOpenApiFragment(
 ): OpenApiFragment {
   const pathPrefix = opts.pathPrefix ?? '/api';
   const securitySchemeName = opts.securitySchemeName ?? 'bearerAuth';
-  const path = `${pathPrefix}/${toolName}`;
+  // The HTTP adapter serves the manifest's declared path. Synthesizing a path
+  // from the MCP name makes the OpenAPI document advertise a route that the
+  // server cannot handle (for example `health:ack` vs
+  // `/api/agent-tools/health/ack`).
+  const path = tool.expose.http?.path ?? `${pathPrefix}/${toolName}`;
   const keyName = componentKey(toolName);
 
   const schemas: Record<string, Record<string, unknown>> = {};
