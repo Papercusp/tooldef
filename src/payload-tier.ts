@@ -66,6 +66,12 @@ export interface PayloadShapers {
     rows: string;
     /** Override the fields parsed from `returns`. Prefer the derived list. */
     fields?: readonly string[];
+    /**
+     * Top-level envelope keys the trimmed projection must retain beside `rows`.
+     * These are typically qualifiers such as scope, provenance, or bounded-read
+     * metadata whose removal can make otherwise intact rows misleading.
+     */
+    preserve?: readonly string[];
   };
 }
 
