@@ -42,7 +42,7 @@ import { checkScript, ensureParseCheckReady, type StaticToolCall } from './parse
  * `ctx` can never express). `next(callCtx)` performs the actual dispatch with
  * whatever context the wrapper decides is correct for THIS call.
  */
-export type DispatchNext = (callCtx: UnifiedToolContext) => Promise<unknown>;
+export type DispatchNext = (callCtx: UnifiedToolContext, callArgs?: unknown) => Promise<unknown>;
 export type WrapDispatch = (
   tool: ProjectedTool,
   toolName: string,
@@ -801,7 +801,7 @@ export async function runToolOrchestration(
     // wrapper only when inner rows actually exist (census double-count, P-012).
     dispatchCount += 1;
     const childIdempotencyKey = nestedIdempotencyKey(ctx, callRecord.ordinal);
-    const call: DispatchNext = (callCtx) => {
+    const call: DispatchNext = (callCtx, callArgs = args) => {
       // Observe the exact context that enters the real dispatcher, after any
       // per-call workspace/principal rebinding. This is the runtime-owned
       // authorization entry; the script cannot forge or suppress it.
@@ -813,7 +813,7 @@ export async function runToolOrchestration(
       const childCtx = childIdempotencyKey
         ? { ...callCtx, idempotencyKey: childIdempotencyKey }
         : callCtx;
-      return realDispatch(childCtx, callDeps)(tool, name, args);
+      return realDispatch(childCtx, callDeps)(tool, name, callArgs);
     };
     try {
       const result = await (wrapDispatch
