@@ -16,6 +16,7 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import {
   isLocalSchemaTarget,
+  invalidInputCorrections,
   nestedArgPaths,
   strictArgs,
   suggestArgName,
@@ -536,6 +537,30 @@ describe('suggestArgName', () => {
     expect(suggestArgName('description', ['slug', 'content'])).toBe('content');
     expect(suggestArgName('owner', ['slug', 'ownerEmail'])).toBe('ownerEmail');
     expect(suggestArgName('code', ['script', 'timeout_ms'])).toBe('script');
+  });
+
+  it('prefers the plural plan-item selector for a plural itemIds correction', () => {
+    const rawSchema = {
+      properties: {
+        slug: { type: 'string' },
+        planItemIds: { type: 'array' },
+        itemId: { type: 'string' },
+      },
+    };
+    const input = { slug: 'a-plan-2026-09-05', itemIds: ['P-006'] };
+    const corrections = invalidInputCorrections(
+      [{ message: 'Unrecognized key: "itemIds"' }],
+      rawSchema,
+      undefined,
+      input,
+    );
+
+    expect(corrections).toEqual([
+      { rejectedArg: 'itemIds', target: 'planItemIds', kind: 'near-name' },
+    ]);
+    // A tool with only the singular compatibility alias keeps the useful
+    // fallback rather than losing the correction entirely.
+    expect(suggestArgName('itemIds', ['slug', 'itemId'])).toBe('itemId');
   });
 
   /**

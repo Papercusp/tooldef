@@ -1432,6 +1432,11 @@ const COMMON_ARG_ALIASES: Readonly<Record<string, readonly string[]>> = {
   // (verified 2026-08-31: returns `scope: hive, hive: papercusp`). EI-21390759884688723.
   harness: ['scope', 'harnessSlug', 'harness_slug', 'pot'],
   itemid: ['item'],
+  // `itemIds` is the plural spelling used by neighboring plan tools. Prefer a
+  // declared plural destination when this tool has one (for example
+  // plans:get-specs -> planItemIds); fall back to the singular alias only on
+  // tools whose contract has no plural selector. Exact declared keys still win.
+  itemids: ['planItemIds', 'itemId'],
   linkedfeatureid: ['linkedFeatureId', 'linked_feature_id'],
   owner: ['ownerEmail', 'ownerId', 'assignee', 'assign_to'],
   ownerid: ['ownerEmail', 'owner', 'assignee', 'assign_to'],
