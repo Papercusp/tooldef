@@ -121,6 +121,18 @@ function isBulkPartialFailure(value) {
     const failed = counts.failed;
     return typeof failed === 'number' && failed > 0;
 }
+/**
+ * A write-class tool can be dispatched by a non-dry-run orchestration while asking the tool
+ * itself for a preview (for example `rubrics:amend({ dryRun: true })`). The outer orchestration
+ * dry-run gate cannot see that intent: it only knows the tool's registry effect. Keep the check
+ * deliberately top-level and exact, and accept the returned marker as a compatibility fallback
+ * for tools that normalize/default their preview flag before returning.
+ */
+function isChildPreview(args, result) {
+    const hasDryRunMarker = (value) => typeof value === 'object' && value !== null && !Array.isArray(value) &&
+        value.dryRun === true;
+    return hasDryRunMarker(args) || hasDryRunMarker(result);
+}
 const OUTPUT_REFERENCE_SHA_RE = /^[0-9a-f]{64}$/i;
 const OUTPUT_REFERENCE_AUDIENCES = new Set(['owner', 'workspace', 'public']);
 /**
@@ -426,7 +438,7 @@ export async function runToolOrchestration(script, opts) {
         // wrapper only when inner rows actually exist (census double-count, P-012).
         dispatchCount += 1;
         const childIdempotencyKey = nestedIdempotencyKey(ctx, callRecord.ordinal);
-        const call = (callCtx) => {
+        const call = (callCtx, callArgs = args) => {
             // Observe the exact context that enters the real dispatcher, after any
             // per-call workspace/principal rebinding. This is the runtime-owned
             // authorization entry; the script cannot forge or suppress it.
@@ -438,7 +450,7 @@ export async function runToolOrchestration(script, opts) {
             const childCtx = childIdempotencyKey
                 ? { ...callCtx, idempotencyKey: childIdempotencyKey }
                 : callCtx;
-            return realDispatch(childCtx, callDeps)(tool, name, args);
+            return realDispatch(childCtx, callDeps)(tool, name, callArgs);
         };
         try {
             const result = await (wrapDispatch
@@ -471,8 +483,9 @@ export async function runToolOrchestration(script, opts) {
                 }
             }
             else if (writeAttempt) {
-                writeAttempt.disposition = 'settled';
-                callRecord.disposition = 'settled';
+                const preview = isChildPreview(args, result);
+                writeAttempt.disposition = preview ? 'preview' : 'settled';
+                callRecord.disposition = preview ? 'preview' : 'settled';
             }
             else {
                 callRecord.disposition = 'settled';

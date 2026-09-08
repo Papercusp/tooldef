@@ -83,6 +83,8 @@ export { standardValidate, validateSync, formatIssues, } from './standard-schema
 export { registerProjectedTool, unregisterProjectedToolsForPlugin, toolDeclaresGate, listUngatedProjectedTools, lookupByMcpName, resolveMcpName, normalizeMcpName, lookupByHttpPath, listAllProjectedTools, projectedToolSourceFile, listDeclaredToolShapers, recordToolShapers, PROJECTED_TOOL_REGISTRY_SOURCE, projectedToolRegistryRevision, projectedToolCallContract, projectedToolAdmitted, assertProjectedToolCallContract, renderProjectedToolCall, projectedToolCorrectiveCalls, isProjectedToolDrop, assertProjectedToolGuidanceConformance, ProjectedToolContractError, listMcpProjections, ToolRegistrationError, emitToSseSink, isPapercuspBinaryEnvelope, _resetProjectionRegistryForTests, } from './tool-projection';
 /* ─── Dispatcher ─────────────────────────────────────────────────────── */
 export { dispatchProjectedTool, dispatchProjectedToolStream, defaultComputeQuotaWindow, UnauthorizedToolError, HarnessRequiredError, WorkspaceTxNotDeclaredError, WorkspaceTxUnavailableError, InvalidInputError, PASS_THROUGH, } from './dispatch-projected';
+// The canonical named stack is also used for no-handler authorization probes.
+export { DEFAULT_DISPATCH_STACK, runDispatchStack, preflightDispatchStack, withReplacedStep } from './dispatch-stack';
 /**
  * P-015 — the shared refusal helper. Exported so a host can render or act on the corrected
  * call itself; every tool defined through this library already inherits it in the refusal

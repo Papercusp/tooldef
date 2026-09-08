@@ -9,7 +9,7 @@
 export { buildToolFacade, facadeToolNames, roleScopedToolNames, } from './tool-facade';
 export { runOrchestrationScript, DEFAULT_SCRIPT_TIMEOUT_MS, } from './run-script';
 export { checkScript, ensureParseCheckReady, } from './parse-check';
-export { realDispatch, unwrapToolResult } from './dispatch-binding';
+export { realDispatch, unwrapToolResult, ToolDispatchError, isPreExecutionFailure, } from './dispatch-binding';
 export { parseJsonWithTrailer } from './json-prefix';
 export { runToolOrchestration, detectStrandedWrites, } from './orchestrate';
 // B-CX-API: compile-time typed signatures for the facade + the on-demand namespace index.

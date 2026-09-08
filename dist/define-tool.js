@@ -1533,6 +1533,36 @@ export function nestedArgPaths(props) {
     return out;
 }
 /**
+ * Normalize the schema representation used by the invalid-argument hint helpers.
+ *
+ * The dispatch path passes the eagerly projected JSON-Schema form, but
+ * `unknownArgHint` is exported for direct verification and callers naturally pass
+ * the source Standard Schema (`tool.args`). Treating that source validator as if it
+ * were already JSON Schema makes every hint look absent (`properties` is undefined),
+ * which is a false negative rather than a harmless no-op. Conversion is best-effort
+ * because this helper runs while reporting an invalid call: an unrepresentable
+ * schema must not replace the original validation error with a diagnostic throw.
+ */
+function jsonSchemaForArgHints(rawSchema) {
+    if (!rawSchema || typeof rawSchema !== 'object' || Array.isArray(rawSchema))
+        return undefined;
+    const candidate = rawSchema;
+    // The production path already supplies JSON Schema. Avoid converting it again,
+    // including union roots whose top-level `properties` is intentionally absent.
+    if (Object.prototype.hasOwnProperty.call(candidate, 'properties') ||
+        Array.isArray(candidate.anyOf) ||
+        Array.isArray(candidate.oneOf)) {
+        return candidate;
+    }
+    try {
+        const converted = toJsonSchema(rawSchema);
+        return converted && typeof converted === 'object' && !Array.isArray(converted) ? converted : undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
+/**
  * Merge `properties` across every branch of a UNION-rooted JSON Schema
  * (`anyOf`/`oneOf`), falling back to the schema's own top-level `properties`
  * when it isn't a union.
@@ -1552,7 +1582,7 @@ export function nestedArgPaths(props) {
  * lookup found no keys to work from.
  */
 function mergedSchemaProperties(rawSchema) {
-    const schema = rawSchema;
+    const schema = jsonSchemaForArgHints(rawSchema);
     if (schema?.properties)
         return schema.properties;
     const branches = (Array.isArray(schema?.anyOf) ? schema.anyOf : Array.isArray(schema?.oneOf) ? schema.oneOf : null);
@@ -1609,7 +1639,7 @@ function leafIssueSummary(issues) {
  * the caller's data — strictly worse than the silence it replaces.
  */
 function selectedUnionBranchProperties(rawSchema, input) {
-    const schema = rawSchema;
+    const schema = jsonSchemaForArgHints(rawSchema);
     if (schema?.properties)
         return undefined;
     if (!input || typeof input !== 'object' || Array.isArray(input))
@@ -2305,7 +2335,10 @@ function failingFieldSchemaHint(issues, rawSchema) {
         // primitive case), retain the resolved leaf itself. This is the WI-6661 seam:
         // `claimableLimit` now teaches only its integer/range schema instead of dumping
         // every unrelated coord:orient argument before truncating mid-property.
-        let nodes = [rawSchema];
+        let nodes = [];
+        const schema = jsonSchemaForArgHints(rawSchema);
+        if (schema)
+            nodes = [schema];
         let bestNode;
         let bestLabel = '';
         let leafNode;
@@ -2561,12 +2594,16 @@ function registerLegacyAsProjected(def, expose, sourceFile) {
             tier: resolvePayloadTier(callTier, ctx.contextTier, {
                 ignoreSessionTier: def.ignoreSessionPayloadTier,
             }),
-            // An explicit per-call payloadTier:'full' is the documented escape hatch
-            // out of shaping AND the hard ceiling (WI-5078) — only the arg counts,
-            // never a defaulted/session 'full'. A ctx-borne `transportCapExempt`
-            // consumer (code:run's inner dispatch — the result never reaches an
-            // agent's context) gets the same exemption (EI-18719561823587590).
-            explicitFullRequest: callTier === 'full' || ctx.transportCapExempt === true,
+            // A caller-selected full tier is the documented escape hatch out of
+            // shaping AND the hard ceiling (WI-5078): it can arrive as a per-call
+            // payloadTier:'full' or as the session's explicit ctx_tier=full choice.
+            // The latter must be stamped too, because the downstream result-door
+            // sees only serialized metadata and otherwise generically re-projects
+            // the raw body (EI-22586965566163070). A ctx-borne
+            // `transportCapExempt` consumer (code:run's inner dispatch — the result
+            // never reaches an agent's context) gets the same exemption
+            // (EI-18719561823587590).
+            explicitFullRequest: callTier === 'full' || ctx.contextTier === 'full' || ctx.transportCapExempt === true,
             // WI-37843: a tool may raise its OWN hard ceiling (coord:orient, the
             // session-bootstrap read, whose full payload IS the value). Absent ⇒ the
             // shared PAYLOAD_TIER_HARD_CEILING_CHARS, unchanged for every other tool.
@@ -2729,12 +2766,16 @@ function registerRoleGatedAsProjected(def, expose, sourceFile) {
             tier: resolvePayloadTier(callTier, handlerCtx.contextTier, {
                 ignoreSessionTier: def.ignoreSessionPayloadTier,
             }),
-            // An explicit per-call payloadTier:'full' is the documented escape hatch
-            // out of shaping AND the hard ceiling (WI-5078) — only the arg counts,
-            // never a defaulted/session 'full'. A ctx-borne `transportCapExempt`
-            // consumer (code:run's inner dispatch — the result never reaches an
-            // agent's context) gets the same exemption (EI-18719561823587590).
-            explicitFullRequest: callTier === 'full' || handlerCtx.transportCapExempt === true,
+            // A caller-selected full tier is the documented escape hatch out of
+            // shaping AND the hard ceiling (WI-5078): it can arrive as a per-call
+            // payloadTier:'full' or as the session's explicit ctx_tier=full choice.
+            // The latter must be stamped too, because the downstream result-door
+            // sees only serialized metadata and otherwise generically re-projects
+            // the raw body (EI-22586965566163070). A ctx-borne
+            // `transportCapExempt` consumer (code:run's inner dispatch — the result
+            // never reaches an agent's context) gets the same exemption
+            // (EI-18719561823587590).
+            explicitFullRequest: callTier === 'full' || handlerCtx.contextTier === 'full' || handlerCtx.transportCapExempt === true,
             // WI-37843: a tool may raise its OWN hard ceiling (coord:orient, the
             // session-bootstrap read, whose full payload IS the value). Absent ⇒ the
             // shared PAYLOAD_TIER_HARD_CEILING_CHARS, unchanged for every other tool.

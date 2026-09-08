@@ -1092,6 +1092,35 @@ export const DEFAULT_DISPATCH_STACK = Object.freeze([
     kernelEnforceStep,
     invokeStep,
 ]);
+// Exhaustive by step name: adding a step requires classifying it for preflight.
+// Derive gate order from the actual default stack, never maintain a second stack.
+const PREFLIGHT_STEP = {
+    'kernel-preflight': true, 'default-deny': true, 'role-allowlist': true,
+    'capability-check': true, 'capability-envelope': true, 'role-requirement': true,
+    'harness-check': true, quota: true, authorize: true, preconditions: true,
+    'entity-check': true, timeout: false, 'idle-watchdog': false,
+    'replay-buffer': false, 'ctx-bindings': false, 'kernel-enforce': true, invoke: false,
+};
+/**
+ * Re-evaluate canonical gates against the supplied ORIGINAL context, without
+ * taking ownership of its run. No handler, corrective tool, timer, replay/card
+ * lifecycle, invocation receipt or reaction is run. Gate audits remain enabled.
+ * `allowed` is a preflight observation, never evidence of execution or a grant
+ * for a later mutation (which must recheck authority).
+ */
+export async function preflightDispatchStack(tool, toolName, input, ctx, deps) {
+    const exec = initExecution(tool, toolName, input, ctx, {
+        ...deps, firePrecondition: undefined,
+    });
+    for (const step of DEFAULT_DISPATCH_STACK) {
+        if (!PREFLIGHT_STEP[step.name])
+            continue;
+        const result = await step.run(exec);
+        if (result)
+            return { allowed: false, error: result.error };
+    }
+    return { allowed: true };
+}
 /* ─── Customization ──────────────────────────────────────────────────── */
 /**
  * Derive a stack from the default with one step replaced by name. The

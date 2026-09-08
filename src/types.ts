@@ -464,9 +464,11 @@ export interface ToolGuidance {
    * reads only when/notWhen/chaining), so it costs zero prompt weight and is
    * paid for only on the failure path that needs it.
    *
-   * Verification note: `unknownArgHint` consumes the JSON-Schema form of `args`,
-   * not the source Zod object; validate redirects through the registry-backed
-   * `packages/operator-core/lib/prompt-assembly.test.ts`, not a bare scratch import.
+   * Verification note: `unknownArgHint` accepts either the eagerly projected
+   * JSON-Schema form or the source validator (`tool.args`) and normalizes the latter
+   * through the active `toJsonSchema` adapter. Structured corrective calls still
+   * require the registry-backed `packages/operator-core/lib/prompt-assembly.test.ts`
+   * (a bare scratch import has no projected target registry to resolve).
    *
    * Example: `{ tags: 'work_items:tag { id, topic } — the ONLY writer for the
    * claim-spec-visible tags field' }`

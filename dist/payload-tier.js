@@ -606,7 +606,10 @@ function projectValue(value, path, depth, state, preservePaths = state.preserveP
             for (let i = 0; i < shown.length; i += 1) {
                 if (state.remaining < 128)
                     break;
-                projected.push(projectValue(shown[i], `${path}[${i}]`, depth + 1, state, preserveArrayChildPaths(preservePaths, i)));
+                const childPreservePaths = preserveArrayChildPaths(preservePaths, i);
+                projected.push(preservePaths.length > 0 && shown.length > 1
+                    ? projectIdentityPreview(shown[i], `${path}[${i}]`, 0, state, childPreservePaths)
+                    : projectValue(shown[i], `${path}[${i}]`, depth + 1, state, childPreservePaths));
             }
             const droppedCount = value.length - projected.length;
             if (droppedCount > 0) {

@@ -200,6 +200,18 @@ describe('unknownArgHint argRedirects (EI-20281509195248260)', () => {
     expect(out).toContain('work_items:tag { id, topic }');
   });
 
+  it('normalizes a source validator before rendering a redirect (EI-22427117131124352)', () => {
+    // Direct probes commonly pass `tool.args`, while the dispatch path passes its
+    // JSON-Schema projection. Both inputs must exercise the same correction logic;
+    // otherwise a working redirect is indistinguishable from an unwired one.
+    const sourceSchema = strictArgs(
+      z.object({ id: z.string(), body: z.string().optional(), severity: z.string().optional() }),
+    );
+    const out = unknownArgHint(issues, sourceSchema, { tags: 'work_items:tag { id, topic }' });
+    expect(out).toContain('`tags` is not an arg of this tool');
+    expect(out).toContain('work_items:tag { id, topic }');
+  });
+
   it('CONTROL: without a redirect the same rejection names no owner (the bug)', () => {
     const out = unknownArgHint(issues, schema);
     expect(out).toContain('this tool accepts ONLY');

@@ -451,6 +451,103 @@ const WORKER_SRC = `(() => {
     "  }\\n" +
     "  return output;\\n" +
     '}\\n' +
+    // btoa is deliberately defined in the VM realm alongside atob. Keep the
+    // helper host-independent so callers can encode a compact ASCII/binary
+    // snapshot for a capability:bash command without exposing Node's Buffer.
+    'globalThis.btoa = (input) => {\\n' +
+    "  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';\\n" +
+    '  const value = String(input);\\n' +
+    '  let output = "";\\n' +
+    '  for (let i = 0; i < value.length; i += 3) {\\n' +
+    '    const c0 = value.charCodeAt(i);\\n' +
+    '    const hasC1 = i + 1 < value.length;\\n' +
+    '    const hasC2 = i + 2 < value.length;\\n' +
+    '    const c1 = hasC1 ? value.charCodeAt(i + 1) : 0;\\n' +
+    '    const c2 = hasC2 ? value.charCodeAt(i + 2) : 0;\\n' +
+    '    if (c0 > 0xff || (hasC1 && c1 > 0xff) || (hasC2 && c2 > 0xff)) {\\n' +
+    "      throw new Error('InvalidCharacterError: the string to be encoded contains characters outside of the Latin1 range');\\n" +
+    '    }\\n' +
+    '    output += alphabet.charAt(c0 >> 2);\\n' +
+    '    output += alphabet.charAt(((c0 & 3) << 4) | (c1 >> 4));\\n' +
+    '    output += hasC1 ? alphabet.charAt(((c1 & 15) << 2) | (c2 >> 6)) : "=";\\n' +
+    '    output += hasC2 ? alphabet.charAt(c2 & 63) : "=";\\n' +
+    '  }\\n' +
+    '  return output;\\n' +
+    '}\\n' +
+    // TextDecoder is a host global in Node, not a JavaScript intrinsic, and passing Node's
+    // constructor into the VM would expose a host Function. Keep the decode seam realm-local so
+    // scripts can reassemble UTF-8 result-door/capability:read pages without reopening the host.
+    'globalThis.TextDecoder = (() => {\\n' +
+    '  const decodeUtf8 = (input, fatal) => {\\n' +
+    '    const bytes = input == null\\n' +
+    '      ? new Uint8Array(0)\\n' +
+    '      : input instanceof Uint8Array\\n' +
+    '      ? input\\n' +
+    '      : input instanceof ArrayBuffer\\n' +
+    '      ? new Uint8Array(input)\\n' +
+    '      : input && input.buffer instanceof ArrayBuffer\\n' +
+    '      ? new Uint8Array(input.buffer, input.byteOffset || 0, input.byteLength)\\n' +
+    '      : new Uint8Array(input);\\n' +
+    '    let output = "";\\n' +
+    '    let i = 0;\\n' +
+    '    while (i < bytes.length) {\\n' +
+    '      const first = bytes[i];\\n' +
+    '      let needed;\\n' +
+    '      let codePoint;\\n' +
+    '      if (first <= 0x7f) {\\n' +
+    '        needed = 0;\\n' +
+    '        codePoint = first;\\n' +
+    '      } else if (first >= 0xc2 && first <= 0xdf) {\\n' +
+    '        needed = 1;\\n' +
+    '      } else if (first >= 0xe0 && first <= 0xef) {\\n' +
+    '        needed = 2;\\n' +
+    '      } else if (first >= 0xf0 && first <= 0xf4) {\\n' +
+    '        needed = 3;\\n' +
+    '      }\\n' +
+    '      const invalid = () => {\\n' +
+    '        if (fatal) throw new TypeError("The encoded data was not valid UTF-8");\\n' +
+    '        output += "\\\\ufffd";\\n' +
+    '        i += 1;\\n' +
+    '      };\\n' +
+    '      if (needed === undefined || i + needed >= bytes.length) {\\n' +
+    '        invalid();\\n' +
+    '        continue;\\n' +
+    '      }\\n' +
+    '      let valid = true;\\n' +
+    '      for (let j = 1; j <= needed; j += 1) {\\n' +
+    '        if ((bytes[i + j] & 0xc0) !== 0x80) { valid = false; break; }\\n' +
+    '      }\\n' +
+    '      const second = bytes[i + 1];\\n' +
+    '      if (valid && ((first === 0xe0 && second < 0xa0) || (first === 0xed && second > 0x9f)\\n' +
+    '        || (first === 0xf0 && second < 0x90) || (first === 0xf4 && second > 0x8f))) {\\n' +
+    '        valid = false;\\n' +
+    '      }\\n' +
+    '      if (!valid) {\\n' +
+    '        invalid();\\n' +
+    '        continue;\\n' +
+    '      }\\n' +
+    '      if (needed === 1) codePoint = ((first & 0x1f) << 6) | (bytes[i + 1] & 0x3f);\\n' +
+    '      if (needed === 2) codePoint = ((first & 0x0f) << 12) | ((bytes[i + 1] & 0x3f) << 6) | (bytes[i + 2] & 0x3f);\\n' +
+    '      if (needed === 3) codePoint = ((first & 0x07) << 18) | ((bytes[i + 1] & 0x3f) << 12) | ((bytes[i + 2] & 0x3f) << 6) | (bytes[i + 3] & 0x3f);\\n' +
+    '      output += String.fromCodePoint(codePoint);\\n' +
+    '      i += needed + 1;\\n' +
+    '    }\\n' +
+    '    return output;\\n' +
+    '  };\\n' +
+    '  const TextDecoder = function TextDecoder(label, options) {\\n' +
+    '    const normalized = String(label === undefined ? "utf-8" : label).trim().toLowerCase().replace(/_/g, "-");\\n' +
+    '    if (normalized !== "utf-8" && normalized !== "utf8") throw new RangeError("Unsupported encoding: " + normalized);\\n' +
+    '    this.encoding = "UTF-8";\\n' +
+    '    this.fatal = Boolean(options && options.fatal);\\n' +
+    '    this.ignoreBOM = Boolean(options && options.ignoreBOM);\\n' +
+    '  };\\n' +
+    '  TextDecoder.prototype.decode = function(input) {\\n' +
+    '    let decoded = decodeUtf8(input, this.fatal);\\n' +
+    '    if (!this.ignoreBOM && decoded.charAt(0) === "\\\\ufeff") decoded = decoded.slice(1);\\n' +
+    '    return decoded;\\n' +
+    '  };\\n' +
+    '  return TextDecoder;\\n' +
+    '})();\\n' +
     body +
     '\\n});\\n' +
     '})()';
@@ -557,7 +654,7 @@ const WORKER_SRC = `(() => {
       const friendly = /dynamic import callback/i.test(msg)
         ? 'dynamic_import_unsupported: code:run cannot import()/require() repo modules or node builtins -- only tools.ns.verb(args) is exposed (the role tool whitelist IS the sandbox security boundary, same reason require/process are absent). Use capability:bash + npx tsx for direct module/DB access outside that whitelist.'
         : bufferMatch
-        ? 'buffer_unsupported: code:run has no ambient Buffer -- scripts run in a restricted VM with JSON/Math/Promise intrinsics only; for base64 pages returned by capability:read or result-door recovery, use atob(page.data) and Uint8Array.from(binary, (character) => character.charCodeAt(0)).'
+        ? 'buffer_unsupported: code:run has no ambient Buffer -- scripts run in a restricted VM with JSON/Math/Promise intrinsics only; for base64 pages returned by capability:read or result-door recovery, use atob(page.data), Uint8Array.from(binary, (character) => character.charCodeAt(0)), and new TextDecoder("utf-8").decode(bytes).'
         : structuredCloneMatch
         ? 'structured_clone_unsupported: code:run has no ambient structuredClone -- scripts run in a restricted VM with JSON/Math/Promise intrinsics only; for JSON-only tool results and args, use JSON.parse(JSON.stringify(value)).'
         : timerMatch

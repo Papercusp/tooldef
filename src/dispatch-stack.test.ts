@@ -113,6 +113,25 @@ describe('preflightDispatchStack — gates without run ownership', () => {
     expect(handler).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledWith('run_X');
   });
+
+  it.each(['kernel-preflight', 'kernel-enforce', 'capability-envelope'] as const)(
+    'audits a %s refusal without an invocation receipt', async (seat) => {
+      const auditAuth = vi.fn(), recordInvocation = vi.fn(), postInvoke = vi.fn(), handler = vi.fn();
+      const result = await preflightDispatchStack(makeTool({ fn: handler }), 'fix.tool', {}, MAKE_CTX(), {
+        auditAuth, recordInvocation, postInvoke,
+        kernelEnforcement: async ({ phase }) => seat === `kernel-${phase}`
+          ? { decision: 'deny', reason: 'renewed kernel refusal' } : { decision: 'allow' },
+        checkCapabilityEnvelope: async () => seat === 'capability-envelope'
+          ? { decision: 'deny', reason: 'renewed confinement refusal' } : null,
+      });
+      expect(result.allowed).toBe(false);
+      expect(auditAuth).toHaveBeenCalledOnce();
+      expect(auditAuth).toHaveBeenCalledWith(expect.objectContaining({
+        decision: 'deny', reason: expect.stringContaining(`[preflight:${seat}]`),
+      }));
+      for (const effect of [handler, recordInvocation, postInvoke]) expect(effect).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('DEFAULT_DISPATCH_STACK — enumeration', () => {
