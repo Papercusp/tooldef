@@ -1221,7 +1221,15 @@ function deepStrictifyInPlace(schema, active) {
                         shape[key] = deepStrictifyInPlace(shape[key], active);
                     }
                 }
-                return typeof s.strict === 'function' ? s.strict() : schema;
+                if (typeof s.strict !== 'function')
+                    return schema;
+                const strict = s.strict();
+                // Zod's strict() replaces the object and drops registry metadata.
+                // Preserve descriptions and validator-owned call constraints on BOTH
+                // root and nested objects before publishing their JSON Schema. This
+                // does not change the catchall/refinements that enforce strictness.
+                const metadata = typeof s.meta === 'function' ? s.meta() : undefined;
+                return metadata && typeof strict.meta === 'function' ? strict.meta(metadata) : strict;
             }
             case 'array':
                 def.element = deepStrictifyInPlace(def.element, active);
