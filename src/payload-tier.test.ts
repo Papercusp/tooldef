@@ -1188,17 +1188,20 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
       _truncated: true,
       omittedCount: 5,
       shownCount: 12,
-      totalCount: 17,
+      renderedCount: 17,
     });
+    expect(marker).not.toHaveProperty('totalCount');
     expect(marker.note as string).toMatch(/TRUNCATED \+\d+ more item\(s\)/);
     expect(marker.note as string).toContain('header count includes this marker');
-    expect(marker.note as string).toContain('showing 12 of 17');
+    expect(marker.note as string).toContain('showing 12 of 17 rendered input entries');
+    expect(marker.note as string).toContain('renderedCount is NOT the query population');
 
     // The actual agent-facing TOON shape still has a projected-length header,
-    // so the adjacent marker must carry the shown/true total distinction.
+    // so the adjacent marker must carry the shown/rendered-input distinction
+    // without pretending to know the underlying query population.
     const toon = encodeResult(out, 'toon');
     expect(toon).toContain('criteria[13]:');
-    expect(toon).toContain('header count includes this marker; showing 12 of 17');
+    expect(toon).toContain('header count includes this marker; showing 12 of 17 rendered input entries');
 
     // And the sample list actually names it — never starved out by the
     // per-element field/depth omissions recorded for the elements that DID
@@ -1220,8 +1223,9 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
       _truncated: true,
       omittedCount: 5,
       shownCount: 12,
-      totalCount: 17,
+      renderedCount: 17,
     });
+    expect(projectedRuns.at(-1)).not.toHaveProperty('totalCount');
     expect(() => projectedRuns.map((row) => [row.startedAt, row.filePath, row.outputTail])).not.toThrow();
   });
 
@@ -1268,7 +1272,8 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     );
     const marker = (out.values as unknown[]).at(-1);
     expect(typeof marker).toBe('string');
-    expect(marker as string).toContain('showing 12 of 17');
+    expect(marker as string).toContain('showing 12 of 17 rendered input entries');
+    expect(marker as string).toContain('renderedCount is NOT the query population');
   });
 
   it('the depth-boundary markers carry the recovery knob too, and pay no stringify for a size', () => {
