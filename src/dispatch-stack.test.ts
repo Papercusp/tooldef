@@ -11,11 +11,15 @@ import {
   extractSoftFailureOutcome,
   withReplacedStep,
   runDispatchStack,
+  preflightDispatchStack,
   type DispatchStepName,
 } from './dispatch-stack';
 import { type PostInvokeEvent } from './dispatch-types';
 import { z } from 'zod';
 import { clearEntityResolvers, entityRef, setEntityResolver } from './entity-ref';
+import * as cardCorrelator from './card-correlator';
+import * as stateChannel from './state-channel';
+import * as replayBuffer from './replay-buffer';
 import {
   _resetProjectionRegistryForTests,
   type ProjectedTool,
@@ -49,6 +53,67 @@ const makeTool = (over: Partial<ProjectedTool> = {}): ProjectedTool => ({
 });
 
 afterEach(() => _resetProjectionRegistryForTests());
+
+describe('preflightDispatchStack — gates without run ownership', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each([false, true])('retains original gate context and never touches the live run (deny=%s)', async (deny) => {
+    const cancel = vi.spyOn(cardCorrelator, 'cancelPendingCardsForRun');
+    const close = vi.spyOn(stateChannel, 'closeRun');
+    const open = vi.spyOn(stateChannel, 'openRun');
+    const replay = vi.spyOn(replayBuffer, 'openBuffer');
+    const handler = vi.fn();
+    const start = vi.fn(), record = vi.fn(), post = vi.fn();
+    const ctx = MAKE_CTX({ profile: 'engineer', interactiveCardCapability: true, transport: 'mcp' });
+    const observed: Array<{ phase: string; ctx: UnifiedToolContext }> = [];
+    const result = await preflightDispatchStack(makeTool({ fn: handler, replayBufferSize: 5 }), 'fix.tool', {}, ctx, {
+      onDispatchStart: start, recordInvocation: record, postInvoke: post,
+      kernelEnforcement: async (request) => {
+        observed.push(request);
+        return deny && request.phase === 'enforce'
+          ? { decision: 'deny', reason: 'current policy changed' } : { decision: 'allow' };
+      },
+    });
+    expect(result.allowed).toBe(!deny);
+    expect(observed.map((r) => r.phase)).toEqual(['preflight', 'enforce']);
+    for (const { ctx: original } of observed) {
+      expect(original).toMatchObject({
+        workspaceId: 'default', harnessSlug: 'sheets', runId: 'run_X', chunkId: 'ck_X',
+        spawnId: 'spw_X', featureId: 'F-AUTH-003', transport: 'mcp', profile: 'engineer',
+      });
+    }
+    for (const effect of [handler, start, record, post, cancel, close, open, replay]) {
+      expect(effect).not.toHaveBeenCalled();
+    }
+  });
+
+  it('uses the original quota window rather than a fresh probe run', async () => {
+    const readQuotaState = vi.fn(async () => ({ count: 2 }));
+    const result = await preflightDispatchStack(
+      makeTool({ rolesQuota: { worker: { perRun: 2 } } }), 'fix.tool', {}, MAKE_CTX(), { readQuotaState },
+    );
+    expect(result).toMatchObject({ allowed: false, error: { code: 'quota_exceeded' } });
+    expect(readQuotaState).toHaveBeenCalledWith('fix.tool', expect.objectContaining({ runId: 'run_X' }), 'run:run_X');
+  });
+
+  it('audits a failed prerequisite without auto-firing its corrective tool', async () => {
+    const fire = vi.fn(), auditAuth = vi.fn();
+    const result = await preflightDispatchStack(makeTool({
+      requires: [{ id: 'not-ready', when: { field: 'state.ready', op: 'eq', value: true }, fire: 'fix:write' }],
+    }), 'fix.tool', {}, MAKE_CTX(), { firePrecondition: fire, auditAuth });
+    expect(result).toMatchObject({ allowed: false, error: { code: 'precondition_failed' } });
+    expect(fire).not.toHaveBeenCalled();
+    expect(auditAuth).toHaveBeenCalledWith(expect.objectContaining({ gate: 'precondition', decision: 'deny' }));
+  });
+
+  it('does not change normal dispatch cleanup or execution', async () => {
+    const close = vi.spyOn(stateChannel, 'closeRun');
+    const handler = vi.fn(async () => ({ content: [] }));
+    expect((await runDispatchStack(makeTool({ fn: handler }), 'fix.tool', {}, MAKE_CTX(), {})).ok).toBe(true);
+    expect(handler).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledWith('run_X');
+  });
+});
 
 describe('DEFAULT_DISPATCH_STACK — enumeration', () => {
   it('runs steps in this exact order: gates → timeout → idle → buffer → bindings → invoke', () => {
