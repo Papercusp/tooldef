@@ -484,6 +484,52 @@ describe('applyPayloadTier', () => {
     expect(project(['results[].items[].text']).results[0]).not.toHaveProperty('shipReadiness');
   });
 
+  it('REGRESSION (EI-22626647927619840): preserved fields survive on every array row before optional detail spends the budget', () => {
+    const payload = {
+      results: Array.from({ length: 3 }, (_, i) => ({
+        ok: true,
+        id: `EI-${i}`,
+        completionAuthority: 'proposed',
+        authorityWarning: `authority-${i}`,
+        requirementShortfallWarning: `requirements-${i}`,
+        workItem: { id: `EI-${i}`, summary: 'S'.repeat(3_000) },
+        completion: { summary: 'C'.repeat(3_000) },
+      })),
+    };
+    const project = (preservePaths: string[]) =>
+      projectBoundedPayload(payload, {
+        toolName: 'work_items:complete',
+        tier: 'trimmed',
+        forced: true,
+        targetChars: 6_000,
+        preservePaths,
+      }) as unknown as { results: Array<Record<string, unknown>> };
+
+    const projected = project([
+      'results[].ok',
+      'results[].id',
+      'results[].completionAuthority',
+      'results[].authorityWarning',
+      'results[].requirementShortfallWarning',
+    ]);
+    expect(projected.results).toHaveLength(3);
+    expect(projected.results.map((row) => row.id)).toEqual(['EI-0', 'EI-1', 'EI-2']);
+    expect(projected.results.map((row) => row.authorityWarning)).toEqual([
+      'authority-0',
+      'authority-1',
+      'authority-2',
+    ]);
+    expect(projected.results.map((row) => row.requirementShortfallWarning)).toEqual([
+      'requirements-0',
+      'requirements-1',
+      'requirements-2',
+    ]);
+
+    // FALSIFIABILITY CONTROL: without a preserve declaration the same first
+    // rows can consume the budget before the final row is projected.
+    expect(project([]).results.some((row) => row.authorityWarning === undefined)).toBe(true);
+  });
+
   it('REGRESSION (EI-22186855527494865): a dropped preserved path is NAMED in omittedPreserved, which sample-shedding cannot take away', () => {
     // `omitted` is a SAMPLE list the budget ladder trades away entirely (to 5,
     // then to 0) to buy back content — so the one omission a caller cannot infer,

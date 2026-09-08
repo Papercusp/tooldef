@@ -904,8 +904,11 @@ function projectValue(
       const projected: unknown[] = [];
       for (let i = 0; i < shown.length; i += 1) {
         if (state.remaining < 128) break;
+        const childPreservePaths = preserveArrayChildPaths(preservePaths, i);
         projected.push(
-          projectValue(shown[i], `${path}[${i}]`, depth + 1, state, preserveArrayChildPaths(preservePaths, i)),
+          preservePaths.length > 0 && shown.length > 1
+            ? projectIdentityPreview(shown[i], `${path}[${i}]`, 0, state, childPreservePaths)
+            : projectValue(shown[i], `${path}[${i}]`, depth + 1, state, childPreservePaths),
         );
       }
       const droppedCount = value.length - projected.length;
