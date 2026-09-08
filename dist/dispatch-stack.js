@@ -1116,8 +1116,23 @@ export async function preflightDispatchStack(tool, toolName, input, ctx, deps) {
         if (!PREFLIGHT_STEP[step.name])
             continue;
         const result = await step.run(exec);
-        if (result)
+        if (result) {
+            // These seats normally retain their verdict through invocation telemetry.
+            // A preflight owns no invocation, so preserve refusals via the existing
+            // auth audit sink instead. Other gates already emit their own audit.
+            if (step.name === 'kernel-preflight' || step.name === 'kernel-enforce' ||
+                step.name === 'capability-envelope') {
+                deps.auditAuth?.({
+                    ts: Date.now(),
+                    principal: ctx.principal
+                        ? { slug: ctx.principal.slug, workspaceId: ctx.principal.workspaceId } : null,
+                    tool: toolName, action: toolName, decision: 'deny',
+                    gate: step.name === 'capability-envelope' ? 'capability' : 'authorize',
+                    reason: `[preflight:${step.name}] ${result.error?.message ?? 'policy refused'}`,
+                });
+            }
             return { allowed: false, error: result.error };
+        }
     }
     return { allowed: true };
 }
