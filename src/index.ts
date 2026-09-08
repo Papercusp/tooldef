@@ -428,6 +428,8 @@ export {
   type CapabilityEnvelopeVerdict,
   type ToolDispatchOverrideFn,
 } from './dispatch-projected';
+// The canonical named stack is also used for no-handler authorization probes.
+export { DEFAULT_DISPATCH_STACK, runDispatchStack, withReplacedStep } from './dispatch-stack';
 
 /**
  * P-015 — the shared refusal helper. Exported so a host can render or act on the corrected
