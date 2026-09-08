@@ -225,6 +225,73 @@ describe('runOrchestrationScript (B-CX-1A)', () => {
     expect(read).toHaveBeenCalledTimes(2);
   });
 
+  // EI-22359719062736291: the realm shipped a complete DECODE path (atob -> bytes, TextDecoder ->
+  // text) but only HALF an encode path. btoa is Latin1-only by spec and TextEncoder was never
+  // installed, so btoa(JSON.stringify(value)) threw InvalidCharacterError on the first non-ASCII
+  // character -- an em dash in a work-item title is enough -- and no in-realm route to UTF-8 bytes
+  // existed. Reported 18 times before it was fixed.
+  //
+  // This guard starts from TEXT, which is the whole point. The pre-existing btoa test above feeds
+  // String.fromCharCode(0, 255, 1, 128, ...) -- values already <= 0xff, i.e. bytes someone else
+  // encoded -- so it passes on a Latin1-only encode path and is structurally incapable of
+  // observing this defect. Only encoding real text can.
+  it('encodes non-ASCII text to base64 in-realm, the exact inverse of the atob/TextDecoder path', async () => {
+    const text = 'assignment snapshot — café ✅ 🚀';
+    const r = await runOrchestrationScript(
+      `const text = ${JSON.stringify(text)};
+       const bytes = new TextEncoder().encode(text);
+       const encoded = btoa(Array.from(bytes, (byte) => String.fromCharCode(byte)).join(''));
+       return {
+         encoded,
+         byteLength: bytes.length,
+         isUint8Array: bytes instanceof Uint8Array,
+         codecs: [typeof atob, typeof btoa, typeof TextEncoder, typeof TextDecoder].join(','),
+         bufferType: typeof Buffer,
+       };`,
+      facade({}),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.result).toEqual({
+      // matching the host byte-for-byte is what proves the astral char (surrogate pair -> 4-byte
+      // sequence) and the 2- and 3-byte sequences are all encoded correctly, not merely produced
+      encoded: Buffer.from(text, 'utf8').toString('base64'),
+      byteLength: Buffer.byteLength(text, 'utf8'),
+      isUint8Array: true,
+      // the codec set must stay SYMMETRIC -- half a direction is a broken feature, not a smaller
+      // one, and this is the cheap assertion that catches it
+      codecs: 'function,function,function,function',
+      bufferType: 'undefined',
+    });
+  });
+
+  it('round-trips text through the in-realm encode and decode paths without exposing Buffer', async () => {
+    const text = 'wörk-item — ✅ 🚀 done';
+    const r = await runOrchestrationScript(
+      `const text = ${JSON.stringify(text)};
+       const encoded = btoa(Array.from(new TextEncoder().encode(text), (byte) => String.fromCharCode(byte)).join(''));
+       const binary = atob(encoded);
+       const decoded = new TextDecoder('utf-8').decode(Uint8Array.from(binary, (character) => character.charCodeAt(0)));
+       return { decoded, matches: decoded === text, bufferType: typeof Buffer };`,
+      facade({}),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.result).toEqual({ decoded: text, matches: true, bufferType: 'undefined' });
+  });
+
+  // The diagnostic is what a caller reaching for Buffer actually reads. It taught only the decode
+  // half, so an agent trying to ENCODE a snapshot was handed decode guidance and no route -- which
+  // is why the same report kept recurring. Both directions must stay named.
+  it('names the ENCODE idiom, not only the decode one, when a script reaches for Buffer', async () => {
+    const r = await runOrchestrationScript(
+      "return Buffer.from(JSON.stringify({ title: 'snapshot — em dash' })).toString('base64');",
+      facade({}),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/^buffer_unsupported:/);
+    expect(r.error).toMatch(/new TextEncoder\(\)\.encode/);
+    expect(r.error).toMatch(/Latin1-only/);
+  });
+
   // EI-19294786663902075: the vm context has no importModuleDynamically callback, so a script's
   // `await import(...)` throws the V8-internal "A dynamic import callback was not specified."
   // before the specifier is even looked at -- which reads like a bad path, not a sandbox limit.

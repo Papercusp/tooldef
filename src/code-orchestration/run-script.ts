@@ -28,10 +28,14 @@
  *
  * Inside the worker we STILL run the body under `node:vm.runInNewContext`, which scopes the
  * script's globals (no `require`/`process`/`module`/`Buffer`; standard intrinsics like
- * JSON/Math/Promise present) and gives clean compile-error reporting. VM-local, browser-style
- * `atob` and UTF-8 `TextDecoder` helpers are installed for decoding the base64 byte pages
- * returned by `capability:read`; they are defined inside the VM rather than passing host
- * functions across the boundary. So the worker is the isolation+kill boundary; the inner vm is
+ * JSON/Math/Promise present) and gives clean compile-error reporting. A VM-local, browser-style
+ * codec set is installed: `atob`/`TextDecoder` decode the base64 byte pages returned by
+ * `capability:read`, and `btoa`/`TextEncoder` encode in the other direction so a script can build
+ * a base64 snapshot to hand to `capability:bash`. All four are defined inside the VM rather than
+ * passing host functions across the boundary. Keep the set SYMMETRIC when changing it: shipping
+ * only half a direction is not a smaller version of the feature but a broken one, because
+ * `btoa` is Latin1-only and needs `TextEncoder` to carry any non-ASCII text (EI-22359719062736291).
+ * So the worker is the isolation+kill boundary; the inner vm is
  * the globals-scoping + compile boundary.
  *
  * `setTimeout`/`setInterval` are Node/DOM globals, not JS-spec intrinsics, so they are NOT
@@ -754,6 +758,52 @@ const WORKER_SRC = `(() => {
     '  };\\n' +
     '  return TextDecoder;\\n' +
     '})();\\n' +
+    // TextEncoder completes the codec set. Without it the realm had a full DECODE path
+    // (atob -> bytes, TextDecoder -> text) but only half an ENCODE path: btoa is Latin1-only by
+    // spec, so btoa(JSON.stringify(anything)) throws InvalidCharacterError the moment the value
+    // holds a non-ASCII character -- an em dash in a work-item title is enough. That left no
+    // in-realm way to turn a string into UTF-8 bytes, so the documented
+    // encode-a-snapshot-for-capability:bash use case could not be written without hand-rolling a
+    // UTF-8 encoder in every script. Defined VM-locally for the same reason as atob/TextDecoder:
+    // passing Node's host constructor across the boundary would expose a host Function.
+    'globalThis.TextEncoder = (() => {\\n' +
+    '  const encodeUtf8 = (input) => {\\n' +
+    '    const value = input === undefined ? "" : String(input);\\n' +
+    '    const bytes = [];\\n' +
+    '    for (let i = 0; i < value.length; i += 1) {\\n' +
+    '      let codePoint = value.charCodeAt(i);\\n' +
+    '      if (codePoint >= 0xd800 && codePoint <= 0xdbff && i + 1 < value.length) {\\n' +
+    '        const trail = value.charCodeAt(i + 1);\\n' +
+    '        if (trail >= 0xdc00 && trail <= 0xdfff) {\\n' +
+    '          codePoint = ((codePoint - 0xd800) << 10) + (trail - 0xdc00) + 0x10000;\\n' +
+    '          i += 1;\\n' +
+    '        }\\n' +
+    '      }\\n' +
+    // A lone surrogate is not encodable; the WHATWG encoder substitutes U+FFFD rather than
+    // throwing, so a script encoding a truncated string still produces valid UTF-8.
+    '      if (codePoint >= 0xd800 && codePoint <= 0xdfff) codePoint = 0xfffd;\\n' +
+    '      if (codePoint <= 0x7f) {\\n' +
+    '        bytes.push(codePoint);\\n' +
+    '      } else if (codePoint <= 0x7ff) {\\n' +
+    '        bytes.push(0xc0 | (codePoint >> 6), 0x80 | (codePoint & 0x3f));\\n' +
+    '      } else if (codePoint <= 0xffff) {\\n' +
+    '        bytes.push(0xe0 | (codePoint >> 12), 0x80 | ((codePoint >> 6) & 0x3f), 0x80 | (codePoint & 0x3f));\\n' +
+    '      } else {\\n' +
+    '        bytes.push(0xf0 | (codePoint >> 18), 0x80 | ((codePoint >> 12) & 0x3f), 0x80 | ((codePoint >> 6) & 0x3f), 0x80 | (codePoint & 0x3f));\\n' +
+    '      }\\n' +
+    '    }\\n' +
+    '    return Uint8Array.from(bytes);\\n' +
+    '  };\\n' +
+    // The WHATWG constructor takes no arguments, and callers habitually write
+    // new TextEncoder("utf-8") anyway; ignoring the argument accepts both spellings.
+    '  const TextEncoder = function TextEncoder() {\\n' +
+    '    this.encoding = "utf-8";\\n' +
+    '  };\\n' +
+    '  TextEncoder.prototype.encode = function(input) {\\n' +
+    '    return encodeUtf8(input);\\n' +
+    '  };\\n' +
+    '  return TextEncoder;\\n' +
+    '})();\\n' +
     body +
     '\\n});\\n' +
     '})()';
@@ -860,7 +910,7 @@ const WORKER_SRC = `(() => {
       const friendly = /dynamic import callback/i.test(msg)
         ? 'dynamic_import_unsupported: code:run cannot import()/require() repo modules or node builtins -- only tools.ns.verb(args) is exposed (the role tool whitelist IS the sandbox security boundary, same reason require/process are absent). Use capability:bash + npx tsx for direct module/DB access outside that whitelist.'
         : bufferMatch
-        ? 'buffer_unsupported: code:run has no ambient Buffer -- scripts run in a restricted VM with JSON/Math/Promise intrinsics only; for base64 pages returned by capability:read or result-door recovery, use atob(page.data), Uint8Array.from(binary, (character) => character.charCodeAt(0)), and new TextDecoder("utf-8").decode(bytes).'
+        ? 'buffer_unsupported: code:run has no ambient Buffer -- scripts run in a restricted VM with JSON/Math/Promise intrinsics only, but VM-local browser-style codecs are installed in BOTH directions. To DECODE base64 pages returned by capability:read or result-door recovery, use atob(page.data), Uint8Array.from(binary, (character) => character.charCodeAt(0)), and new TextDecoder("utf-8").decode(bytes). To ENCODE -- for example a snapshot to hand to capability:bash -- use new TextEncoder().encode(text) then btoa(Array.from(bytes, (byte) => String.fromCharCode(byte)).join("")); btoa alone is Latin1-only and throws InvalidCharacterError on any non-ASCII text, so encode to UTF-8 bytes first.'
         : structuredCloneMatch
         ? 'structured_clone_unsupported: code:run has no ambient structuredClone -- scripts run in a restricted VM with JSON/Math/Promise intrinsics only; for JSON-only tool results and args, use JSON.parse(JSON.stringify(value)).'
         : timerMatch
