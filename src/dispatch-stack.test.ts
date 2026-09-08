@@ -122,7 +122,7 @@ describe('preflightDispatchStack — gates without run ownership', () => {
         kernelEnforcement: async ({ phase }) => seat === `kernel-${phase}`
           ? { decision: 'deny', reason: 'renewed kernel refusal' } : { decision: 'allow' },
         checkCapabilityEnvelope: async () => seat === 'capability-envelope'
-          ? { decision: 'deny', reason: 'renewed confinement refusal' } : null,
+          ? { decision: 'deny', posture: 'rejected', applied: true, reason: 'renewed confinement refusal' } : null,
       });
       expect(result.allowed).toBe(false);
       expect(auditAuth).toHaveBeenCalledOnce();
