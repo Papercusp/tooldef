@@ -86,6 +86,41 @@ describe('strictArgs (EI-10883)', () => {
     expect(() => strictArgs(weird)).not.toThrow();
     expect(strictArgs(weird)).toBe(weird);
   });
+
+  it('preserves object metadata through strictification without weakening unknown-key or refinement checks', () => {
+    const row = z.object({ value: z.string().min(1) }).meta({
+      description: 'Evidence row',
+      'x-papercusp-call-constraint': 'row requires evidence',
+    });
+    const source = z.object({ rows: z.array(row) })
+      .superRefine((value, ctx) => {
+        if (value.rows.length === 0) ctx.addIssue({ code: 'custom', message: 'rows must not be empty' });
+      })
+      .meta({ description: 'Root contract', 'x-papercusp-call-constraint': 'root requires rows' });
+    const strict = strictArgs(source);
+    const json = toArgsJsonSchema('test:metadata', strict);
+    expect(json).toMatchObject({
+      description: 'Root contract',
+      'x-papercusp-call-constraint': 'root requires rows',
+      additionalProperties: false,
+      properties: {
+        rows: { items: {
+          description: 'Evidence row',
+          'x-papercusp-call-constraint': 'row requires evidence',
+          additionalProperties: false,
+        } },
+      },
+    });
+    // A later registration can strictify the already-strict schema again.
+    expect(toArgsJsonSchema('test:metadata-again', strictArgs(strict))).toEqual(json);
+    expect(parse(strict, { rows: [{ value: 'measured' }] }).ok).toBe(true);
+    for (const value of [
+      { rows: [] },
+      { rows: [{ value: '' }] },
+      { rows: [{ value: 'measured', undeclared: true }] },
+      { rows: [{ value: 'measured' }], undeclared: true },
+    ]) expect(parse(strict, value).ok).toBe(false);
+  });
 });
 
 describe('strictArgs deep nesting (EI-18723223344390510)', () => {

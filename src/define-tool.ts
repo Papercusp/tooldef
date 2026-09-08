@@ -1350,7 +1350,11 @@ function deepStrictifyInPlace(schema: unknown, active: Set<object>): unknown {
   if (active.has(schema as object)) return schema;
   active.add(schema as object);
   try {
-    const s = schema as { strict?: () => unknown; _zod?: { def?: Record<string, unknown> } };
+    const s = schema as {
+      strict?: () => unknown;
+      meta?: () => Record<string, unknown> | undefined;
+      _zod?: { def?: Record<string, unknown> };
+    };
     const def = s._zod?.def;
     if (!def || typeof def.type !== 'string') return schema;
 
@@ -1362,7 +1366,14 @@ function deepStrictifyInPlace(schema: unknown, active: Set<object>): unknown {
             shape[key] = deepStrictifyInPlace(shape[key], active);
           }
         }
-        return typeof s.strict === 'function' ? s.strict() : schema;
+        if (typeof s.strict !== 'function') return schema;
+        const strict = s.strict() as { meta?: (metadata: Record<string, unknown>) => unknown };
+        // Zod's strict() replaces the object and drops registry metadata.
+        // Preserve descriptions and validator-owned call constraints on BOTH
+        // root and nested objects before publishing their JSON Schema. This
+        // does not change the catchall/refinements that enforce strictness.
+        const metadata = typeof s.meta === 'function' ? s.meta() : undefined;
+        return metadata && typeof strict.meta === 'function' ? strict.meta(metadata) : strict;
       }
       case 'array':
         def.element = deepStrictifyInPlace(def.element, active);
