@@ -185,4 +185,16 @@ describe('checkScript (B-CX-PARSE — AST: computed / aliased / destructured)', 
     expect(Array.isArray(r.unknownRefs)).toBe(true);
     expect(Array.isArray(r.refs)).toBe(true);
   });
+
+  it('marks parser recovery errors so consumers do not validate recovered pseudo-properties', () => {
+    const r = checkScript(
+      String.raw`const r = await tools.capability.bash({
+        command: "head -n 12 /tmp/x.log | awk '{print NR ":" substr($0,1,600)}'",
+        cwd: "/tmp"
+      });`,
+      [mkTool('capability:bash')],
+    );
+    expect(r.hasParseErrors).toBe(true);
+    expect(r.refs).toContain('capability.bash');
+  });
 });

@@ -289,10 +289,13 @@ function omissionMarker(pointer, reason, omittedChars) {
  * think to correlate (EI-19965559011729712). The marker names both numbers and
  * explains that the downstream header includes the marker itself: TOON has no
  * lossless `N of TOTAL` header syntax, so the adjacent marker is the honest
- * bounded-count label.
+ * bounded-count label. `renderedCount` is deliberately named as a rendered
+ * input count: this generic projector cannot know how many rows the underlying
+ * query matched before its input was materialized, so it must never imply that
+ * this number is a query population total.
  */
-function arrayTruncationMarker(droppedCount, shownCount, totalCount) {
-    return `[TRUNCATED +${droppedCount} more item(s) — header count includes this marker; showing ${shownCount} of ${totalCount} — see _projection.cursor]`;
+function arrayTruncationMarker(droppedCount, shownCount, renderedCount) {
+    return `[TRUNCATED +${droppedCount} more item(s) — header count includes this marker; showing ${shownCount} of ${renderedCount} rendered input entries — renderedCount is NOT the query population; see _projection.cursor]`;
 }
 function isPlainObject(value) {
     if (value === null || typeof value !== 'object' || Array.isArray(value))
@@ -320,15 +323,15 @@ function isPlainObject(value) {
  * The rule is simply that the marker must match the contract of the array it JOINS.
  * An empty `projectedRows` carries no contract to preserve, so it keeps the string.
  */
-function arrayTruncationValue(projectedRows, droppedCount, shownCount, totalCount) {
-    const note = arrayTruncationMarker(droppedCount, shownCount, totalCount);
+function arrayTruncationValue(projectedRows, droppedCount, shownCount, renderedCount) {
+    const note = arrayTruncationMarker(droppedCount, shownCount, renderedCount);
     if (projectedRows.length > 0 && projectedRows.every(isPlainObject)) {
         return {
             id: '(truncated)',
             _truncated: true,
             omittedCount: droppedCount,
             shownCount,
-            totalCount,
+            renderedCount,
             note,
         };
     }
@@ -384,7 +387,7 @@ const IDENTITY_FIELDS = new Set([
     // A bounded object may already be passing through a second projection seam
     // (payload tier -> result door). Its honesty markers and array-count receipt
     // are identity too: dropping them recreates a complete-looking partial row.
-    '_partial', '_omitted', '_truncated', 'omittedCount', 'shownCount', 'totalCount',
+    '_partial', '_omitted', '_truncated', 'omittedCount', 'shownCount', 'renderedCount', 'totalCount',
     // EI-21197620758075816: a rubric criterion's structured `check` is its
     // executable identity. Dropping it makes a bound criterion indistinguishable
     // from a fuzzy/unbound one. The value is handled as a bounded structured
@@ -505,7 +508,7 @@ function projectIdentityPreview(value, path, depth, state, preservePaths = state
                 // priority: an element-count drop must survive the omitted[] sample cap
                 // even when per-row entries for the KEPT elements would otherwise fill it
                 // first (EI-19965559011729712).
-                recordOmission(state, `${path}[${projected.length}]`, `${droppedCount} identity row(s) omitted; showing ${projected.length} of ${value.length}`, droppedCount, true);
+                recordOmission(state, `${path}[${projected.length}]`, `${droppedCount} identity row(s) omitted; showing ${projected.length} of ${value.length} rendered input entries`, droppedCount, true);
                 projected.push(arrayTruncationValue(projected, droppedCount, projected.length, value.length));
             }
             return projected;
@@ -620,7 +623,7 @@ function projectValue(value, path, depth, state, preservePaths = state.preserveP
                 // source), so it must never be the one that gets starved out
                 // (EI-19965559011729712). The in-band marker also travels WITH the array
                 // itself, so a downstream encoder's own element count reflects the drop.
-                recordOmission(state, `${path}[${projected.length}]`, `${droppedCount} array item(s) omitted; showing ${projected.length} of ${value.length}`, droppedCount, true);
+                recordOmission(state, `${path}[${projected.length}]`, `${droppedCount} array item(s) omitted; showing ${projected.length} of ${value.length} rendered input entries`, droppedCount, true);
                 projected.push(arrayTruncationValue(projected, droppedCount, projected.length, value.length));
             }
             return projected;

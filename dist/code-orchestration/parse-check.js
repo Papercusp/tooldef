@@ -123,11 +123,23 @@ export function checkScript(script, tools, allowed) {
     };
     const canonicalMemberName = (member) => memberToName.get(member) ?? memberToName.get(canonMember(member)) ?? member;
     let source;
+    let hasParseErrors = false;
     try {
         source = ts.createSourceFile('script.ts', script, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+        // TypeScript deliberately recovers from syntax errors so callers can inspect a partial AST.
+        // That recovery is useful for the advisory tool-reference scan, but it is not trustworthy
+        // enough for literal argument/schema validation: an unescaped quote inside a shell command
+        // can become a pseudo-property and look like an unsupported tool argument. Keep the signal
+        // with the parse result so schema validators can defer to the VM's authoritative compile
+        // error instead of refusing on recovered nodes.
+        const parseDiagnostics = source.parseDiagnostics;
+        hasParseErrors = (parseDiagnostics?.length ?? 0) > 0;
     }
     catch {
-        return regexFallback(script, memberToName, fullNames);
+        // If source creation itself fails, the AST-based argument inspection is unavailable too.
+        // Preserve the regex fallback for the advisory reference scan, but mark the result as
+        // unparseable so consumers still skip schema validation.
+        return regexFallback(script, memberToName, fullNames, true);
     }
     // Binding maps, populated in source order during the walk. Straight-line scripts declare an
     // alias (`const t = tools`) before they use it, and chained bindings (`const w = tools.x; const
@@ -249,10 +261,16 @@ export function checkScript(script, tools, allowed) {
         ts.forEachChild(node, visit);
     };
     visit(source);
-    return { ok: unknown.size === 0, unknownRefs: [...unknown].sort(), refs: [...refs].sort(), calls };
+    return {
+        ok: unknown.size === 0,
+        unknownRefs: [...unknown].sort(),
+        refs: [...refs].sort(),
+        hasParseErrors,
+        calls,
+    };
 }
 /** Degrade gracefully if AST parsing ever throws: the original regex scan (dotted + call only). */
-function regexFallback(script, memberToName, fullNames) {
+function regexFallback(script, memberToName, fullNames, hasParseErrors = false) {
     const refs = new Set();
     const unknown = new Set();
     for (const m of script.matchAll(/\btools\.([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)/g)) {
@@ -269,5 +287,11 @@ function regexFallback(script, memberToName, fullNames) {
         if (!fullNames.has(m[1]))
             unknown.add(m[1]);
     }
-    return { ok: unknown.size === 0, unknownRefs: [...unknown].sort(), refs: [...refs].sort(), calls: [] };
+    return {
+        ok: unknown.size === 0,
+        unknownRefs: [...unknown].sort(),
+        refs: [...refs].sort(),
+        hasParseErrors,
+        calls: [],
+    };
 }
