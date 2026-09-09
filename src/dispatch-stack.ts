@@ -813,6 +813,20 @@ const invokeStep: DispatchStep = {
       //     low-stakes call, never a governed mutation — so a completed one is safe
       //     to surface even past the deadline.
       if (exec.abort.signal.aborted) {
+        // A handler may have cooperatively completed with an explicit failure after the
+        // dispatcher was aborted. Preserve that result: capability:bash uses structuredContent
+        // to report a child that was killed/timed out, and replacing it with the dispatcher's
+        // generic timeout loses the definitive child state and makes code:run classify it as
+        // uncertain. This does not weaken write safety: an explicit failure is never surfaced as
+        // a success, while an apparent success below remains abort-authoritative for non-low
+        // tools. MCP's isError is the equivalent failure signal for handlers without structured
+        // content.
+        const handlerReportedFailure =
+          result.isError === true ||
+          (result.structuredContent !== null &&
+            typeof result.structuredContent === 'object' &&
+            !Array.isArray(result.structuredContent) &&
+            (result.structuredContent as { ok?: unknown }).ok === false);
         // Effective tier from the tool's capabilities (host-registered resolver via
         // tierFor; defaults to 'low'). Low-tier READ ⟺ ≥1 declared capability AND
         // every one resolves to 'low' (the effective tier is the max). No declared
@@ -830,7 +844,7 @@ const invokeStep: DispatchStep = {
         // beat the deadline under load. Absent/false ⇒ the abort stays authoritative (below),
         // unchanged for every tool that has not opted in.
         const isIdempotentCompletion = exec.tool.idempotent === true;
-        if (!isLowTierRead && !isIdempotentCompletion) {
+        if (!handlerReportedFailure && !isLowTierRead && !isIdempotentCompletion) {
           return {
             ok: false,
             error: {

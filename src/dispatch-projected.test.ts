@@ -651,6 +651,28 @@ describe('dispatchProjectedTool', () => {
     expect(r.error?.code).toBe('timeout');
   }, 10_000);
 
+  it('preserves an explicit failed handler result when abort races handler completion', async () => {
+    // capability:bash returns structuredContent with the child status after the outer
+    // code:run abort kills its foreground process. The dispatcher must not replace that
+    // definitive `killed`/`timed_out` result with its generic handler-returned timeout.
+    // The result remains a failed command (`ok:false`), so this does not make a write look
+    // successful or weaken the abort-authoritative rule for an apparent success.
+    const tool = makeTool({
+      capabilities: [], // non-low tier: an apparent success must still become timeout
+      timeoutSec: 0.05,
+      fn: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return {
+          content: [{ type: 'text', text: 'command killed' }],
+          structuredContent: { ok: false, status: 'killed', exit_code: null },
+        };
+      },
+    });
+    const r = await dispatchProjectedTool(tool, 'capability:bash', {}, MAKE_CTX(), MAKE_DEPS());
+    expect(r.ok).toBe(true);
+    expect(r.result?.structuredContent).toEqual({ ok: false, status: 'killed', exit_code: null });
+  }, 10_000);
+
   it('ok-on-abort (idempotent READ, tier low): a completed result SURFACES despite the abort (no false timeout)', async () => {
     // The repeated-tool-error cluster (EI-98/99/105/174/175): under load the
     // wall-clock exceeds the timeout even for a cheap read, the idle/timeout

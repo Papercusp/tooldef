@@ -67,6 +67,41 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     expect(r.summary).toEqual({ scanned: 3, bad: [2] }); // 4 tool calls collapsed into ONE code:run
   });
 
+  it('preserves capability:bash explicit child failure after the outer script aborts', async () => {
+    // A foreground capability:bash child kills its process when code:run aborts, then
+    // settles with structuredContent describing `killed`/`timed_out`. The dispatch stack
+    // must preserve that definitive result so the orchestration reports a semantic child
+    // failure, rather than converting it into an uncertain dispatch timeout.
+    const bash = mkTool('capability:bash', 'write', async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return {
+        content: [{ type: 'text', text: 'command killed' }],
+        structuredContent: { ok: false, status: 'killed', exit_code: null },
+      };
+    });
+    const r = await runToolOrchestration(
+      `await tools.capability.bash({ command: 'sleep 10', timeout: 600000 }); return 'unreachable';`,
+      {
+        ctx: MAKE_CTX({ codeMode: true }),
+        deps: DEPS,
+        tools: [bash],
+        timeoutMs: 50,
+        timeoutGraceMs: 200,
+      },
+    );
+
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('script_timeout');
+    expect(r.childFailures).toEqual([
+      {
+        tool: 'capability:bash',
+        kind: 'semantic',
+        result: { ok: false, status: 'killed', exit_code: null },
+      },
+    ]);
+    expect(r.detachedCalls).toBeUndefined();
+  }, 10_000);
+
   describe('P-027 explicit final media result', () => {
     it('extracts validated image/audio blocks while preserving the authored summary', async () => {
       const r = await runToolOrchestration(
