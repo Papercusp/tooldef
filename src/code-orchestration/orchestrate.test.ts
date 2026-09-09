@@ -72,8 +72,10 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     // settles with structuredContent describing `killed`/`timed_out`. The dispatch stack
     // must preserve that definitive result so the orchestration reports a semantic child
     // failure, rather than converting it into an uncertain dispatch timeout.
+    let childStarted = false;
     const bash = mkTool('capability:bash', 'write', async () => {
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      childStarted = true;
+      await new Promise((resolve) => setTimeout(resolve, 5_100));
       return {
         content: [{ type: 'text', text: 'command killed' }],
         structuredContent: { ok: false, status: 'killed', exit_code: null },
@@ -85,13 +87,18 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
         ctx: MAKE_CTX({ codeMode: true }),
         deps: DEPS,
         tools: [bash],
-        timeoutMs: 50,
+        // Leave enough startup headroom for the worker under a loaded test runner. A 50ms
+        // budget expires before the worker can send its first RPC, which tests strandedWrites
+        // rather than the intended in-flight settlement path.
+        timeoutMs: 5_000,
         timeoutGraceMs: 200,
       },
     );
 
     expect(r.ok).toBe(false);
     expect(r.error).toContain('script_timeout');
+    expect(childStarted).toBe(true);
+    expect(r.dispatchCount).toBe(1);
     expect(r.childFailures).toEqual([
       {
         tool: 'capability:bash',
