@@ -720,6 +720,13 @@ export interface UnifiedToolContext {
   uiClientId?: string | null;
 
   /**
+   * Private stable session key for process-local failure-loop detector state.
+   * It is deliberately separate from the public coordination identity exposed
+   * by `resolveAgentIdentity` and is never rendered in failure hints.
+   */
+  failureLoopSessionKey?: string | null;
+
+  /**
    * Recall-telemetry surface label for a sub-call folded by a COMPOUND tool
    * (`inProcessCall(ctx, { telemetrySurface })`). It lets the folded tool
    * self-identify its entry point — coord:orient's `memory:search` fold records
