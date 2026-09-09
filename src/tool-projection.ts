@@ -345,6 +345,8 @@ export interface GateBypass {
 export interface RequestOriginMetadata {
   /** Transport adapter that observed the request, e.g. "mcp". */
   transport: string;
+  /** Host-observed physical binding; separate from protocol/format policy. */
+  connection?: 'http' | 'uds';
   /** URL pathname only; query params are whitelisted separately below. */
   path?: string;
   /** Non-secret request query params useful for attribution/debugging. */
