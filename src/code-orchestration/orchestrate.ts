@@ -415,6 +415,34 @@ export function resolveToolEffect(
   }
 }
 
+/**
+ * Resolve the effect of a facade call, including the dynamic target behind
+ * `tools:invoke`. The meta-tool is registered as a read because it is a
+ * delegator, but a code-run dry-run must gate the write it would delegate.
+ *
+ * A valid target that is absent from the projected catalog (or whose effect is
+ * unknown) is treated as a write. The dispatcher may reject that target later,
+ * but executing an unclassifiable delegated call during a dry-run would be an
+ * unsafe fail-open. Malformed invoke args cannot reach a target and retain the
+ * wrapper's static effect so normal schema validation remains observable.
+ */
+function resolveFacadeToolEffect(
+  tool: Pick<ProjectedTool, 'effect' | 'effectForCall'>,
+  toolName: string,
+  args: unknown,
+  tools: readonly ProjectedTool[],
+): ResolvedToolEffect {
+  const effect = resolveToolEffect(tool, args);
+  if (toolName !== 'tools:invoke' || !isPlainRecord(args) || typeof args.name !== 'string') {
+    return effect;
+  }
+
+  const nestedName = args.name.trim();
+  const nestedTool = tools.find((candidate) => candidate.expose?.mcp?.name === nestedName);
+  if (!nestedTool) return 'write';
+  return resolveToolEffect(nestedTool, args.args ?? {}) === 'read' ? 'read' : 'write';
+}
+
 export function detectStrandedWrites(
   staticCalls: readonly StaticToolCall[],
   tools: readonly ProjectedTool[],
@@ -769,7 +797,7 @@ export async function runToolOrchestration(
   const unknownRefs = check.ok ? undefined : check.unknownRefs;
 
   const dispatch: FacadeDispatch = async (tool, name, args) => {
-    const effect = resolveToolEffect(tool, args);
+    const effect = resolveFacadeToolEffect(tool, name, args, tools);
     const callRecord: OrchestrationCallRecord = {
       ordinal: callRecords.length,
       tool: name,

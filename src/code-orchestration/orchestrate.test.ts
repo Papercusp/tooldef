@@ -262,6 +262,30 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     expect(r.plannedMutations).toEqual([{ tool: 'wi:set-status', args: { id: 1, status: 'done' } }]);
   });
 
+  it('gates a write delegated through tools:invoke during dryRun', async () => {
+    const invokeFn = vi.fn(async () => json({ ok: true }));
+    const writeFn = vi.fn(async () => json({ ok: true }));
+    const invoke = mkTool('tools:invoke', 'read', invokeFn);
+    const setStatus = mkTool('wi:set-status', 'write', writeFn);
+    const r = await runToolOrchestration(
+      `await tools.tools.invoke({ name: 'wi:set-status', args: { id: 1, status: 'done' } }); return 'preview';`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [invoke, setStatus], dryRun: true },
+    );
+
+    expect(r.ok).toBe(true);
+    expect(invokeFn).not.toHaveBeenCalled();
+    expect(writeFn).not.toHaveBeenCalled();
+    expect(r.plannedMutations).toEqual([
+      {
+        tool: 'tools:invoke',
+        args: { name: 'wi:set-status', args: { id: 1, status: 'done' } },
+      },
+    ]);
+    expect(r.callRecords).toEqual([
+      expect.objectContaining({ ordinal: 0, tool: 'tools:invoke', effect: 'write', disposition: 'planned' }),
+    ]);
+  });
+
   it('resolves argument-sensitive effects before applying the dry-run gate', async () => {
     const deployFn = vi.fn(async () => json({ ok: true, state: 'gate-red' }));
     const deploy = mkTool(
