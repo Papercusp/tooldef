@@ -262,6 +262,22 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     expect(r.plannedMutations).toEqual([{ tool: 'wi:set-status', args: { id: 1, status: 'done' } }]);
   });
 
+  it('marks the synthetic dry-run write result ok for field reads', async () => {
+    const writeFn = vi.fn(async () => json({ ok: true }));
+    const setStatus = mkTool('wi:set-status', 'write', writeFn);
+    const r = await runToolOrchestration(
+      `const preview = await tools.wi.setStatus({ id: 1 });
+       return { ok: preview.ok, dryRun: preview.dryRun, wouldCall: preview.wouldCall };`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [setStatus], dryRun: true },
+    );
+
+    expect(r.ok).toBe(true);
+    expect(r.summary).toEqual({ ok: true, dryRun: true, wouldCall: 'wi:set-status' });
+    expect(r.fieldMisses).toBeUndefined();
+    expect(writeFn).not.toHaveBeenCalled();
+    expect(r.plannedMutations).toEqual([{ tool: 'wi:set-status', args: { id: 1 } }]);
+  });
+
   it('gates a write delegated through tools:invoke during dryRun', async () => {
     const invokeFn = vi.fn(async () => json({ ok: true }));
     const writeFn = vi.fn(async () => json({ ok: true }));

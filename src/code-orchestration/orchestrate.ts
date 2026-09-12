@@ -811,7 +811,7 @@ export async function runToolOrchestration(
       plannedMutations.push({ tool: name, args });
       if (dryRun) {
         callRecord.disposition = 'planned';
-        return { dryRun: true, wouldCall: name, args };
+        return { ok: true, dryRun: true, wouldCall: name, args };
       }
       writeAttempt = {
         index: writeAttempts.length,
