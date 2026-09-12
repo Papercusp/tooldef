@@ -755,6 +755,63 @@ describe('EI-19301148486657755: reading a field the tool result does not have', 
     expect(r.fieldMisses).toBeUndefined();
   });
 
+  it('keeps the account-status recipe on the nested rate pause field', async () => {
+    // `accounts:status` exposes the governor pause as `account.rate.pausedUntil`.
+    // The saved measure-account-pool-availability-wall-state recipe previously read
+    // `account.pausedUntil`, producing one field miss per account and refusing reuse.
+    const status = async () => ({
+      accounts: [{
+        id: 'account-1',
+        available: false,
+        usageWalled: true,
+        readingStatus: 'fresh',
+        rate: {
+          pausedUntil: 123,
+          utilization: 0.9,
+          utilization7d: 0.95,
+          windowResetAt: 456,
+          windowResetAt7d: 789,
+        },
+      }],
+    });
+    const correctedScript = `const s = await tools.accounts.status({});
+      const rows = (s.accounts || []).map(a => ({
+        id: a.id,
+        available: a.available,
+        usageWalled: a.usageWalled,
+        readingStatus: a.readingStatus,
+        pausedUntil: a.rate?.pausedUntil ?? null,
+        util: a.rate?.utilization ?? null,
+        util7d: a.rate?.utilization7d ?? null,
+        resetAt: a.rate?.windowResetAt ?? null,
+        reset7d: a.rate?.windowResetAt7d ?? null,
+      }));
+      return {
+        total: rows.length,
+        availableCount: rows.filter(r => r.available).length,
+        usageWalledCount: rows.filter(r => r.usageWalled).length,
+        rows,
+      };`;
+    const staleScript = correctedScript.replace('a.rate?.pausedUntil', 'a.pausedUntil');
+
+    const stale = await runOrchestrationScript(staleScript, facade({ accounts: { status } }));
+    expect(stale.ok).toBe(true);
+    expect(stale.result).toMatchObject({ rows: [{ pausedUntil: null }] });
+    expect(stale.fieldMisses).toEqual([
+      expect.objectContaining({ tool: 'accounts:status', path: 'accounts.0', read: 'pausedUntil' }),
+    ]);
+
+    const corrected = await runOrchestrationScript(correctedScript, facade({ accounts: { status } }));
+    expect(corrected.ok).toBe(true);
+    expect(corrected.result).toMatchObject({
+      total: 1,
+      availableCount: 0,
+      usageWalledCount: 1,
+      rows: [{ pausedUntil: 123, util7d: 0.95, resetAt: 456, reset7d: 789 }],
+    });
+    expect(corrected.fieldMisses).toBeUndefined();
+  });
+
   it('catches a NESTED miss inside an array element, with the dotted path', async () => {
     // The coord:send case: `r.woken` read on each row of `results[]`, where the rows carry
     // different keys entirely. A top-level-only check would miss this.
