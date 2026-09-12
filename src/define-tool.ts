@@ -1557,12 +1557,13 @@ function editDistance(a: string, b: string): number {
  * tool and wrong on another, and the only discriminator is whether the TARGET can hold
  * the VALUE — which is what this decides.
  *
- * Deliberately narrow: only `enum`/`const` count as proof. Those enumerate the entire
- * admissible set, so "cannot accept" is decidable with no judgment. A `type`-based check
- * would have to guess — a string offered to an array-typed key is often a legitimate
- * relocation that merely needs wrapping — and a wrong SUPPRESSION is exactly as harmful
- * as the wrong suggestion this removes, just harder to notice. Absent proof we stay
- * silent and let the name-based suggestion stand.
+ * Deliberately narrow: an object/array value is also refused only when the target's
+ * declared `type` consists exclusively of scalar JSON types. That is direct proof that
+ * the structured value cannot validate (the scorecards:list `subject` -> `subjectRef`
+ * incident), while a target typed as `object`/`array` remains open to a caller-side
+ * representation mistake that this helper must not guess how to repair. Scalar values
+ * are never rejected from a structured target by this check. Absent proof we stay silent
+ * and let the name-based suggestion stand.
  */
 function candidateRefutesValue(
   props: Record<string, unknown> | undefined,
@@ -1572,10 +1573,30 @@ function candidateRefutesValue(
   if (!props || value === undefined) return false;
   const schema = props[candidate];
   if (!schema || typeof schema !== 'object') return false;
+  const constrained = schema as { enum?: unknown; const?: unknown; type?: unknown };
+  const declaredTypes =
+    typeof constrained.type === 'string'
+      ? [constrained.type]
+      : Array.isArray(constrained.type) &&
+          constrained.type.every((type): type is string => typeof type === 'string')
+        ? constrained.type
+        : null;
+  const structured = value !== null && typeof value === 'object';
+  // A structured value cannot satisfy a target that declares only scalar primitive
+  // types. Keep this one-way: the inverse (a scalar offered to an object/array target)
+  // may need a representation-specific wrapper and is therefore not proof for this
+  // name-suggestion helper.
+  if (
+    structured &&
+    declaredTypes &&
+    declaredTypes.length > 0 &&
+    declaredTypes.every((type) => ['string', 'number', 'integer', 'boolean', 'null'].includes(type))
+  ) {
+    return true;
+  }
   // Only primitives are compared. A structured value tested against an enum of
   // primitives is not decidable by identity, so it yields no proof either way.
-  if (value !== null && typeof value === 'object') return false;
-  const constrained = schema as { enum?: unknown; const?: unknown };
+  if (structured) return false;
   if (Array.isArray(constrained.enum)) return !constrained.enum.includes(value);
   if ('const' in constrained) return constrained.const !== value;
   return false;

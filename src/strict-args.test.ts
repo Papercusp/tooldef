@@ -738,6 +738,64 @@ describe('suggestArgName', () => {
     ).toBe('scope');
   });
 
+  it('does not relocate a structured subject onto scorecards:list\'s scalar subjectRef (EI-23096821540998210)', () => {
+    // The live failure: scorecards:list rejected emit's structured `subject` object,
+    // then the name-distance correction moved that object to `subjectRef`, whose
+    // declared JSON-Schema type is string. The corrected call failed a second time.
+    const scorecardsListProps = {
+      rubricRef: { type: 'string' },
+      sourceHive: { type: 'string' },
+      subjectRef: { type: 'string' },
+      limit: { type: 'integer' },
+    };
+    const rejection = [{ message: 'Unrecognized key: "subject"', keys: ['subject'] }];
+    const input = {
+      subject: {
+        kind: 'plan',
+        ref: 'review-verification-efficiency-2026-09-09#AUTO-BAR-R-6-P-004@2',
+      },
+    };
+
+    expect(
+      invalidInputCorrections(rejection, { properties: scorecardsListProps }, undefined, input),
+    ).toEqual([]);
+    const hint = unknownArgHint(rejection, { properties: scorecardsListProps }, undefined, input);
+    expect(hint).toContain('this tool accepts ONLY');
+    expect(hint).not.toContain('subjectRef` for `subject`');
+  });
+
+  it('supports scalar type unions while leaving structured targets and unconstrained schemas open', () => {
+    const rejection = [{ message: 'Unrecognized key: "subject"', keys: ['subject'] }];
+    const input = { subject: { kind: 'plan', ref: 'plan-1' } };
+
+    expect(
+      invalidInputCorrections(
+        rejection,
+        { properties: { subjectRef: { type: ['string', 'null'] } } },
+        undefined,
+        input,
+      ),
+    ).toEqual([]);
+    expect(
+      suggestArgName('subject', ['subjectRef'], {
+        value: input.subject,
+        props: { subjectRef: { type: ['string', 'object'] } },
+      }),
+    ).toBe('subjectRef');
+    expect(
+      suggestArgName('subject', ['subjectRef'], {
+        value: input.subject,
+        props: { subjectRef: {} },
+      }),
+    ).toBe('subjectRef');
+    expect(
+      suggestArgName('subject', ['subjectRef'], {
+        value: 'plan-1',
+        props: { subjectRef: { type: 'object' } },
+      }),
+    ).toBe('subjectRef');
+  });
+
   it('stays silent rather than misdirecting when no viable target remains', () => {
     // No `pot` declared and `scope` refuted. A suggestion that cannot work costs a
     // guaranteed extra round-trip AND teaches a false vocabulary the caller carries to
