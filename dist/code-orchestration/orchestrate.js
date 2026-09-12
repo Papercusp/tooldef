@@ -62,6 +62,28 @@ export function resolveToolEffect(tool, args) {
         return fallback;
     }
 }
+/**
+ * Resolve the effect of a facade call, including the dynamic target behind
+ * `tools:invoke`. The meta-tool is registered as a read because it is a
+ * delegator, but a code-run dry-run must gate the write it would delegate.
+ *
+ * A valid target that is absent from the projected catalog (or whose effect is
+ * unknown) is treated as a write. The dispatcher may reject that target later,
+ * but executing an unclassifiable delegated call during a dry-run would be an
+ * unsafe fail-open. Malformed invoke args cannot reach a target and retain the
+ * wrapper's static effect so normal schema validation remains observable.
+ */
+function resolveFacadeToolEffect(tool, toolName, args, tools) {
+    const effect = resolveToolEffect(tool, args);
+    if (toolName !== 'tools:invoke' || !isPlainRecord(args) || typeof args.name !== 'string') {
+        return effect;
+    }
+    const nestedName = args.name.trim();
+    const nestedTool = tools.find((candidate) => candidate.expose?.mcp?.name === nestedName);
+    if (!nestedTool)
+        return 'write';
+    return resolveToolEffect(nestedTool, args.args ?? {}) === 'read' ? 'read' : 'write';
+}
 export function detectStrandedWrites(staticCalls, tools, dispatchedToolNames) {
     // `expose.mcp.name` is the canonical projected name — the SAME accessor buildToolFacade and
     // facadeToolNames use, and the one `checkScript` resolves its `calls` against. A ProjectedTool
@@ -388,7 +410,7 @@ export async function runToolOrchestration(script, opts) {
     // per-call error.
     const unknownRefs = check.ok ? undefined : check.unknownRefs;
     const dispatch = async (tool, name, args) => {
-        const effect = resolveToolEffect(tool, args);
+        const effect = resolveFacadeToolEffect(tool, name, args, tools);
         const callRecord = {
             ordinal: callRecords.length,
             tool: name,
@@ -402,7 +424,7 @@ export async function runToolOrchestration(script, opts) {
             plannedMutations.push({ tool: name, args });
             if (dryRun) {
                 callRecord.disposition = 'planned';
-                return { dryRun: true, wouldCall: name, args };
+                return { ok: true, dryRun: true, wouldCall: name, args };
             }
             writeAttempt = {
                 index: writeAttempts.length,
