@@ -2339,6 +2339,7 @@ function makeInvalidInputError(
     input,
     corrections,
     unknownKeys,
+    issues,
     acceptedOnOtherVariant: argsAcceptedOnOtherVariant(rawSchema, unknownKeys),
   });
   const metadata: InvalidInputMetadata = {

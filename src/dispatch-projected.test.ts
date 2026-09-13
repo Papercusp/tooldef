@@ -462,6 +462,102 @@ describe('dispatchProjectedTool', () => {
     expect(metadataJson?.invalidInput).toEqual(expected);
   });
 
+  it('returns a corrected call for known-key mutually-exclusive refinement failures', async () => {
+    defineTool({
+      name: 'test:invalid-input-known-conflict',
+      requirePrincipal: false as const,
+      capability: 'test:read',
+      args: z
+        .object({
+          op: z.literal('admit'),
+          paths: z.array(z.string()),
+          patchCommit: z.string(),
+          reason: z.string().optional(),
+          wholeBlob: z.boolean().optional(),
+          includeHunksFrom: z.array(z.string()).optional(),
+        })
+        .superRefine((value, refinementCtx) => {
+          if (
+            value.wholeBlob === true ||
+            value.includeHunksFrom !== undefined
+          ) {
+            refinementCtx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ['patchCommit'],
+              message:
+                'patchCommit requires a review reason and cannot combine with wholeBlob or includeHunksFrom',
+            });
+          }
+        }),
+      async handler() {
+        return { content: [{ type: 'text' as const, text: 'ok' }] };
+      },
+    });
+    let metadataJson: Record<string, unknown> | null | undefined;
+    const input = {
+      op: 'admit',
+      paths: ['lib/red.test.ts'],
+      patchCommit: 'a'.repeat(40),
+      reason: 'reviewed patch source',
+      wholeBlob: true,
+      includeHunksFrom: ['peer'],
+    };
+
+    const result = await dispatchProjectedTool(
+      lookupByMcpName('test:invalid-input-known-conflict')!,
+      'test:invalid-input-known-conflict',
+      input,
+      MAKE_CTX(),
+      MAKE_DEPS({
+        recordInvocation: vi.fn(async (invocation) => {
+          metadataJson = invocation.metadataJson;
+        }),
+      }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error?.code).toBe('invalid_input');
+    expect(result.error?.message).toContain(
+      'CORRECTED CALL — send this: test:invalid-input-known-conflict(',
+    );
+    expect(result.error?.message).toContain('keep the named source option');
+    expect(result.error?.meta?.invalidInput).toMatchObject({
+      correctedCall: expect.objectContaining({
+        args: {
+          op: 'admit',
+          paths: ['lib/red.test.ts'],
+          patchCommit: 'a'.repeat(40),
+          reason: 'reviewed patch source',
+        },
+        steps: [
+          {
+            rejectedArg: 'wholeBlob',
+            action: 'dropped',
+            reason: 'mutually-exclusive',
+            conflictsWith: 'patchCommit',
+          },
+          {
+            rejectedArg: 'includeHunksFrom',
+            action: 'dropped',
+            reason: 'mutually-exclusive',
+            conflictsWith: 'patchCommit',
+          },
+        ],
+        droppedUnaccepted: false,
+      }),
+    });
+    expect(metadataJson?.invalidInput).toMatchObject({
+      correctedCall: expect.objectContaining({
+        args: {
+          op: 'admit',
+          paths: ['lib/red.test.ts'],
+          patchCommit: 'a'.repeat(40),
+          reason: 'reviewed patch source',
+        },
+      }),
+    });
+  });
+
   it('emits a corrected call for an authored redirect on a zero-key schema', async () => {
     defineTool({
       name: 'test:zero-key-redirect',

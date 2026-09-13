@@ -53,6 +53,10 @@ export interface CorrectedCallStep {
   readonly target?: string;
   /** Which correction source chose the destination (absent when dropped). */
   readonly kind?: InvalidInputCorrection['kind'];
+  /** Known-key refinement dropped because it conflicts with another supplied key. */
+  readonly reason?: 'mutually-exclusive';
+  /** The source key retained when `rejectedArg` was dropped for a conflict. */
+  readonly conflictsWith?: string;
   /**
    * Dropped, but the tool DOES declare this key on another variant of a discriminated
    * union — the caller picked the wrong branch, not a nonexistent arg. Distinguishing the
@@ -73,8 +77,67 @@ export interface CorrectedCall {
   readonly steps: readonly CorrectedCallStep[];
   /** One-line, copy-pasteable, size-bounded rendering. */
   readonly rendered: string;
-  /** True when at least one key had no destination and was removed. */
+  /** True when at least one unaccepted key had no destination and was removed. */
   readonly droppedUnaccepted: boolean;
+}
+
+export interface CorrectedCallIssue {
+  readonly message?: string;
+  readonly path?: readonly unknown[];
+}
+
+export interface MutuallyExclusiveArgConflict {
+  /** The key named by the refinement issue and retained in the corrected call. */
+  readonly source: string;
+  /** Other keys named by the issue that were supplied by the caller. */
+  readonly conflictingKeys: readonly string[];
+}
+
+function issuePathKey(issue: CorrectedCallIssue): string | undefined {
+  const segment = issue.path?.[issue.path.length - 1];
+  if (typeof segment === 'string') return segment;
+  if (segment && typeof segment === 'object' && 'key' in segment) {
+    const key = (segment as { key?: unknown }).key;
+    return typeof key === 'string' ? key : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Extract only explicit known-key exclusion rules from refinement messages.
+ *
+ * This is intentionally narrower than a general natural-language parser: a corrected call
+ * must never guess which valid value to change. The refinement must identify its source path
+ * and use the explicit `cannot combine with ...` / `mutually exclusive with ...` vocabulary;
+ * only named keys already present in the caller's object are removed.
+ */
+export function mutuallyExclusiveArgConflicts(
+  issues: readonly CorrectedCallIssue[] | undefined,
+  input: unknown,
+): MutuallyExclusiveArgConflict[] {
+  if (!issues || !input || typeof input !== 'object' || Array.isArray(input)) return [];
+  const args = input as Record<string, unknown>;
+  const conflicts: MutuallyExclusiveArgConflict[] = [];
+  const seen = new Set<string>();
+  for (const issue of issues) {
+    const message = typeof issue.message === 'string' ? issue.message : '';
+    const match =
+      message.match(/\bcannot\s+combine\s+with\s+(.+)$/i) ??
+      message.match(/\bmutually\s+exclusive\s+with\s+(.+)$/i);
+    if (!match) continue;
+    const source = issuePathKey(issue);
+    if (!source || !(source in args)) continue;
+    const names = match[1]?.match(/[A-Za-z_$][A-Za-z0-9_$]*/g) ?? [];
+    const conflictingKeys = [
+      ...new Set(names.filter((name) => name !== source && name in args)),
+    ];
+    if (conflictingKeys.length === 0) continue;
+    const key = `${source}:${conflictingKeys.join(',')}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    conflicts.push({ source, conflictingKeys });
+  }
+  return conflicts;
 }
 
 /**
@@ -170,13 +233,16 @@ export function buildCorrectedCall(params: {
   readonly input: unknown;
   readonly corrections: readonly InvalidInputCorrection[];
   readonly unknownKeys: readonly string[];
+  /** Known-key refinement issues, used for explicit mutually-exclusive source conflicts. */
+  readonly issues?: readonly CorrectedCallIssue[];
   /** Subset of `unknownKeys` the tool declares on a different union variant. */
   readonly acceptedOnOtherVariant?: readonly string[];
 }): CorrectedCall | null {
   const { toolName, input, corrections, unknownKeys } = params;
   const acceptedElsewhere = new Set(params.acceptedOnOtherVariant ?? []);
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
-  if (unknownKeys.length === 0) return null;
+  const conflicts = mutuallyExclusiveArgConflicts(params.issues, input);
+  if (unknownKeys.length === 0 && conflicts.length === 0) return null;
 
   const args: Record<string, unknown> = { ...(input as Record<string, unknown>) };
   const steps: CorrectedCallStep[] = [];
@@ -213,6 +279,24 @@ export function buildCorrectedCall(params: {
     });
   }
 
+  // A refinement can reject a combination of keys that are all valid individually. The
+  // unknown-key pass above cannot see that failure, so retain the explicitly named source
+  // key and remove only the conflicting keys the caller actually supplied. This is the
+  // deterministic repair for `patchCommit` + `wholeBlob`-style source conflicts.
+  for (const conflict of conflicts) {
+    if (!(conflict.source in args)) continue;
+    for (const key of conflict.conflictingKeys) {
+      if (!(key in args)) continue;
+      delete args[key];
+      steps.push({
+        rejectedArg: key,
+        action: 'dropped',
+        reason: 'mutually-exclusive',
+        conflictsWith: conflict.source,
+      });
+    }
+  }
+
   if (steps.length === 0) return null;
 
   return {
@@ -220,7 +304,7 @@ export function buildCorrectedCall(params: {
     args,
     steps,
     rendered: `${toolName}(${renderArgs(args)})`,
-    droppedUnaccepted: steps.some((step) => step.action === 'dropped'),
+    droppedUnaccepted: steps.some((step) => step.action === 'dropped' && !step.reason),
   };
 }
 
@@ -235,12 +319,16 @@ export function correctedCallHint(corrected: CorrectedCall | null): string {
     .filter((step) => step.action === 'relocated')
     .map((step) => `\`${step.rejectedArg}\` -> \`${step.target}\``);
   const droppedSteps = corrected.steps.filter((step) => step.action === 'dropped');
+  const conflictDrops = droppedSteps.filter((step) => step.reason === 'mutually-exclusive');
   const wrongVariant = droppedSteps
-    .filter((step) => step.acceptedOnOtherVariant)
+    .filter((step) => step.acceptedOnOtherVariant && !step.reason)
     .map((step) => `\`${step.rejectedArg}\``);
   const unknownAnywhere = droppedSteps
-    .filter((step) => !step.acceptedOnOtherVariant)
+    .filter((step) => !step.acceptedOnOtherVariant && !step.reason)
     .map((step) => `\`${step.rejectedArg}\``);
+  const conflicts = conflictDrops.map(
+    (step) => `\`${step.rejectedArg}\` (conflicts with \`${step.conflictsWith}\`)`,
+  );
   const changes: string[] = [];
   if (relocated.length > 0) changes.push(`moved ${relocated.join(', ')}`);
   if (unknownAnywhere.length > 0) {
@@ -252,6 +340,9 @@ export function correctedCallHint(corrected: CorrectedCall | null): string {
     changes.push(
       `removed ${wrongVariant.join(', ')} (declared by this tool, but NOT on the variant your other args select — switch variant if you need it, do not rename it)`,
     );
+  }
+  if (conflicts.length > 0) {
+    changes.push(`removed ${conflicts.join(', ')} (keep the named source option)`);
   }
   return (
     ` CORRECTED CALL — send this: ${corrected.rendered}` +

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { buildCorrectedCall, correctedCallHint } from './corrected-call';
+import {
+  buildCorrectedCall,
+  correctedCallHint,
+  mutuallyExclusiveArgConflicts,
+} from './corrected-call';
 import {
   argsAcceptedOnOtherVariant,
   invalidInputCorrections,
@@ -161,6 +165,83 @@ describe('buildCorrectedCall', () => {
     // then reporting a value-level failure as a tool bug.
     expect(hint).toContain('does not');
     expect(hint).toContain('guarantee');
+  });
+});
+
+describe('known-key mutually-exclusive refinements', () => {
+  const conflictIssues = [
+    {
+      path: ['patchCommit'],
+      message: 'patchCommit requires a review reason and cannot combine with wholeBlob or includeHunksFrom',
+    },
+  ];
+
+  it('extracts only the named conflicting keys the caller actually supplied', () => {
+    expect(
+      mutuallyExclusiveArgConflicts(conflictIssues, {
+        patchCommit: 'a'.repeat(40),
+        wholeBlob: true,
+        unrelated: 'preserve me',
+      }),
+    ).toEqual([{ source: 'patchCommit', conflictingKeys: ['wholeBlob'] }]);
+  });
+
+  it('removes known conflicting options even when there are no unrecognized keys', () => {
+    const input = {
+      op: 'admit',
+      paths: ['lib/red.test.ts'],
+      patchCommit: 'a'.repeat(40),
+      reason: 'reviewed patch source',
+      wholeBlob: true,
+      includeHunksFrom: ['peer'],
+    };
+    const corrected = buildCorrectedCall({
+      toolName: 'release:repair-queue',
+      input,
+      corrections: [],
+      unknownKeys: [],
+      issues: conflictIssues,
+    });
+
+    expect(corrected).not.toBeNull();
+    expect(corrected!.args).toEqual({
+      op: 'admit',
+      paths: ['lib/red.test.ts'],
+      patchCommit: 'a'.repeat(40),
+      reason: 'reviewed patch source',
+    });
+    expect(corrected!.steps).toEqual([
+      {
+        rejectedArg: 'wholeBlob',
+        action: 'dropped',
+        reason: 'mutually-exclusive',
+        conflictsWith: 'patchCommit',
+      },
+      {
+        rejectedArg: 'includeHunksFrom',
+        action: 'dropped',
+        reason: 'mutually-exclusive',
+        conflictsWith: 'patchCommit',
+      },
+    ]);
+    // These are valid keys individually; the correction is not an unaccepted-key drop.
+    expect(corrected!.droppedUnaccepted).toBe(false);
+
+    const hint = correctedCallHint(corrected);
+    expect(hint).toContain('release:repair-queue(');
+    expect(hint).toContain('"patchCommit"');
+    expect(hint).not.toContain('"wholeBlob"');
+    expect(hint).not.toContain('"includeHunksFrom"');
+    expect(hint).toContain('keep the named source option');
+  });
+
+  it('fails closed for refinement wording that does not explicitly name an exclusion rule', () => {
+    expect(
+      mutuallyExclusiveArgConflicts(
+        [{ path: ['patchCommit'], message: 'patchCommit is incompatible with wholeBlob' }],
+        { patchCommit: 'a'.repeat(40), wholeBlob: true },
+      ),
+    ).toEqual([]);
   });
 });
 
