@@ -738,62 +738,45 @@ describe('suggestArgName', () => {
     ).toBe('scope');
   });
 
-  it('does not relocate a structured subject onto scorecards:list\'s scalar subjectRef (EI-23096821540998210)', () => {
-    // The live failure: scorecards:list rejected emit's structured `subject` object,
-    // then the name-distance correction moved that object to `subjectRef`, whose
-    // declared JSON-Schema type is string. The corrected call failed a second time.
-    const scorecardsListProps = {
-      rubricRef: { type: 'string' },
-      sourceHive: { type: 'string' },
-      subjectRef: { type: 'string' },
-      limit: { type: 'integer' },
-    };
-    const rejection = [{ message: 'Unrecognized key: "subject"', keys: ['subject'] }];
-    const input = {
-      subject: {
-        kind: 'plan',
-        ref: 'review-verification-efficiency-2026-09-09#AUTO-BAR-R-6-P-004@2',
-      },
-    };
-
-    expect(
-      invalidInputCorrections(rejection, { properties: scorecardsListProps }, undefined, input),
-    ).toEqual([]);
-    const hint = unknownArgHint(rejection, { properties: scorecardsListProps }, undefined, input);
-    expect(hint).toContain('this tool accepts ONLY');
-    expect(hint).not.toContain('subjectRef` for `subject`');
-  });
-
-  it('supports scalar type unions while leaving structured targets and unconstrained schemas open', () => {
+  it('keeps structured corrections open when projected primitive types may be coercive', () => {
+    // Zod's strict and coercive primitives both project as a scalar JSON-Schema type.
+    // The coercive source is allowed to accept this object, so the projected `string`
+    // type is not proof that relocating it to `subjectRef` will fail.
+    const coercive = z.object({ subjectRef: z.coerce.string() });
+    const rawSchema = toArgsJsonSchema('test:coercive-subject', coercive);
     const rejection = [{ message: 'Unrecognized key: "subject"', keys: ['subject'] }];
     const input = { subject: { kind: 'plan', ref: 'plan-1' } };
 
+    expect(coercive.safeParse({ subjectRef: input.subject }).success).toBe(true);
     expect(
-      invalidInputCorrections(
-        rejection,
-        { properties: { subjectRef: { type: ['string', 'null'] } } },
-        undefined,
-        input,
-      ),
-    ).toEqual([]);
-    expect(
-      suggestArgName('subject', ['subjectRef'], {
-        value: input.subject,
-        props: { subjectRef: { type: ['string', 'object'] } },
-      }),
-    ).toBe('subjectRef');
-    expect(
-      suggestArgName('subject', ['subjectRef'], {
-        value: input.subject,
-        props: { subjectRef: {} },
-      }),
-    ).toBe('subjectRef');
-    expect(
-      suggestArgName('subject', ['subjectRef'], {
-        value: 'plan-1',
-        props: { subjectRef: { type: 'object' } },
-      }),
-    ).toBe('subjectRef');
+      invalidInputCorrections(rejection, rawSchema, undefined, input),
+    ).toEqual([
+      { rejectedArg: 'subject', target: 'subjectRef', kind: 'near-name' },
+    ]);
+    expect(unknownArgHint(rejection, rawSchema, undefined, input)).toContain(
+      'subjectRef` for `subject`',
+    );
+  });
+
+  it('keeps the sessions:read-style detail:true to tail:true correction path open', () => {
+    // The stale wrapper used `detail:true`; the current vocabulary is `tail`. Model
+    // the coercive primitive boundary explicitly: both project as `number`, while
+    // the source accepts true and produces the usable tail value 1.
+    const readArgs = z.object({
+      session: z.string(),
+      tail: z.coerce.number().optional(),
+    });
+    const rawSchema = toArgsJsonSchema('sessions:read', readArgs);
+    const rejection = [{ message: 'Unrecognized key: "detail"', keys: ['detail'] }];
+    const input = { session: 'self', detail: true };
+
+    expect(readArgs.safeParse({ session: 'self', tail: true }).success).toBe(true);
+    expect(invalidInputCorrections(rejection, rawSchema, undefined, input)).toEqual([
+      { rejectedArg: 'detail', target: 'tail', kind: 'near-name' },
+    ]);
+    expect(unknownArgHint(rejection, rawSchema, undefined, input)).toContain(
+      'tail` for `detail`',
+    );
   });
 
   it('stays silent rather than misdirecting when no viable target remains', () => {
