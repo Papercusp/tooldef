@@ -514,6 +514,64 @@ function reencodableJsonPayload(out: ToolResult, ctx: UnifiedToolContext): unkno
 }
 
 /**
+ * A few legacy handlers return a hybrid envelope: human-facing MCP `content`
+ * alongside the authoritative structured `data` payload. Treating that value
+ * as a raw `ToolResult` drops `data` at the transport boundary because
+ * `dispatchProjectedToolToMcp` intentionally forwards only MCP fields. The
+ * launch-agent capability is the measured instance: its successful response
+ * contains a prose launch summary plus `{ deduped, launch }` data, so ptool's
+ * JSON-mode caller used to receive the prose instead of machine-readable JSON.
+ *
+ * Keep this adaptation MCP-only. HTTP, IPC, and in-process callers may consume
+ * the handler's original content contract directly (including content that is
+ * deliberately human-readable). MCP callers instead receive the data through
+ * the same serializer as canonical `{ data }` handlers, including negotiated
+ * `structuredContent`, while preserving the handler's protocol failure bit and
+ * metadata.
+ */
+function isHybridToolResponse(
+  response: ToolResponse | ToolResult,
+): response is ToolResponse & ToolResult {
+  return (
+    response !== null &&
+    typeof response === 'object' &&
+    Array.isArray((response as ToolResult).content) &&
+    Object.hasOwn(response, 'data') &&
+    (response as ToolResponse).data !== undefined
+  );
+}
+
+async function serializeHybridToolResponse(
+  response: ToolResponse & ToolResult,
+  ctx: UnifiedToolContext,
+  eligibility: EligibilityResult | undefined,
+  def: { name: string; result?: StandardSchemaV1; delta?: DeltaCapability },
+  readColumns?: ColumnSpec[],
+  args?: unknown,
+): Promise<ToolResult> {
+  if (ctx.transport !== 'mcp') return response;
+
+  const serialized = await serializeProjectedResult(response, ctx, eligibility, def, readColumns, args);
+  const result: ToolResult = {
+    ...serialized,
+    ...(response.isError !== undefined ? { isError: response.isError } : {}),
+    ...(response._meta || serialized._meta
+      ? { _meta: { ...(response._meta ?? {}), ...(serialized._meta ?? {}) } }
+      : {}),
+  };
+  // The serializer's data-derived structured value is authoritative when it
+  // was requested. Preserve a handler-supplied structured value only when the
+  // serializer did not produce one, keeping the hybrid path lossless for
+  // callers that already supplied an MCP structured twin.
+  if (result.structuredContent === undefined && response.structuredContent !== undefined) {
+    result.structuredContent = response.structuredContent;
+  }
+  if (response.outputRef !== undefined) result.outputRef = response.outputRef;
+  if (response.outputSize !== undefined) result.outputSize = response.outputSize;
+  return result;
+}
+
+/**
  * EI-20305133624359928: an object-rooted `result` schema is advertised to MCP
  * clients as `outputSchema`. The official SDK then requires `structuredContent`
  * whenever the caller opted into it, even when a legacy handler returned an
@@ -2819,6 +2877,9 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     // handler's own JSON over a non-mcp transport) are byte-for-byte unchanged
     // — preserving the contract a past blanket re-encode broke
     // (memory-taxonomy-and-debt-followups P-006).
+    if (isHybridToolResponse(response)) {
+      return disclose(serializeHybridToolResponse(response, ctx, eligibility, def, readColumns, parsed.value));
+    }
     if (response && typeof response === 'object' && Array.isArray((response as ToolResult).content)) {
       const reencodable = reencodableJsonPayload(response as ToolResult, ctx);
       if (reencodable !== undefined) {
@@ -3010,6 +3071,9 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     // the MCP transport, a single-text JSON body whose shape TOON shrinks is
     // re-encoded for the token win (P-002); see `reencodableJsonPayload` — it is
     // a no-op on every non-mcp transport, so verbatim-content consumers are safe.
+    if (isHybridToolResponse(out)) {
+      return disclose(serializeHybridToolResponse(out, handlerCtx, eligibility, def, readColumns, parsed.value));
+    }
     if (out && typeof out === 'object' && Array.isArray((out as ToolResult).content)) {
       const reencodable = reencodableJsonPayload(out as ToolResult, handlerCtx);
       if (reencodable !== undefined) {

@@ -54,6 +54,23 @@ async function call(name: string, over: Partial<UnifiedToolContext> = {}) {
   return { result, text, meta: result._meta ?? {} };
 }
 
+async function callPrincipal(name: string, transport: string) {
+  const tool = lookupByMcpName(name)!;
+  const r = await dispatchProjectedTool(
+    tool,
+    name,
+    {},
+    ctx({
+      transport,
+      principal: { slug: 'u', workspaceId: 'w', capabilities: new Set(['test:read']) },
+      tx: {},
+    } as unknown as Partial<UnifiedToolContext>),
+    DEPS,
+  );
+  if (!r.ok) throw new Error(`dispatch failed: ${r.error?.code}`);
+  return { text: (r.result!.content[0] as { text: string }).text, meta: r.result!._meta ?? {} };
+}
+
 afterEach(() => _resetProjectionRegistryForTests());
 
 describe('end-to-end format selection through defineTool', () => {
@@ -189,6 +206,51 @@ describe('end-to-end format selection through defineTool', () => {
     expect(result.structuredContent).toEqual(payload);
     expect(result.isError).toBe(true);
   });
+
+  it('serializes a hybrid role-gated response from data on MCP while preserving isError', async () => {
+    const payload = { ok: true, launch: { opened: 2 } };
+    defineTool({
+      name: 'fmt:hybrid-role',
+      requirePrincipal: false,
+      capability: 'test:read',
+      args: z.object({}),
+      result: z.object({ ok: z.boolean(), launch: z.object({ opened: z.number() }) }),
+      handler: async () => ({
+        content: [{ type: 'text' as const, text: 'Launched 2 agents.' }],
+        data: payload,
+        isError: true,
+      }),
+    });
+
+    const { result, text } = await call('fmt:hybrid-role', {
+      transport: 'mcp',
+      requestedStructured: true,
+    });
+    expect(text).toBe(JSON.stringify(payload));
+    expect(result.structuredContent).toEqual(payload);
+    expect(result.isError).toBe(true);
+  });
+
+  it('serializes a hybrid principal-gated response from data on MCP but keeps raw content off MCP', async () => {
+    const payload = { ok: true, launch: { opened: 1 } };
+    defineTool({
+      name: 'fmt:hybrid-principal',
+      capability: 'test:read',
+      args: z.object({}),
+      result: z.object({ ok: z.boolean(), launch: z.object({ opened: z.number() }) }),
+      handler: async () => ({
+        content: [{ type: 'text' as const, text: 'Launched 1 agent.' }],
+        data: payload,
+      }),
+    });
+
+    const mcp = await callPrincipal('fmt:hybrid-principal', 'mcp');
+    expect(mcp.text).not.toBe('Launched 1 agent.');
+    expect(mcp.text).toBe(JSON.stringify(payload));
+
+    const http = await callPrincipal('fmt:hybrid-principal', 'http');
+    expect(http.text).toBe('Launched 1 agent.');
+  });
 });
 
 describe('raw-ToolResult re-encode on the MCP transport (definetool-token-optimization-adoption P-002)', () => {
@@ -201,23 +263,6 @@ describe('raw-ToolResult re-encode on the MCP transport (definetool-token-optimi
       args: z.object({}),
       handler: async () => ({ content: [{ type: 'text', text }] }),
     });
-  }
-
-  async function callPrincipal(name: string, transport: string) {
-    const tool = lookupByMcpName(name)!;
-    const r = await dispatchProjectedTool(
-      tool,
-      name,
-      {},
-      ctx({
-        transport,
-        principal: { slug: 'u', workspaceId: 'w', capabilities: new Set(['test:read']) },
-        tx: {},
-      } as unknown as Partial<UnifiedToolContext>),
-      DEPS,
-    );
-    if (!r.ok) throw new Error(`dispatch failed: ${r.error?.code}`);
-    return { text: (r.result!.content[0] as { text: string }).text, meta: r.result!._meta ?? {} };
   }
 
   it('an object-with-array-field JSON body IS re-encoded to compact TOON on mcp (the inliner win, lossless)', async () => {
