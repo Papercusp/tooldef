@@ -3,8 +3,8 @@ import {
   deriveCodeRunSettledReadReplayProof,
   runToolOrchestration,
   type OrchestrationCallRecord,
-  type StaticToolCall,
 } from './orchestrate';
+import type { StaticToolCall } from './parse-check';
 import type { ProjectedTool, UnifiedToolContext } from '../tool-projection';
 import type { DispatchProjectedDeps } from '../dispatch-types';
 import type { ToolResult } from '../wire';
