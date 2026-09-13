@@ -330,6 +330,86 @@ export interface OrchestrateResult {
   detachedCalls?: DetachedOrchestrationCall[];
 }
 
+/**
+ * Runtime-owned evidence that one completed code:run made only settled reads.
+ *
+ * This is deliberately a small, transport-safe proof rather than a copy of
+ * callRecords. It contains no arguments, results, output previews, or caller
+ * identity. A consumer may use it only after checking that the request body it
+ * is about to retry hashes to `requestHash`.
+ */
+export const CODE_RUN_REPLAY_PROOF_META_KEY = 'codeRunReplayProof' as const;
+export const CODE_RUN_REPLAY_PROOF_SCHEMA_VERSION = 1 as const;
+
+export interface CodeRunSettledReadReplayProof {
+  schemaVersion: typeof CODE_RUN_REPLAY_PROOF_SCHEMA_VERSION;
+  kind: 'settled-read';
+  tool: 'code:run';
+  requestHash: string;
+  callCount: number;
+}
+
+export interface DeriveCodeRunSettledReadReplayProofInput {
+  /** SHA-256 of the complete code:run MCP argument object, computed by the server. */
+  requestHash: string;
+  /** The static parser's calls for this exact script. */
+  staticCalls: readonly StaticToolCall[];
+  /** Recovered AST syntax errors are not sufficient evidence for a proof. */
+  hasParseErrors?: boolean;
+  /** Unknown/dynamic facade references are never proofable. */
+  unknownRefs?: readonly string[];
+  /** Whether the script itself completed. */
+  runOk: boolean;
+  /** Preview runs are excluded even when their visible calls are reads. */
+  dryRun: boolean;
+  callRecords?: readonly OrchestrationCallRecord[];
+}
+
+/**
+ * Derive the only replay proof code:run may expose.
+ *
+ * The static and runtime lists must have the same cardinality and source order:
+ * this intentionally rejects loops, dynamic calls, parse recovery, and any
+ * runtime-only call because those shapes cannot establish an exact settled body
+ * from the bounded evidence available here. A proof generated after a lost
+ * request is impossible by construction: this function runs only on the
+ * completed server result and the request hash is supplied by that handler.
+ */
+export function deriveCodeRunSettledReadReplayProof(
+  input: DeriveCodeRunSettledReadReplayProofInput,
+): CodeRunSettledReadReplayProof | undefined {
+  const requestHash = input.requestHash.trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(requestHash)) return undefined;
+  if (!input.runOk || input.dryRun || input.hasParseErrors || input.unknownRefs?.length) return undefined;
+
+  const staticCalls = input.staticCalls;
+  const runtimeCalls = [...(input.callRecords ?? [])].sort((a, b) => a.ordinal - b.ordinal);
+  if (staticCalls.length === 0 || runtimeCalls.length !== staticCalls.length) return undefined;
+
+  for (let index = 0; index < staticCalls.length; index += 1) {
+    const staticCall = staticCalls[index];
+    const runtimeCall = runtimeCalls[index];
+    if (
+      staticCall.dynamicArgs ||
+      staticCall.tool.length === 0 ||
+      runtimeCall.ordinal !== index ||
+      runtimeCall.tool !== staticCall.tool ||
+      runtimeCall.effect !== 'read' ||
+      runtimeCall.disposition !== 'settled'
+    ) {
+      return undefined;
+    }
+  }
+
+  return {
+    schemaVersion: CODE_RUN_REPLAY_PROOF_SCHEMA_VERSION,
+    kind: 'settled-read',
+    tool: 'code:run',
+    requestHash,
+    callCount: runtimeCalls.length,
+  };
+}
+
 interface ActiveOrchestrationCall {
   callRecord: OrchestrationCallRecord;
   settled: Promise<void>;
