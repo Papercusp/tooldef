@@ -1,5 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
-import { runToolOrchestration } from './orchestrate';
+import {
+  deriveCodeRunSettledReadReplayProof,
+  runToolOrchestration,
+  type OrchestrationCallRecord,
+  type StaticToolCall,
+} from './orchestrate';
 import type { ProjectedTool, UnifiedToolContext } from '../tool-projection';
 import type { DispatchProjectedDeps } from '../dispatch-types';
 import type { ToolResult } from '../wire';
@@ -36,6 +41,95 @@ const mkTool = (
     expose: { mcp: { name } },
     fn,
   }) as unknown as ProjectedTool;
+
+const replayStaticCall = (over: Partial<StaticToolCall> = {}): StaticToolCall => ({
+  tool: 'capability:read',
+  args: { file_path: '/tmp/spill.md' },
+  dynamicArgs: false,
+  ...over,
+});
+
+const replayRuntimeCall = (over: Partial<OrchestrationCallRecord> = {}): OrchestrationCallRecord => ({
+  ordinal: 0,
+  tool: 'capability:read',
+  effect: 'read',
+  disposition: 'settled',
+  outputReferences: [],
+  ...over,
+});
+
+describe('deriveCodeRunSettledReadReplayProof', () => {
+  const requestHash = 'a'.repeat(64);
+
+  it('returns compact runtime-owned proof for an exact settled read sequence', () => {
+    expect(
+      deriveCodeRunSettledReadReplayProof({
+        requestHash,
+        staticCalls: [replayStaticCall()],
+        callRecords: [replayRuntimeCall()],
+        runOk: true,
+        dryRun: false,
+      }),
+    ).toEqual({
+      schemaVersion: 1,
+      kind: 'settled-read',
+      tool: 'code:run',
+      requestHash,
+      callCount: 1,
+    });
+  });
+
+  it.each([
+    ['a dynamic static call', { staticCalls: [replayStaticCall({ dynamicArgs: true })] }],
+    ['a write effect', { callRecords: [replayRuntimeCall({ effect: 'write' })] }],
+    ['an unsettled call', { callRecords: [replayRuntimeCall({ disposition: 'uncertain' })] }],
+    ['a mismatched runtime tool', { callRecords: [replayRuntimeCall({ tool: 'work_items:get' })] }],
+    ['a parse-recovered script', { hasParseErrors: true }],
+    ['a partial/unknown run', { unknownRefs: ['capability:missing'] }],
+    ['a dry-run preview', { dryRun: true }],
+  ])('fails closed for %s', (_label, over) => {
+    expect(
+      deriveCodeRunSettledReadReplayProof({
+        requestHash,
+        staticCalls: [replayStaticCall()],
+        callRecords: [replayRuntimeCall()],
+        runOk: true,
+        dryRun: false,
+        ...over,
+      }),
+    ).toBeUndefined();
+  });
+
+  it('rejects zero-call, missing, malformed, and extra runtime evidence', () => {
+    expect(
+      deriveCodeRunSettledReadReplayProof({
+        requestHash,
+        staticCalls: [],
+        callRecords: [],
+        runOk: true,
+        dryRun: false,
+      }),
+    ).toBeUndefined();
+    expect(
+      deriveCodeRunSettledReadReplayProof({
+        requestHash: 'not-a-sha',
+        staticCalls: [replayStaticCall()],
+        callRecords: [replayRuntimeCall()],
+        runOk: true,
+        dryRun: false,
+      }),
+    ).toBeUndefined();
+    expect(
+      deriveCodeRunSettledReadReplayProof({
+        requestHash,
+        staticCalls: [replayStaticCall()],
+        callRecords: [replayRuntimeCall(), replayRuntimeCall({ ordinal: 1 })],
+        runOk: true,
+        dryRun: false,
+      }),
+    ).toBeUndefined();
+  });
+});
 
 describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', () => {
   it('forwards frozen runtime inputs through the orchestration composition seam', async () => {
