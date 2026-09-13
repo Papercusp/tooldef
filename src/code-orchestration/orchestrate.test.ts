@@ -498,6 +498,51 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     ]);
   });
 
+  it('does not tally an expected SIGPIPE from a read-only capability:bash call', async () => {
+    const bash = mkTool(
+      'capability:bash',
+      'write',
+      async () => json({ ok: false, status: 'failed', exit_code: 141, output: 'head closed the pipe' }),
+      (args) =>
+        (args as { command?: unknown }).command === 'cat /dev/zero | head -c 1' ? 'read' : 'write',
+    );
+    const r = await runToolOrchestration(
+      `const probe = await tools.capability.bash({ command: 'cat /dev/zero | head -c 1' });
+       return { ok: probe.ok, exit: probe.exit_code };`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [bash] },
+    );
+
+    expect(r.ok).toBe(true);
+    expect(r.summary).toEqual({ ok: false, exit: 141 });
+    expect(r.partial).toBe(false);
+    expect(r.childFailures).toEqual([]);
+    expect(r.callRecords).toEqual([
+      expect.objectContaining({
+        tool: 'capability:bash',
+        effect: 'read',
+        disposition: 'settled',
+      }),
+    ]);
+  });
+
+  it('still tallies exit 141 when capability:bash is classified as a write', async () => {
+    const bash = mkTool(
+      'capability:bash',
+      'write',
+      async () => json({ ok: false, status: 'failed', exit_code: 141 }),
+    );
+    const r = await runToolOrchestration(
+      `await tools.capability.bash({ command: 'printf x > output.txt' }); return 'done';`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [bash] },
+    );
+
+    expect(r.ok).toBe(true);
+    expect(r.partial).toBe(true);
+    expect(r.childFailures).toEqual([
+      expect.objectContaining({ tool: 'capability:bash', kind: 'semantic' }),
+    ]);
+  });
+
   // EI-18664105352441219: the house bulk-envelope contract (_bulk.ts's runBulk/bulkContent)
   // ALWAYS returns a top-level `ok: true` ("the batch ran") even when every individual item
   // failed — `counts.failed` is where per-item truth lives. plans:add-item against a

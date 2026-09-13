@@ -575,6 +575,22 @@ function isOkFalseResult(value: unknown): value is { ok: false; [key: string]: u
 }
 
 /**
+ * A read-only `capability:bash` pipeline may deliberately end its producer with SIGPIPE when
+ * an early consumer such as `head` has already received enough output. Bash reports that signal
+ * as exit code 141, so the command's own `{ ok: false }` remains useful to the script but must not
+ * make the otherwise observational orchestration partial. Keep this exact to the dynamically
+ * resolved read effect and tool name: ordinary read failures and mutation-class bash calls still
+ * need the semantic-failure signal.
+ */
+function isExpectedReadOnlyBashSigpipe(
+  toolName: string,
+  effect: ResolvedToolEffect,
+  value: unknown,
+): boolean {
+  return toolName === 'capability:bash' && effect === 'read' && isOkFalseResult(value) && value.exit_code === 141;
+}
+
+/**
  * True when `value` is a house BULK envelope (`{ ok: true, results: [...], counts: { failed } }`
  * — the keyed-array bulk contract, `_bulk.ts`'s `runBulk`/`bulkContent`) reporting at least one
  * per-item failure. By that contract's OWN design the top-level `ok` is ALWAYS `true` ("the batch
@@ -970,7 +986,10 @@ export async function runToolOrchestration(
       // but reports its OWN semantic rejection (ok: false in its result body, e.g. a completion-
       // integrity check) resolves normally here. Tally those so a batched script that doesn't check
       // every result still gets visibility instead of silently counting the write as executed.
-      if (isOkFalseResult(result) || isBulkPartialFailure(result)) {
+      if (
+        (!isExpectedReadOnlyBashSigpipe(name, effect, result) && isOkFalseResult(result)) ||
+        isBulkPartialFailure(result)
+      ) {
         callRecord.disposition = 'semantic_rejected';
         childFailures.push({ tool: name, kind: 'semantic', result });
         if (effect === 'write') {
