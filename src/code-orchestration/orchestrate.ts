@@ -73,6 +73,13 @@ export interface OrchestrateOptions {
   wrapDispatch?: WrapDispatch;
   /** Optional JSON-only runtime inputs, exposed inside the VM as deeply frozen `inputs`. */
   inputs?: OrchestrationInputs;
+  /**
+   * Server-computed SHA-256 of the complete outer `code:run` argument object.
+   * When present, a settled-read proof is returned only after the runtime
+   * evidence passes every fail-closed check. The generic runtime never hashes
+   * or accepts a proof supplied by the script.
+   */
+  requestHash?: string;
 }
 
 /**
@@ -328,6 +335,8 @@ export interface OrchestrateResult {
   callRecords?: OrchestrationCallRecord[];
   /** Host dispatches still unresolved after the bounded timeout settlement grace. */
   detachedCalls?: DetachedOrchestrationCall[];
+  /** Internal server-owned evidence; code:run carries it in MCP `_meta` and strips it from text. */
+  replayProof?: CodeRunSettledReadReplayProof;
 }
 
 /**
@@ -1048,6 +1057,17 @@ export async function runToolOrchestration(
   const generated = validateGeneratedImages(run.generatedImages);
   const media = [...(finalResult.media ?? []), ...generated.media];
   const effectiveOk = run.ok && !finalResult.error && !generated.error;
+  const replayProof = opts.requestHash
+    ? deriveCodeRunSettledReadReplayProof({
+        requestHash: opts.requestHash,
+        staticCalls: check.calls,
+        hasParseErrors: check.hasParseErrors,
+        unknownRefs,
+        runOk: effectiveOk,
+        dryRun,
+        callRecords,
+      })
+    : undefined;
   return {
     ok: effectiveOk,
     summary: finalResult.summary,
@@ -1075,6 +1095,7 @@ export async function runToolOrchestration(
     ...(strandedWrites.length ? { strandedWrites } : {}),
     ...(notDispatchedWrites.length ? { notDispatchedWrites } : {}),
     ...(detachedCalls.length ? { detachedCalls } : {}),
+    ...(replayProof ? { replayProof } : {}),
     ...(run.fieldMisses?.length ? { fieldMisses: run.fieldMisses } : {}),
     ...(run.sleepCaps?.length ? { sleepCaps: run.sleepCaps } : {}),
     callRecords: callRecords.map((record) => ({
