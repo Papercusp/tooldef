@@ -648,7 +648,8 @@ const invokeStep = {
                     (result.structuredContent !== null &&
                         typeof result.structuredContent === 'object' &&
                         !Array.isArray(result.structuredContent) &&
-                        result.structuredContent.ok === false);
+                        result.structuredContent.ok === false) ||
+                    hasExplicitFailurePayload(result);
                 // Effective tier from the tool's capabilities (host-registered resolver via
                 // tierFor; defaults to 'low'). Low-tier READ ⟺ ≥1 declared capability AND
                 // every one resolves to 'low' (the effective tier is the max). No declared
@@ -1195,6 +1196,32 @@ function objectRecord(value) {
     return value !== null && typeof value === 'object' && !Array.isArray(value)
         ? value
         : null;
+}
+/**
+ * Detect the explicit failure marker on a serialized ToolResponse.
+ *
+ * Nested code-mode dispatches request lossless JSON text rather than
+ * `structuredContent`, so a handler returning `{ data: { ok: false, ... } }`
+ * reaches this stack as a ToolResult whose first text item contains the
+ * serialized data. Preserve that definitive failure after an abort just as we
+ * preserve `isError` and structured `ok:false`; an apparent success remains
+ * subject to the abort-authoritative tier/idempotency checks below.
+ *
+ * This intentionally reads only the first JSON text item and only an exact
+ * top-level `ok:false` object. It does not infer failure from nested fields,
+ * prose, or arbitrary compact encodings.
+ */
+function hasExplicitFailurePayload(result) {
+    const firstText = result.content.find((item) => item.type === 'text');
+    if (!firstText)
+        return false;
+    try {
+        const parsed = JSON.parse(firstText.text);
+        return objectRecord(parsed)?.ok === false;
+    }
+    catch {
+        return false;
+    }
 }
 /**
  * Extract the conventional successful-call / unsuccessful-effect outcome.

@@ -11,6 +11,6 @@ export { runOrchestrationScript, DEFAULT_SCRIPT_TIMEOUT_MS, } from './run-script
 export { checkScript, ensureParseCheckReady, } from './parse-check';
 export { realDispatch, unwrapToolResult, ToolDispatchError, isPreExecutionFailure, } from './dispatch-binding';
 export { parseJsonWithTrailer } from './json-prefix';
-export { runToolOrchestration, detectStrandedWrites, } from './orchestrate';
+export { runToolOrchestration, detectStrandedWrites, CODE_RUN_REPLAY_PROOF_META_KEY, CODE_RUN_REPLAY_PROOF_SCHEMA_VERSION, deriveCodeRunSettledReadReplayProof, } from './orchestrate';
 // B-CX-API: compile-time typed signatures for the facade + the on-demand namespace index.
 export { generateToolFacadeTypes, listFacadeNamespaces, toolArgsType, } from './facade-types';

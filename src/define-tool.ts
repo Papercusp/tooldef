@@ -514,6 +514,35 @@ function reencodableJsonPayload(out: ToolResult, ctx: UnifiedToolContext): unkno
 }
 
 /**
+ * Preserve the result-door's explicit-full signal for handlers that return an
+ * MCP-shaped `ToolResult` directly. The normal `{ data }` path gets this
+ * marker from `applyPayloadTier`, but raw results bypass that helper; without
+ * the marker, an oversized explicit-full body is generically re-projected by
+ * the result door instead of being spilled losslessly.
+ *
+ * Merge into existing metadata so handler-supplied fields survive. Ordinary
+ * calls return the original result unchanged, keeping the default raw-result
+ * contract byte- and metadata-stable.
+ */
+function markExplicitFullRawResult<T extends ToolResult>(
+  result: T,
+  explicitFullRequest: boolean,
+): T {
+  if (!explicitFullRequest) return result;
+  return {
+    ...result,
+    _meta: { ...(result._meta ?? {}), explicitFullRequest: true },
+  } as T;
+}
+
+function isExplicitFullPayloadRequest(
+  callTier: ReturnType<typeof extractPayloadTier>['callTier'],
+  ctx: Pick<UnifiedToolContext, 'contextTier' | 'transportCapExempt'>,
+): boolean {
+  return callTier === 'full' || ctx.contextTier === 'full' || ctx.transportCapExempt === true;
+}
+
+/**
  * A few legacy handlers return a hybrid envelope: human-facing MCP `content`
  * alongside the authoritative structured `data` payload. Treating that value
  * as a raw `ToolResult` drops `data` at the transport boundary because
@@ -2868,6 +2897,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     const disclose = async (result: ToolResult | Promise<ToolResult>): Promise<ToolResult> =>
       attachCorrectedDisclosure(await result, corrections);
     const response = await def.handler(parsed.value, legacyCtx);
+    const explicitFullRequest = isExplicitFullPayloadRequest(callTier, ctx);
     // A raw ToolResult (MCP content shape) normally passes through untouched —
     // parity with the role-gated wrapper below. EXCEPT: on the agent-facing MCP
     // transport, a single-text-item JSON body whose shape TOON shrinks is
@@ -2878,14 +2908,25 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     // — preserving the contract a past blanket re-encode broke
     // (memory-taxonomy-and-debt-followups P-006).
     if (isHybridToolResponse(response)) {
-      return disclose(serializeHybridToolResponse(response, ctx, eligibility, def, readColumns, parsed.value));
+      const marked = markExplicitFullRawResult(response, explicitFullRequest);
+      return disclose(serializeHybridToolResponse(marked, ctx, eligibility, def, readColumns, parsed.value));
     }
     if (response && typeof response === 'object' && Array.isArray((response as ToolResult).content)) {
-      const reencodable = reencodableJsonPayload(response as ToolResult, ctx);
+      const marked = markExplicitFullRawResult(response as ToolResult, explicitFullRequest);
+      const reencodable = reencodableJsonPayload(marked, ctx);
       if (reencodable !== undefined) {
-        return disclose(serializeProjectedResult({ data: reencodable } as ToolResponse, ctx, eligibility, def, readColumns, parsed.value));
+        return disclose(
+          serializeProjectedResult(
+            { data: reencodable, ...(explicitFullRequest ? { explicitFullRequest: true } : {}) },
+            ctx,
+            eligibility,
+            def,
+            readColumns,
+            parsed.value,
+          ),
+        );
       }
-      return disclose(attachRequestedStructuredContent(response as ToolResult, ctx, def));
+      return disclose(attachRequestedStructuredContent(marked, ctx, def));
     }
     // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
     // the session/call tier before format-aware serialization. Unshaped tools
@@ -3064,6 +3105,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
         ? { ...ctx, contextTier: callTier, payloadTierOverride: callTier }
         : ctx;
     const out = await def.handler(parsed.value, handlerCtx);
+    const explicitFullRequest = isExplicitFullPayloadRequest(callTier, handlerCtx);
 
     // Already a ToolResult? The handler self-serialized its content — pass it
     // through untouched (format-aware serialization only applies to handlers
@@ -3072,14 +3114,25 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     // re-encoded for the token win (P-002); see `reencodableJsonPayload` — it is
     // a no-op on every non-mcp transport, so verbatim-content consumers are safe.
     if (isHybridToolResponse(out)) {
-      return disclose(serializeHybridToolResponse(out, handlerCtx, eligibility, def, readColumns, parsed.value));
+      const marked = markExplicitFullRawResult(out, explicitFullRequest);
+      return disclose(serializeHybridToolResponse(marked, handlerCtx, eligibility, def, readColumns, parsed.value));
     }
     if (out && typeof out === 'object' && Array.isArray((out as ToolResult).content)) {
-      const reencodable = reencodableJsonPayload(out as ToolResult, handlerCtx);
+      const marked = markExplicitFullRawResult(out as ToolResult, explicitFullRequest);
+      const reencodable = reencodableJsonPayload(marked, handlerCtx);
       if (reencodable !== undefined) {
-        return disclose(serializeProjectedResult({ data: reencodable } as ToolResponse, handlerCtx, eligibility, def, readColumns, parsed.value));
+        return disclose(
+          serializeProjectedResult(
+            { data: reencodable, ...(explicitFullRequest ? { explicitFullRequest: true } : {}) },
+            handlerCtx,
+            eligibility,
+            def,
+            readColumns,
+            parsed.value,
+          ),
+        );
       }
-      return disclose(attachRequestedStructuredContent(out as ToolResult, handlerCtx, def));
+      return disclose(attachRequestedStructuredContent(marked, handlerCtx, def));
     }
 
     // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per

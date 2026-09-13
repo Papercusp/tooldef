@@ -15,6 +15,56 @@ function nestedIdempotencyKey(ctx, ordinal) {
     const outer = ctx.idempotencyKey?.trim();
     return outer ? `code-run:nested:${outer}:${ordinal}` : undefined;
 }
+/**
+ * Runtime-owned evidence that one completed code:run made only settled reads.
+ *
+ * This is deliberately a small, transport-safe proof rather than a copy of
+ * callRecords. It contains no arguments, results, output previews, or caller
+ * identity. A consumer may use it only after checking that the request body it
+ * is about to retry hashes to `requestHash`.
+ */
+export const CODE_RUN_REPLAY_PROOF_META_KEY = 'codeRunReplayProof';
+export const CODE_RUN_REPLAY_PROOF_SCHEMA_VERSION = 1;
+/**
+ * Derive the only replay proof code:run may expose.
+ *
+ * The static and runtime lists must have the same cardinality and source order:
+ * this intentionally rejects loops, dynamic calls, parse recovery, and any
+ * runtime-only call because those shapes cannot establish an exact settled body
+ * from the bounded evidence available here. A proof generated after a lost
+ * request is impossible by construction: this function runs only on the
+ * completed server result and the request hash is supplied by that handler.
+ */
+export function deriveCodeRunSettledReadReplayProof(input) {
+    const requestHash = input.requestHash.trim().toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(requestHash))
+        return undefined;
+    if (!input.runOk || input.dryRun || input.hasParseErrors || input.unknownRefs?.length)
+        return undefined;
+    const staticCalls = input.staticCalls;
+    const runtimeCalls = [...(input.callRecords ?? [])].sort((a, b) => a.ordinal - b.ordinal);
+    if (staticCalls.length === 0 || runtimeCalls.length !== staticCalls.length)
+        return undefined;
+    for (let index = 0; index < staticCalls.length; index += 1) {
+        const staticCall = staticCalls[index];
+        const runtimeCall = runtimeCalls[index];
+        if (staticCall.dynamicArgs ||
+            staticCall.tool.length === 0 ||
+            runtimeCall.ordinal !== index ||
+            runtimeCall.tool !== staticCall.tool ||
+            runtimeCall.effect !== 'read' ||
+            runtimeCall.disposition !== 'settled') {
+            return undefined;
+        }
+    }
+    return {
+        schemaVersion: CODE_RUN_REPLAY_PROOF_SCHEMA_VERSION,
+        kind: 'settled-read',
+        tool: 'code:run',
+        requestHash,
+        callCount: runtimeCalls.length,
+    };
+}
 function setContainsAll(superset, subset) {
     if (!subset || subset.size === 0)
         return true;
@@ -565,7 +615,9 @@ export async function runToolOrchestration(script, opts) {
     }
     // P-020: only meaningful when the script ABORTED — a run that completed reached every line
     // it was going to, so an undispatched write there was a branch not taken, not a stranding.
-    const strandedWrites = run.ok
+    // A parse-recovered AST is advisory only: TypeScript may surface calls from syntax-invalid
+    // source that the VM never compiled, so those calls were not ordered by an executable script.
+    const strandedWrites = run.ok || check.hasParseErrors
         ? []
         : detectStrandedWrites(check.calls, tools, dispatchedToolNames);
     const notDispatchedWrites = strandedWrites.map((tool) => ({
@@ -587,6 +639,17 @@ export async function runToolOrchestration(script, opts) {
     const generated = validateGeneratedImages(run.generatedImages);
     const media = [...(finalResult.media ?? []), ...generated.media];
     const effectiveOk = run.ok && !finalResult.error && !generated.error;
+    const replayProof = opts.requestHash
+        ? deriveCodeRunSettledReadReplayProof({
+            requestHash: opts.requestHash,
+            staticCalls: check.calls,
+            hasParseErrors: check.hasParseErrors,
+            unknownRefs,
+            runOk: effectiveOk,
+            dryRun,
+            callRecords,
+        })
+        : undefined;
     return {
         ok: effectiveOk,
         summary: finalResult.summary,
@@ -614,6 +677,7 @@ export async function runToolOrchestration(script, opts) {
         ...(strandedWrites.length ? { strandedWrites } : {}),
         ...(notDispatchedWrites.length ? { notDispatchedWrites } : {}),
         ...(detachedCalls.length ? { detachedCalls } : {}),
+        ...(replayProof ? { replayProof } : {}),
         ...(run.fieldMisses?.length ? { fieldMisses: run.fieldMisses } : {}),
         ...(run.sleepCaps?.length ? { sleepCaps: run.sleepCaps } : {}),
         callRecords: callRecords.map((record) => ({

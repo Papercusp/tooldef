@@ -45,21 +45,21 @@ function defineListTool(name: string, opts: { result?: z.ZodTypeAny; data?: unkn
   });
 }
 
-async function call(name: string, over: Partial<UnifiedToolContext> = {}) {
+async function call(name: string, over: Partial<UnifiedToolContext> = {}, input: unknown = {}) {
   const tool = lookupByMcpName(name)!;
-  const r = await dispatchProjectedTool(tool, name, {}, ctx(over), DEPS);
+  const r = await dispatchProjectedTool(tool, name, input, ctx(over), DEPS);
   if (!r.ok) throw new Error(`dispatch failed: ${r.error?.code}`);
   const result = r.result!;
   const text = (result.content[0] as { text: string }).text;
   return { result, text, meta: result._meta ?? {} };
 }
 
-async function callPrincipal(name: string, transport: string) {
+async function callPrincipal(name: string, transport: string, input: unknown = {}) {
   const tool = lookupByMcpName(name)!;
   const r = await dispatchProjectedTool(
     tool,
     name,
-    {},
+    input,
     ctx({
       transport,
       principal: { slug: 'u', workspaceId: 'w', capabilities: new Set(['test:read']) },
@@ -250,6 +250,57 @@ describe('end-to-end format selection through defineTool', () => {
 
     const http = await callPrincipal('fmt:hybrid-principal', 'http');
     expect(http.text).toBe('Launched 1 agent.');
+  });
+
+  it('marks a role-gated raw pass-through when the caller explicitly requests full and preserves metadata', async () => {
+    defineTool({
+      name: 'fmt:raw-explicit-role',
+      requirePrincipal: false,
+      capability: 'test:read',
+      args: z.object({}),
+      handler: async () => ({
+        content: [{ type: 'text' as const, text: 'RAW' }],
+        _meta: { source: 'handler' },
+      }),
+    });
+
+    const { result, text, meta } = await call('fmt:raw-explicit-role', { transport: 'mcp' }, { payloadTier: 'full' });
+    expect(text).toBe('RAW');
+    expect(result._meta).toEqual({ source: 'handler', explicitFullRequest: true });
+    expect(meta).toEqual({ source: 'handler', explicitFullRequest: true });
+  });
+
+  it('marks a principal-gated raw JSON re-encode when the caller explicitly requests full', async () => {
+    defineTool({
+      name: 'fmt:raw-explicit-principal',
+      capability: 'test:read',
+      args: z.object({}),
+      handler: async () => ({
+        content: [{ type: 'text' as const, text: JSON.stringify(ROWS) }],
+      }),
+    });
+
+    const { meta, text } = await callPrincipal('fmt:raw-explicit-principal', 'mcp', { payloadTier: 'full' });
+    expect(meta.explicitFullRequest).toBe(true);
+    expect(meta.format).toBe('toon');
+    expect(text).toMatch(/^format: toon\n/);
+  });
+
+  it('does not add the explicit-full marker to a default raw result', async () => {
+    defineTool({
+      name: 'fmt:raw-default-marker',
+      requirePrincipal: false,
+      capability: 'test:read',
+      args: z.object({}),
+      handler: async () => ({
+        content: [{ type: 'text' as const, text: 'RAW' }],
+        _meta: { source: 'handler' },
+      }),
+    });
+
+    const { meta } = await call('fmt:raw-default-marker', { transport: 'mcp' });
+    expect(meta).toEqual({ source: 'handler' });
+    expect(meta.explicitFullRequest).toBeUndefined();
   });
 });
 

@@ -442,6 +442,75 @@ function reencodableJsonPayload(out, ctx) {
     return parsed;
 }
 /**
+ * Preserve the result-door's explicit-full signal for handlers that return an
+ * MCP-shaped `ToolResult` directly. The normal `{ data }` path gets this
+ * marker from `applyPayloadTier`, but raw results bypass that helper; without
+ * the marker, an oversized explicit-full body is generically re-projected by
+ * the result door instead of being spilled losslessly.
+ *
+ * Merge into existing metadata so handler-supplied fields survive. Ordinary
+ * calls return the original result unchanged, keeping the default raw-result
+ * contract byte- and metadata-stable.
+ */
+function markExplicitFullRawResult(result, explicitFullRequest) {
+    if (!explicitFullRequest)
+        return result;
+    return {
+        ...result,
+        _meta: { ...(result._meta ?? {}), explicitFullRequest: true },
+    };
+}
+function isExplicitFullPayloadRequest(callTier, ctx) {
+    return callTier === 'full' || ctx.contextTier === 'full' || ctx.transportCapExempt === true;
+}
+/**
+ * A few legacy handlers return a hybrid envelope: human-facing MCP `content`
+ * alongside the authoritative structured `data` payload. Treating that value
+ * as a raw `ToolResult` drops `data` at the transport boundary because
+ * `dispatchProjectedToolToMcp` intentionally forwards only MCP fields. The
+ * launch-agent capability is the measured instance: its successful response
+ * contains a prose launch summary plus `{ deduped, launch }` data, so ptool's
+ * JSON-mode caller used to receive the prose instead of machine-readable JSON.
+ *
+ * Keep this adaptation MCP-only. HTTP, IPC, and in-process callers may consume
+ * the handler's original content contract directly (including content that is
+ * deliberately human-readable). MCP callers instead receive the data through
+ * the same serializer as canonical `{ data }` handlers, including negotiated
+ * `structuredContent`, while preserving the handler's protocol failure bit and
+ * metadata.
+ */
+function isHybridToolResponse(response) {
+    return (response !== null &&
+        typeof response === 'object' &&
+        Array.isArray(response.content) &&
+        Object.hasOwn(response, 'data') &&
+        response.data !== undefined);
+}
+async function serializeHybridToolResponse(response, ctx, eligibility, def, readColumns, args) {
+    if (ctx.transport !== 'mcp')
+        return response;
+    const serialized = await serializeProjectedResult(response, ctx, eligibility, def, readColumns, args);
+    const result = {
+        ...serialized,
+        ...(response.isError !== undefined ? { isError: response.isError } : {}),
+        ...(response._meta || serialized._meta
+            ? { _meta: { ...(response._meta ?? {}), ...(serialized._meta ?? {}) } }
+            : {}),
+    };
+    // The serializer's data-derived structured value is authoritative when it
+    // was requested. Preserve a handler-supplied structured value only when the
+    // serializer did not produce one, keeping the hybrid path lossless for
+    // callers that already supplied an MCP structured twin.
+    if (result.structuredContent === undefined && response.structuredContent !== undefined) {
+        result.structuredContent = response.structuredContent;
+    }
+    if (response.outputRef !== undefined)
+        result.outputRef = response.outputRef;
+    if (response.outputSize !== undefined)
+        result.outputSize = response.outputSize;
+    return result;
+}
+/**
  * EI-20305133624359928: an object-rooted `result` schema is advertised to MCP
  * clients as `outputSchema`. The official SDK then requires `structuredContent`
  * whenever the caller opted into it, even when a legacy handler returned an
@@ -1408,13 +1477,13 @@ function editDistance(a, b) {
  * tool and wrong on another, and the only discriminator is whether the TARGET can hold
  * the VALUE — which is what this decides.
  *
- * Deliberately narrow: an object/array value is also refused only when the target's
- * declared `type` consists exclusively of scalar JSON types. That is direct proof that
- * the structured value cannot validate (the scorecards:list `subject` -> `subjectRef`
- * incident), while a target typed as `object`/`array` remains open to a caller-side
- * representation mistake that this helper must not guess how to repair. Scalar values
- * are never rejected from a structured target by this check. Absent proof we stay silent
- * and let the name-based suggestion stand.
+ * Deliberately narrow: only `enum`/`const` count as proof. Those enumerate the entire
+ * admissible set, so "cannot accept" is decidable with no judgment. A projected
+ * JSON-Schema `type` is not enough: Zod coercive and strict primitives project to the
+ * same type even though coercive schemas may accept representations (including objects)
+ * that strict schemas reject. Treating that lossy metadata as proof would suppress a
+ * useful correction on the very calls this helper is meant to teach. Absent proof we
+ * stay silent about admissibility and let the name-based suggestion stand.
  */
 function candidateRefutesValue(props, candidate, value) {
     if (!props || value === undefined)
@@ -1423,26 +1492,9 @@ function candidateRefutesValue(props, candidate, value) {
     if (!schema || typeof schema !== 'object')
         return false;
     const constrained = schema;
-    const declaredTypes = typeof constrained.type === 'string'
-        ? [constrained.type]
-        : Array.isArray(constrained.type) &&
-            constrained.type.every((type) => typeof type === 'string')
-            ? constrained.type
-            : null;
-    const structured = value !== null && typeof value === 'object';
-    // A structured value cannot satisfy a target that declares only scalar primitive
-    // types. Keep this one-way: the inverse (a scalar offered to an object/array target)
-    // may need a representation-specific wrapper and is therefore not proof for this
-    // name-suggestion helper.
-    if (structured &&
-        declaredTypes &&
-        declaredTypes.length > 0 &&
-        declaredTypes.every((type) => ['string', 'number', 'integer', 'boolean', 'null'].includes(type))) {
-        return true;
-    }
     // Only primitives are compared. A structured value tested against an enum of
     // primitives is not decidable by identity, so it yields no proof either way.
-    if (structured)
+    if (value !== null && typeof value === 'object')
         return false;
     if (Array.isArray(constrained.enum))
         return !constrained.enum.includes(value);
@@ -2596,6 +2648,7 @@ function registerLegacyAsProjected(def, expose, sourceFile) {
         // unrepresentable rather than leaving six sites each needing an `await` remembered.
         const disclose = async (result) => attachCorrectedDisclosure(await result, corrections);
         const response = await def.handler(parsed.value, legacyCtx);
+        const explicitFullRequest = isExplicitFullPayloadRequest(callTier, ctx);
         // A raw ToolResult (MCP content shape) normally passes through untouched —
         // parity with the role-gated wrapper below. EXCEPT: on the agent-facing MCP
         // transport, a single-text-item JSON body whose shape TOON shrinks is
@@ -2605,12 +2658,17 @@ function registerLegacyAsProjected(def, expose, sourceFile) {
         // handler's own JSON over a non-mcp transport) are byte-for-byte unchanged
         // — preserving the contract a past blanket re-encode broke
         // (memory-taxonomy-and-debt-followups P-006).
+        if (isHybridToolResponse(response)) {
+            const marked = markExplicitFullRawResult(response, explicitFullRequest);
+            return disclose(serializeHybridToolResponse(marked, ctx, eligibility, def, readColumns, parsed.value));
+        }
         if (response && typeof response === 'object' && Array.isArray(response.content)) {
-            const reencodable = reencodableJsonPayload(response, ctx);
+            const marked = markExplicitFullRawResult(response, explicitFullRequest);
+            const reencodable = reencodableJsonPayload(marked, ctx);
             if (reencodable !== undefined) {
-                return disclose(serializeProjectedResult({ data: reencodable }, ctx, eligibility, def, readColumns, parsed.value));
+                return disclose(serializeProjectedResult({ data: reencodable, ...(explicitFullRequest ? { explicitFullRequest: true } : {}) }, ctx, eligibility, def, readColumns, parsed.value));
             }
-            return disclose(attachRequestedStructuredContent(response, ctx, def));
+            return disclose(attachRequestedStructuredContent(marked, ctx, def));
         }
         // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
         // the session/call tier before format-aware serialization. Unshaped tools
@@ -2771,18 +2829,24 @@ function registerRoleGatedAsProjected(def, expose, sourceFile) {
             ? { ...ctx, contextTier: callTier, payloadTierOverride: callTier }
             : ctx;
         const out = await def.handler(parsed.value, handlerCtx);
+        const explicitFullRequest = isExplicitFullPayloadRequest(callTier, handlerCtx);
         // Already a ToolResult? The handler self-serialized its content — pass it
         // through untouched (format-aware serialization only applies to handlers
         // that return a ToolResponse envelope with structured `data`). EXCEPT: on
         // the MCP transport, a single-text JSON body whose shape TOON shrinks is
         // re-encoded for the token win (P-002); see `reencodableJsonPayload` — it is
         // a no-op on every non-mcp transport, so verbatim-content consumers are safe.
+        if (isHybridToolResponse(out)) {
+            const marked = markExplicitFullRawResult(out, explicitFullRequest);
+            return disclose(serializeHybridToolResponse(marked, handlerCtx, eligibility, def, readColumns, parsed.value));
+        }
         if (out && typeof out === 'object' && Array.isArray(out.content)) {
-            const reencodable = reencodableJsonPayload(out, handlerCtx);
+            const marked = markExplicitFullRawResult(out, explicitFullRequest);
+            const reencodable = reencodableJsonPayload(marked, handlerCtx);
             if (reencodable !== undefined) {
-                return disclose(serializeProjectedResult({ data: reencodable }, handlerCtx, eligibility, def, readColumns, parsed.value));
+                return disclose(serializeProjectedResult({ data: reencodable, ...(explicitFullRequest ? { explicitFullRequest: true } : {}) }, handlerCtx, eligibility, def, readColumns, parsed.value));
             }
-            return disclose(attachRequestedStructuredContent(out, handlerCtx, def));
+            return disclose(attachRequestedStructuredContent(marked, handlerCtx, def));
         }
         // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
         // the session/call tier before format-aware serialization. Unshaped tools
