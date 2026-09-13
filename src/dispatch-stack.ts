@@ -826,7 +826,8 @@ const invokeStep: DispatchStep = {
           (result.structuredContent !== null &&
             typeof result.structuredContent === 'object' &&
             !Array.isArray(result.structuredContent) &&
-            (result.structuredContent as { ok?: unknown }).ok === false);
+            (result.structuredContent as { ok?: unknown }).ok === false) ||
+          hasExplicitFailurePayload(result);
         // Effective tier from the tool's capabilities (host-registered resolver via
         // tierFor; defaults to 'low'). Low-tier READ ⟺ ≥1 declared capability AND
         // every one resolves to 'low' (the effective tier is the max). No declared
@@ -1404,6 +1405,33 @@ function objectRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
+}
+
+/**
+ * Detect the explicit failure marker on a serialized ToolResponse.
+ *
+ * Nested code-mode dispatches request lossless JSON text rather than
+ * `structuredContent`, so a handler returning `{ data: { ok: false, ... } }`
+ * reaches this stack as a ToolResult whose first text item contains the
+ * serialized data. Preserve that definitive failure after an abort just as we
+ * preserve `isError` and structured `ok:false`; an apparent success remains
+ * subject to the abort-authoritative tier/idempotency checks below.
+ *
+ * This intentionally reads only the first JSON text item and only an exact
+ * top-level `ok:false` object. It does not infer failure from nested fields,
+ * prose, or arbitrary compact encodings.
+ */
+function hasExplicitFailurePayload(result: Pick<ToolResult, 'content'>): boolean {
+  const firstText = result.content.find(
+    (item): item is Extract<ToolResult['content'][number], { type: 'text' }> => item.type === 'text',
+  );
+  if (!firstText) return false;
+  try {
+    const parsed = JSON.parse(firstText.text) as unknown;
+    return objectRecord(parsed)?.ok === false;
+  } catch {
+    return false;
+  }
 }
 
 /**

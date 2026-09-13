@@ -673,6 +673,31 @@ describe('dispatchProjectedTool', () => {
     expect(r.result?.structuredContent).toEqual({ ok: false, status: 'killed', exit_code: null });
   }, 10_000);
 
+  it('preserves a serialized ToolResponse failure with detached recovery after abort', async () => {
+    // testing:run returns ToolResponse.data with ok:false/error/detachedRunId. Nested
+    // code-mode dispatch requests JSON text, so that failure has no top-level isError or
+    // structuredContent marker by the time it reaches this stack. Keep the recovery handle
+    // instead of replacing the definitive timeout result with a generic dispatcher timeout.
+    const failedData = {
+      ok: false,
+      error: 'timeout',
+      detachedRunId: 'test-run-recovery-1',
+      detachedDurable: true,
+    };
+    const tool = makeTool({
+      capabilities: [], // non-low tier: only an explicit failure may survive the abort
+      timeoutSec: 0.05,
+      fn: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return { content: [{ type: 'text', text: JSON.stringify(failedData) }] };
+      },
+    });
+    const r = await dispatchProjectedTool(tool, 'testing:run', {}, MAKE_CTX(), MAKE_DEPS());
+    expect(r.ok).toBe(true);
+    expect(r.result?.structuredContent).toBeUndefined();
+    expect(JSON.parse(r.result?.content[0]?.type === 'text' ? r.result.content[0].text : '')).toEqual(failedData);
+  }, 10_000);
+
   it('ok-on-abort (idempotent READ, tier low): a completed result SURFACES despite the abort (no false timeout)', async () => {
     // The repeated-tool-error cluster (EI-98/99/105/174/175): under load the
     // wall-clock exceeds the timeout even for a cheap read, the idle/timeout
