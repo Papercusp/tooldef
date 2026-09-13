@@ -63,6 +63,30 @@ describe('runOrchestrationScript (B-CX-1A)', () => {
     expect(r.error).toMatch(/compile_error/);
   });
 
+  // EI-23070330686894296: a regex literal whose path slash was over-escaped
+  // through an outer string layer produces V8's "Invalid regular expression
+  // flags" message. Keep the repair guidance at the execution boundary so an
+  // agent can fix the script without guessing whether the tool or its input is
+  // broken.
+  it('explains how to repair an over-escaped slash in a regex literal', async () => {
+    const r = await runOrchestrationScript(
+      String.raw`const value = "packages/operator-core"; return value.match(/packages\\/operator-core/);`,
+      facade({}),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('compile_error: Invalid regular expression flags');
+    expect(r.error).toContain('over-escaped');
+    expect(r.error).toContain('String.includes');
+    expect(r.error).toContain('new RegExp');
+  });
+
+  it('does not add regex guidance to an unrelated compile error', async () => {
+    const r = await runOrchestrationScript(`this is ( not valid`, facade({}));
+    expect(r.ok).toBe(false);
+    expect(r.error).not.toContain('over-escaped');
+    expect(r.error).not.toContain('Invalid regular expression flags');
+  });
+
   // EI-21909921686340240: code:run scripts are compiled as plain JavaScript
   // (via vm.runInNewContext) — TypeScript-only syntax (type annotations, `as`
   // casts, interfaces) fails to parse with an opaque V8 SyntaxError and no

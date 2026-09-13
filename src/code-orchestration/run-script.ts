@@ -836,7 +836,13 @@ const WORKER_SRC = `(() => {
     //
     // No backslashes in the pattern on purpose — this whole block is inside the WORKER_SRC
     // template literal, where every backslash must be doubled to survive to the worker.
+    const errorMessage = (err && err.message) || String(err);
     const tsSyntax = /(^|[^A-Za-z0-9_$])(interface|enum|implements|declare|namespace) |: *(string|number|boolean|any|unknown|never|void) *[,)=;>&|]|: *(string|number|boolean|any|unknown|never|void)$|(^|[^A-Za-z0-9_$])as +(const|string|number|boolean|any|unknown)([^A-Za-z0-9_$]|$)/m.test(String(script));
+    // A regex literal with an over-escaped slash closes at the slash after the
+    // escaped backslash, so the path segment is parsed as flags. The resulting
+    // V8 message is accurate but does not tell an agent how to repair a script
+    // assembled through another string layer.
+    const regexFlagsSyntax = /Invalid regular expression flags/i.test(String(errorMessage));
     // V8's SyntaxError stack opens with 'evalmachine.<anonymous>:<n>', then the offending
     // SOURCE LINE, then a caret marking the column. Surface those two lines, never the line
     // NUMBER: it counts from the top of the wrapped source, and the harness prelude sits
@@ -856,10 +862,13 @@ const WORKER_SRC = `(() => {
       t: 'error',
       error:
         'compile_error: ' +
-        ((err && err.message) || String(err)) +
+        errorMessage +
         frame +
         (tsSyntax
           ? ' -- code:run scripts are plain JavaScript only (no TypeScript type annotations, interfaces, or "as" casts); strip them and retry'
+          : '') +
+        (regexFlagsSyntax
+          ? ' -- an over-escaped slash in a regex literal can close the literal early and make the remaining path look like flags; prefer String.includes(...) or new RegExp("...") when composing code:run scripts through another string layer'
           : ''),
     });
     return;
