@@ -35,6 +35,12 @@
 # bumping the submodule pointer for no reason and riding into release bundles (cf WI-4419).
 node_modules/
 
+# The package exports source TypeScript directly. Build output is a local convenience for
+# standalone consumers and is intentionally not repository state; tracking it creates a second,
+# silently stale copy of the source (EI-22733941811175533).
+dist/
+*.tsbuildinfo
+
 # Coverage reports — any Vitest/cargo-llvm-cov --coverage run.
 #
 # The SUPERPROJECT .gitignore already carries this exact rule set, but a
