@@ -1870,11 +1870,94 @@ function mergedSchemaProperties(rawSchema: unknown): Record<string, unknown> | u
  */
 function leafIssueSummary(
   issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
-): { msgs: string; keys: string[] } {
+): {
+  msgs: string;
+  keys: string[];
+  leaves: Array<{ issue: StandardSchemaV1.Issue; segs: PropertyKey[] }>;
+} {
   const leaves = issueLeaves((issues ?? []) as StandardSchemaV1.Issue[]);
   const msgs = leaves.map(({ issue }) => issue.message ?? '').join(' ');
   const keys = leaves.flatMap(({ issue }) => (issue as { keys?: readonly string[] }).keys ?? []);
-  return { msgs, keys };
+  return { msgs, keys, leaves };
+}
+
+/**
+ * Resolve the object whose properties were being validated at an issue path.
+ *
+ * A flat root-property lookup is insufficient for strict unknown-key issues: the same
+ * key can be valid on the tool's root while invalid inside `items[]` or a structured
+ * object. Reuse the schema path walker used by field-scoped value hints so this
+ * diagnostic describes the validator's actual context instead of guessing from the
+ * key name alone. An ambiguous union is merged conservatively; a key accepted by any
+ * reachable branch is not called unknown.
+ */
+function schemaPropertiesAtPath(
+  rawSchema: unknown,
+  path: ReadonlyArray<PropertyKey>,
+): Record<string, unknown> | undefined {
+  if (path.length === 0) return mergedSchemaProperties(rawSchema);
+  const schema = jsonSchemaForArgHints(rawSchema);
+  if (!schema) return undefined;
+
+  let nodes: unknown[] = [schema];
+  for (const segment of path) {
+    nodes = stepSchema(nodes, segment);
+    if (nodes.length === 0) return undefined;
+  }
+
+  let merged: Record<string, unknown> | undefined;
+  for (const node of nodes) {
+    if (!node || typeof node !== 'object' || Array.isArray(node)) continue;
+    const properties = (node as Record<string, unknown>).properties;
+    if (!properties || typeof properties !== 'object' || Array.isArray(properties)) continue;
+    merged = { ...(merged ?? {}), ...(properties as Record<string, unknown>) };
+  }
+  return merged;
+}
+
+function issueKeyNames(issue: StandardSchemaV1.Issue): string[] {
+  const keys = (issue as { keys?: readonly PropertyKey[] }).keys;
+  if (Array.isArray(keys)) return keys.map(String);
+  return Array.from(issue.message.matchAll(/["'`]([^"'`]+)["'`]/g), (match) => match[1]);
+}
+
+function schemaPathLabel(path: ReadonlyArray<PropertyKey>, key: string): string {
+  let label = '';
+  for (const segment of [...path, key]) {
+    const text = String(segment);
+    if (/^\d+$/.test(text)) {
+      label += '[]';
+    } else {
+      label = label.length > 0 ? `${label}.${text}` : text;
+    }
+  }
+  return label;
+}
+
+/**
+ * Find nested rejections whose key is accepted at the root as well. These are the
+ * misleading cases where the ordinary `accepts ONLY` list is technically true but
+ * omits the parent path that determines whether the caller's shape is valid.
+ */
+function nestedTopLevelArgContexts(
+  issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
+  rawSchema: unknown,
+): Array<{ key: string; path: string }> {
+  const root = mergedSchemaProperties(rawSchema);
+  if (!root) return [];
+  const contexts = new Map<string, string>();
+  for (const { issue, segs } of issueLeaves((issues ?? []) as StandardSchemaV1.Issue[])) {
+    if (segs.length === 0) continue;
+    if (!/nrecognized key/i.test(issue.message)) continue;
+    const nested = schemaPropertiesAtPath(rawSchema, segs);
+    if (!nested) continue;
+    for (const key of issueKeyNames(issue)) {
+      if (Object.prototype.hasOwnProperty.call(nested, key)) continue;
+      if (!Object.prototype.hasOwnProperty.call(root, key)) continue;
+      contexts.set(key, schemaPathLabel(segs, key));
+    }
+  }
+  return Array.from(contexts, ([key, path]) => ({ key, path }));
 }
 
 /**
@@ -1956,7 +2039,7 @@ export function unrecognizedArgKeys(
   /** The caller's args — enables per-branch resolution on a discriminated union. */
   input?: unknown,
 ): string[] {
-  const { msgs, keys: leafKeys } = leafIssueSummary(issues);
+  const { msgs, keys: leafKeys, leaves } = leafIssueSummary(issues);
   if (!/nrecognized key/i.test(msgs)) return [];
   const merged = mergedSchemaProperties(rawSchema);
   // An empty object schema is still a readable schema. `z.object({})` declares no
@@ -1967,13 +2050,39 @@ export function unrecognizedArgKeys(
   if (!merged) return [];
   // Per-branch when the caller's own discriminator picks exactly one, merged otherwise.
   const branch = input === undefined ? undefined : selectedUnionBranchProperties(rawSchema, input);
-  const keys = Object.keys(branch ?? merged);
-  return [
+  const rootKeys = Object.keys(branch ?? merged);
+  const reportedKeys = [
     ...new Set([
       ...leafKeys,
       ...Array.from(msgs.matchAll(/["']([^"']+)["']/g), (match) => match[1]),
     ]),
-  ].filter((key) => !keys.includes(key));
+  ];
+  const unknown = new Set<string>();
+
+  // Compare each rejection against the object at its own path. A root-level key is
+  // not a valid reason to suppress a nested rejection: `{ items:[{ harness }] }` and
+  // `{ harness, items:[...] }` are different call shapes even when both mention the
+  // same field name.
+  for (const { issue, segs } of leaves) {
+    if (!/nrecognized key/i.test(issue.message)) continue;
+    const nested = segs.length > 0 ? schemaPropertiesAtPath(rawSchema, segs) : undefined;
+    for (const key of issueKeyNames(issue)) {
+      if (nested) {
+        if (!Object.prototype.hasOwnProperty.call(nested, key)) unknown.add(key);
+      } else if (!rootKeys.includes(key)) {
+        unknown.add(key);
+      }
+    }
+  }
+
+  // Preserve the old message/keys fallback for validators that provide an unusual
+  // issue shape which `issueLeaves` cannot associate with a path.
+  for (const key of reportedKeys) {
+    if (!leaves.some(({ issue }) => issueKeyNames(issue).includes(key))) {
+      if (!rootKeys.includes(key)) unknown.add(key);
+    }
+  }
+  return reportedKeys.filter((key) => unknown.has(key));
 }
 
 /**
@@ -2228,13 +2337,20 @@ export function unknownArgHint(
   const correctionText = localCorrections.length > 0
     ? ` Did you mean ${localCorrections.map(({ rejectedArg, target }) => `\`${target}\` for \`${rejectedArg}\``).join('; ')}?`
     : '';
+  const unknownKeys = unrecognizedArgKeys(issues, rawSchema, input);
+  const nestedContexts = nestedTopLevelArgContexts(issues, rawSchema)
+    .filter(({ key }) => unknownKeys.includes(key));
+  const nestedContextText = nestedContexts
+    .map(({ key, path }) =>
+      ` \`${key}\` is not accepted at \`${path}\`; this tool accepts \`${key}\` only at the top level, so move it out of that nested object.`,
+    )
+    .join('');
   // EI-21826333890701824: `tools:invoke`'s envelope (`{ name, args }`) wrapped around a
   // DIRECT verb call is a recognisable, recurring caller error with a specific remedy,
   // but the generic list-the-keys message cannot express it: it truthfully reports two
   // unknown keys and leaves the caller to infer that their whole call SHAPE — not their
   // field names — was wrong. Fires only when this tool declares NEITHER key itself, so
   // the meta-dispatcher that genuinely takes `name`/`args` never sees it.
-  const unknownKeys = unrecognizedArgKeys(issues, rawSchema, input);
   // EI-22174225494240206: dispatch-level args (`payloadTier`, and any host-registered
   // ones — e.g. Papercusp's `projection`) are stripped by the transport BEFORE this
   // validator ever runs, so they can never appear in `keys` above. Where the transport
@@ -2307,7 +2423,7 @@ export function unknownArgHint(
     })
     .join('');
   return (
-    ` — this tool accepts ONLY: ${keys.join(', ')}.${ambientText}${envelopeText}${metaEnvelopeText}${siblingText}${redirectText}${correctionText}` +
+    ` — this tool accepts ONLY: ${keys.join(', ')}.${ambientText}${envelopeText}${metaEnvelopeText}${siblingText}${redirectText}${nestedContextText}${correctionText}` +
     ' An undeclared arg is REJECTED, not silently ignored (EI-10883): passing an arg a tool does not declare used to return ok:true' +
     ` while quietly doing something else, which is indistinguishable from success.${reSendHint}` +
     // EI-19953470656367880: an unrecognized-key rejection is ALSO the exact shape a

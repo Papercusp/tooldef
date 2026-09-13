@@ -912,3 +912,31 @@ describe('nestedArgPaths (WI-38059) — a relocation, not a typo', () => {
     expect(nested.get('shared')).toBe('alpha.shared');
   });
 });
+
+describe('unknownArgHint nested context (EI-23075119222889942)', () => {
+  it('identifies a root-valid key rejected inside items[] instead of hiding it from the hint', () => {
+    // This mirrors the stale work_items:checkpoint shape: `harness` is a valid
+    // batch-level default, but the older item schema did not declare it per item.
+    // Zod reports the rejection at path `items[0]`; a root-only key comparison
+    // incorrectly filtered it out because the root also declares `harness`.
+    const item = z.object({
+      id: z.string(),
+      checkpoint: z.string().optional(),
+    });
+    const schema = strictArgs(
+      z.object({
+        items: z.array(item),
+        harness: z.string().optional(),
+      }),
+    );
+    const rawSchema = toArgsJsonSchema('work_items:checkpoint', schema);
+    const parsed = schema.safeParse({ items: [{ id: 'EI-1', harness: 'papercusp' }] });
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return;
+
+    const out = unknownArgHint(parsed.error.issues, rawSchema);
+    expect(out).toContain('`harness` is not accepted at `items[].harness`');
+    expect(out).toContain('accepts `harness` only at the top level');
+    expect(out).toContain('this tool accepts ONLY');
+  });
+});
