@@ -1035,7 +1035,9 @@ export async function runToolOrchestration(
   }
   // P-020: only meaningful when the script ABORTED — a run that completed reached every line
   // it was going to, so an undispatched write there was a branch not taken, not a stranding.
-  const strandedWrites = run.ok
+  // A parse-recovered AST is advisory only: TypeScript may surface calls from syntax-invalid
+  // source that the VM never compiled, so those calls were not ordered by an executable script.
+  const strandedWrites = run.ok || check.hasParseErrors
     ? []
     : detectStrandedWrites(check.calls, tools, dispatchedToolNames);
   const notDispatchedWrites: NotDispatchedWrite[] = strandedWrites.map((tool) => ({

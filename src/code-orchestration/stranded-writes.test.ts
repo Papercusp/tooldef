@@ -221,6 +221,24 @@ describe('P-020 end-to-end: a real aborted run reports its stranded writes', () 
     expect(r.strandedWrites).toBeUndefined();
   });
 
+  it('does not infer stranded writes from calls recovered out of a compile error', async () => {
+    const bash = mkTool('capability:bash', 'write', vi.fn(async () => json({ ok: true })));
+    const r = await runToolOrchestration(
+      `const command = "line 1
+line 2";
+       await tools.capability.bash({ command });
+       return { done: true };`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [bash] },
+    );
+
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('compile_error');
+    expect(r.dispatchCount).toBe(0);
+    expect(bash.fn).not.toHaveBeenCalled();
+    expect(r.strandedWrites).toBeUndefined();
+    expect(r.notDispatchedWrites).toBeUndefined();
+  });
+
   it('reports an exact settled prefix and correlates a non-cooperative detached write by callId', async () => {
     const starts: string[] = [];
     const settles: Array<{ callId?: string; status: string }> = [];
