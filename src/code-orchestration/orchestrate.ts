@@ -622,6 +622,57 @@ function isExpectedReadOnlySystemctlStatus(
 }
 
 /**
+ * `ps --ppid <numeric-pid>` returns exit 1 for a parent with no children. The
+ * capability layer normalizes the real command, but keep the orchestration
+ * semantic-failure guard aligned for replay/fixture results that still carry
+ * the raw empty probe outcome. It is intentionally limited to a read effect,
+ * empty output, numeric parent, and an optional simple awk field printer.
+ */
+function isExpectedReadOnlyPsPpidEmpty(
+  toolName: string,
+  effect: ResolvedToolEffect,
+  args: unknown,
+  value: unknown,
+): boolean {
+  if (
+    toolName !== 'capability:bash' ||
+    effect !== 'read' ||
+    !isOkFalseResult(value) ||
+    value.status !== 'failed' ||
+    value.exit_code !== 1 ||
+    typeof value.output !== 'string' ||
+    value.output.trim() !== '' ||
+    typeof args !== 'object' ||
+    args === null
+  ) {
+    return false;
+  }
+  const commandValue = (args as { command?: unknown; cmd?: unknown }).command ?? (args as { cmd?: unknown }).cmd;
+  if (typeof commandValue !== 'string' || /[;&<>\n\r]/.test(commandValue) || commandValue.includes('||')) return false;
+  const segments = commandValue.split(/\s*\|\s*/);
+  if (segments.length < 1 || segments.length > 2) return false;
+  const first = segments[0]!.trim();
+  const firstTokens = (first.match(/(?:"[^"]*"|'[^']*'|\S+)/g) ?? []).map((token) =>
+    token.length >= 2 && ((token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'")))
+      ? token.slice(1, -1)
+      : token,
+  );
+  const commandBase = (token: string): string => token.slice(token.lastIndexOf('/') + 1).toLowerCase();
+  if (commandBase(firstTokens[0] ?? '') !== 'ps') return false;
+  const ppidIndex = firstTokens.indexOf('--ppid');
+  const numericPpid =
+    (ppidIndex >= 0 && /^\d+$/.test(firstTokens[ppidIndex + 1] ?? '')) ||
+    firstTokens.some((token) => /^--ppid=\d+$/.test(token));
+  if (!numericPpid) return false;
+  if (segments.length === 1) return true;
+  const awk = segments[1]!.trim();
+  const field = String.raw`(?:\$\d+|[A-Za-z_][A-Za-z0-9_]*)`;
+  return new RegExp(
+    String.raw`^(?:\S+\/)?awk\s+['"]?\{\s*print(?:\s+${field}(?:\s*,\s*${field})*)?\s*\}['"]?$`,
+  ).test(awk);
+}
+
+/**
  * True when `value` is a house BULK envelope (`{ ok: true, results: [...], counts: { failed } }`
  * — the keyed-array bulk contract, `_bulk.ts`'s `runBulk`/`bulkContent`) reporting at least one
  * per-item failure. By that contract's OWN design the top-level `ok` is ALWAYS `true` ("the batch
@@ -1020,6 +1071,7 @@ export async function runToolOrchestration(
       if (
         (!isExpectedReadOnlyBashSigpipe(name, effect, result) &&
           !isExpectedReadOnlySystemctlStatus(name, effect, args, result) &&
+          !isExpectedReadOnlyPsPpidEmpty(name, effect, args, result) &&
           isOkFalseResult(result)) ||
         isBulkPartialFailure(result)
       ) {

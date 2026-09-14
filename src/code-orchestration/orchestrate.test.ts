@@ -560,6 +560,33 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     ]);
   });
 
+  it('does not tally an empty numeric-parent ps probe as a semantic child failure', async () => {
+    const command = "ps --ppid 12345 -o pid= | awk '{print $1}'";
+    const bash = mkTool(
+      'capability:bash',
+      'write',
+      async () => json({ ok: false, status: 'failed', exit_code: 1, output: '' }),
+      (args) => ((args as { command?: unknown }).command === command ? 'read' : 'write'),
+    );
+    const r = await runToolOrchestration(
+      `const probe = await tools.capability.bash({ command: ${JSON.stringify(command)} });
+       return { ok: probe.ok, status: probe.status, exit: probe.exit_code, output: probe.output };`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [bash] },
+    );
+
+    expect(r.ok).toBe(true);
+    expect(r.summary).toEqual({ ok: false, status: 'failed', exit: 1, output: '' });
+    expect(r.partial).toBe(false);
+    expect(r.childFailures).toEqual([]);
+    expect(r.callRecords).toEqual([
+      expect.objectContaining({
+        tool: 'capability:bash',
+        effect: 'read',
+        disposition: 'settled',
+      }),
+    ]);
+  });
+
   it('still tallies exit 3 from a different read-only capability:bash command', async () => {
     const bash = mkTool(
       'capability:bash',
