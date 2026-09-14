@@ -591,6 +591,37 @@ function isExpectedReadOnlyBashSigpipe(
 }
 
 /**
+ * `systemctl status` uses exit code 3 to report that a known unit is inactive or
+ * failed. That is the state being queried, not a failure to execute the read-only
+ * diagnostic. Keep this exception narrower than the SIGPIPE case: only a
+ * read-classified capability:bash call whose command contains a direct systemctl
+ * status segment may use exit 3 as data.
+ */
+function isExpectedReadOnlySystemctlStatus(
+  toolName: string,
+  effect: ResolvedToolEffect,
+  args: unknown,
+  value: unknown,
+): boolean {
+  if (
+    toolName !== 'capability:bash' ||
+    effect !== 'read' ||
+    !isOkFalseResult(value) ||
+    value.status !== 'failed' ||
+    value.exit_code !== 3 ||
+    typeof args !== 'object' ||
+    args === null
+  ) {
+    return false;
+  }
+  const command = (args as { command?: unknown; cmd?: unknown }).command ?? (args as { cmd?: unknown }).cmd;
+  if (typeof command !== 'string') return false;
+  return command.split(/\s*(?:&&|\|\||\||;|\n)\s*/).some((segment) =>
+    /^(?:timeout\s+\S+\s+)?systemctl(?:\s+--?[A-Za-z0-9][A-Za-z0-9_=-]*)*\s+status(?:\s|$)/.test(segment.trim()),
+  );
+}
+
+/**
  * True when `value` is a house BULK envelope (`{ ok: true, results: [...], counts: { failed } }`
  * — the keyed-array bulk contract, `_bulk.ts`'s `runBulk`/`bulkContent`) reporting at least one
  * per-item failure. By that contract's OWN design the top-level `ok` is ALWAYS `true` ("the batch
@@ -987,7 +1018,9 @@ export async function runToolOrchestration(
       // integrity check) resolves normally here. Tally those so a batched script that doesn't check
       // every result still gets visibility instead of silently counting the write as executed.
       if (
-        (!isExpectedReadOnlyBashSigpipe(name, effect, result) && isOkFalseResult(result)) ||
+        (!isExpectedReadOnlyBashSigpipe(name, effect, result) &&
+          !isExpectedReadOnlySystemctlStatus(name, effect, args, result) &&
+          isOkFalseResult(result)) ||
         isBulkPartialFailure(result)
       ) {
         callRecord.disposition = 'semantic_rejected';

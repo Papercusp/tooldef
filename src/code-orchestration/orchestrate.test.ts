@@ -525,6 +525,60 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     ]);
   });
 
+  it('does not tally systemctl status exit 3 from a read-only capability:bash call', async () => {
+    const bash = mkTool(
+      'capability:bash',
+      'write',
+      async () =>
+        json({
+          ok: false,
+          status: 'failed',
+          exit_code: 3,
+          output: 'Active: failed (Result: exit-code)',
+        }),
+      (args) =>
+        (args as { command?: unknown }).command === 'systemctl --user status agenticmail.service --no-pager'
+          ? 'read'
+          : 'write',
+    );
+    const r = await runToolOrchestration(
+      `const probe = await tools.capability.bash({ command: 'systemctl --user status agenticmail.service --no-pager' });
+       return { ok: probe.ok, status: probe.status, exit: probe.exit_code };`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [bash] },
+    );
+
+    expect(r.ok).toBe(true);
+    expect(r.summary).toEqual({ ok: false, status: 'failed', exit: 3 });
+    expect(r.partial).toBe(false);
+    expect(r.childFailures).toEqual([]);
+    expect(r.callRecords).toEqual([
+      expect.objectContaining({
+        tool: 'capability:bash',
+        effect: 'read',
+        disposition: 'settled',
+      }),
+    ]);
+  });
+
+  it('still tallies exit 3 from a different read-only capability:bash command', async () => {
+    const bash = mkTool(
+      'capability:bash',
+      'write',
+      async () => json({ ok: false, status: 'failed', exit_code: 3, output: 'diagnostic failed' }),
+      () => 'read',
+    );
+    const r = await runToolOrchestration(
+      `await tools.capability.bash({ command: 'strace -f -p 123' }); return 'inspected';`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [bash] },
+    );
+
+    expect(r.ok).toBe(true);
+    expect(r.partial).toBe(true);
+    expect(r.childFailures).toEqual([
+      expect.objectContaining({ tool: 'capability:bash', kind: 'semantic' }),
+    ]);
+  });
+
   it('still tallies exit 141 when capability:bash is classified as a write', async () => {
     const bash = mkTool(
       'capability:bash',
