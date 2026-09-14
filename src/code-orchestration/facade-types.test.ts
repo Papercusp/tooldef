@@ -95,8 +95,8 @@ describe('facade-types (B-CX-API)', () => {
     expect(out).toContain('declare const tools: {');
     expect(out).toContain('workItems: {');
     // required `name` has NO `?`; optionals have `?`; enum → literal union; array → Array<string>.
-    expect(out).toMatch(
-      /list\(args: \{ status\?: "open" \| "closed"; limit\?: number; name: string; tags\?: Array<string> \}\): Promise<unknown>;/,
+    expect(out).toContain(
+      'list(args: { status?: "open" | "closed"; limit?: number /* integer(1-100) */; name: string; tags?: Array<string> }): Promise<unknown>;',
     );
     // The tool description rides as a JSDoc comment.
     expect(out).toContain('/** List work-items across kinds (feature/bug/change). */');
@@ -191,7 +191,39 @@ describe('facade-types (B-CX-API)', () => {
 
     const out = generateToolFacadeTypes([capabilityBash]);
     expect(out).toContain('/** @param args.timeout Wall-clock timeout in milliseconds; 20 seconds = 20000. */');
-    expect(out).toContain('bash(args?: { timeout?: number }): Promise<unknown>;');
+    expect(out).toContain('bash(args?: { timeout?: number /* integer */ }): Promise<unknown>;');
+  });
+
+  it('preserves numeric bounds and integer-ness without changing number assignability', () => {
+    const numericTool = mkTool('demo:numeric', {
+      type: 'object',
+      properties: {
+        boundedInteger: { type: 'integer', minimum: 5, maximum: 200 },
+        minimumOnly: { type: 'number', minimum: 0 },
+        maximumOnly: { type: 'number', maximum: 1 },
+        exclusive: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1 },
+        draft4Exclusive: { type: 'integer', minimum: 0, exclusiveMinimum: true },
+        integerOnly: { type: 'integer' },
+        nullableInteger: { type: ['integer', 'null'], minimum: 1 },
+      },
+      additionalProperties: false,
+    });
+
+    const type = toolArgsType(numericTool).type;
+    expect(type).toContain('boundedInteger?: number /* integer(5-200) */');
+    expect(type).toContain('minimumOnly?: number /* number(≥0) */');
+    expect(type).toContain('maximumOnly?: number /* number(≤1) */');
+    expect(type).toContain('exclusive?: number /* number(>0-<1) */');
+    expect(type).toContain('draft4Exclusive?: number /* integer(>0) */');
+    expect(type).toContain('integerOnly?: number /* integer */');
+    expect(type).toContain('nullableInteger?: number /* integer(≥1) */ | null');
+
+    // The annotations are comments, so the generated declaration remains valid
+    // and callers still write ordinary numeric values against the facade.
+    const out = generateToolFacadeTypes([numericTool]);
+    expect(out).toContain(
+      'numeric(args?: { boundedInteger?: number /* integer(5-200) */; minimumOnly?: number /* number(≥0) */; maximumOnly?: number /* number(≤1) */; exclusive?: number /* number(>0-<1) */; draft4Exclusive?: number /* integer(>0) */; integerOnly?: number /* integer */; nullableInteger?: number /* integer(≥1) */ | null }): Promise<unknown>;',
+    );
   });
 
   it('emits balanced, well-formed TS (braces match)', () => {
@@ -306,7 +338,7 @@ describe('facade-types (B-CX-API)', () => {
 
     it('a tool with neither an output schema nor guidance.returns still renders Promise<unknown> and no @returns line', () => {
       const out = generateToolFacadeTypes([workItemsList]);
-      expect(out).toContain('list(args: { status?: "open" | "closed"; limit?: number; name: string; tags?: Array<string> }): Promise<unknown>;');
+      expect(out).toContain('list(args: { status?: "open" | "closed"; limit?: number /* integer(1-100) */; name: string; tags?: Array<string> }): Promise<unknown>;');
       expect(out).not.toContain('@returns');
     });
   });

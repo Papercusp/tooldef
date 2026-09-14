@@ -70,6 +70,49 @@ function uniq(parts: string[]): string[] {
   return out;
 }
 
+type NumericSchemaBound = { value: number; exclusive: boolean };
+
+/**
+ * Render the caller-facing numeric contract that TypeScript cannot express as a
+ * normal primitive type. The comment keeps generated signatures assignable as
+ * `number` while making integer-ness and validator bounds visible to the model.
+ * This intentionally mirrors the compact discovery form (`integer(5-200)`).
+ */
+function numericConstraintNote(schema: JsonSchema, t: string): string {
+  if (t !== 'number' && t !== 'integer') return '';
+
+  const numberValue = (value: unknown): number | undefined =>
+    typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  const findBound = (
+    inclusiveKey: 'minimum' | 'maximum',
+    exclusiveKey: 'exclusiveMinimum' | 'exclusiveMaximum',
+  ): NumericSchemaBound | undefined => {
+    const exclusiveValue = numberValue(schema[exclusiveKey]);
+    if (exclusiveValue !== undefined) return { value: exclusiveValue, exclusive: true };
+
+    const inclusiveValue = numberValue(schema[inclusiveKey]);
+    if (inclusiveValue !== undefined) {
+      return { value: inclusiveValue, exclusive: schema[exclusiveKey] === true };
+    }
+    return undefined;
+  };
+
+  const lower = findBound('minimum', 'exclusiveMinimum');
+  const upper = findBound('maximum', 'exclusiveMaximum');
+  const range = lower && upper
+    ? `${lower.exclusive ? '>' : ''}${lower.value}-${upper.exclusive ? '<' : ''}${upper.value}`
+    : upper
+      ? `${upper.exclusive ? '<' : '≤'}${upper.value}`
+      : lower
+        ? `${lower.exclusive ? '>' : '≥'}${lower.value}`
+        : '';
+
+  // An unbounded `number` already has the exact TS representation we can
+  // provide. Keep it compact, but retain `integer` even without bounds so the
+  // validator's integral-value requirement is not silently erased.
+  return t === 'number' && !range ? '' : `${t}${range ? `(${range})` : ''}`;
+}
+
 /** Map a single JSON-Schema primitive `type` to its TS type. */
 function primitiveType(t: string): string {
   switch (t) {
@@ -89,6 +132,13 @@ function primitiveType(t: string): string {
     default:
       return 'unknown';
   }
+}
+
+/** Map a primitive and retain numeric validator constraints as a TS comment. */
+function primitiveSchemaType(t: string, schema: JsonSchema): string {
+  const base = primitiveType(t);
+  const note = numericConstraintNote(schema, t);
+  return note ? `${base} /* ${note} */` : base;
 }
 
 /** Resolve a `$ref` like `#/$defs/Name` or `#/definitions/Name` against the root `$defs`. */
@@ -145,7 +195,7 @@ function schemaToTs(
       t.map((one) =>
         one === 'object' || one === 'array'
           ? schemaToTs({ ...schema, type: one }, depth, defs, maxDepth)
-          : primitiveType(String(one)),
+          : primitiveSchemaType(String(one), schema),
       ),
     );
     return parts.join(' | ');
@@ -166,7 +216,7 @@ function schemaToTs(
     return objectToTs(schema, depth, defs, maxDepth) + nullableSuffix;
   }
 
-  if (typeof t === 'string') return primitiveType(t) + nullableSuffix;
+  if (typeof t === 'string') return primitiveSchemaType(t, schema) + nullableSuffix;
 
   return 'unknown';
 }
