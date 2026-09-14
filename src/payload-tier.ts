@@ -456,11 +456,17 @@ function inferBulkEnvelope(value: unknown): Required<BulkEnvelopeProjectionOpts>
   const accounting = counts as Record<string, unknown>;
   if (typeof accounting.ok !== 'number' || typeof accounting.failed !== 'number') return undefined;
   // A generic object with `results` and `counts` is not enough on its own: only
-  // infer the special walk when rows expose the keyed bulk outcome shape.
+  // infer the special walk when a failure row exposes the keyed bulk outcome
+  // shape. Success-only envelopes continue through the ordinary identity-first
+  // walk; the special ordering is needed specifically to rescue failures that
+  // would otherwise be visited after bulky successful rows, and this narrower
+  // discriminator avoids changing nested result summaries that happen to use the
+  // same outer `{ ok, results, counts }` spelling.
   if (!rows.some((row) => {
     if (row === null || typeof row !== 'object' || Array.isArray(row)) return false;
     const record = row as Record<string, unknown>;
-    return typeof record.ok === 'boolean' || Object.prototype.hasOwnProperty.call(record, 'error');
+    return record.ok === false || record.ok === 'failed' || record.ok === 'error' ||
+      Object.prototype.hasOwnProperty.call(record, 'error');
   })) return undefined;
   return { resultsKey: 'results', failureKey: 'ok', countsKey: 'counts' };
 }
@@ -532,7 +538,13 @@ function projectBulkResultsArray(
   });
   for (const index of workIndexes) {
     if (state.remaining < 128) break;
-    const childPreservePaths = preserveArrayChildPaths(preservePaths, index);
+    // A custom envelope may call its outcome field something other than `ok`.
+    // Promote that configured field into the row's identity preview so the
+    // failure/success discriminator remains visible after the same budget cut.
+    const childPreservePaths = [
+      ...preserveArrayChildPaths(preservePaths, index),
+      [{ kind: 'key', name: config.failureKey } as const],
+    ];
     projectedByIndex.set(
       index,
       projectIdentityPreview(value[index], `${path}[${index}]`, 0, state, childPreservePaths),
@@ -806,7 +818,7 @@ function takePrimitive(state: ProjectionState, value: unknown, path: string): un
  */
 const IDENTITY_FIELDS = new Set([
   'id', 'title', 'name', 'slug', 'ref', 'kind', 'state', 'status', 'ok', 'error',
-  'item', 'itemId', 'plan', 'planSlug', 'rubricRef', 'workItemId',
+  'item', 'itemId', 'key', 'plan', 'planSlug', 'rubricRef', 'workItemId',
   // A bounded object may already be passing through a second projection seam
   // (payload tier -> result door). Its honesty markers and array-count receipt
   // are identity too: dropping them recreates a complete-looking partial row.
@@ -1443,6 +1455,7 @@ export function projectBoundedPayload(
         // unchanged, so it must not silently revert to the generic re-call.
         recoveryPointer: state.recoveryPointer,
         preservePaths: state.preservePaths,
+        bulkEnvelope: state.bulkEnvelope,
       };
       const rePreview = projectValue(data, '$', 0, reState);
       // `omittedPreserved` names fields that are MISSING FROM THIS BODY, so it is

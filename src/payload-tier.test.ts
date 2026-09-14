@@ -346,6 +346,90 @@ describe('applyPayloadTier', () => {
     expect(projected._projection.next).toBe(recovery.next);
   });
 
+  it('prioritizes a tail failure in a canonical bulk envelope and restores source order', () => {
+    const results = [
+      ...Array.from({ length: 16 }, (_, i) => ({
+        ok: true,
+        id: `WI-${i}`,
+        detail: 'x'.repeat(4_000),
+      })),
+      { ok: false, id: 'WI-tail-failure', error: 'evidence is stale', detail: 'x'.repeat(4_000) },
+    ];
+
+    const projected = projectBoundedPayload(
+      { ok: true, results, counts: { ok: 16, failed: 1 } },
+      {
+        toolName: 'plans:bind-spec-evidence',
+        tier: 'trimmed',
+        targetChars: 3_000,
+      },
+    ) as unknown as {
+      results: Array<Record<string, unknown>>;
+      counts: { ok: number; failed: number };
+      _projection: { omittedCount: number; omitted: Array<{ path: string; reason: string }> };
+    };
+
+    // The tail failure is selected before bulky successes, then emitted in its
+    // original position so callers can still correlate visible rows with the
+    // input order they supplied. The exact success count is budget-dependent;
+    // the failure's presence and relative ordering are the contract.
+    const visibleRows = projected.results.filter((row) => row._truncated !== true);
+    expect(visibleRows.map((row) => row.id)).toEqual(
+      [...visibleRows]
+        .sort((a, b) => results.findIndex((source) => source.id === a.id) - results.findIndex((source) => source.id === b.id))
+        .map((row) => row.id),
+    );
+    expect(visibleRows).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        ok: false,
+        id: 'WI-tail-failure',
+        error: 'evidence is stale',
+      }),
+    ]));
+    expect(visibleRows.at(-1)).toMatchObject({
+      ok: false,
+      id: 'WI-tail-failure',
+      error: 'evidence is stale',
+    });
+    expect(projected.counts).toEqual({ ok: 16, failed: 1 });
+    expect(projected._projection.omittedCount).toBeGreaterThan(0);
+    expect(projected._projection.omitted).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        path: expect.stringMatching(/^\$\.results\[\d+\]$/),
+        reason: expect.stringContaining('bulk result row(s) omitted'),
+      }),
+    ]));
+  });
+
+  it('retains configured failure and correlation keys for a custom bulk envelope', () => {
+    const entries = [
+      ...Array.from({ length: 16 }, (_, i) => ({
+        outcome: 'ok',
+        key: `k-${i}`,
+        detail: 'x'.repeat(4_000),
+      })),
+      { outcome: 'failed', key: 'k-tail-failure', detail: 'x'.repeat(4_000) },
+    ];
+    const projected = projectBoundedPayload(
+      { accepted: true, entries, tally: { ok: 16, failed: 1 } },
+      {
+        toolName: 'custom:bulk',
+        tier: 'trimmed',
+        targetChars: 3_000,
+        bulkEnvelope: { resultsKey: 'entries', failureKey: 'outcome', countsKey: 'tally' },
+      },
+    ) as unknown as {
+      entries: Array<Record<string, unknown>>;
+      tally: { ok: number; failed: number };
+    };
+
+    const visibleEntries = projected.entries.filter((entry) => entry._truncated !== true);
+    expect(visibleEntries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ outcome: 'failed', key: 'k-tail-failure' }),
+    ]));
+    expect(projected.tally).toEqual({ ok: 16, failed: 1 });
+  });
+
   it('handles circular data in the generic projector without throwing', () => {
     const circular: { name: string; self?: unknown } = { name: 'loop' };
     circular.self = circular;
