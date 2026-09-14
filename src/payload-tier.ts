@@ -199,6 +199,23 @@ export interface BoundedPayloadRecovery {
   next: string;
 }
 
+/**
+ * How a bounded projection recognizes the keyed-array bulk contract. Bulk
+ * envelopes are special because a successful row can contain a large detail
+ * object while a failed row's `{ ok:false, <key>, error }` is the only evidence
+ * a caller needs to decide what to retry. When the budget is tight, evaluate
+ * failed rows before those bulky successes, then restore the selected rows to
+ * their original input order.
+ */
+export interface BulkEnvelopeProjectionOpts {
+  /** Top-level array key (the house contract uses `results`). */
+  resultsKey?: string;
+  /** Per-row outcome key (the house contract uses `ok`). */
+  failureKey?: string;
+  /** Top-level accounting key (the house contract uses `counts`). */
+  countsKey?: string;
+}
+
 export interface ProjectBoundedPayloadOpts {
   toolName: string;
   tier: PayloadTier;
@@ -242,6 +259,13 @@ export interface ProjectBoundedPayloadOpts {
    * prints an EXECUTABLE call; absent ⇒ the generic host-neutral wording.
    */
   rawDispatchTemplate?: string;
+  /**
+   * Preserve semantic failures in keyed-array bulk results before projecting
+   * bulky successful rows. `true` uses the house `{ results, counts, ok }`
+   * spelling; an object customizes those keys. Omit to infer the house shape
+   * from a canonical bulk envelope, or pass `false` to disable inference.
+   */
+  bulkEnvelope?: BulkEnvelopeProjectionOpts | boolean;
 }
 
 /** Once-per-(tool,tier) dedup for ratchet warnings — a worklist, not a log storm. */
@@ -289,6 +313,7 @@ interface ProjectionState {
    */
   recoveryPointer: string;
   preservePaths: readonly PreservePathSegment[][];
+  bulkEnvelope?: Required<BulkEnvelopeProjectionOpts>;
 }
 
 type PreservePathSegment =
@@ -405,6 +430,136 @@ function notePreservedDrops(
       'explicitly preserved field omitted to fit projection budget',
     );
   }
+}
+
+function normalizeBulkEnvelopeOption(
+  value: BulkEnvelopeProjectionOpts | boolean | undefined,
+): Required<BulkEnvelopeProjectionOpts> | undefined {
+  if (value === false) return undefined;
+  if (value === true) return { resultsKey: 'results', failureKey: 'ok', countsKey: 'counts' };
+  if (value === undefined) return undefined;
+  return {
+    resultsKey: value.resultsKey?.trim() || 'results',
+    failureKey: value.failureKey?.trim() || 'ok',
+    countsKey: value.countsKey?.trim() || 'counts',
+  };
+}
+
+function inferBulkEnvelope(value: unknown): Required<BulkEnvelopeProjectionOpts> | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const envelope = value as Record<string, unknown>;
+  const rows = envelope.results;
+  const counts = envelope.counts;
+  if (!Array.isArray(rows) || counts === null || typeof counts !== 'object' || Array.isArray(counts)) {
+    return undefined;
+  }
+  const accounting = counts as Record<string, unknown>;
+  if (typeof accounting.ok !== 'number' || typeof accounting.failed !== 'number') return undefined;
+  // A generic object with `results` and `counts` is not enough on its own: only
+  // infer the special walk when rows expose the keyed bulk outcome shape.
+  if (!rows.some((row) => {
+    if (row === null || typeof row !== 'object' || Array.isArray(row)) return false;
+    const record = row as Record<string, unknown>;
+    return typeof record.ok === 'boolean' || Object.prototype.hasOwnProperty.call(record, 'error');
+  })) return undefined;
+  return { resultsKey: 'results', failureKey: 'ok', countsKey: 'counts' };
+}
+
+function isBulkFailureRow(value: unknown, config: Required<BulkEnvelopeProjectionOpts>): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  const outcome = row[config.failureKey];
+  return outcome === false || outcome === 'failed' || outcome === 'error' ||
+    Object.prototype.hasOwnProperty.call(row, 'error');
+}
+
+function isBulkResultsPath(path: string, config: Required<BulkEnvelopeProjectionOpts> | undefined): boolean {
+  return config != null && path === `$.${config.resultsKey}`;
+}
+
+function bulkEnvelopeKeyPriority(
+  path: string,
+  key: string,
+  config: Required<BulkEnvelopeProjectionOpts> | undefined,
+): number {
+  if (config == null || path !== '$') return 0;
+  // Keep the tiny outcome/accounting fields in front of the large row array.
+  if (key === config.failureKey || key === config.countsKey) return 20;
+  if (key === config.resultsKey) return -1;
+  return 0;
+}
+
+/**
+ * Select the rows that have the highest recovery value from a bulk envelope.
+ * Failures are selected before successes so a tail `{ok:false,error}` row is
+ * not hidden behind the ordinary row cap. The returned indexes are sorted back
+ * into input order for the caller; only the projection work order is failure
+ * first.
+ */
+function selectBulkResultIndexes(
+  rows: readonly unknown[],
+  maxRows: number,
+  config: Required<BulkEnvelopeProjectionOpts>,
+): number[] {
+  const failureIndexes: number[] = [];
+  const successIndexes: number[] = [];
+  for (let index = 0; index < rows.length; index += 1) {
+    (isBulkFailureRow(rows[index], config) ? failureIndexes : successIndexes).push(index);
+  }
+  return [...failureIndexes, ...successIndexes]
+    .slice(0, Math.max(0, maxRows))
+    .sort((a, b) => a - b);
+}
+
+function projectBulkResultsArray(
+  value: unknown[],
+  path: string,
+  state: ProjectionState,
+  preservePaths: readonly PreservePathSegment[][],
+): unknown[] {
+  const config = state.bulkEnvelope;
+  if (config == null || !isBulkResultsPath(path, config)) return [];
+
+  const selectedIndexes = selectBulkResultIndexes(value, state.limits.maxArray, config);
+  const projectedByIndex = new Map<number, unknown>();
+  // The work order deliberately differs from output order: failures first get
+  // the shared budget, then successes spend whatever remains. This is what
+  // makes a failure at the tail visible even when preceding success rows carry
+  // large workItem/checkpoint/summary payloads.
+  const workIndexes = [...selectedIndexes].sort((a, b) => {
+    const failureDelta = Number(isBulkFailureRow(value[b], config)) - Number(isBulkFailureRow(value[a], config));
+    return failureDelta || a - b;
+  });
+  for (const index of workIndexes) {
+    if (state.remaining < 128) break;
+    const childPreservePaths = preserveArrayChildPaths(preservePaths, index);
+    projectedByIndex.set(
+      index,
+      projectIdentityPreview(value[index], `${path}[${index}]`, 0, state, childPreservePaths),
+    );
+  }
+
+  const projected: unknown[] = [];
+  for (const index of selectedIndexes) {
+    const row = projectedByIndex.get(index);
+    if (row === undefined && !projectedByIndex.has(index)) continue;
+    projected.push(row);
+  }
+  // The row cap and budget can each omit input rows. Count both, but do not
+  // invent a gap in the output: the marker describes the actual projected rows
+  // and the original rendered input population.
+  const droppedCount = value.length - projectedByIndex.size;
+  if (droppedCount > 0) {
+    recordOmission(
+      state,
+      `${path}[${projected.length}]`,
+      `${droppedCount} bulk result row(s) omitted; failures were prioritized and output order follows input order; showing ${projected.length} of ${value.length} rendered input entries`,
+      droppedCount,
+      true,
+    );
+    projected.push(arrayTruncationValue(projected, droppedCount, projected.length, value.length));
+  }
+  return projected;
 }
 
 /**
@@ -903,6 +1058,9 @@ function projectValue(
   state.active.add(value);
   try {
     if (Array.isArray(value)) {
+      if (isBulkResultsPath(path, state.bulkEnvelope)) {
+        return projectBulkResultsArray(value, path, state, preservePaths);
+      }
       const shown = value.slice(0, state.limits.maxArray);
       const projected: unknown[] = [];
       for (let i = 0; i < shown.length; i += 1) {
@@ -953,9 +1111,12 @@ function projectValue(
     const entries = Object.entries(value as Record<string, unknown>);
     const prioritized = entries.length > 1
       ? [...entries].sort(
-          (a, b) =>
-            keyProjectionPriority(preservePaths, b[0]) -
-            keyProjectionPriority(preservePaths, a[0]),
+          (a, b) => {
+            const bulkDelta =
+              bulkEnvelopeKeyPriority(path, b[0], state.bulkEnvelope) -
+              bulkEnvelopeKeyPriority(path, a[0], state.bulkEnvelope);
+            return bulkDelta || keyProjectionPriority(preservePaths, b[0]) - keyProjectionPriority(preservePaths, a[0]);
+          },
         )
       : entries;
     const projected: Record<string, unknown> = {};
@@ -1112,6 +1273,9 @@ export function projectBoundedPayload(
     preservePaths: (opts.preservePaths ?? [])
       .map(parsePreservePath)
       .filter((path) => path.length > 0),
+    bulkEnvelope:
+      normalizeBulkEnvelopeOption(opts.bulkEnvelope) ??
+      (opts.bulkEnvelope === false ? undefined : inferBulkEnvelope(data)),
   };
   const preview = projectValue(data, '$', 0, state);
   const cursorArgs = projectCursorArgs(opts.args);
