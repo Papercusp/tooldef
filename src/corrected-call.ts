@@ -54,7 +54,7 @@ export interface CorrectedCallStep {
   /** Which correction source chose the destination (absent when dropped). */
   readonly kind?: InvalidInputCorrection['kind'];
   /** Known-key refinement dropped because it conflicts with another supplied key. */
-  readonly reason?: 'mutually-exclusive';
+  readonly reason?: 'mutually-exclusive' | 'authored-call';
   /** The source key retained when `rejectedArg` was dropped for a conflict. */
   readonly conflictsWith?: string;
   /**
@@ -247,13 +247,13 @@ export function buildCorrectedCall(params: {
   const args: Record<string, unknown> = { ...(input as Record<string, unknown>) };
   const steps: CorrectedCallStep[] = [];
 
-  // An authored redirect points at a DIFFERENT tool, so its value cannot be relocated
-  // within this call — the key is simply not ours. It is still dropped here (leaving it
-  // would re-trigger the same rejection), and the redirect's own rendered call, which
-  // `unknownArgHint` already emits, remains the answer for where the value belongs.
+  // A structured authored redirect can point either at a DIFFERENT tool or at a
+  // replacement shape for THIS tool. Keep both available here so the same-tool case
+  // can seed its required placeholder fields instead of being mislabeled as having
+  // "no counterpart" by the generic dropped-key path.
   const byArg = new Map<string, InvalidInputCorrection>();
   for (const correction of corrections) {
-    if (correction.kind === 'authored-redirect' || correction.kind === 'authored-drop') continue;
+    if (correction.kind === 'authored-drop') continue;
     if (!byArg.has(correction.rejectedArg)) byArg.set(correction.rejectedArg, correction);
   }
 
@@ -261,7 +261,19 @@ export function buildCorrectedCall(params: {
     if (!(key in args)) continue;
     const value = args[key];
     const correction = byArg.get(key);
-    if (correction && setPath(args, correction.target, value)) {
+    if (correction?.kind === 'authored-redirect' && correction.call?.tool === toolName) {
+      delete args[key];
+      // Preserve concrete accepted values the caller already supplied (for example
+      // id:"WI-1"), and fill only the missing fields from the authored call shape
+      // (for example topic:"<topic>"). The result is both executable-looking and
+      // honest about the value the rejection could not infer.
+      for (const [targetKey, targetValue] of Object.entries(correction.call.args)) {
+        if (!(targetKey in args)) args[targetKey] = targetValue;
+      }
+      steps.push({ rejectedArg: key, action: 'dropped', reason: 'authored-call' });
+      continue;
+    }
+    if (correction && correction.kind !== 'authored-redirect' && setPath(args, correction.target, value)) {
       delete args[key];
       steps.push({
         rejectedArg: key,
@@ -320,6 +332,9 @@ export function correctedCallHint(corrected: CorrectedCall | null): string {
     .map((step) => `\`${step.rejectedArg}\` -> \`${step.target}\``);
   const droppedSteps = corrected.steps.filter((step) => step.action === 'dropped');
   const conflictDrops = droppedSteps.filter((step) => step.reason === 'mutually-exclusive');
+  const authoredCallDrops = droppedSteps
+    .filter((step) => step.reason === 'authored-call')
+    .map((step) => `\`${step.rejectedArg}\``);
   const wrongVariant = droppedSteps
     .filter((step) => step.acceptedOnOtherVariant && !step.reason)
     .map((step) => `\`${step.rejectedArg}\``);
@@ -331,6 +346,9 @@ export function correctedCallHint(corrected: CorrectedCall | null): string {
   );
   const changes: string[] = [];
   if (relocated.length > 0) changes.push(`moved ${relocated.join(', ')}`);
+  if (authoredCallDrops.length > 0) {
+    changes.push(`replaced ${authoredCallDrops.join(', ')} with the authored same-tool call shape`);
+  }
   if (unknownAnywhere.length > 0) {
     changes.push(
       `removed ${unknownAnywhere.join(', ')} (this tool declares no counterpart — the fix is to drop it, not to look for a synonym)`,

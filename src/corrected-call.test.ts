@@ -119,6 +119,36 @@ describe('buildCorrectedCall', () => {
     expect(corrected!.args['topics:tag']).toBeUndefined();
   });
 
+  it('fills a same-tool authored call shape without discarding accepted caller values', () => {
+    const corrected = buildCorrectedCall({
+      toolName: 'work_items:tag',
+      input: { id: 'WI-1', tags: ['infra'] },
+      corrections: [
+        {
+          rejectedArg: 'tags',
+          target: 'work_items:tag({ "id": "<work-item-id>", "topic": "<topic>" })',
+          kind: 'authored-redirect',
+          call: {
+            tool: 'work_items:tag',
+            args: { id: '<work-item-id>', topic: '<topic>' },
+            source: 'projected-tool-registry',
+            registryRevision: 'test-revision',
+          },
+        },
+      ],
+      unknownKeys: ['tags'],
+    });
+
+    expect(corrected!.args).toEqual({ id: 'WI-1', topic: '<topic>' });
+    expect(corrected!.steps).toEqual([
+      { rejectedArg: 'tags', action: 'dropped', reason: 'authored-call' },
+    ]);
+    const hint = correctedCallHint(corrected);
+    expect(hint).toContain('work_items:tag({ "id": "WI-1", "topic": "<topic>" })');
+    expect(hint).toContain('authored same-tool call shape');
+    expect(hint).not.toContain('declares no counterpart');
+  });
+
   it('elides a bulky value instead of truncating the caller data into the snippet', () => {
     const body = 'x'.repeat(5000);
     const corrected = buildCorrectedCall({
