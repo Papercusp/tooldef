@@ -144,6 +144,7 @@ export {
   type PayloadShaperCtx,
   type BoundedPayloadProjection,
   type BoundedPayloadRecovery,
+  type BulkEnvelopeProjectionOpts,
   type ProjectBoundedPayloadOpts,
 } from './payload-tier';
 export { defineResource } from './define-resource';
