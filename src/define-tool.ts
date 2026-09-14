@@ -2149,6 +2149,7 @@ export function invalidInputCorrections(
         rejectedArg,
         target: `${rendered}${redirect.note ? ` — ${redirect.note}` : ''}`,
         kind: 'authored-redirect',
+        ...(redirect.note ? { note: redirect.note } : {}),
         call: {
           tool: redirect.tool,
           args: redirect.args,
@@ -2313,7 +2314,7 @@ export function unknownArgHint(
   // holding right now. The distinction is DERIVED from the tool's own declared keys, so
   // a newly authored redirect classifies itself with no second field to maintain.
   const redirectText = redirected
-    .map(({ rejectedArg, target, kind, note }) => {
+    .map(({ rejectedArg, target, kind, note, call }) => {
       if (kind === 'authored-drop') {
         return ` \`${rejectedArg}\` is not an arg of this tool — drop the key${
           note ? `: ${note}` : '.'
@@ -2326,6 +2327,16 @@ export function unknownArgHint(
       if (local) {
         return ` \`${rejectedArg}\` is not a top-level arg of this tool — pass it as \`${local.path}\` instead${
           local.note ? `: ${local.note}` : '.'
+        }`;
+      }
+      // A structured corrective call may intentionally target THIS SAME tool (for
+      // example, a removed broad filter that now requires a targeted lookup). It is
+      // still a call-shape correction, not ownership by another tool. Rendering it
+      // as "written by <this tool>" contradicts the corrected call above and can
+      // send the caller back through the same rejected argument.
+      if (toolName && call?.tool === toolName) {
+        return ` \`${rejectedArg}\` is not an arg of this tool — use this tool with ${JSON.stringify(call.args)} instead${
+          note ? `: ${note}` : '.'
         }`;
       }
       return ` \`${rejectedArg}\` is not an arg of this tool — it is written by ${target}.`;

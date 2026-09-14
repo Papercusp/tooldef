@@ -24,6 +24,15 @@ import {
   unknownArgHint,
   siblingToolArgOwner,
 } from './define-tool';
+import {
+  registerProjectedTool,
+  unregisterProjectedToolsForPlugin,
+  type ProjectedTool,
+} from './tool-projection';
+
+const projectionNoop: ProjectedTool['fn'] = async () => ({
+  content: [{ type: 'text', text: 'ok' }],
+});
 
 /** Zod 4 exposes safeParse on the schema; keep the test honest about the shape. */
 function parse(schema: unknown, value: unknown): { ok: boolean; message: string } {
@@ -357,6 +366,47 @@ describe('unknownArgHint same-tool relocation vs cross-tool redirect (EI-2111994
     expect(isLocalSchemaTarget('work_items:tag { id, topic }', ['body'])).toBe(false);
     // A dotted path whose ROOT this tool does not declare is not local either.
     expect(isLocalSchemaTarget('other.field', ['body'])).toBe(false);
+  });
+});
+
+describe('unknownArgHint same-tool corrective call (EI-23112077178480920)', () => {
+  it('does not describe a same-tool remedy as ownership by that same tool', () => {
+    const pluginName = 'strict-args-self-tool-redirect-test';
+    registerProjectedTool({
+      pluginName,
+      description: 'test tool',
+      inputSchema: {
+        type: 'object',
+        properties: { owner: { type: 'string' } },
+        additionalProperties: false,
+      },
+      capabilities: [],
+      expose: { mcp: { name: 'coord:presence' } },
+      fn: projectionNoop,
+    });
+
+    try {
+      const out = unknownArgHint(
+        [{ message: 'Unrecognized key: "include_stale"', keys: ['include_stale'] }],
+        { properties: { owner: {} } },
+        {
+          include_stale: {
+            tool: 'coord:presence',
+            args: { owner: '<agent-id>' },
+            note: 'the full stale-roster dump was REMOVED; use a targeted owner lookup',
+          },
+        },
+        { include_stale: true },
+        'coord:presence',
+      );
+
+      expect(out).toContain('`include_stale` is not an arg of this tool');
+      expect(out).toContain('use this tool with {"owner":"<agent-id>"} instead');
+      expect(out).toContain('the full stale-roster dump was REMOVED');
+      expect(out).not.toContain('it is written by coord:presence');
+    } finally {
+      unregisterProjectedToolsForPlugin(pluginName);
+    }
   });
 });
 
