@@ -537,9 +537,21 @@ function markExplicitFullRawResult<T extends ToolResult>(
 
 function isExplicitFullPayloadRequest(
   callTier: ReturnType<typeof extractPayloadTier>['callTier'],
-  ctx: Pick<UnifiedToolContext, 'contextTier' | 'transportCapExempt'>,
+  ctx: Pick<UnifiedToolContext, 'contextTier' | 'transportCapExempt' | 'requestedStructured'>,
 ): boolean {
-  return callTier === 'full' || ctx.contextTier === 'full' || ctx.transportCapExempt === true;
+  // A structured-content request is a programmatic/schema-validation contract,
+  // not merely a second rendering of the trimmed model-facing text. Generic
+  // payload-tier projections can wrap/drop required fields (for example
+  // activity:recent's `{ activity, count }`), making the value fail the
+  // outputSchema the MCP client validates on `tools/call`. Preserve the raw
+  // data whenever the caller explicitly asks for structuredContent; the result
+  // door still owns the separate model-facing text budget.
+  return (
+    callTier === 'full' ||
+    ctx.contextTier === 'full' ||
+    ctx.transportCapExempt === true ||
+    ctx.requestedStructured === true
+  );
 }
 
 /**
@@ -3066,20 +3078,23 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       // WI-37843: a tool may opt OUT of routine per-session shaping, in which
       // case the session tier is discarded and an un-overridden call resolves
       // to 'full'. An explicit per-call payloadTier still wins either way.
-      tier: resolvePayloadTier(callTier, ctx.contextTier, {
-        ignoreSessionTier: def.ignoreSessionPayloadTier,
-      }),
+      tier:
+        ctx.requestedStructured === true
+          ? 'full'
+          : resolvePayloadTier(callTier, ctx.contextTier, {
+              ignoreSessionTier: def.ignoreSessionPayloadTier,
+            }),
       // A caller-selected full tier is the documented escape hatch out of
       // shaping AND the hard ceiling (WI-5078): it can arrive as a per-call
-      // payloadTier:'full' or as the session's explicit ctx_tier=full choice.
+      // payloadTier:'full', an explicit ctx_tier=full choice, or a structured
+      // content request (which also requires schema-valid raw data).
       // The latter must be stamped too, because the downstream result-door
       // sees only serialized metadata and otherwise generically re-projects
       // the raw body (EI-22586965566163070). A ctx-borne
       // `transportCapExempt` consumer (code:run's inner dispatch — the result
       // never reaches an agent's context) gets the same exemption
       // (EI-18719561823587590).
-      explicitFullRequest:
-        callTier === 'full' || ctx.contextTier === 'full' || ctx.transportCapExempt === true,
+      explicitFullRequest,
       // WI-37843: a tool may raise its OWN hard ceiling (coord:orient, the
       // session-bootstrap read, whose full payload IS the value). Absent ⇒ the
       // shared PAYLOAD_TIER_HARD_CEILING_CHARS, unchanged for every other tool.
@@ -3273,20 +3288,23 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
       // WI-37843: a tool may opt OUT of routine per-session shaping, in which
       // case the session tier is discarded and an un-overridden call resolves
       // to 'full'. An explicit per-call payloadTier still wins either way.
-      tier: resolvePayloadTier(callTier, handlerCtx.contextTier, {
-        ignoreSessionTier: def.ignoreSessionPayloadTier,
-      }),
+      tier:
+        handlerCtx.requestedStructured === true
+          ? 'full'
+          : resolvePayloadTier(callTier, handlerCtx.contextTier, {
+              ignoreSessionTier: def.ignoreSessionPayloadTier,
+            }),
       // A caller-selected full tier is the documented escape hatch out of
       // shaping AND the hard ceiling (WI-5078): it can arrive as a per-call
-      // payloadTier:'full' or as the session's explicit ctx_tier=full choice.
+      // payloadTier:'full', an explicit ctx_tier=full choice, or a structured
+      // content request (which also requires schema-valid raw data).
       // The latter must be stamped too, because the downstream result-door
       // sees only serialized metadata and otherwise generically re-projects
       // the raw body (EI-22586965566163070). A ctx-borne
       // `transportCapExempt` consumer (code:run's inner dispatch — the result
       // never reaches an agent's context) gets the same exemption
       // (EI-18719561823587590).
-      explicitFullRequest:
-        callTier === 'full' || handlerCtx.contextTier === 'full' || handlerCtx.transportCapExempt === true,
+      explicitFullRequest,
       // WI-37843: a tool may raise its OWN hard ceiling (coord:orient, the
       // session-bootstrap read, whose full payload IS the value). Absent ⇒ the
       // shared PAYLOAD_TIER_HARD_CEILING_CHARS, unchanged for every other tool.
