@@ -843,6 +843,68 @@ const WORKER_SRC = `(() => {
     // V8 message is accurate but does not tell an agent how to repair a script
     // assembled through another string layer.
     const regexFlagsSyntax = /Invalid regular expression flags/i.test(String(errorMessage));
+    // A raw line terminator inside a JavaScript single/double-quoted string is a syntax
+    // error, but V8's generic "Invalid or unexpected token" does not explain the extra
+    // string layer that usually caused it. Detect this narrow shape lexically so a shell
+    // heredoc passed as \`command: "..."\` gets a repair path without blaming valid template
+    // literals (which intentionally allow literal newlines). Comments and template literals
+    // are skipped; escaped line continuations are valid JavaScript and are not reported.
+    const hasLiteralLineTerminatorInQuotedString = (source) => {
+      let quote = null;
+      let escaped = false;
+      for (let i = 0; i < source.length; i += 1) {
+        const ch = source[i];
+        const next = source[i + 1];
+        if (quote) {
+          if (escaped) {
+            if (ch === '\\r' && next === '\\n') i += 1;
+            escaped = false;
+            continue;
+          }
+          if (ch === '\\\\') {
+            escaped = true;
+            continue;
+          }
+          if (ch === quote) {
+            quote = null;
+            continue;
+          }
+          if (ch === '\\n' || ch === '\\r') return true;
+          continue;
+        }
+        if (ch === '/' && next === '/') {
+          i += 2;
+          while (i < source.length && source[i] !== '\\n' && source[i] !== '\\r') i += 1;
+          i -= 1;
+          continue;
+        }
+        if (ch === '/' && next === '*') {
+          i += 2;
+          while (i < source.length && !(source[i] === '*' && source[i + 1] === '/')) i += 1;
+          i += 1;
+          continue;
+        }
+        if (ch === '\`') {
+          i += 1;
+          let templateEscaped = false;
+          while (i < source.length) {
+            const templateCh = source[i];
+            if (templateEscaped) {
+              templateEscaped = false;
+            } else if (templateCh === '\\\\') {
+              templateEscaped = true;
+            } else if (templateCh === '\`') {
+              break;
+            }
+            i += 1;
+          }
+          continue;
+        }
+        if (ch === '\\'' || ch === '\"') quote = ch;
+      }
+      return false;
+    };
+    const quotedStringLineTerminatorSyntax = hasLiteralLineTerminatorInQuotedString(String(script));
     // V8's SyntaxError stack opens with 'evalmachine.<anonymous>:<n>', then the offending
     // SOURCE LINE, then a caret marking the column. Surface those two lines, never the line
     // NUMBER: it counts from the top of the wrapped source, and the harness prelude sits
@@ -869,6 +931,9 @@ const WORKER_SRC = `(() => {
           : '') +
         (regexFlagsSyntax
           ? ' -- an over-escaped slash in a regex literal can close the literal early and make the remaining path look like flags; prefer String.includes(...) or new RegExp("...") when composing code:run scripts through another string layer'
+          : '') +
+        (quotedStringLineTerminatorSyntax
+          ? ' -- a JavaScript single/double-quoted string cannot contain a literal newline; for multiline shell commands use a backtick template literal or escape line breaks as \\\\n (for example \`command: "line 1\\\\nline 2"\`), otherwise code:run stops before bash dispatch'
           : ''),
     });
     return;

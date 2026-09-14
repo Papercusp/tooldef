@@ -87,6 +87,27 @@ describe('runOrchestrationScript (B-CX-1A)', () => {
     expect(r.error).not.toContain('Invalid regular expression flags');
   });
 
+  it('explains the multiline shell-command repair when a quoted JavaScript string contains a literal newline', async () => {
+    const r = await runOrchestrationScript(
+      'const command = "cat <<EOF\nhello\nEOF"; return command;',
+      facade({}),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('compile_error: Invalid or unexpected token');
+    expect(r.error).toContain('single/double-quoted string cannot contain a literal newline');
+    expect(r.error).toContain('backtick template literal');
+    expect(r.error).toContain('escape line breaks as \\n');
+    expect(r.error).toContain('before bash dispatch');
+  });
+
+  it('does not flag a valid multiline shell command held in a JavaScript template literal', async () => {
+    const r = await runOrchestrationScript(
+      'const command = `cat <<EOF\nhello\nEOF`; return command;',
+      facade({}),
+    );
+    expect(r).toMatchObject({ ok: true, result: 'cat <<EOF\nhello\nEOF' });
+  });
+
   // EI-21909921686340240: code:run scripts are compiled as plain JavaScript
   // (via vm.runInNewContext) — TypeScript-only syntax (type annotations, `as`
   // casts, interfaces) fails to parse with an opaque V8 SyntaxError and no
