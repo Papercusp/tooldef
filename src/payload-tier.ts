@@ -67,6 +67,23 @@ export interface PayloadShapers {
     /** Override the fields parsed from `returns`. Prefer the derived list. */
     fields?: readonly string[];
     /**
+     * ADDITIONAL row sets, each with its own required fields. Judged exactly
+     * like `rows`/`fields`, once per axis.
+     *
+     * Two jobs, and the first is what makes the second reachable:
+     *
+     * 1. SATISFY THE SHAPER'S ENTRY GUARD. The check synthesises the envelope
+     *    it feeds the shaper, and from `rows` alone it can only build one
+     *    array. A shaper that bails unless SEVERAL arrays are present returns
+     *    its input untouched, so the contract passes while asserting nothing.
+     *    Naming the co-required sets here gets the shaper to actually run.
+     * 2. GUARD A SECOND PROJECTOR. One tool often rebuilds two row kinds from
+     *    two independent allowlists; a single `rows` axis can only ever guard
+     *    one of them, leaving the other with the exact failure mode the pin
+     *    exists to kill.
+     */
+    alsoRows?: Readonly<Record<string, readonly string[]>>;
+    /**
      * Top-level envelope keys the trimmed projection must retain beside `rows`.
      * These are typically qualifiers such as scope, provenance, or bounded-read
      * metadata whose removal can make otherwise intact rows misleading.
