@@ -223,7 +223,14 @@ export type ToolDispatchOverrideFn = (
  */
 export type AuthorizationFailureHintFn = (input: {
   toolName: string;
-  missingCapability: string;
+  /** Set when the refusal is a CAPABILITY denial. */
+  missingCapability?: string;
+  /** Set when the refusal is a ROLE-ALLOWLIST denial. Both refusals send the caller
+   *  to the same place — a differently-scoped session — so both get the same hint
+   *  seam; a role denial that names only the allowed roles leaves the caller to
+   *  guess which surface actually carries one. */
+  deniedRole?: string;
+  allowedRoles?: readonly string[];
   ctx: UnifiedToolContext;
 }) => string | undefined;
 

@@ -357,14 +357,29 @@ const defaultDenyStep: DispatchStep = {
 const roleAllowlistStep: DispatchStep = {
   name: 'role-allowlist',
   async run(exec) {
-    const { tool, ctx, toolName } = exec;
+    const { tool, ctx, toolName, deps } = exec;
     if (!tool.agentRoles || !ctx.role || ctx.gateBypass?.role) return null;
     if (tool.agentRoles.includes(ctx.role as AgentRole)) return null;
+    // The allowed-roles list says what WOULD be permitted, never where to get it —
+    // so the caller is left to guess which surface carries one of those roles. Let
+    // the host name the remedy, on the same seam the capability denial already uses.
+    let hint: string | undefined;
+    try {
+      hint = deps.authorizationFailureHint?.({
+        toolName,
+        deniedRole: String(ctx.role),
+        allowedRoles: tool.agentRoles,
+        ctx,
+      });
+    } catch {
+      hint = undefined; // a hint must never change the refusal it decorates
+    }
+    const denial = `Role "${ctx.role}" cannot call tool "${toolName}" (allowed roles: ${tool.agentRoles.join(', ')})`;
     return {
       ok: false,
       error: {
         code: 'role_not_allowed' as DispatchProjectedErrorCode,
-        message: `Role "${ctx.role}" cannot call tool "${toolName}" (allowed roles: ${tool.agentRoles.join(', ')})`,
+        message: hint ? `${denial} — ${hint}` : denial,
       },
     };
   },
