@@ -591,7 +591,9 @@ describe('dispatchProjectedTool', () => {
     expect(result.error?.message).toContain(
       'CORRECTED CALL — send this: test:zero-key-redirect({  })',
     );
-    expect(result.error?.message).toContain('removed `workspace`');
+    expect(result.error?.message).toContain(
+      'replaced `workspace` with the authored same-tool call shape',
+    );
     expect(result.error?.meta?.invalidInput).toMatchObject({
       corrections: [
         expect.objectContaining({
@@ -602,7 +604,7 @@ describe('dispatchProjectedTool', () => {
       ],
       correctedCall: expect.objectContaining({
         args: {},
-        steps: [{ rejectedArg: 'workspace', action: 'dropped' }],
+        steps: [{ rejectedArg: 'workspace', action: 'dropped', reason: 'authored-call' }],
       }),
     });
   });
