@@ -356,6 +356,47 @@ describe('runDispatchStack — custom stack', () => {
     expect(invoked).toBe(false);
   });
 
+  // R-7 / P-012 (acceptance-machinery-seam-fixes-2026-09-16). The host can only name
+  // the remedy for a role denial if the step actually ASKS it. Without this, a hint
+  // implementation can handle role denials perfectly and still never be consulted —
+  // the "delete the wiring and the bound tests stay green" shape.
+  it('asks the host for a remedy hint on a role denial, and appends it', async () => {
+    const asked: Array<Record<string, unknown>> = [];
+    const tool = makeTool({ agentRoles: ['scoper', 'worker'] as ProjectedTool['agentRoles'] });
+    const r = await runDispatchStack(tool, 'fix.tool', {}, MAKE_CTX({ role: 'judge' }), {
+      authorizationFailureHint: (input) => {
+        asked.push(input as unknown as Record<string, unknown>);
+        return 'go use the other session';
+      },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe('role_not_allowed');
+    // It was asked, and asked about the ROLE denial specifically.
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toMatchObject({ toolName: 'fix.tool', deniedRole: 'judge' });
+    expect(asked[0]!.allowedRoles).toEqual(['scoper', 'worker']);
+    // The original denial survives; the hint is appended, never substituted.
+    expect(r.error?.message).toContain('allowed roles: scoper, worker');
+    expect(r.error?.message).toContain('go use the other session');
+  });
+
+  it('keeps the bare denial when the host offers no hint', async () => {
+    const tool = makeTool({ agentRoles: ['scoper'] as ProjectedTool['agentRoles'] });
+    const r = await runDispatchStack(tool, 'fix.tool', {}, MAKE_CTX({ role: 'judge' }), {});
+    expect(r.error?.message).toBe('Role "judge" cannot call tool "fix.tool" (allowed roles: scoper)');
+  });
+
+  it('never lets a throwing hint change the refusal', async () => {
+    const tool = makeTool({ agentRoles: ['scoper'] as ProjectedTool['agentRoles'] });
+    const r = await runDispatchStack(tool, 'fix.tool', {}, MAKE_CTX({ role: 'judge' }), {
+      authorizationFailureHint: () => {
+        throw new Error('hint blew up');
+      },
+    });
+    expect(r.error?.code).toBe('role_not_allowed');
+    expect(r.error?.message).toBe('Role "judge" cannot call tool "fix.tool" (allowed roles: scoper)');
+  });
+
   it('runs telemetry even on short-circuit', async () => {
     const recorded: string[] = [];
     const denyAll = withReplacedStep(DEFAULT_DISPATCH_STACK, 'capability-check', async () => ({
