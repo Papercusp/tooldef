@@ -49,6 +49,52 @@ describe('buildCorrectedCall', () => {
     ]);
   });
 
+  it('wraps a scalar relocation only when the projected destination is an array', () => {
+    const targetSchema = {
+      type: 'object',
+      properties: {
+        items: { type: 'array', items: { type: 'string' } },
+        title: { type: 'string' },
+      },
+    };
+    const corrected = buildCorrectedCall({
+      toolName: 'plans:get',
+      input: { item: 'P-001', title: 'keep scalar' },
+      corrections: [near('item', 'items')],
+      unknownKeys: ['item'],
+      targetSchema,
+    });
+
+    expect(corrected!.args).toEqual({ items: ['P-001'], title: 'keep scalar' });
+  });
+
+  it('preserves arrays and scalar destinations during relocation', () => {
+    const targetSchema = {
+      type: 'object',
+      properties: {
+        items: { type: 'array', items: { type: 'string' } },
+        title: { type: 'string' },
+      },
+    };
+    const arrayValue = buildCorrectedCall({
+      toolName: 'plans:get',
+      input: { item: ['P-001'] },
+      corrections: [near('item', 'items')],
+      unknownKeys: ['item'],
+      targetSchema,
+    });
+    const scalarValue = buildCorrectedCall({
+      toolName: 'plans:get',
+      input: { titel: 'P-001' },
+      corrections: [near('titel', 'title')],
+      unknownKeys: ['titel'],
+      targetSchema,
+    });
+
+    expect(arrayValue!.args).toEqual({ items: ['P-001'] });
+    expect(scalarValue!.args).toEqual({ title: 'P-001' });
+  });
+
   /**
    * The D-105 case, and the reason this helper exists at all. `omp:sessions` rejected 66
    * calls from ten agents — every one `Unrecognized key: "cwd"` — while returning its

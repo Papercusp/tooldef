@@ -2478,6 +2478,7 @@ function makeInvalidInputError(
     input,
     corrections,
     unknownKeys,
+    targetSchema: rawSchema,
     issues,
     acceptedOnOtherVariant: argsAcceptedOnOtherVariant(rawSchema, unknownKeys),
   });

@@ -177,6 +177,69 @@ function setPath(target: Record<string, unknown>, path: string, value: unknown):
   return true;
 }
 
+/**
+ * Return the schema alternatives represented by one projected JSON-Schema node.
+ *
+ * The corrected-call path receives the raw projected schema, which may have a union
+ * at the root or at the relocated property. Resolve only schema combinators here;
+ * deliberately do not infer an array from `items` or from a caller's value.
+ */
+function schemaAlternatives(node: unknown): Record<string, unknown>[] {
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return [];
+  const candidate = node as Record<string, unknown>;
+  for (const key of ['anyOf', 'oneOf', 'allOf'] as const) {
+    const branches = candidate[key];
+    if (Array.isArray(branches)) {
+      return branches.flatMap((branch) => schemaAlternatives(branch));
+    }
+  }
+  return [candidate];
+}
+
+/** Resolve a dotted relocation target against projected object properties. */
+function schemaAtPath(rawSchema: unknown, target: string): Record<string, unknown>[] {
+  const segments = target.split('.').filter((segment) => segment.length > 0);
+  if (segments.length === 0) return [];
+  let nodes: unknown[] = [rawSchema];
+  for (const segment of segments) {
+    const next: unknown[] = [];
+    for (const node of nodes.flatMap((candidate) => schemaAlternatives(candidate))) {
+      const properties = node.properties;
+      if (!properties || typeof properties !== 'object' || Array.isArray(properties)) continue;
+      const child = (properties as Record<string, unknown>)[segment];
+      if (child !== undefined) next.push(child);
+    }
+    if (next.length === 0) return [];
+    nodes = next;
+  }
+  return nodes.flatMap((node) => schemaAlternatives(node));
+}
+
+/**
+ * Only a destination whose projected schema is exclusively an array gets this repair.
+ * Union schemas that also permit a scalar fail closed: changing a caller's scalar in
+ * that case would be a value guess rather than a schema-directed correction.
+ */
+function targetDeclaresArray(rawSchema: unknown, target: string): boolean {
+  const schemas = schemaAtPath(rawSchema, target);
+  return schemas.length > 0 && schemas.every((schema) => {
+    const type = schema.type;
+    return type === 'array' || (Array.isArray(type) && type.length === 1 && type[0] === 'array');
+  });
+}
+
+function isScalarCorrectionValue(value: unknown): boolean {
+  return value !== undefined && value !== null &&
+    (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint');
+}
+
+function valueForCorrectionTarget(value: unknown, target: string, rawSchema: unknown): unknown {
+  if (!isScalarCorrectionValue(value) || Array.isArray(value) || !targetDeclaresArray(rawSchema, target)) {
+    return value;
+  }
+  return [value];
+}
+
 /** Compact, bounded rendering of one value — bulk becomes a labelled placeholder. */
 function renderValue(value: unknown): string {
   if (typeof value === 'string') {
@@ -233,6 +296,8 @@ export function buildCorrectedCall(params: {
   readonly input: unknown;
   readonly corrections: readonly InvalidInputCorrection[];
   readonly unknownKeys: readonly string[];
+  /** Raw projected JSON Schema used to resolve the destination's declared shape. */
+  readonly targetSchema?: unknown;
   /** Known-key refinement issues, used for explicit mutually-exclusive source conflicts. */
   readonly issues?: readonly CorrectedCallIssue[];
   /** Subset of `unknownKeys` the tool declares on a different union variant. */
@@ -273,7 +338,10 @@ export function buildCorrectedCall(params: {
       steps.push({ rejectedArg: key, action: 'dropped', reason: 'authored-call' });
       continue;
     }
-    if (correction && correction.kind !== 'authored-redirect' && setPath(args, correction.target, value)) {
+    const correctedValue = correction && correction.kind !== 'authored-redirect'
+      ? valueForCorrectionTarget(value, correction.target, params.targetSchema)
+      : value;
+    if (correction && correction.kind !== 'authored-redirect' && setPath(args, correction.target, correctedValue)) {
       delete args[key];
       steps.push({
         rejectedArg: key,

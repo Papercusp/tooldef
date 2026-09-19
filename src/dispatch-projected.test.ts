@@ -462,6 +462,39 @@ describe('dispatchProjectedTool', () => {
     expect(metadataJson?.invalidInput).toEqual(expected);
   });
 
+  it('adapts a scalar near-name relocation to the projected array destination', async () => {
+    defineTool({
+      name: 'test:invalid-input-array-relocation',
+      requirePrincipal: false as const,
+      capability: 'test:read',
+      args: z.strictObject({
+        items: z.array(z.string()),
+        label: z.string().optional(),
+      }),
+      async handler() {
+        return { content: [{ type: 'text' as const, text: 'ok' }] };
+      },
+    });
+
+    const result = await dispatchProjectedTool(
+      lookupByMcpName('test:invalid-input-array-relocation')!,
+      'test:invalid-input-array-relocation',
+      { item: 'P-001', label: 'keep me' },
+      MAKE_CTX(),
+      MAKE_DEPS(),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error?.code).toBe('invalid_input');
+    expect(result.error?.meta?.invalidInput).toMatchObject({
+      corrections: [{ rejectedArg: 'item', target: 'items', kind: 'near-name' }],
+      correctedCall: expect.objectContaining({
+        args: { items: ['P-001'], label: 'keep me' },
+        steps: [{ rejectedArg: 'item', action: 'relocated', target: 'items', kind: 'near-name' }],
+      }),
+    });
+  });
+
   it('returns a corrected call for known-key mutually-exclusive refinement failures', async () => {
     defineTool({
       name: 'test:invalid-input-known-conflict',
