@@ -843,6 +843,23 @@ const WORKER_SRC = `(() => {
     // V8 message is accurate but does not tell an agent how to repair a script
     // assembled through another string layer.
     const regexFlagsSyntax = /Invalid regular expression flags/i.test(String(errorMessage));
+    // A shell command with several quote delimiters is especially prone to an unescaped quote
+    // closing the JavaScript string before the command reaches bash. V8 reports the token where
+    // it finally gets confused (often a Python import or JSON key), which otherwise makes this
+    // look like a host/tool failure even though dispatchCount is still zero.
+    const scriptText = String(script);
+    const hasShellBashCall =
+      scriptText.indexOf('tools.capability.bash') >= 0 ||
+      (scriptText.indexOf('tools.call') >= 0 && scriptText.indexOf('capability:bash') >= 0);
+    const shellQuoteCount = Array.from(scriptText).reduce(
+      (count, character) => count + (character === '\\'' || character === '"' ? 1 : 0),
+      0,
+    );
+    const unexpectedTokenSyntax =
+      errorMessage.indexOf('Unexpected token') >= 0 ||
+      errorMessage.indexOf('Unexpected identifier') >= 0 ||
+      errorMessage.indexOf('Invalid or unexpected token') >= 0;
+    const likelyNestedShellQuoteSyntax = hasShellBashCall && unexpectedTokenSyntax && shellQuoteCount >= 4;
     // A raw line terminator inside a JavaScript single/double-quoted string is a syntax
     // error, but V8's generic "Invalid or unexpected token" does not explain the extra
     // string layer that usually caused it. Detect this narrow shape lexically so a shell
@@ -931,6 +948,9 @@ const WORKER_SRC = `(() => {
           : '') +
         (regexFlagsSyntax
           ? ' -- an over-escaped slash in a regex literal can close the literal early and make the remaining path look like flags; prefer String.includes(...) or new RegExp("...") when composing code:run scripts through another string layer'
+          : '') +
+        (likelyNestedShellQuoteSyntax
+          ? ' -- a shell command with nested quotes may have closed its JavaScript string early; use a backtick template literal, shell single-quoted fragments or quoted stdin, concatenate generated JSON at runtime, or escape inner quotes; code:run stops before bash dispatch'
           : '') +
         (quotedStringLineTerminatorSyntax
           ? ' -- a JavaScript single/double-quoted string cannot contain a literal newline; for multiline shell commands use a backtick template literal or escape line breaks as \\\\n (for example \`command: "line 1\\\\nline 2"\`), otherwise code:run stops before bash dispatch'

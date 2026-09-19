@@ -87,6 +87,24 @@ describe('runOrchestrationScript (B-CX-1A)', () => {
     expect(r.error).not.toContain('Invalid regular expression flags');
   });
 
+  // EI-23243845155820397: a generated Python diagnostic can close the outer JavaScript command
+  // string with its JSON quotes. The compiler reports the later token (not the original quote),
+  // so keep the repair guidance at the code:run boundary and prove that bash is never called.
+  it('explains nested shell-quote repair before bash dispatch', async () => {
+    const bash = vi.fn(async () => ({ ok: true }));
+    const r = await runOrchestrationScript(
+      String.raw`return await tools.capability.bash({ command: "python3 -c "import json; print(json.load(open('/tmp/STATUS.json'))["status"])"" });`,
+      facade({ capability: { bash } }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('compile_error:');
+    expect(r.error).toContain('nested quotes may have closed its JavaScript string early');
+    expect(r.error).toContain('backtick template literal');
+    expect(r.error).toContain('quoted stdin');
+    expect(r.error).toContain('before bash dispatch');
+    expect(bash).not.toHaveBeenCalled();
+  });
+
   it('explains the multiline shell-command repair when a quoted JavaScript string contains a literal newline', async () => {
     const r = await runOrchestrationScript(
       'const command = "cat <<EOF\nhello\nEOF"; return command;',
