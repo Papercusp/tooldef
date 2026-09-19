@@ -366,7 +366,7 @@ describe('applyPayloadTier', () => {
     ) as unknown as {
       results: Array<Record<string, unknown>>;
       counts: { ok: number; failed: number };
-      _projection: { omittedCount: number; omitted: Array<{ path: string; reason: string }> };
+      _projection: { omittedCount: number; omitted: Array<{ path: string; reason: string }>; omittedSamplesDropped?: true };
     };
 
     // The tail failure is selected before bulky successes, then emitted in its
