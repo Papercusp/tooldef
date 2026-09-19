@@ -777,6 +777,13 @@ function arrayTruncationValue(
   if (projectedRows.length > 0 && projectedRows.every(isPlainObject)) {
     return {
       id: '(truncated)',
+      // This is an ARRAY MARKER, not a domain row. `id:'(truncated)'` remains
+      // for backwards compatibility with callers that already filter that
+      // sentinel, but the explicit discriminator keeps positional readers from
+      // treating the marker's missing message fields as a failed/empty entry
+      // (EI-23481355842555588).
+      kind: 'projection-truncation',
+      type: 'projection-truncation',
       _truncated: true,
       omittedCount: droppedCount,
       shownCount,

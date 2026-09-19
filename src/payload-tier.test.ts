@@ -393,12 +393,17 @@ describe('applyPayloadTier', () => {
     });
     expect(projected.counts).toEqual({ ok: 16, failed: 1 });
     expect(projected._projection.omittedCount).toBeGreaterThan(0);
-    expect(projected._projection.omitted).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        path: expect.stringMatching(/^\$\.results\[\d+\]$/),
-        reason: expect.stringContaining('bulk result row(s) omitted'),
-      }),
-    ]));
+    // The omission sample is intentionally shed after content has been kept;
+    // the in-band typed marker is the durable row-count evidence in that case.
+    expect(projected._projection.omittedSamplesDropped).toBe(true);
+    expect(projected.results.at(-1)).toMatchObject({
+      kind: 'projection-truncation',
+      type: 'projection-truncation',
+      _truncated: true,
+      omittedCount: 9,
+      shownCount: 8,
+      renderedCount: 17,
+    });
   });
 
   it('retains configured failure and correlation keys for a custom bulk envelope', () => {
@@ -1269,6 +1274,8 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     // silently short — the drop is visible IN the array's own last element.
     const marker = projectedCriteria[projectedCriteria.length - 1] as Record<string, unknown>;
     expect(marker).toMatchObject({
+      kind: 'projection-truncation',
+      type: 'projection-truncation',
       _truncated: true,
       omittedCount: 5,
       shownCount: 12,
@@ -1340,7 +1347,11 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     expect(shown.every(isRow)).toBe(true);
 
     // Every element the caller sees is an object, so the marker must be one too.
-    expect(projected.at(-1)).toMatchObject({ _truncated: true });
+    expect(projected.at(-1)).toMatchObject({
+      kind: 'projection-truncation',
+      type: 'projection-truncation',
+      _truncated: true,
+    });
 
     // The load-bearing property, stated directly. Deliberately NOT phrased as
     // `expect(() => projected.map((r) => r.lock_id)).not.toThrow()`: unlike jq,
@@ -1413,7 +1424,7 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
 
     // Precondition: the payload really did get compacted — otherwise this test
     // would vacuously pass on a result that was never budget-clipped.
-    expect(text).toContain('non-identity fields omitted at projection depth limit');
+    expect(text).toContain('non-identity field(s) at projection depth limit');
 
     // Every criterion that LOST its prose must say so on the object itself, and
     // name the lost field — a reader must never see a bare {title, check} and
