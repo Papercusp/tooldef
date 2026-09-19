@@ -538,6 +538,42 @@ describe('applyPayloadTier', () => {
     ]));
   });
 
+  it('REGRESSION (EI-23347725227642394): an explicit object endpoint is not reduced to identity keys at the depth boundary', () => {
+    const observation = {
+      rubricRef: 'spec-quality',
+      ratings: { correctness: 'pass', completeness: 'pass' },
+      subject: { kind: 'work-item', ref: 'EI-23347483681497744' },
+      sourceHive: 'papercusp',
+      criteriaHash: 'criteria-sha',
+      gradingAudit: { state: 'settled', grader: 'role-20cd0b30' },
+      rubricRevision: 7,
+    };
+    const payload = {
+      results: [{
+        id: 'EI-23347483681497744',
+        workItem: {
+          id: 'EI-23347483681497744',
+          payload: { observation },
+        },
+      }],
+    };
+
+    const projected = projectBoundedPayload(payload, {
+      toolName: 'work_items:get',
+      tier: 'trimmed',
+      preservePaths: ['results[].workItem.payload.observation'],
+    }) as unknown as { results: Array<Record<string, any>> };
+    const selected = projected.results[0]!.workItem.payload.observation;
+
+    // The selected object lands exactly at the trimmed maxDepth after the
+    // keyed result/workItem/payload nesting. Every field of the named object
+    // remains addressable, rather than the generic identity preview reducing
+    // it to rubricRef + _partial.
+    expect(selected).toEqual(observation);
+    expect(selected).not.toHaveProperty('_partial');
+    expect(selected).not.toHaveProperty('_omitted');
+  });
+
   it('REGRESSION (EI-22186855527494865): declared preserve ORDER breaks the tie between two preserved siblings', () => {
     // Two preserved siblings used to rank identically, so the tie fell through to
     // INSERTION order — and on plans:get the bulky sibling (`items[].text`) is

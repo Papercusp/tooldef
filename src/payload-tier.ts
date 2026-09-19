@@ -1087,6 +1087,18 @@ function projectValue(
     return '[circular]';
   }
   if (depth >= state.limits.maxDepth) {
+    // An explicit `projection.pick` may end exactly at this object (the empty
+    // preserve-path suffix means "keep this value"). The ordinary identity
+    // preview is intentionally lossy and therefore wrong for that request:
+    // once the suffix is consumed it would keep only identity keys, making a
+    // selected object such as `payload.observation` look partial even though
+    // the caller named the object itself. Restart the normal bounded walk at
+    // this selected endpoint. Passing no preserve paths is deliberate: the
+    // caller selected this object, not every descendant, so nested values keep
+    // their ordinary depth/key/string limits and circular-reference handling.
+    if (preservePaths.some((preservePath) => preservePath.length === 0)) {
+      return projectValue(value, path, 0, state, []);
+    }
     recordOmission(state, path, 'nested value compacted at projection depth limit');
     return projectIdentityPreview(value, path, 0, state, preservePaths);
   }
