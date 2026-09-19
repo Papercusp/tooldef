@@ -105,6 +105,18 @@ describe('runOrchestrationScript (B-CX-1A)', () => {
     expect(bash).not.toHaveBeenCalled();
   });
 
+  it('allows a shell-quoted Python command with escaped JSON quotes to dispatch', async () => {
+    const bash = vi.fn(async (args: { command: string }) => ({ ok: true, command: args.command }));
+    const r = await runOrchestrationScript(
+      String.raw`return await tools.capability.bash({ command: "python3 -c 'import json; print(json.load(open(\"/tmp/STATUS.json\"))[\"status\"])'" });`,
+      facade({ capability: { bash } }),
+    );
+    expect(r).toMatchObject({ ok: true });
+    expect(bash).toHaveBeenCalledWith({
+      command: 'python3 -c \'import json; print(json.load(open("/tmp/STATUS.json"))["status"])\'',
+    });
+  });
+
   it('explains the multiline shell-command repair when a quoted JavaScript string contains a literal newline', async () => {
     const r = await runOrchestrationScript(
       'const command = "cat <<EOF\nhello\nEOF"; return command;',
