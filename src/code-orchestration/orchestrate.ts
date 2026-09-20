@@ -673,16 +673,29 @@ function isExpectedReadOnlyPsPpidEmpty(
 }
 
 /**
- * True when `value` is a house BULK envelope (`{ ok: true, results: [...], counts: { failed } }`
+ * True when `value` is a BULK-shaped envelope (`{ ok: true, results: [...], counts: { failed } }`
  * — the keyed-array bulk contract, `_bulk.ts`'s `runBulk`/`bulkContent`) reporting at least one
- * per-item failure. By that contract's OWN design the top-level `ok` is ALWAYS `true` ("the batch
- * ran"; `counts.failed` is where per-item truth lives), so `isOkFalseResult` alone never catches a
- * partial bulk failure (EI-18664105352441219: `plans:add-item` against a non-existent plan
- * returned `{ ok:true, results:[{ ok:false, error:'not_found' }], counts:{ ok:0, failed:1 } }`,
- * and a batched script's own mutation tally read it as a landed write — `code:run` reported
- * `mutations:{ count:1 }` for a write that never happened). Detecting this here, once, covers
- * every one of the ~64 existing bulk-contract tools (and any future one) without each having to
- * special-case its own top-level `ok`.
+ * per-item failure WHILE STILL CLAIMING `ok: true`.
+ *
+ * HISTORY: that combination used to be the house contract's OWN design — the top-level `ok` was
+ * hard-coded `true` ("the batch ran"; `counts.failed` was where per-item truth lived), so
+ * `isOkFalseResult` alone could never catch a partial bulk failure (EI-18664105352441219:
+ * `plans:add-item` against a non-existent plan returned
+ * `{ ok:true, results:[{ ok:false, error:'not_found' }], counts:{ ok:0, failed:1 } }`, and a
+ * batched script's own mutation tally read it as a landed write — `code:run` reported
+ * `mutations:{ count:1 }` for a write that never happened).
+ *
+ * ⚠ NO LONGER THE CONTRACT: EI-23737206446729041 made `runBulk` DERIVE the envelope's `ok` from
+ * its items (`ok: failed === 0`), so a runBulk producer can no longer emit `ok:true` alongside
+ * `failed > 0` — and a partial bulk failure is now caught by the `isOkFalseResult` branch of the
+ * call site below, which is what preserves the EI-18664105352441219 guarantee.
+ *
+ * This predicate therefore no longer fires for house bulk tools, and is DELIBERATELY RETAINED as
+ * defense in depth: the orchestrator sees whatever a tool actually returns, including a
+ * hand-rolled or non-`runBulk` envelope, and this is the only thing that still catches the shape
+ * if one reappears. Defense behind the contract, not a restatement of it — do not "simplify" it
+ * away on the grounds that it is unreachable, and do not read it as evidence that a bulk
+ * envelope's `ok` is still hard-coded.
  */
 function isBulkPartialFailure(
   value: unknown,
