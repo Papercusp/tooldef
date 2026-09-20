@@ -624,13 +624,18 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     ]);
   });
 
-  // EI-18664105352441219: the house bulk-envelope contract (_bulk.ts's runBulk/bulkContent)
-  // ALWAYS returns a top-level `ok: true` ("the batch ran") even when every individual item
-  // failed — `counts.failed` is where per-item truth lives. plans:add-item against a
-  // non-existent plan is the reported case: `{ ok:true, results:[{ ok:false, error:'not_found' }],
-  // counts:{ ok:0, failed:1 } }`. Without bulk-envelope awareness, isOkFalseResult (top-level
-  // `ok` only) never sees this as a failure, so a batched write that failed for every item reads
-  // as a clean, fully-landed mutation.
+  // EI-18664105352441219: a bulk envelope can carry a per-item failure under a top-level
+  // `ok: true`, which isOkFalseResult (top-level `ok` only) would never see as a failure — so a
+  // batched write that failed for every item reads as a clean, fully-landed mutation. The
+  // reported case was plans:add-item against a non-existent plan:
+  // `{ ok:true, results:[{ ok:false, error:'not_found' }], counts:{ ok:0, failed:1 } }`.
+  //
+  // EI-23737206446729041 has since made `runBulk` DERIVE the envelope's `ok` from `results[].ok`,
+  // so the house contract no longer produces that shape and the fixture below is hand-built
+  // rather than obtained from runBulk. This coverage deliberately STAYS: the orchestrator sees
+  // whatever a tool actually returns, including a hand-rolled envelope or a non-runBulk producer,
+  // and this is the only thing that catches the shape if one reappears. Defense in depth behind
+  // the contract, not a restatement of it.
   it('a write-effect call returning a bulk envelope with a per-item failure is tallied in okFalseMutations, even though the envelope\'s own top-level ok is true', async () => {
     const addItem = mkTool('plans:add-item', 'write', async () =>
       json({ ok: true, results: [{ ok: false, slug: 'missing-plan', error: 'not_found' }], counts: { ok: 0, failed: 1 } }),
