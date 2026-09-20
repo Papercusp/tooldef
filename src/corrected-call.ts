@@ -48,13 +48,19 @@ export interface CorrectedCallStep {
   /** The key as the caller sent it. */
   readonly rejectedArg: string;
   /** `relocated` — its value moved to `target`. `dropped` — nothing accepts it here. */
-  readonly action: 'relocated' | 'dropped';
+  readonly action: 'relocated' | 'dropped' | 'added' | 'retyped';
   /** Destination for `relocated`: a top-level key, or a dotted path for a nested arg. */
   readonly target?: string;
   /** Which correction source chose the destination (absent when dropped). */
   readonly kind?: InvalidInputCorrection['kind'];
   /** Known-key refinement dropped because it conflicts with another supplied key. */
-  readonly reason?: 'mutually-exclusive' | 'authored-call';
+  readonly reason?: 'mutually-exclusive' | 'authored-call' | 'missing-required' | 'wrong-type';
+  /**
+   * For `added` / `retyped` steps: the type the schema declared, as named by the issue
+   * itself (`expected string, received undefined`). Rendered as a `<string>` PLACEHOLDER,
+   * never a guessed value — see `declaredKeyRepairs`.
+   */
+  readonly expectedType?: string;
   /** The source key retained when `rejectedArg` was dropped for a conflict. */
   readonly conflictsWith?: string;
   /**
@@ -279,8 +285,64 @@ function renderArgs(args: Record<string, unknown>): string {
   return `{ ${parts.join(', ')}${tail} }`;
 }
 
+/** A DECLARED key the refusal can repair without guessing a value. */
+interface DeclaredKeyRepair {
+  readonly key: string;
+  readonly kind: 'missing-required' | 'wrong-type';
+  readonly expectedType: string;
+}
+
 /**
- * Build the corrected call for an unrecognized-key refusal.
+ * Extract repairs for keys the tool DECLARES — the half `unknownKeys` structurally cannot see.
+ *
+ * P-004 / EI-23181078042197096: `buildCorrectedCall` only ever processed UNRECOGNIZED keys, so a
+ * caller whose mistake was a missing required field or a wrong-typed declared field got no
+ * corrected call at all. That is the exact gap `correctedCallHint`'s own closing caveat admitted
+ * ("a value-level or missing-field error would not have been visible to this check"). MEASURED on
+ * `plans:new({ title: 12345 })` — two issues (`slug` missing, `title` mistyped), ZERO unknown keys,
+ * and therefore zero corrected call on the FIRST refusal. The item filed this as an occurrence
+ * counter ("rather than the third"); there is no counter anywhere on this path — the gate is this
+ * key SHAPE, which is why a misspelled key already got the hint on attempt #1 and a mistyped one
+ * never got it at all.
+ *
+ * Deliberately narrow, for the same reason `mutuallyExclusiveArgConflicts` is: a corrected call
+ * must never invent a value. We read the type the issue ITSELF names and emit a `<type>`
+ * PLACEHOLDER, so the result is executable-SHAPED while staying visibly honest about the one thing
+ * a refusal genuinely cannot infer — what the caller meant to send.
+ *
+ * Top-level keys only: a corrected call is a top-level arg object, so a nested path would render a
+ * placeholder at the wrong depth.
+ */
+function declaredKeyRepairs(
+  issues: readonly CorrectedCallIssue[] | undefined,
+  input: Record<string, unknown>,
+): DeclaredKeyRepair[] {
+  if (!issues || issues.length === 0) return [];
+  const repairs: DeclaredKeyRepair[] = [];
+  const seen = new Set<string>();
+  for (const issue of issues) {
+    if (issue.path?.length !== 1) continue;
+    const key = issuePathKey(issue);
+    if (!key || seen.has(key)) continue;
+    const match = /expected\s+([A-Za-z]+),\s*received\s+([A-Za-z]+)/i.exec(issue.message ?? '');
+    if (!match) continue;
+    const [, expectedType, received] = match;
+    // `received undefined` for a key the caller never sent is the MISSING-REQUIRED case. The
+    // same message on a key that IS present means they sent a literal `undefined` — still a
+    // value-level fix rather than an omission, so it is classified as a retype.
+    const present = key in input;
+    const kind: DeclaredKeyRepair['kind'] =
+      received.toLowerCase() === 'undefined' && !present ? 'missing-required' : 'wrong-type';
+    // A wrong-type repair is only meaningful for a value the caller actually sent.
+    if (kind === 'wrong-type' && !present) continue;
+    seen.add(key);
+    repairs.push({ key, kind, expectedType: expectedType.toLowerCase() });
+  }
+  return repairs;
+}
+
+/**
+ * Build the corrected call for an invalid-input refusal.
  *
  * `unknownKeys` must be the FULL set of keys the tool rejected — including ones for which no
  * correction was found. Those are the `dropped` cases, and they are the highest-value half:
@@ -307,7 +369,13 @@ export function buildCorrectedCall(params: {
   const acceptedElsewhere = new Set(params.acceptedOnOtherVariant ?? []);
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
   const conflicts = mutuallyExclusiveArgConflicts(params.issues, input);
-  if (unknownKeys.length === 0 && conflicts.length === 0) return null;
+  // P-004: offer declared-key repairs only to a caller who is MID-CORRECTION. For one who sent
+  // nothing at all, a placeholder for every required field is just the args schema restated —
+  // and D-105 measured that a schema dump does not land (`omp:sessions` returns its entire
+  // schema and ten agents still re-hit the same wall 66 times).
+  const sent = input as Record<string, unknown>;
+  const repairs = Object.keys(sent).length > 0 ? declaredKeyRepairs(params.issues, sent) : [];
+  if (unknownKeys.length === 0 && conflicts.length === 0 && repairs.length === 0) return null;
 
   const args: Record<string, unknown> = { ...(input as Record<string, unknown>) };
   const steps: CorrectedCallStep[] = [];
@@ -377,6 +445,20 @@ export function buildCorrectedCall(params: {
     }
   }
 
+  // P-004: declared-key repairs land LAST, so a relocation that already filled a required slot
+  // wins over a placeholder. Presence is re-checked at APPLY time rather than trusting the
+  // earlier classification — the unknown-key loop above may have just supplied the value.
+  for (const repair of repairs) {
+    if (repair.kind === 'missing-required' && args[repair.key] !== undefined) continue;
+    args[repair.key] = `<${repair.expectedType}>`;
+    steps.push({
+      rejectedArg: repair.key,
+      action: repair.kind === 'missing-required' ? 'added' : 'retyped',
+      reason: repair.kind,
+      expectedType: repair.expectedType,
+    });
+  }
+
   if (steps.length === 0) return null;
 
   return {
@@ -412,6 +494,14 @@ export function correctedCallHint(corrected: CorrectedCall | null): string {
   const conflicts = conflictDrops.map(
     (step) => `\`${step.rejectedArg}\` (conflicts with \`${step.conflictsWith}\`)`,
   );
+  // P-004: the declared-key half. Each renders with its placeholder inline so the reader can
+  // see at a glance which fields are theirs to fill and which were carried through untouched.
+  const added = corrected.steps
+    .filter((step) => step.action === 'added')
+    .map((step) => `\`${step.rejectedArg}\` (\`<${step.expectedType}>\`)`);
+  const retyped = corrected.steps
+    .filter((step) => step.action === 'retyped')
+    .map((step) => `\`${step.rejectedArg}\` (\`<${step.expectedType}>\`)`);
   const changes: string[] = [];
   if (relocated.length > 0) changes.push(`moved ${relocated.join(', ')}`);
   if (authoredCallDrops.length > 0) {
@@ -430,11 +520,20 @@ export function correctedCallHint(corrected: CorrectedCall | null): string {
   if (conflicts.length > 0) {
     changes.push(`removed ${conflicts.join(', ')} (keep the named source option)`);
   }
+  if (added.length > 0) changes.push(`added the required ${added.join(', ')}`);
+  if (retyped.length > 0) changes.push(`retyped ${retyped.join(', ')} to the declared type`);
+  // P-004: the closing caveat used to say a missing-field error "would not have been visible to
+  // this check". That was true and is no longer: when a placeholder is present the honest warning
+  // is the opposite one — the SHAPE is now right and the VALUES are the caller's to supply.
+  const placeholders = added.length + retyped.length;
   return (
     ` CORRECTED CALL — send this: ${corrected.rendered}` +
     ` (${changes.join('; ')}).` +
-    ' This resolves the rejected keys against the args you actually sent; it does not' +
-    ' guarantee the call validates, since a value-level or missing-field error would' +
-    ' not have been visible to this check.'
+    (placeholders > 0
+      ? ' Every `<type>` above is a PLACEHOLDER, not a guess: those are the fields this refusal' +
+        ' could identify but cannot fill for you — replace each with a real value before sending.'
+      : ' This resolves the rejected keys against the args you actually sent; it does not' +
+        ' guarantee the call validates, since a value-level error would not have been visible' +
+        ' to this check.')
   );
 }

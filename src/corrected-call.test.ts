@@ -443,3 +443,121 @@ describe('control: a builder that only names the target would pass a weaker asse
     expect(real!.rendered).toContain('"kind"');
   });
 });
+
+/**
+ * P-004 (frontier-remediation-...-60d3a8). The item was filed as "emit the corrected-call hint on
+ * the FIRST plans:new invalid_input refusal rather than the third". There is no attempt counter
+ * anywhere on this path — that framing was folklore. The real gate was a key SHAPE test: the
+ * builder only ever processed UNRECOGNIZED keys, so a misspelled key got the hint on attempt #1
+ * while a MISSING or MISTYPED declared key never got it at all, on any attempt.
+ *
+ * The property under test: a refusal whose issues are entirely about DECLARED keys still returns
+ * a finished, executable-shaped call — with placeholders that are visibly placeholders.
+ */
+describe('buildCorrectedCall — declared-key repairs (P-004)', () => {
+  /** The exact refusal measured live against `plans:new({ title: 12345 })`. */
+  const plansNewIssues = [
+    { path: ['slug'], message: 'Invalid input: expected string, received undefined' },
+    { path: ['title'], message: 'Invalid input: expected string, received number' },
+  ];
+
+  it('produces a corrected call when ZERO keys are unrecognized (the measured regression)', () => {
+    const corrected = buildCorrectedCall({
+      toolName: 'plans:new',
+      input: { title: 12345 },
+      corrections: [],
+      unknownKeys: [],
+      issues: plansNewIssues,
+    });
+
+    expect(corrected).not.toBeNull();
+    // The missing required key is ADDED, the mistyped one is RETYPED — both as placeholders.
+    expect(corrected!.args).toEqual({ title: '<string>', slug: '<string>' });
+    expect(corrected!.rendered).toContain('plans:new(');
+    expect(corrected!.steps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ rejectedArg: 'slug', action: 'added', reason: 'missing-required' }),
+        expect.objectContaining({ rejectedArg: 'title', action: 'retyped', reason: 'wrong-type' }),
+      ]),
+    );
+  });
+
+  it('marks placeholders as placeholders and RETIRES the stale "not visible to this check" caveat', () => {
+    const hint = correctedCallHint(
+      buildCorrectedCall({
+        toolName: 'plans:new',
+        input: { title: 12345 },
+        corrections: [],
+        unknownKeys: [],
+        issues: plansNewIssues,
+      }),
+    );
+
+    expect(hint).toContain('CORRECTED CALL');
+    expect(hint).toContain('added the required');
+    expect(hint).toContain('retyped');
+    expect(hint).toContain('PLACEHOLDER');
+    // The old closing sentence claimed a missing-field error "would not have been visible to
+    // this check". It is visible now, so asserting its ABSENCE is what keeps the two in sync.
+    expect(hint).not.toContain('missing-field error would');
+  });
+
+  it('stays SILENT for a caller who sent nothing — a placeholder per required field is a schema dump', () => {
+    expect(
+      buildCorrectedCall({
+        toolName: 'plans:new',
+        input: {},
+        corrections: [],
+        unknownKeys: [],
+        issues: plansNewIssues,
+      }),
+    ).toBeNull();
+  });
+
+  it('ignores a NESTED path — a corrected call is a top-level arg object', () => {
+    expect(
+      buildCorrectedCall({
+        toolName: 'plans:new',
+        input: { completion: {} },
+        corrections: [],
+        unknownKeys: [],
+        issues: [
+          {
+            path: ['completion', 'summary'],
+            message: 'Invalid input: expected string, received undefined',
+          },
+        ],
+      }),
+    ).toBeNull();
+  });
+
+  it('lets a RELOCATION fill a required slot instead of overwriting it with a placeholder', () => {
+    const corrected = buildCorrectedCall({
+      toolName: 'plans:new',
+      input: { titel: 'a real title' },
+      corrections: [near('titel', 'title')],
+      unknownKeys: ['titel'],
+      issues: [{ path: ['title'], message: 'Invalid input: expected string, received undefined' }],
+    });
+
+    // The caller's real value survives; it is NOT clobbered by `<string>`.
+    expect(corrected!.args.title).toBe('a real title');
+    expect(corrected!.steps.some((step) => step.action === 'added')).toBe(false);
+  });
+
+  /**
+   * CONTROL. Same input, same refusal, but with the issues withheld — which is precisely the
+   * information the pre-P-004 builder ignored. It must go back to returning null, or these
+   * tests would pass against a builder that emits a corrected call unconditionally.
+   */
+  it('control: withholding the issues reproduces the old silence', () => {
+    expect(
+      buildCorrectedCall({
+        toolName: 'plans:new',
+        input: { title: 12345 },
+        corrections: [],
+        unknownKeys: [],
+      }),
+    ).toBeNull();
+  });
+});

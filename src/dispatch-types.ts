@@ -159,13 +159,16 @@ export interface InvalidInputMetadata {
   corrections: InvalidInputCorrection[];
   /**
    * P-015: the finished call, resolved against the args the caller actually sent —
-   * `corrections` names WHAT was wrong, this is the call that fixes it. Present only for
-   * an unrecognized-key refusal where at least one key was relocated or dropped.
+   * `corrections` names WHAT was wrong, this is the call that fixes it. Present when at
+   * least one key was relocated, dropped, added or retyped — P-004 widened this past the
+   * original unrecognized-key-only branch, so a MISSING required key or a WRONG-TYPED
+   * declared key now produces a corrected call too.
    *
    * Structured (not just the rendered sentence in the message) so a caller can act on it
    * mechanically. It is a REFUSAL artifact under D-104: nothing here has been executed,
-   * and it carries no promise of validating — a value-level or missing-field error is
-   * invisible to the unrecognized-key branch that produced it.
+   * and it carries no promise of validating. An `added`/`retyped` step carries a `<type>`
+   * PLACEHOLDER rather than a guessed value — the refusal can locate the field but never
+   * invent what the caller meant to put in it.
    */
   correctedCall?: CorrectedCall;
 }
