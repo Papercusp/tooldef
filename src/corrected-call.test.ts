@@ -561,3 +561,124 @@ describe('buildCorrectedCall — declared-key repairs (P-004)', () => {
     ).toBeNull();
   });
 });
+
+/**
+ * WI-10002056. A relocation used to write its destination unconditionally, so a stray key
+ * whose near-name target the caller had ALREADY filled overwrote a correct value and the
+ * suggested call silently named the wrong subject — the worst failure shape for this feature,
+ * because the corrected call still looks authoritative and executable.
+ *
+ * The property: a relocation may only FILL a vacant destination, never REPLACE a supplied one.
+ */
+describe('buildCorrectedCall — a relocation never overwrites a value the caller supplied', () => {
+  it('keeps the caller value and drops the stray key when the destination is occupied', () => {
+    const corrected = buildCorrectedCall({
+      toolName: 'plans:get',
+      input: { harness: 'papercusp', slug: 'REAL-SLUG-KEEP-ME', slug2: 'BOGUS-SHOULD-NOT-WIN' },
+      corrections: [near('slug2', 'slug')],
+      unknownKeys: ['slug2'],
+    });
+
+    expect(corrected).not.toBeNull();
+    expect(corrected!.args).toEqual({ harness: 'papercusp', slug: 'REAL-SLUG-KEEP-ME' });
+    expect(corrected!.steps).toEqual([
+      { rejectedArg: 'slug2', action: 'dropped', reason: 'target-occupied', conflictsWith: 'slug' },
+    ]);
+    // The key HAD a destination — it was refused, not unrecognized. Conflating the two would
+    // send the reader hunting for a synonym that already exists and is already populated.
+    expect(corrected!.droppedUnaccepted).toBe(false);
+  });
+
+  it('applies the same rule to a nested dotted destination', () => {
+    const corrected = buildCorrectedCall({
+      toolName: 'demo:tool',
+      input: { opts: { slug: 'REAL-NESTED' }, slug2: 'BOGUS-NESTED' },
+      corrections: [{ rejectedArg: 'slug2', target: 'opts.slug', kind: 'nested-path' }],
+      unknownKeys: ['slug2'],
+    });
+
+    expect(corrected!.args).toEqual({ opts: { slug: 'REAL-NESTED' } });
+    expect(corrected!.steps[0]).toMatchObject({ reason: 'target-occupied', conflictsWith: 'opts.slug' });
+  });
+
+  it('CONTROL: a VACANT destination still relocates, so the guard is not blanket-refusing', () => {
+    const corrected = buildCorrectedCall({
+      toolName: 'plans:get',
+      input: { harness: 'papercusp', slug2: 'MOVE-ME' },
+      corrections: [near('slug2', 'slug')],
+      unknownKeys: ['slug2'],
+    });
+
+    expect(corrected!.args).toEqual({ harness: 'papercusp', slug: 'MOVE-ME' });
+    expect(corrected!.steps).toEqual([
+      { rejectedArg: 'slug2', action: 'relocated', target: 'slug', kind: 'near-name' },
+    ]);
+  });
+
+  it('relocates into a destination holding a literal undefined, which counts as absent', () => {
+    const corrected = buildCorrectedCall({
+      toolName: 'plans:get',
+      input: { slug: undefined, slug2: 'MOVE-ME' },
+      corrections: [near('slug2', 'slug')],
+      unknownKeys: ['slug2'],
+    });
+
+    expect(corrected!.args.slug).toBe('MOVE-ME');
+    expect(corrected!.steps[0]).toMatchObject({ action: 'relocated' });
+  });
+
+  it('tells the caller WHICH value survived, and does not call it a missing counterpart', () => {
+    const hint = correctedCallHint(
+      buildCorrectedCall({
+        toolName: 'plans:get',
+        input: { slug: 'REAL-SLUG-KEEP-ME', slug2: 'BOGUS' },
+        corrections: [near('slug2', 'slug')],
+        unknownKeys: ['slug2'],
+      }),
+    );
+
+    expect(hint).toContain('REAL-SLUG-KEEP-ME');
+    expect(hint).not.toContain('BOGUS');
+    // Names the surviving key, so the reader can tell this from a key with no destination.
+    expect(hint).toContain('`slug` already had a value, which was kept');
+    expect(hint).not.toContain('declares no counterpart');
+  });
+
+  /**
+   * The deliberately-wrong control, kept permanently in-file per this suite's convention
+   * (never mutate the shared tree to prove a guard falsifiable). This is the pre-fix
+   * relocation: write the destination unconditionally. The assertions above must FAIL
+   * against it, or they are not actually testing the property.
+   */
+  it('CONTROL: the unconditional-write relocation this guard replaced does overwrite', () => {
+    const naiveRelocate = (
+      input: Record<string, unknown>,
+      rejectedArg: string,
+      target: string,
+    ): Record<string, unknown> => {
+      const args = { ...input };
+      args[target] = args[rejectedArg];
+      delete args[rejectedArg];
+      return args;
+    };
+
+    const clobbered = naiveRelocate(
+      { harness: 'papercusp', slug: 'REAL-SLUG-KEEP-ME', slug2: 'BOGUS-SHOULD-NOT-WIN' },
+      'slug2',
+      'slug',
+    );
+
+    // The exact defect WI-10002056 reported: the typo's value wins.
+    expect(clobbered.slug).toBe('BOGUS-SHOULD-NOT-WIN');
+    // And the shipped implementation disagrees with it on the same input — which is what
+    // makes the first test in this block a real assertion rather than a restatement.
+    const shipped = buildCorrectedCall({
+      toolName: 'plans:get',
+      input: { harness: 'papercusp', slug: 'REAL-SLUG-KEEP-ME', slug2: 'BOGUS-SHOULD-NOT-WIN' },
+      corrections: [near('slug2', 'slug')],
+      unknownKeys: ['slug2'],
+    });
+    expect(shipped!.args.slug).not.toBe(clobbered.slug);
+    expect(shipped!.args.slug).toBe('REAL-SLUG-KEEP-ME');
+  });
+});

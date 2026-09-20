@@ -53,8 +53,21 @@ export interface CorrectedCallStep {
   readonly target?: string;
   /** Which correction source chose the destination (absent when dropped). */
   readonly kind?: InvalidInputCorrection['kind'];
-  /** Known-key refinement dropped because it conflicts with another supplied key. */
-  readonly reason?: 'mutually-exclusive' | 'authored-call' | 'missing-required' | 'wrong-type';
+  /**
+   * Why the key was dropped rather than relocated.
+   *
+   * `target-occupied` is the one case where a destination WAS found and deliberately not
+   * used: the caller already supplied a value at `target`, so relocating would silently
+   * overwrite a real value with a typo's value and point the corrected call at the wrong
+   * subject. Dropping the stray key and keeping what the caller sent is the only
+   * non-destructive repair, and `conflictsWith` names the value that was kept.
+   */
+  readonly reason?:
+    | 'mutually-exclusive'
+    | 'authored-call'
+    | 'missing-required'
+    | 'wrong-type'
+    | 'target-occupied';
   /**
    * For `added` / `retyped` steps: the type the schema declared, as named by the issue
    * itself (`expected string, received undefined`). Rendered as a `<string>` PLACEHOLDER,
@@ -181,6 +194,26 @@ function setPath(target: Record<string, unknown>, path: string, value: unknown):
   }
   cursor[segments[segments.length - 1]] = value;
   return true;
+}
+
+/**
+ * True when `path` already holds a value, so writing there would DESTROY it.
+ *
+ * Read-only counterpart to `setPath`, and deliberately the same segment walk: a relocation
+ * whose destination the caller already filled must be refused rather than applied, or the
+ * corrected call silently retargets itself at the typo's value (a stray `slug2` overwriting
+ * a real `slug`). A literal `undefined` does not count as occupied — `strip-undefined-args`
+ * treats that as absent, so relocating into it loses nothing.
+ */
+function pathOccupied(target: Record<string, unknown>, path: string): boolean {
+  const segments = path.split('.').filter((segment) => segment.length > 0);
+  if (segments.length === 0) return false;
+  let cursor: unknown = target;
+  for (const segment of segments) {
+    if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor)) return false;
+    cursor = (cursor as Record<string, unknown>)[segment];
+  }
+  return cursor !== undefined;
 }
 
 /**
@@ -409,6 +442,26 @@ export function buildCorrectedCall(params: {
     const correctedValue = correction && correction.kind !== 'authored-redirect'
       ? valueForCorrectionTarget(value, correction.target, params.targetSchema)
       : value;
+    // A destination the caller ALREADY FILLED must not be written: the stray key's value would
+    // win over a real one and the corrected call would silently name the wrong subject (a typo'd
+    // `slug2` overwriting the `slug` that was correct all along). Dropping the stray and keeping
+    // what the caller sent is the only non-destructive repair; `conflictsWith` names what stayed.
+    // A self-targeting correction is excluded so it keeps its existing behaviour below.
+    if (
+      correction
+      && correction.kind !== 'authored-redirect'
+      && correction.target !== key
+      && pathOccupied(args, correction.target)
+    ) {
+      delete args[key];
+      steps.push({
+        rejectedArg: key,
+        action: 'dropped',
+        reason: 'target-occupied',
+        conflictsWith: correction.target,
+      });
+      continue;
+    }
     if (correction && correction.kind !== 'authored-redirect' && setPath(args, correction.target, correctedValue)) {
       delete args[key];
       steps.push({
@@ -494,6 +547,12 @@ export function correctedCallHint(corrected: CorrectedCall | null): string {
   const conflicts = conflictDrops.map(
     (step) => `\`${step.rejectedArg}\` (conflicts with \`${step.conflictsWith}\`)`,
   );
+  // A destination that was found but refused. Naming the SURVIVING value is the whole point:
+  // the caller has to know the correction kept their `slug` rather than the typo's, or they
+  // cannot tell this apart from a key that had no counterpart at all.
+  const occupiedDrops = droppedSteps
+    .filter((step) => step.reason === 'target-occupied')
+    .map((step) => `\`${step.rejectedArg}\` (\`${step.conflictsWith}\` already had a value, which was kept)`);
   // P-004: the declared-key half. Each renders with its placeholder inline so the reader can
   // see at a glance which fields are theirs to fill and which were carried through untouched.
   const added = corrected.steps
@@ -519,6 +578,12 @@ export function correctedCallHint(corrected: CorrectedCall | null): string {
   }
   if (conflicts.length > 0) {
     changes.push(`removed ${conflicts.join(', ')} (keep the named source option)`);
+  }
+  if (occupiedDrops.length > 0) {
+    changes.push(
+      `removed ${occupiedDrops.join(', ')} — moving it would have OVERWRITTEN the value you sent,` +
+        ' so the value you sent won; if the removed key was the one you meant, re-send with only it',
+    );
   }
   if (added.length > 0) changes.push(`added the required ${added.join(', ')}`);
   if (retyped.length > 0) changes.push(`retyped ${retyped.join(', ')} to the declared type`);
