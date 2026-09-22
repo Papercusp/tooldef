@@ -34,6 +34,8 @@
  * nothing below knows what a Papercusp tool, workspace or role is.
  */
 
+import { summaryGuidanceDescription } from './partial-guidance';
+
 const UTF8_ENCODER = new TextEncoder();
 
 /**
@@ -137,7 +139,11 @@ export function compactWireBytes(
   });
   const compact = jsonBytes({
     name,
-    description: '',
+    // P-010: COMPACT ships a SUMMARY, not silence. This measurement and
+    // `applyCompactTier` MUST stay in lockstep — if delivery ships prose that
+    // measurement priced at zero, `spentBytes` becomes a fiction and the whole
+    // budget is unenforceable.
+    description: summaryGuidanceDescription(tool.description),
     inputSchema: compactInputSchema(tool.inputSchema ?? {}),
   });
   return { full, compact, saved: full - compact };

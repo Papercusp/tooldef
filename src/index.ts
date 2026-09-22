@@ -31,6 +31,22 @@ export {
   compactInputSchema,
   compactWireBytes,
 } from './compact-schema';
+// Partial-guidance tier (same plan, P-010 / D-006): the PROSE analogue of the
+// compact schema projection. COMPACT drops `description` entirely, which on the
+// MCP wire is a tool's only prose field; partial keeps the selection signal
+// (`when`) plus every hard refusal/safety clause and reduces the rest. Lossy by
+// nature and measured rather than asserted — see partialGuidanceLoss.
+export type { PartialGuidanceLoss, GuidanceWireBytes } from './partial-guidance';
+export {
+  GUIDANCE_SECTION_LABELS,
+  GUIDANCE_SECTION_SEPARATOR,
+  SUMMARY_LEAD_MAX_CHARS,
+  isSafetyClause,
+  partialGuidanceDescription,
+  summaryGuidanceDescription,
+  partialGuidanceLoss,
+  guidanceWireBytes,
+} from './partial-guidance';
 // Base-rate stamping (EI-19375528138828761): a filtered result carries the
 // population it was drawn from, so a slice is never read as a census.
 export type { Denominator, DenominatorSpec } from './denominator';

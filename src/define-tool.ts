@@ -51,6 +51,7 @@ import {
 } from './dispatch-projected';
 import { serverVintageHint, constraintVintageHint } from './server-vintage';
 import { readAmbientArgKeys } from './ambient-args';
+import { GUIDANCE_SECTION_LABELS, GUIDANCE_SECTION_SEPARATOR } from './partial-guidance';
 import { buildCorrectedCall, correctedCallHint } from './corrected-call';
 import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
 import { applyPayloadTier, extractPayloadTier, resolvePayloadTier, PAYLOAD_TIER_ARG } from './payload-tier';
@@ -238,10 +239,14 @@ function deriveNameFromCallSite(site: string | null): string | null {
 function describeFromGuidance(guidance: ToolGuidance | undefined): string | null {
   if (!guidance) return null;
   const parts: string[] = [];
-  if (guidance.when) parts.push(`When to use: ${guidance.when}`);
-  if (guidance.notWhen) parts.push(`When NOT to use: ${guidance.notWhen}`);
-  if (guidance.chaining) parts.push(`Chaining: ${guidance.chaining}`);
-  return parts.length > 0 ? parts.join('\n\n') : null;
+  // Labels come from the SHARED constant that `partial-guidance.ts` splits on,
+  // so the composer and the projection cannot drift into two copies of the
+  // format (derived-truth ladder, rung 1).
+  const L = GUIDANCE_SECTION_LABELS;
+  if (guidance.when) parts.push(`${L.when} ${guidance.when}`);
+  if (guidance.notWhen) parts.push(`${L.notWhen} ${guidance.notWhen}`);
+  if (guidance.chaining) parts.push(`${L.chaining} ${guidance.chaining}`);
+  return parts.length > 0 ? parts.join(GUIDANCE_SECTION_SEPARATOR) : null;
 }
 
 /**
