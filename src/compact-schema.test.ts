@@ -160,6 +160,27 @@ describe('compactInputSchema', () => {
     expect(defs.Reused.description).toBeUndefined();
   });
 
+  // The test below iterates COMPACT_DROPPED_KEYS itself, so it adapts to any
+  // addition and can never object to one. That adaptivity is the hazard: adding
+  // a keyword that genuinely constrains validity — `patternProperties` or
+  // `propertyNames`, say — would keep every other test in this file green while
+  // turning a compact definition into a PARTIAL contract, which is the single
+  // failure the compact tier must never allow. So pin the membership itself.
+  //
+  // Changing this list takes a recorded plan decision, not just a green run:
+  // every name here must be one that cannot affect whether a call VALIDATES
+  // (the doc comment on COMPACT_DROPPED_KEYS lists the keywords deliberately
+  // excluded, and why each one constrains validity).
+  it('pins the dropped-keyword denylist so a validity-constraining addition cannot pass silently', () => {
+    expect([...COMPACT_DROPPED_KEYS]).toEqual([
+      'description',
+      'title',
+      'examples',
+      'example',
+      'default',
+    ]);
+  });
+
   it('drops every prose keyword at every depth', () => {
     for (const keyword of COMPACT_DROPPED_KEYS) {
       // `properties.description` / `properties.default` are NAMES, not keywords,
