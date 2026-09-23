@@ -128,6 +128,8 @@ export interface KernelEnforcementResult {
   /** Host policy revision, distinct from the agent specification revision. */
   policyRevision?: string | null;
   obligations?: Readonly<Record<string, unknown>>;
+  /** Host-authored identity/decision facts forwarded to telemetry; never authorize a call. */
+  serverAudit?: Readonly<Record<string, unknown>>;
 }
 
 /** The host implementation of the single policy/enforcement port. */
@@ -198,6 +200,9 @@ export function normalizeKernelEnforcementResult(
       : {}),
     ...(value.obligations && typeof value.obligations === 'object' && !Array.isArray(value.obligations)
       ? { obligations: value.obligations }
+      : {}),
+    ...(value.serverAudit && typeof value.serverAudit === 'object' && !Array.isArray(value.serverAudit)
+      ? { serverAudit: value.serverAudit }
       : {}),
   };
   const source = value.revisionSource;

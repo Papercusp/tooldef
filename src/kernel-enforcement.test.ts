@@ -38,6 +38,12 @@ describe('kernel-enforcement contract', () => {
     expect(normalizeKernelEnforcementResult({ decision: 'not-a-decision' as never }, 'preflight').decision).toBe('allow');
   });
 
+  it('preserves host-authored audit context for telemetry without using it as authority', () => {
+    const serverAudit = { identityLaunchRecord: { advSessionId: '42', xmin: '9001' } };
+    expect(normalizeKernelEnforcementResult({ decision: 'allow', serverAudit }, 'enforce'))
+      .toMatchObject({ decision: 'allow', serverAudit });
+  });
+
   it('preserves an explicit deny and its reason', async () => {
     const result = await evaluateKernelEnforcement(
       () => ({ decision: 'deny', code: 'revoked', reason: 'authority revoked' }),
