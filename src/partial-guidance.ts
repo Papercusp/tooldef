@@ -182,16 +182,14 @@ export function partialGuidanceDescription(description: string | undefined): str
 /**
  * Character ceiling for the SUMMARY tier's lead sentence.
  *
- * ⚠ THIS VALUE IS A MEASUREMENT, NOT A STYLE PREFERENCE — it is the largest cap
- * that fits the 100,000 B trimmed-mode budget (D-009). Measured by
+ * ⚠ THIS VALUE IS A MEASUREMENT, NOT A STYLE PREFERENCE — it is the largest
+ * tested cap that fits the 100,000 B trimmed-mode budget (D-009). Measured by
  * `SUMMARY_CAP_SWEEP` in `scripts/gen-tool-delivery.ts`, which re-prices the
  * whole catalog and re-resolves the delivery map at each candidate:
  *
- *     cap=0   full=4 compact=67 spent=100,000 fits ← but 67 tools ship NO prose
- *     cap=80  full=2 compact=61 spent= 99,962 fits
- *     cap=100 full=0 compact=63 spent= 99,996 fits ← chosen
- *     cap=120 full=0 compact=62 spent=100,293 OVERRUN
- *     cap=200 full=0 compact=62 spent=101,254 OVERRUN
+ *     2026-09-25, 907-tool catalog before this cap change:
+ *     cap=80  full=1 compact=63 spent= 99,977 fits ← chosen
+ *     cap=100 full=0 compact=63 spent=100,176 OVER by 176
  *
  * THE TRADE, stated because it is real: pricing prose into the tier costs 8
  * advertised seats (71 → 63). That is the right direction — a tool advertised
@@ -200,7 +198,7 @@ export function partialGuidanceDescription(description: string | undefined): str
  * reachable through `tools:find`. Re-run the sweep after any catalog change
  * before editing this number by hand.
  */
-export const SUMMARY_LEAD_MAX_CHARS = 100;
+export const SUMMARY_LEAD_MAX_CHARS = 80;
 
 /** Truncate at a word boundary, marking the cut so a reader knows prose is missing. */
 function truncateAtWord(text: string, maxChars: number): string {
