@@ -23,7 +23,8 @@
  * Calls are serialized in ordinal order so the host's step identities stay deterministic even when
  * the script issues calls concurrently.
  */
-import type { ProjectedTool, ToolResult, UnifiedToolContext } from '../tool-projection';
+import type { ProjectedTool, UnifiedToolContext } from '../tool-projection';
+import type { ToolResult } from '../wire';
 import { ToolDispatchError, isPreExecutionFailure } from './dispatch-binding';
 import { resolveToolEffect, type WrapDispatch } from './orchestrate';
 
