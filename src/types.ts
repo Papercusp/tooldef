@@ -242,7 +242,7 @@ export interface RouteDefinition<TInputSchema extends ZodTypeAny | undefined = u
  * a workspace-scoped SQL client) and gets a checked `ctx.tx`.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export interface ToolContext<Tx = any> {
+export interface ToolContext<Tx = any> extends Partial<Omit<UnifiedToolContext, 'principal' | 'tx' | 'log'>> {
   principal: Principal;
   /**
    * Host-supplied transaction handle. In Papercusp this is a workspace-scoped

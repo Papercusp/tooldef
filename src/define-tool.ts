@@ -2951,7 +2951,18 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     // Framework-reserved per-call tier override is stripped next — BEFORE
     // validation (context-trimming-tiers D-004; not part of any tool's schema).
     const { input: tierlessInput, callTier } = extractPayloadTier(unwrapUnparsedToolInput(input));
+    // Preserve host context metadata without touching `tx`: transaction-free
+    // dispatches may install a fail-loud getter there. Copy descriptors first,
+    // then omit the three fields whose legacy contracts differ from the host.
+    const passthroughDescriptors: Record<string, PropertyDescriptor> = Object.getOwnPropertyDescriptors(ctx);
+    delete passthroughDescriptors.tx;
+    delete passthroughDescriptors.principal;
+    delete passthroughDescriptors.log;
+    const passthroughCtx = Object.defineProperties({}, passthroughDescriptors) as Omit<
+      UnifiedToolContext, 'tx' | 'principal' | 'log'
+    >;
     const legacyCtx = {
+      ...passthroughCtx,
       principal: ctx.principal as unknown as ToolContext['principal'],
       // EI-18808330244321407: transaction-free tools receive no `tx` key at
       // all. A declared consumer reaches this point only with a real bound tx.
@@ -2968,40 +2979,6 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       // handlers. `contextTier` alone cannot tell a caller's `full` override
       // from the default session tier.
       ...(callTier !== undefined ? { payloadTierOverride: callTier } : {}),
-      // Source-aware reads may receive the already-parsed dispatch projection
-      // from the host transport. Keep it on the legacy handler context too:
-      // this shim is field-by-field, so omitting it would silently make
-      // projection-aware handlers fall back to full-column reads.
-      ...(ctx.sourceProjection !== undefined ? { sourceProjection: ctx.sourceProjection } : {}),
-      // EI-10358: thread the caller's role + per-session id through — the outer
-      // `ctx` (UnifiedToolContext) already carries both (populated by the MCP
-      // dispatch layer from the spawn/su URL context), but this legacy shim
-      // previously dropped them, leaving every principal-gated handler
-      // (memory:remember, …) unable to attribute a write to a real session —
-      // `ctx.principal` alone collapses every su session to the single shared
-      // `system:superuser` principal.
-      ...(ctx.role ? { role: ctx.role } : {}),
-      ...(ctx.uiClientId ? { uiClientId: ctx.uiClientId } : {}),
-      // WI-4549: thread the ctx-borne telemetry surface. A compound's
-      // inProcessCall stamps `telemetrySurface` on the inner ctx so its folded
-      // sub-call self-identifies (coord:orient's memory:search fold records under
-      // 'orient', not generic 'search'). memory:search is PRINCIPAL-gated, so it
-      // lands in THIS shim — which dropped the stamp, and its recall telemetry
-      // blended back into 'search' for weeks. orient had ZERO rows in
-      // memory_recall_stats while demonstrably folding recall on every call.
-      //
-      // ⚠ THIS ALLOWLIST IS THE BUG, AND THIS IS ITS THIRD VICTIM (contextTier,
-      // then role/uiClientId per EI-10358, now telemetrySurface). The role-gated
-      // wrapper below passes the WHOLE ctx (`{ ...ctx }`); only this legacy shim
-      // rebuilds it field-by-field, so every ctx-borne field must be re-threaded
-      // here BY HAND or it vanishes silently — no type error, no runtime error,
-      // just a handler reading `undefined` and taking its fallback. If you add a
-      // ctx-borne field, add it here too, and pin it with a test that drives the
-      // REAL dispatch path (inProcessCall → dispatchProjectedTool → handler) —
-      // a test that calls `handler(input, ctxLiteral)` directly proves only that
-      // the handler READS the field, never that dispatch DELIVERS it. That gap is
-      // exactly why this shipped green.
-      ...(ctx.telemetrySurface ? { telemetrySurface: ctx.telemetrySurface } : {}),
     } as ToolContext & {
       contextTier?: string;
       payloadTierOverride?: string;

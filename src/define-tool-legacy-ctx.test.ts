@@ -36,6 +36,32 @@ const ctx = (over: Partial<UnifiedToolContext> = {}): UnifiedToolContext => ({
 afterEach(() => _resetProjectionRegistryForTests());
 
 describe('registerLegacyAsProjected — role/uiClientId threading (EI-10358)', () => {
+  it('forwards scope and verified caller metadata through the real dispatch path', async () => {
+    let received: ToolContext | undefined;
+    defineTool({
+      name: 'test:legacy-ctx-scope',
+      capability: 'test:read',
+      description: 'fixture',
+      args: z.object({}),
+      async handler(_args, handlerCtx) {
+        received = handlerCtx;
+        return { content: [{ type: 'text', text: 'ok' }] };
+      },
+    });
+
+    await dispatchProjectedTool(
+      lookupByMcpName('test:legacy-ctx-scope')!,
+      'test:legacy-ctx-scope',
+      {},
+      ctx({ workspaceId: 'ws-2', harnessSlug: 'side', isSuperuser: true,
+        isPowerUser: true, sigVerifiedSpawn: true, runId: 'run-2' }),
+      DEPS,
+    );
+
+    expect(received).toMatchObject({ workspaceId: 'ws-2', harnessSlug: 'side',
+      isSuperuser: true, isPowerUser: true, sigVerifiedSpawn: true, runId: 'run-2' });
+  });
+
   it('threads role + uiClientId from the outer ctx into the handler legacyCtx', async () => {
     let received: (ToolContext & { role?: string; uiClientId?: string | null }) | undefined;
     defineTool({
