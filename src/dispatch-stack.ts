@@ -28,6 +28,7 @@ import type { AgentRole } from './host-types';
 import {
   PROJECTED_TOOL_REGISTRY_SOURCE,
   toolDeclaresGate,
+  type AbortCompletionReceipt,
   type ProjectedTool,
   type UnifiedToolContext,
 } from './tool-projection';
@@ -860,12 +861,51 @@ const invokeStep: DispatchStep = {
         // beat the deadline under load. Absent/false ⇒ the abort stays authoritative (below),
         // unchanged for every tool that has not opted in.
         const isIdempotentCompletion = exec.tool.idempotent === true;
-        if (!handlerReportedFailure && !isLowTierRead && !isIdempotentCompletion) {
+        let attemptReceipt: AbortCompletionReceipt | null = null;
+        if (exec.tool.abortCompletionReceipt) {
+          try {
+            attemptReceipt =
+              exec.tool.abortCompletionReceipt(input, result, {
+                callId: exec.callId,
+                toolName,
+              }) ?? null;
+          } catch (error) {
+            attemptReceipt = {
+              status: 'recovery-incomplete',
+              reason: `receipt resolver threw: ${error instanceof Error ? error.message : String(error)}`,
+            };
+          }
+        }
+        const hasAuthoritativeAttemptReceipt =
+          attemptReceipt?.status === 'recorded' || attemptReceipt?.status === 'not-recorded';
+        if (!handlerReportedFailure && !isLowTierRead && !isIdempotentCompletion && !hasAuthoritativeAttemptReceipt) {
+          const receipt = attemptReceipt ?? {
+            status: 'recovery-incomplete' as const,
+            reason: 'handler completed after abort without an authoritative attempt receipt',
+          };
           return {
             ok: false,
             error: {
               code: 'timeout',
               message: `tool "${toolName}" exceeded timeout of ${exec.timeoutSec}s (handler returned but signal had aborted)`,
+              meta: {
+                abortCompletionReceipt: {
+                  ...receipt,
+                  attemptId: exec.callId,
+                },
+              },
+            },
+          };
+        }
+        if (attemptReceipt) {
+          result = {
+            ...result,
+            _meta: {
+              ...result._meta,
+              abortCompletionReceipt: {
+                ...attemptReceipt,
+                attemptId: exec.callId,
+              },
             },
           };
         }
@@ -891,7 +931,21 @@ const invokeStep: DispatchStep = {
       if (isTimeout) {
         return {
           ok: false,
-          error: { code: 'timeout', message: `tool "${toolName}" exceeded timeout of ${exec.timeoutSec}s` },
+          error: {
+            code: 'timeout',
+            message: `tool "${toolName}" exceeded timeout of ${exec.timeoutSec}s`,
+            ...(exec.tool.abortCompletionReceipt
+              ? {
+                  meta: {
+                    abortCompletionReceipt: {
+                      status: 'recovery-incomplete',
+                      reason: 'handler threw after the dispatch signal aborted before returning a receipt',
+                      attemptId: exec.callId,
+                    },
+                  },
+                }
+              : {}),
+          },
         };
       }
       // Match by stable `name` as well as instanceof: when the host loads a

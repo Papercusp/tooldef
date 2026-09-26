@@ -7,7 +7,13 @@ import type { ArgReencoding } from './reencode-args';
 import type { AgentRole } from './host-types';
 import type { z, ZodTypeAny } from 'zod';
 import type { StandardSchemaV1 } from './standard-schema';
-import type { EventsSchema, ResultDoorSkipReason, UnifiedToolContext, UserEvents } from './tool-projection';
+import type {
+  AbortCompletionReceiptResolver,
+  EventsSchema,
+  ResultDoorSkipReason,
+  UnifiedToolContext,
+  UserEvents,
+} from './tool-projection';
 import type { Authorizer } from './authz';
 import type { ToolRequireSpec } from './requires';
 import type { DeltaCapability } from './delta-protocol';
@@ -618,6 +624,8 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
    *  status token to a fixed value. Default (absent/false) keeps the abort authoritative.
    *  Threaded onto `ProjectedTool`; read ONLY by the dispatch abort-race branch. */
   idempotent?: boolean;
+  /** Attempt-specific completed-write proof; see `ProjectedTool.abortCompletionReceipt`. */
+  abortCompletionReceipt?: AbortCompletionReceiptResolver<StandardSchemaV1.InferOutput<TArgs>>;
   /**
    * Canonical tool names this COMPOSITE tool bundles (tool-call-batching-wrappers
    * P-010). A composite collapses a hot fixed multi-step flow into one call (e.g.
@@ -738,6 +746,8 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
    *  status token to a fixed value. Default (absent/false) keeps the abort authoritative.
    *  Threaded onto `ProjectedTool`; read ONLY by the dispatch abort-race branch. */
   idempotent?: boolean;
+  /** Attempt-specific completed-write proof; see `ProjectedTool.abortCompletionReceipt`. */
+  abortCompletionReceipt?: AbortCompletionReceiptResolver<StandardSchemaV1.InferOutput<TArgs>>;
   /** Canonical tool names this composite tool bundles (e.g. coord:orient replaces fleet:assignments + work_items:list + coord:inbox). Omitted for primitives. See ToolDefinition.replaces. */
   replaces?: readonly string[];
   args: TArgs;
@@ -893,6 +903,8 @@ export interface RoleToolDefinition<
    *  status token to a fixed value. Default (absent/false) keeps the abort authoritative.
    *  Threaded onto `ProjectedTool`; read ONLY by the dispatch abort-race branch. */
   idempotent?: boolean;
+  /** Attempt-specific completed-write proof; see `ProjectedTool.abortCompletionReceipt`. */
+  abortCompletionReceipt?: AbortCompletionReceiptResolver<StandardSchemaV1.InferOutput<TArgs>>;
   /** Canonical tool names this composite tool bundles. Omitted for primitives. See ToolDefinition.replaces. */
   replaces?: readonly string[];
   /** Derived at defineTool time: 'composite' when `replaces` is non-empty, else 'primitive'. */
@@ -1158,6 +1170,8 @@ export interface RoleToolDefinitionInput<
    *  status token to a fixed value. Default (absent/false) keeps the abort authoritative.
    *  Threaded onto `ProjectedTool`; read ONLY by the dispatch abort-race branch. */
   idempotent?: boolean;
+  /** Attempt-specific completed-write proof; see `ProjectedTool.abortCompletionReceipt`. */
+  abortCompletionReceipt?: AbortCompletionReceiptResolver<StandardSchemaV1.InferOutput<TArgs>>;
   /** Canonical tool names this composite tool bundles. Omitted for primitives. See ToolDefinition.replaces. */
   replaces?: readonly string[];
   /** Visibility profile gate — see RoleToolDefinition.profile. */

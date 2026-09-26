@@ -944,6 +944,33 @@ export interface ToolExposure {
 }
 
 /**
+ * A mutation-specific receipt evaluated only when the dispatch signal aborted
+ * after the handler returned. Unlike the static `idempotent` marker, this is
+ * evidence about this exact attempt and its returned effect identity.
+ */
+export interface AbortCompletionReceipt {
+  status: 'recorded' | 'not-recorded' | 'recovery-incomplete';
+  /** Durable identity of the effect this attempt recorded, when known. */
+  effectRef?: string;
+  /** Stable explanation for a no-effect or incomplete-recovery outcome. */
+  reason?: string;
+  /** Explicit recovery failures; empty/absent when recovery was complete. */
+  failures?: readonly string[];
+}
+
+export interface AbortCompletionContext {
+  /** Dispatcher-owned identity for this exact attempt. */
+  callId: string;
+  toolName: string;
+}
+
+export type AbortCompletionReceiptResolver<TArgs = unknown> = (
+  args: TArgs,
+  result: ToolResult,
+  context: AbortCompletionContext,
+) => AbortCompletionReceipt | null | undefined;
+
+/**
  * One entry in the projection registry. Combines the function (truth)
  * with manifest metadata (gates + exposure).
  */
@@ -1015,6 +1042,13 @@ export interface ProjectedTool {
    * ONLY the dispatch abort-race branch reads this; it is inert on the happy path.
    */
   idempotent?: boolean;
+  /**
+   * Attempt-specific alternative to `idempotent`. When a handler returns after
+   * its signal aborted, the resolver may prove that this exact attempt either
+   * recorded a named effect or recorded nothing. `recovery-incomplete`, a
+   * missing receipt, or a thrown resolver fails closed to the timeout path.
+   */
+  abortCompletionReceipt?: AbortCompletionReceiptResolver;
   /**
    * Canonical tool names this COMPOSITE tool bundles (tool-call-batching-wrappers
    * P-010). Empty/undefined ⇒ a primitive. Read by agent_tools:list (the queryable

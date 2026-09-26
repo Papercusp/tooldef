@@ -895,6 +895,59 @@ describe('dispatchProjectedTool', () => {
     expect(r.error?.code).toBe('timeout');
   }, 10_000);
 
+  it('ok-on-abort (attempt receipt): a completed non-idempotent write surfaces the exact recorded effect', async () => {
+    const tool = makeTool({
+      capabilities: [],
+      idempotent: false,
+      timeoutSec: 0.05,
+      abortCompletionReceipt: () => ({ status: 'recorded', effectRef: 'EI-attempt-1' }),
+      fn: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return { content: [{ type: 'text', text: '{"ok":true,"effectRef":"EI-attempt-1"}' }] };
+      },
+    });
+
+    const result = await dispatchProjectedTool(tool, 'scorecards:emit', { force: true }, MAKE_CTX(), MAKE_DEPS());
+
+    expect(result.ok).toBe(true);
+    expect(result.result?._meta?.abortCompletionReceipt).toMatchObject({
+      status: 'recorded',
+      effectRef: 'EI-attempt-1',
+      attemptId: expect.any(String),
+    });
+  });
+
+  it('ok-on-abort (attempt receipt): an incomplete receipt fails closed with the attempt identity', async () => {
+    const tool = makeTool({
+      capabilities: [],
+      timeoutSec: 0.05,
+      abortCompletionReceipt: () => ({
+        status: 'recovery-incomplete',
+        reason: 'durable effect identity missing',
+        failures: ['missing-effect-ref'],
+      }),
+      fn: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return { content: [{ type: 'text', text: '{"ok":true}' }] };
+      },
+    });
+
+    const result = await dispatchProjectedTool(tool, 'scorecards:emit', {}, MAKE_CTX(), MAKE_DEPS());
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatchObject({
+      code: 'timeout',
+      meta: {
+        abortCompletionReceipt: {
+          status: 'recovery-incomplete',
+          reason: 'durable effect identity missing',
+          failures: ['missing-effect-ref'],
+          attemptId: expect.any(String),
+        },
+      },
+    });
+  });
+
   it('ctx.progress refreshes idleTimeoutSec deadline (alias parity)', async () => {
     // Regression: a tool that calls ctx.progress() exclusively (no
     // direct ctx.emit) used to trip the idle watchdog because the
