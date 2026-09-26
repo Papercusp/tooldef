@@ -194,7 +194,7 @@ function initExecution(
   const roleQuota = contractCtx.role ? tool.rolesQuota?.[contractCtx.role] : undefined;
   const { key: windowKey, limit: quotaLimit } = (
     deps.computeQuotaWindow ?? defaultComputeQuotaWindow
-  )(contractCtx, roleQuota, toolName);
+  )(contractCtx, roleQuota, toolName, input);
   return {
     tool,
     toolName,
