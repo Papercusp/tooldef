@@ -1,10 +1,10 @@
 /**
- * FNV-1a 64-bit, computed over two unsigned 32-bit halves.
+ * FNV-1a 64-bit, computed over four 16-bit limbs.
  *
  * Why this exists: the obvious implementation keeps the running hash in a
  * `BigInt` and performs a BigInt XOR + multiply + mask for EVERY input unit.
  * Each of those allocates, so hashing a large canonical string (a response
- * body, the projected tool registry) costs a heap allocation per character.
+ * body, the projected tool registry) costs heap allocations per character.
  * On the operator main thread that showed up as the hottest JS function in
  * event-loop-saturation profiles (WI-10003260).
  *
@@ -12,33 +12,19 @@
  * 64-bit value, so every revision / fingerprint / cursor string derived from
  * it is unchanged. Only the final formatting touches BigInt, once per hash.
  *
- * Arithmetic: prime = 2^40 + 0x1b3, so for h = hi·2^32 + lo,
- *   h·prime mod 2^64 = h·0x1b3 + (lo mod 2^24)·2^40
- * which lands in the halves as
- *   lo' = (lo·0x1b3) mod 2^32
- *   hi' = (hi·0x1b3 + carry(lo·0x1b3) + lo·2^8) mod 2^32
- * Every intermediate stays below 2^43, so plain doubles are exact.
+ * Arithmetic: prime = 2^40 + 0x1b3. With h = h3·2^48 + h2·2^32 + h1·2^16 + h0,
+ *   h·prime mod 2^64 = h·0x1b3 + (h1·2^16 + h0)·2^40   (mod 2^64)
+ * so the 2^40 term adds h0·2^8 to limb 2 and h1·2^8 to limb 3. Every
+ * intermediate stays below 2^27, i.e. inside V8's small-integer range, which
+ * is what makes the loop allocation-free and fast.
  */
 
-const OFFSET_HI = 0xcbf29ce4;
-const OFFSET_LO = 0x84222325;
 const PRIME_LO = 0x1b3;
-const TWO_32 = 4294967296;
 
-/** Running state: [hi, lo] unsigned 32-bit halves of the 64-bit hash. */
-type Fnv64State = [number, number];
-
-function step(state: Fnv64State, unit: number): void {
-  const lo = (state[1] ^ unit) >>> 0;
-  const t = lo * PRIME_LO;
-  const tLo = t >>> 0;
-  const carry = (t - tLo) / TWO_32;
-  state[0] = (state[0] * PRIME_LO + carry + lo * 256) >>> 0;
-  state[1] = tLo;
-}
-
-function toBigInt(state: Fnv64State): bigint {
-  return (BigInt(state[0]) << 32n) | BigInt(state[1]);
+function toBigInt(h3: number, h2: number, h1: number, h0: number): bigint {
+  const hi = ((h3 << 16) | h2) >>> 0;
+  const lo = ((h1 << 16) | h0) >>> 0;
+  return (BigInt(hi) << 32n) | BigInt(lo);
 }
 
 /**
@@ -46,9 +32,25 @@ function toBigInt(state: Fnv64State): bigint {
  * protocol has always hashed. Returns the value in base 36.
  */
 export function fnv1a64CodeUnitsBase36(str: string): string {
-  const state: Fnv64State = [OFFSET_HI, OFFSET_LO];
-  for (let i = 0; i < str.length; i++) step(state, str.charCodeAt(i));
-  return toBigInt(state).toString(36);
+  // Offset basis 0xcbf29ce484222325 split into 16-bit limbs.
+  let h0 = 0x2325;
+  let h1 = 0x8422;
+  let h2 = 0x9ce4;
+  let h3 = 0xcbf2;
+  for (let i = 0; i < str.length; i++) {
+    h0 ^= str.charCodeAt(i); // a code unit is < 2^16, so it only touches limb 0
+    const t0 = h0 * PRIME_LO;
+    let t1 = h1 * PRIME_LO;
+    let t2 = h2 * PRIME_LO + (h0 << 8);
+    const t3 = h3 * PRIME_LO + (h1 << 8);
+    t1 += t0 >>> 16;
+    h0 = t0 & 0xffff;
+    t2 += t1 >>> 16;
+    h1 = t1 & 0xffff;
+    h3 = (t3 + (t2 >>> 16)) & 0xffff;
+    h2 = t2 & 0xffff;
+  }
+  return toBigInt(h3, h2, h1, h0).toString(36);
 }
 
 /**
@@ -56,7 +58,22 @@ export function fnv1a64CodeUnitsBase36(str: string): string {
  * value as 16 zero-padded lowercase hex digits.
  */
 export function fnv1a64BytesHex(bytes: Uint8Array): string {
-  const state: Fnv64State = [OFFSET_HI, OFFSET_LO];
-  for (let i = 0; i < bytes.length; i++) step(state, bytes[i]!);
-  return toBigInt(state).toString(16).padStart(16, '0');
+  let h0 = 0x2325;
+  let h1 = 0x8422;
+  let h2 = 0x9ce4;
+  let h3 = 0xcbf2;
+  for (let i = 0; i < bytes.length; i++) {
+    h0 ^= bytes[i]!;
+    const t0 = h0 * PRIME_LO;
+    let t1 = h1 * PRIME_LO;
+    let t2 = h2 * PRIME_LO + (h0 << 8);
+    const t3 = h3 * PRIME_LO + (h1 << 8);
+    t1 += t0 >>> 16;
+    h0 = t0 & 0xffff;
+    t2 += t1 >>> 16;
+    h1 = t1 & 0xffff;
+    h3 = (t3 + (t2 >>> 16)) & 0xffff;
+    h2 = t2 & 0xffff;
+  }
+  return toBigInt(h3, h2, h1, h0).toString(16).padStart(16, '0');
 }

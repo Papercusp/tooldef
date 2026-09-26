@@ -220,7 +220,7 @@ function canonicalStringify(value: unknown): string {
 
 /**
  * FNV-1a 64-bit over a string's UTF-16 code units → base36. Pure and
- * deterministic; the 32-bit-halves implementation is bit-exact with the former
+ * deterministic; the 16-bit-limb implementation is bit-exact with the former
  * per-character BigInt loop, which was a main-thread hot spot (WI-10003260).
  */
 const fnv1a64 = fnv1a64CodeUnitsBase36;

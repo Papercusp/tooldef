@@ -67,6 +67,7 @@ import type {
  */
 export type ResultDoorSkipReason = 'programmatic-caller' | 'oversize-by-design';
 import { pinModuleState } from '@papercusp/module-singleton';
+import { fnv1a64BytesHex } from './fnv1a64';
 import { toJsonSchema } from './schema-adapter';
 import type { StandardSchemaV1 } from './standard-schema';
 import type { Authorizer } from './authz';
@@ -1757,13 +1758,10 @@ export function projectedToolRegistryRevision(
     .sort((a, b) => a.name.localeCompare(b.name));
 
   // Deterministic drift watermark, not a security primitive. FNV-1a avoids
-  // making this generic registry module Node-crypto-specific.
-  let hash = 0xcbf29ce484222325n;
-  for (const byte of new TextEncoder().encode(canonical(contracts))) {
-    hash ^= BigInt(byte);
-    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
-  }
-  return `projected-tool-registry-v1:${hash.toString(16).padStart(16, '0')}`;
+  // making this generic registry module Node-crypto-specific; the shared
+  // 16-bit-limb implementation is bit-exact with the former per-byte BigInt
+  // loop, which was a main-thread hot spot (WI-10003260).
+  return `projected-tool-registry-v1:${fnv1a64BytesHex(new TextEncoder().encode(canonical(contracts)))}`;
 }
 
 export interface ProjectedToolAvailability {
