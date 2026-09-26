@@ -54,6 +54,20 @@ export {
   type WrapDispatch,
   type DispatchNext,
 } from './orchestrate';
+// P-019 / D-019: per-call checkpointing for explicitly durable orchestration runs.
+export {
+  createDurableDispatch,
+  classifyDurableCall,
+  durableRuntimeTools,
+  durableAuthorizationDenied,
+  DurableRunHaltedError,
+  DURABLE_RUNTIME_TOOL_NAMES,
+  type DurableDispatchOptions,
+  type DurableDispatchState,
+  type DurableReplayClass,
+  type DurableStepHost,
+  type DurableStepSummary,
+} from './durable-dispatch';
 // B-CX-API: compile-time typed signatures for the facade + the on-demand namespace index.
 export {
   generateToolFacadeTypes,
