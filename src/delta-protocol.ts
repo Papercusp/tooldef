@@ -38,6 +38,8 @@
  * the protocol mechanics; endpoints opt in by declaring a `DeltaCapability`.
  */
 
+import { fnv1a64CodeUnitsBase36 } from './fnv1a64';
+
 /* ──────────────────────────────────────────────────────────────────────────
  * Wire request (parsed from `_meta.delta` / `?delta=`)
  * ────────────────────────────────────────────────────────────────────────── */
@@ -216,17 +218,12 @@ function canonicalStringify(value: unknown): string {
   return `{${parts.join(',')}}`;
 }
 
-/** FNV-1a 64-bit over a string → base36. Pure, deterministic, dependency-free. */
-function fnv1a64(str: string): string {
-  let hash = 0xcbf29ce484222325n;
-  const prime = 0x100000001b3n;
-  const mask = 0xffffffffffffffffn;
-  for (let i = 0; i < str.length; i++) {
-    hash ^= BigInt(str.charCodeAt(i));
-    hash = (hash * prime) & mask;
-  }
-  return hash.toString(36);
-}
+/**
+ * FNV-1a 64-bit over a string's UTF-16 code units → base36. Pure and
+ * deterministic; the 32-bit-halves implementation is bit-exact with the former
+ * per-character BigInt loop, which was a main-thread hot spot (WI-10003260).
+ */
+const fnv1a64 = fnv1a64CodeUnitsBase36;
 
 /**
  * The fingerprint that a cursor is bound to. Any change to the tool, the
