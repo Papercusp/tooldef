@@ -405,6 +405,7 @@ export {
   assertProjectedToolGuidanceConformance,
   ProjectedToolContractError,
   listMcpProjections,
+  mcpObjectOutputSchema,
   ToolRegistrationError,
   emitToSseSink,
   isPapercuspBinaryEnvelope,

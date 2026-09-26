@@ -13,6 +13,7 @@ import { dispatchProjectedTool, type DispatchProjectedDeps } from './dispatch-pr
 import {
   lookupByMcpName,
   listMcpProjections,
+  mcpObjectOutputSchema,
   _resetProjectionRegistryForTests,
   type UnifiedToolContext,
 } from './tool-projection';
@@ -160,6 +161,39 @@ describe('end-to-end format selection through defineTool', () => {
     // Object tool: object-rooted outputSchema IS advertised.
     expect(obj.outputSchema?.type).toBe('object');
     expect(obj.resultFormats).toEqual(['json']);
+  });
+
+  it('tools/list advertises a union-of-objects result (every branch kept) but never a union with a non-object branch', () => {
+    // A state-discriminated union projects to a type-less root `anyOf`. Every
+    // instance is still a JSON object, so it must reach MCP clients — before
+    // WI-10002937 the `type === 'object'` gate silently dropped it.
+    defineTool({
+      name: 'fmt:unionobj',
+      requirePrincipal: false,
+      capability: 'test:read',
+      args: z.object({}),
+      result: z.union([
+        z.object({ state: z.literal('pending') }),
+        z.object({ state: z.literal('ready'), output: z.string() }),
+      ]),
+      handler: async () => ({ data: { state: 'pending' as const } }),
+    });
+    defineTool({
+      name: 'fmt:unionmixed',
+      requirePrincipal: false,
+      capability: 'test:read',
+      args: z.object({}),
+      result: z.union([z.object({ state: z.literal('ready') }), z.string()]),
+      handler: async () => ({ data: 'x' }),
+    });
+    const listings = listMcpProjections();
+    const union = listings.find((l) => l.name === 'fmt:unionobj')!;
+    expect(union.outputSchema?.type).toBe('object');
+    const branches = (union.outputSchema?.anyOf ?? union.outputSchema?.oneOf) as unknown[];
+    expect(branches).toHaveLength(2);
+    expect(JSON.stringify(union.outputSchema)).toContain('"ready"');
+    expect(listings.find((l) => l.name === 'fmt:unionmixed')!.outputSchema).toBeUndefined();
+    expect(mcpObjectOutputSchema({ type: 'array', items: { type: 'object' } })).toBeUndefined();
   });
 
   it('opt-in structuredContent attaches lossless JSON alongside the compact text (P-010)', async () => {

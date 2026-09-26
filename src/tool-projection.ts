@@ -2152,6 +2152,44 @@ function serializeEventsSchema(events: EventsSchema): Record<string, Record<stri
   return out;
 }
 
+function isObjectTypedBranch(branch: unknown): boolean {
+  return (
+    branch !== null &&
+    typeof branch === 'object' &&
+    !Array.isArray(branch) &&
+    (branch as Record<string, unknown>).type === 'object'
+  );
+}
+
+/**
+ * The MCP `outputSchema` for a tool's registered output JSON schema, or
+ * `undefined` when its instances are not guaranteed to be JSON objects (the
+ * spec requires `structuredContent` to be an object, and the SDK rejects a
+ * tools/list whose outputSchema is not object-typed).
+ *
+ * An object-rooted schema passes through unchanged. A type-less root
+ * `anyOf`/`oneOf` whose EVERY branch is object-typed — a union of object
+ * results such as a `state`-discriminated union — always validates to an
+ * object, so `type: 'object'` is hoisted onto the root. That is a pure
+ * narrowing: every branch is preserved, nothing is merged or relaxed (unlike
+ * `flattenForOpenAi`). Array/scalar roots, `$ref` branches and unions with any
+ * non-object branch stay unadvertised, exactly as before.
+ */
+export function mcpObjectOutputSchema(
+  schema: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!schema) return undefined;
+  if (schema.type === 'object') return schema;
+  if (schema.type !== undefined) return undefined;
+  for (const key of ['anyOf', 'oneOf'] as const) {
+    const branches = schema[key];
+    if (Array.isArray(branches) && branches.length > 0 && branches.every(isObjectTypedBranch)) {
+      return { type: 'object', ...schema };
+    }
+  }
+  return undefined;
+}
+
 export function listMcpProjections(role?: AgentRole, profile?: 'engineer' | 'power'): McpToolListing[] {
   const out: McpToolListing[] = [];
   const registryRevision = projectedToolRegistryRevision();
@@ -2182,9 +2220,8 @@ export function listMcpProjections(role?: AgentRole, profile?: 'engineer' | 'pow
     // arrays, so we only emit the spec-standard `outputSchema` for object-rooted
     // shapes; the array/list case advertises capability via the `resultFormats`
     // extension below (which the SDK tolerates as an unknown field).
-    if (tool.outputJsonSchema && tool.outputJsonSchema.type === 'object') {
-      listing.outputSchema = tool.outputJsonSchema;
-    }
+    const outputSchema = mcpObjectOutputSchema(tool.outputJsonSchema);
+    if (outputSchema) listing.outputSchema = outputSchema;
     if (tool.resultEligibility) {
       const formats = [...tool.resultEligibility.capabilities] as McpToolListing['resultFormats'];
       listing.resultFormats = formats;
