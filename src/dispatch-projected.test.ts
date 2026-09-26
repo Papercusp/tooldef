@@ -283,6 +283,25 @@ describe('dispatchProjectedTool', () => {
     expect(seen).toEqual(['chunk:ck_Z']);
   });
 
+  it('passes call input to quota policy so read operations survive an exhausted write window', async () => {
+    const tool = makeTool({ rolesQuota: { worker: { perRun: 1 } } });
+    const computeQuotaWindow = vi.fn((_ctx, roleQuota, _toolName, input) => {
+      const read = input?.op === 'status';
+      return { key: `run:run_X:${read ? 'read' : 'write'}`, limit: read ? null : roleQuota?.perRun ?? null };
+    });
+    const readQuotaState = vi.fn(async () => ({ count: 1 }));
+    const deps = MAKE_DEPS({ computeQuotaWindow, readQuotaState });
+
+    const status = await dispatchProjectedTool(tool, 'fix.tool', { op: 'status' }, MAKE_CTX(), deps);
+    const write = await dispatchProjectedTool(tool, 'fix.tool', { op: 'run' }, MAKE_CTX(), deps);
+
+    expect(status.ok).toBe(true);
+    expect(write.error?.code).toBe('quota_exceeded');
+    expect(readQuotaState).toHaveBeenCalledOnce();
+    expect(readQuotaState).toHaveBeenCalledWith('fix.tool', expect.anything(), 'run:run_X:write');
+    expect(computeQuotaWindow.mock.calls.map((call) => call[3])).toEqual([{ op: 'status' }, { op: 'run' }]);
+  });
+
   it('records ok invocations with output size', async () => {
     const tool = makeTool({
       fn: async () => ({ content: [{ type: 'text', text: 'a b c' }] }),
