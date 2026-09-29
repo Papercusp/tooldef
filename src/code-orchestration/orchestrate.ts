@@ -20,7 +20,7 @@
 import type { ProjectedTool, UnifiedToolContext } from '../tool-projection';
 import type { DispatchProjectedDeps } from '../dispatch-types';
 import { buildToolFacade, type FacadeDispatch } from './tool-facade';
-import { realDispatch, isPreExecutionFailure } from './dispatch-binding';
+import { realDispatch, isPreExecutionFailure, ToolDispatchError } from './dispatch-binding';
 import {
   DEFAULT_TIMEOUT_SETTLEMENT_GRACE_MS,
   runOrchestrationScript,
@@ -997,6 +997,12 @@ export async function runToolOrchestration(
   const unknownRefs = check.ok ? undefined : check.unknownRefs;
 
   const dispatch: FacadeDispatch = async (tool, name, args) => {
+    // D-009: after an abort (the caller's deadline, detach or supersession, or this run's own
+    // timeout) no new host work begins — including a call the worker posted just before it was
+    // terminated. Refused before the dispatcher is entered, so it provably wrote nothing.
+    if (orchestrationAbort.signal.aborted) {
+      throw new ToolDispatchError(name, 'orchestration_aborted', 'the orchestration was cancelled before this call started');
+    }
     const effect = resolveFacadeToolEffect(tool, name, args, tools);
     const callRecord: OrchestrationCallRecord = {
       ordinal: callRecords.length,
@@ -1135,6 +1141,9 @@ export async function runToolOrchestration(
     ...(timeoutMs ? { timeoutMs } : {}),
     ...(opts.timeoutGraceMs !== undefined ? { timeoutGraceMs: opts.timeoutGraceMs } : {}),
     onTimeout: settleOnTimeout,
+    // The caller's abort terminates the worker too; aborting in-flight handlers alone would let
+    // the script keep posting calls until its own timeout.
+    ...(ctx.signal ? { signal: ctx.signal } : {}),
     ...(opts.inputs ? { inputs: opts.inputs } : {}),
     ...(ctx.emit ? { emit: (name, data) => ctx.emit(name, data) } : {}),
   });

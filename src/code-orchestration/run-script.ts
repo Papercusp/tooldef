@@ -1069,6 +1069,7 @@ export async function runOrchestrationScript(
       if (settled || (timeoutTriggered && !fromTimeout)) return;
       settled = true;
       clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', onAbort);
       void worker.terminate();
       resolve({
         ...out,
@@ -1108,14 +1109,21 @@ export async function runOrchestrationScript(
     // The kill switch: terminate() stops the worker thread even mid sync-loop. Host-side facade
     // calls may still be awaiting real tools, so the awaitable hook gets a bounded grace window
     // before this outer result resolves (EI-20282336542235171).
-    const timer = setTimeout(() => {
+    const stop = (error: string): void => {
       if (settled || timeoutTriggered) return;
       timeoutTriggered = true;
       void worker.terminate();
       void awaitTimeoutHook().then(() => {
-        finish({ ok: false, error: `script_timeout after ${timeoutMs}ms` }, true);
+        finish({ ok: false, error }, true);
       });
-    }, timeoutMs);
+    };
+    const timer = setTimeout(() => stop(`script_timeout after ${timeoutMs}ms`), timeoutMs);
+    // A caller abort is the same kill switch as the wall-clock budget (D-009): terminating the
+    // worker is what stops the script queueing more host work; the hook then settles the rest.
+    function onAbort(): void {
+      stop(SCRIPT_ABORTED_ERROR);
+    }
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
 
     worker.on('message', (m: WorkerMessage) => {
       if (m.t === 'log') {

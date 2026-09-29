@@ -203,6 +203,91 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     expect(r.detachedCalls).toBeUndefined();
   }, 10_000);
 
+  describe('caller abort reaches the worker and the dispatcher (portable-identity P-013, D-009)', () => {
+    const signalOf = (ctx: unknown): AbortSignal => (ctx as { signal: AbortSignal }).signal;
+
+    it('terminates the script at a parent abort, aborts the in-flight handler and dispatches nothing after it', async () => {
+      const parent = new AbortController();
+      let slowSawAbort = false;
+      let afterCalls = 0;
+      const slow = mkTool('slow:get', 'read', (async (_a: unknown, ctx: unknown) => {
+        setTimeout(() => parent.abort('deadline'), 50);
+        await new Promise<void>((resolve) => signalOf(ctx).addEventListener('abort', () => resolve(), { once: true }));
+        slowSawAbort = true;
+        return json({ late: true });
+      }) as ProjectedTool['fn']);
+      const after = mkTool('after:get', 'read', async () => {
+        afterCalls += 1;
+        return json({ ok: true });
+      });
+      const startedAt = Date.now();
+      const r = await runToolOrchestration(
+        `await tools.slow.get({}); for (;;) { await tools.after.get({}); }`,
+        { ctx: MAKE_CTX({ signal: parent.signal }), deps: DEPS, tools: [slow, after], timeoutMs: 8_000, timeoutGraceMs: 200 },
+      );
+      expect(r.ok).toBe(false);
+      expect(r.error).toContain('script_aborted');
+      expect(slowSawAbort).toBe(true);
+      expect(afterCalls).toBe(0);
+      // Stopped by the abort, not by the script's own 8s budget.
+      expect(Date.now() - startedAt).toBeLessThan(4_000);
+    }, 10_000);
+
+    it('refuses calls a busy script keeps posting once the parent aborted', async () => {
+      const parent = new AbortController();
+      let calls = 0;
+      let callsAtAbort = -1;
+      const tick = mkTool('tick:get', 'read', async () => {
+        calls += 1;
+        if (calls === 3) {
+          callsAtAbort = calls;
+          parent.abort('deadline');
+        }
+        return json({ n: calls });
+      });
+      const r = await runToolOrchestration(
+        `for (;;) { await tools.tick.get({}); }`,
+        { ctx: MAKE_CTX({ signal: parent.signal }), deps: DEPS, tools: [tick], timeoutMs: 8_000, timeoutGraceMs: 100 },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(r.error).toContain('script_aborted');
+      expect(callsAtAbort).toBe(3);
+      expect(calls).toBe(3);
+    }, 10_000);
+
+    it('starts nothing for a caller that aborted before the run', async () => {
+      const parent = new AbortController();
+      parent.abort('detached');
+      let calls = 0;
+      const tick = mkTool('tick:get', 'read', async () => {
+        calls += 1;
+        return json({});
+      });
+      const r = await runToolOrchestration(`await tools.tick.get({}); return 1;`,
+        { ctx: MAKE_CTX({ signal: parent.signal }), deps: DEPS, tools: [tick] });
+      expect(r.ok).toBe(false);
+      expect(r.error).toContain('script_aborted');
+      expect(r.dispatchCount).toBe(0);
+      expect(calls).toBe(0);
+    });
+
+    it('reports a handler that ignores the abort as detached instead of waiting for it', async () => {
+      const parent = new AbortController();
+      let release!: () => void;
+      const stubborn = mkTool('stubborn:get', 'read', async () => {
+        setTimeout(() => parent.abort('deadline'), 50);
+        await new Promise<void>((resolve) => { release = resolve; });
+        return json({ late: true });
+      });
+      const r = await runToolOrchestration(`await tools.stubborn.get({}); return 'unreachable';`, {
+        ctx: MAKE_CTX({ signal: parent.signal }), deps: DEPS, tools: [stubborn], timeoutMs: 8_000, timeoutGraceMs: 100,
+      });
+      expect(r.error).toContain('script_aborted');
+      expect(r.detachedCalls?.map((call) => call.tool)).toEqual(['stubborn:get']);
+      release();
+    }, 10_000);
+  });
+
   describe('P-027 explicit final media result', () => {
     it('extracts validated image/audio blocks while preserving the authored summary', async () => {
       const r = await runToolOrchestration(
