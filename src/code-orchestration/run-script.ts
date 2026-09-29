@@ -227,7 +227,17 @@ export interface RunScriptOptions {
   inputs?: OrchestrationInputs;
   /** Streaming helper sink. notify/yield_control map to this caller-scoped transport callback. */
   emit?: (name: string, data: unknown) => void;
+  /**
+   * Caller cancellation (a deadline, detach or supersession above this run). An abort stops the
+   * worker exactly like the wall-clock budget: it is terminated at once, so the script cannot
+   * post another call, and {@link onTimeout} gets the same bounded settlement grace. The result is
+   * `script_aborted`. Without this, a parent abort cancelled in-flight handlers while the worker
+   * kept running and posting new calls until its own timeout.
+   */
+  signal?: AbortSignal;
 }
+
+export const SCRIPT_ABORTED_ERROR = 'script_aborted: the caller cancelled this run';
 
 function jsonInputError(value: unknown, path: string, seen: Set<object>): string | null {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return null;
@@ -1033,6 +1043,9 @@ export async function runOrchestrationScript(
   if (inputsError) {
     return { ok: false, error: `inputs_not_serializable: ${inputsError}`, logs };
   }
+
+  // Nothing starts for a caller that already gave up.
+  if (opts.signal?.aborted) return { ok: false, error: SCRIPT_ABORTED_ERROR, logs };
 
   // Lazy: keeps the barrel browser-safe (see the header note on the type-only import above).
   const { Worker } = await import('node:worker_threads');

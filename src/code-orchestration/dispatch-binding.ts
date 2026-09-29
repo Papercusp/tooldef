@@ -134,6 +134,8 @@ export const PRE_EXECUTION_ERROR_CODES: ReadonlySet<string> = new Set([
   'envelope_denied',
   'quota_exceeded',
   'rate_limited',
+  // The orchestration's own abort fence: refused before the dispatcher is entered.
+  'orchestration_aborted',
 ]);
 
 /**
