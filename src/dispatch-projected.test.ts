@@ -71,6 +71,12 @@ describe('defaultComputeQuotaWindow', () => {
   it('takes the ceiling from roleQuota.perRun', () => {
     expect(defaultComputeQuotaWindow(MAKE_CTX(), { perRun: 5 }).limit).toBe(5);
   });
+  it('keys on the quotaSubject when one is named, so a fresh runId cannot reset the count', () => {
+    expect(defaultComputeQuotaWindow(MAKE_CTX({ runId: 'run_A', quotaSubject: 'wearer:w1' }), { perRun: 5 }))
+      .toEqual({ key: 'subject:wearer:w1', limit: 5 });
+    expect(defaultComputeQuotaWindow(MAKE_CTX({ runId: 'run_B', quotaSubject: 'wearer:w1' }), { perRun: 5 }).key)
+      .toBe('subject:wearer:w1');
+  });
   it('reports a null limit when there is no roleQuota', () => {
     expect(defaultComputeQuotaWindow(MAKE_CTX(), undefined).limit).toBeNull();
   });
