@@ -304,6 +304,19 @@ describe('formatIssues — union branch descent (EI-19968462161677390)', () => {
     }
   });
 
+  it('preserves an explicit union-level message for a scalar union refusal', () => {
+    const accepted = 'wake accepts required, optimistic, or a boolean';
+    const wakeSchema = z.object({
+      wake: z.union([z.boolean(), z.enum(['required', 'optimistic'])], { error: accepted }),
+    });
+    const r = wakeSchema.safeParse({ wake: 'none' });
+
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      expect(formatIssues(r.error.issues, { wake: 'none' })).toBe(`wake: ${accepted}`);
+    }
+  });
+
   it('still renders a plain (non-union) issue unchanged', () => {
     const plain = z.object({ id: z.string() });
     const r = plain.safeParse({});
