@@ -22,6 +22,7 @@
  *                        `alternatives`, never in `match`.
  */
 import { matchName, type MatchParams } from './resolve-name-match';
+import { FUZZY_RESOLVE_M, FUZZY_RESOLVE_T } from './resolve-name-thresholds';
 
 export interface ResolveNameOptions extends MatchParams {
   /** Capability tier of a candidate; `'high'` (D-007) is never fuzzy-resolved. */
@@ -30,13 +31,8 @@ export interface ResolveNameOptions extends MatchParams {
   readonly neverFuzzy?: (tool: string) => boolean;
 }
 
-/**
- * Working `{ T, M }` for seams that have no calibrated pair of their own. Provisional until
- * P-003 (WI-10004036) freezes the calibrated values: M >= 2 raw edits is the floor at which the
- * P-004 grid probe produced zero false-resolves for every T in 0.15–0.4 (M = 1 lets 10 hard raw
- * ties resolve); T = 0.25 is mid-band. Replace with P-003's export when it lands.
- */
-export const DEFAULT_RESOLVE_PARAMS: MatchParams = { T: 0.25, M: 2 };
+/** The frozen, sweep-calibrated `{ T, M }` (P-003, `resolve-name-thresholds.ts`) — the seam default. */
+export const DEFAULT_RESOLVE_PARAMS: MatchParams = { T: FUZZY_RESOLVE_T, M: FUZZY_RESOLVE_M };
 
 export type ResolveVia = 'canonical' | 'fuzzy';
 

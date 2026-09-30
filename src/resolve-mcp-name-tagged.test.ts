@@ -62,11 +62,13 @@ describe('resolveMcpNameTagged', () => {
   });
 
   it('a MUTATING tool is never fuzzy-resolved by default (D-007) — reported as blocked', () => {
-    reg('flags:set', { effect: 'write' });
-    const r = resolveMcpNameTagged('flags:sett');
+    // Verb long enough that ONE edit stays within the frozen T (0.2) — 'flags:set' vs 'flags:sett'
+    // is 1/4 = 0.25 and would be a plain miss, proving nothing about the D-007 gate.
+    reg('plans:set-status', { effect: 'write' });
+    const r = resolveMcpNameTagged('plans:set-statuss');
     expect(r.tool).toBeUndefined();
     expect(r.blocked).toBe(true);
-    expect(r.alternatives).toEqual(['flags:set']);
+    expect(r.alternatives).toEqual(['plans:set-status']);
   });
 
   it('a tierOf==high tool is never fuzzy-resolved even when it is a read (D-007)', () => {
