@@ -540,6 +540,40 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     ]);
   });
 
+  it.each([
+    {
+      label: 'the validateOnly request flag',
+      args: { id: 'WI-1', validateOnly: true },
+      result: { ok: true, id: 'WI-1', validationOnly: true },
+    },
+    {
+      label: 'the normalized validationOnly response marker',
+      args: { id: 'WI-1' },
+      result: { ok: true, id: 'WI-1', validationOnly: true },
+    },
+  ])('classifies work-items complete preflights from $label as previews', async ({ args, result }) => {
+    const complete = mkTool('work_items:complete', 'write', async () => json(result));
+    const script = 'await tools.workItems.complete(' + JSON.stringify(args) + "); return 'preflight';";
+    const r = await runToolOrchestration(script, {
+      ctx: MAKE_CTX(),
+      deps: DEPS,
+      tools: [complete],
+    });
+
+    expect(r.ok).toBe(true);
+    expect(r.plannedMutations).toEqual([{ tool: 'work_items:complete', args }]);
+    expect(r.writeAttempts).toEqual([
+      { index: 0, tool: 'work_items:complete', disposition: 'preview' },
+    ]);
+    expect(r.callRecords).toEqual([
+      expect.objectContaining({
+        tool: 'work_items:complete',
+        effect: 'write',
+        disposition: 'preview',
+      }),
+    ]);
+  });
+
   // EI-7669: a write-effect call can dispatch fine (no throw — realDispatch only throws on a
   // dispatch-level failure) yet report its OWN semantic rejection (ok: false in its result body,
   // e.g. work_items:set_state's completion-integrity check). A script that doesn't inspect every

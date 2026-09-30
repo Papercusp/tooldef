@@ -711,16 +711,19 @@ function isBulkPartialFailure(
 
 /**
  * A write-class tool can be dispatched by a non-dry-run orchestration while asking the tool
- * itself for a preview (for example `rubrics:amend({ dryRun: true })`). The outer orchestration
- * dry-run gate cannot see that intent: it only knows the tool's registry effect. Keep the check
- * deliberately top-level and exact, and accept the returned marker as a compatibility fallback
- * for tools that normalize/default their preview flag before returning.
+ * itself for a preview (for example a rubrics amend with dryRun:true or a work-items complete
+ * preflight with validateOnly:true). The outer orchestration dry-run gate cannot see that intent:
+ * it only knows the tool's registry effect. Keep the check deliberately top-level and exact, and
+ * accept returned markers as a compatibility fallback for tools that normalize the flag.
  */
 function isChildPreview(args: unknown, result: unknown): boolean {
-  const hasDryRunMarker = (value: unknown): boolean =>
-    typeof value === 'object' && value !== null && !Array.isArray(value) &&
-    (value as Record<string, unknown>).dryRun === true;
-  return hasDryRunMarker(args) || hasDryRunMarker(result);
+  const hasPreviewMarker = (value: unknown): boolean => {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+    const record = value as Record<string, unknown>;
+    // work_items:complete accepts validateOnly but returns validationOnly.
+    return record.dryRun === true || record.validateOnly === true || record.validationOnly === true;
+  };
+  return hasPreviewMarker(args) || hasPreviewMarker(result);
 }
 
 const OUTPUT_REFERENCE_SHA_RE = /^[0-9a-f]{64}$/i;
