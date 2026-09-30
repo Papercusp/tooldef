@@ -138,12 +138,16 @@ describe('ADVERSARIAL_CASES — corpus invariants', () => {
     }
   });
 
-  it('far synonyms stay far: normalized distance to every forbidden target is >= 0.25', () => {
+  it('far synonyms stay far at the VERB level: >= 0.4 normalized distance to every forbidden target verb', () => {
+    // Whole-name distance is NOT the right yardstick: `work_items:update` is only 0.18 from
+    // `work_items:create` because the 11-char group prefix is shared — exactly the get/set
+    // collision D-005's group-then-verb matching exists to remove. The verb is what differs.
+    const verbOf = (n: string) => n.slice(n.lastIndexOf(':') + 1);
     const far = ADVERSARIAL_CASES.filter((c) => c.cls === 'far-synonym');
     expect(far.length).toBe(FAR_SYNONYMS.length);
     for (const f of far) {
       for (const target of f.mustNotResolveTo) {
-        expect(normalizedEditDistance(f.rawInput, target), `${f.rawInput} -> ${target}`).toBeGreaterThanOrEqual(0.25);
+        expect(normalizedEditDistance(verbOf(f.rawInput), verbOf(target)), `${f.rawInput} -> ${target}`).toBeGreaterThanOrEqual(0.4);
       }
     }
   });
@@ -193,6 +197,14 @@ describe('ADVERSARIAL_CASES — falsifiability (the corpus can fail a bad resolv
       const out = gatedResolve(c.rawInput, ADVERSARIAL_UNIVERSE, 0.2);
       expect(out === undefined || !c.mustNotResolveTo.includes(out), `${c.id} -> ${out}`).toBe(true);
     }
+  });
+
+  it('normalized-float uniqueness false-resolves raw ties — resolvers must judge ties on RAW edits (P-004 contract)', () => {
+    const leaked = HARD_ADVERSARIAL_CASES.filter((c) => {
+      const out = normalizedUniquenessResolve(c.rawInput, ADVERSARIAL_UNIVERSE, 0.2);
+      return out !== undefined && c.mustNotResolveTo.includes(out);
+    });
+    expect(leaked.map((c) => c.id)).toContain('tie:accounts:npin');
   });
 
   it('a margin probe DOES resolve under a bare unique-nearest gate — that is what M must arbitrate', () => {
