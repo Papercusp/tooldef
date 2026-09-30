@@ -147,6 +147,7 @@ describe('unknownArgHint + server-vintage wiring', () => {
     expect(message).toContain('why: Invalid input: expected object');
     expect(message).toContain('why` accepts');
     expect(message).toContain('goalRef');
+    // vacuous-negative-ok: the appended full-schema dump was retired; pins its label out so it cannot return
     expect(message).not.toContain('full args schema:');
   });
 });
