@@ -68,6 +68,8 @@ import type {
 export type ResultDoorSkipReason = 'programmatic-caller' | 'oversize-by-design';
 import { pinModuleState } from '@papercusp/module-singleton';
 import { fnv1a64BytesHex } from './fnv1a64';
+import { DEFAULT_RESOLVE_PARAMS, resolveToolName } from './resolve-name';
+import type { MatchParams } from './resolve-name-match';
 import { toJsonSchema } from './schema-adapter';
 import type { StandardSchemaV1 } from './standard-schema';
 import type { Authorizer } from './authz';
@@ -1689,6 +1691,126 @@ export function resolveMcpName(name: string): ProjectedTool | undefined {
     }
   }
   return hit;
+}
+
+/** How {@link resolveMcpNameTagged} found (or failed to find) a tool. */
+export type McpNameResolution =
+  /** the registered name, verbatim */
+  | 'exact'
+  /** case / separator / `mcp__<server>__` fold — a formatting difference only (D-004) */
+  | 'canonical'
+  /** typo recovery (D-005/D-006) — the caller MUST annotate this on its reply (D-008) */
+  | 'fuzzy';
+
+export interface ResolveMcpNameOptions {
+  /**
+   * D-009: which registered tools this caller can actually dispatch. The fuzzy stage only
+   * proposes / resolves to tools this returns true for, so a "did you mean" never points at a
+   * tool the caller is not allowed to see. Defaults to every registered tool.
+   */
+  readonly visible?: (tool: ProjectedTool) => boolean;
+  /** D-007: capability tier of a registered name; `'high'` is never fuzzy-resolved. */
+  readonly tierOf?: (mcpName: string) => string | undefined;
+  /**
+   * D-007: extra never-fuzzy predicate. Defaults to "the tool declares `effect: 'write'`" —
+   * catalog tiers are capability-based (a `flags:set` can be `medium`), so tier alone would let
+   * a typo dispatch a mutation. Pass `() => false` to opt out.
+   */
+  readonly neverFuzzy?: (tool: ProjectedTool) => boolean;
+  /** Calibrated `{ T, M }`; defaults to {@link DEFAULT_RESOLVE_PARAMS}. */
+  readonly params?: MatchParams;
+}
+
+export interface ResolvedMcpName {
+  /** The tool to dispatch. Absent on a miss, an ambiguity, or a withheld (blocked) fuzzy hit. */
+  readonly tool?: ProjectedTool;
+  /** How `tool` was found; absent when nothing resolved. */
+  readonly via?: McpNameResolution;
+  /** The name the caller sent, verbatim — what a `via:'fuzzy'` annotation reports as "you sent". */
+  readonly input: string;
+  /** The canonical registered name that was resolved to (or, when blocked, the closest one). */
+  readonly resolvedName?: string;
+  /** Raw edit count for a fuzzy hit; 0 for exact/canonical. */
+  readonly distance?: number;
+  /** >=2 plausible tools too close to call — never guess. */
+  readonly ambiguous?: boolean;
+  /** The single best fuzzy hit was withheld by the D-007 gate. */
+  readonly blocked?: boolean;
+  /** "Did you mean" material (canonical names), best first. Empty when nothing is close. */
+  readonly alternatives: readonly string[];
+}
+
+/**
+ * Tolerant lookup with TYPO recovery (plan fuzzy-tool-name-resolution-2026-07-02, P-005).
+ *
+ * The tagged sibling of {@link resolveMcpName}, NOT a change to it: `resolveMcpName` stays
+ * canonical-only because several callers (identity-grants port, sibling-arg owner lookup,
+ * source-file lookup) derive AUTHORITY or attribution from the resolved tool and must never
+ * act on a guess. A dispatch seam that wants typo recovery calls this instead, and is then
+ * obliged to surface `via:'fuzzy'` to its caller (D-008 — that is P-006).
+ *
+ * Stages, miss-path only (D-003): exact registered name → canonical fold (unambiguous only,
+ * exactly as `resolveMcpName`) → fuzzy over the caller-visible candidate set. An ambiguous
+ * canonical fold is returned as ambiguous and NEVER falls through to fuzzy.
+ */
+export function resolveMcpNameTagged(name: string, opts: ResolveMcpNameOptions = {}): ResolvedMcpName {
+  const exact = BY_MCP_NAME.get(name);
+  if (exact && (opts.visible?.(exact) ?? true)) {
+    return { tool: exact, via: 'exact', input: name, resolvedName: name, distance: 0, alternatives: [name] };
+  }
+  const visible = (t: ProjectedTool): boolean => opts.visible?.(t) ?? true;
+  const norm = normalizeMcpName(name);
+  if (!norm) return { input: name, alternatives: [] };
+
+  // Stage 1 — canonical fold (identical semantics to resolveMcpName, over the visible set).
+  let hit: { name: string; tool: ProjectedTool } | undefined;
+  let ambiguous = false;
+  for (const [registered, tool] of BY_MCP_NAME) {
+    if (!visible(tool)) continue;
+    if (normalizeMcpName(registered) === norm) {
+      if (hit && hit.tool !== tool) ambiguous = true;
+      else hit = { name: registered, tool };
+    }
+  }
+  if (ambiguous) return { input: name, ambiguous: true, alternatives: [], };
+  if (hit) {
+    return { tool: hit.tool, via: 'canonical', input: name, resolvedName: hit.name, distance: 0, alternatives: [hit.name] };
+  }
+
+  // Stage 2 — fuzzy over the visible candidate set.
+  const byName = new Map<string, ProjectedTool>();
+  for (const [registered, tool] of BY_MCP_NAME) if (visible(tool)) byName.set(registered, tool);
+  const neverFuzzy = opts.neverFuzzy ?? ((t: ProjectedTool) => t.effect === 'write');
+  const r = resolveToolName(name, Array.from(byName.keys()), {
+    ...(opts.params ?? DEFAULT_RESOLVE_PARAMS),
+    tierOf: opts.tierOf,
+    neverFuzzy: (n) => {
+      const t = byName.get(n);
+      return t !== undefined && neverFuzzy(t);
+    },
+  });
+  const resolvedName = r.match ?? r.alternatives[0];
+  if (r.match) {
+    const tool = byName.get(r.match);
+    if (tool) {
+      return {
+        tool,
+        via: r.via === 'canonical' ? 'canonical' : 'fuzzy',
+        input: name,
+        resolvedName: r.match,
+        distance: r.distance,
+        alternatives: r.alternatives,
+      };
+    }
+  }
+  return {
+    input: name,
+    ...(resolvedName !== undefined ? { resolvedName } : {}),
+    ...(r.distance !== undefined ? { distance: r.distance } : {}),
+    ...(r.ambiguous ? { ambiguous: true } : {}),
+    ...(r.blocked ? { blocked: true } : {}),
+    alternatives: r.alternatives,
+  };
 }
 
 /** Look up by HTTP path (e.g. '/api/plugins/repomix/pack'). */

@@ -53,6 +53,26 @@ function gatedResolve(input: string, universe: readonly string[], t: number): st
 }
 
 /**
+ * The D-005 shape: resolve the GROUP exactly, then judge the VERB within that group only
+ * (raw-edit uniqueness, normalized threshold on the verb). A reference for "the bar is
+ * satisfiable" — P-004's real resolver is measured by P-003, not by this test helper.
+ */
+function structuredResolve(input: string, universe: readonly string[], t: number): string | undefined {
+  const cut = input.indexOf(':');
+  if (cut < 0) return undefined;
+  const group = input.slice(0, cut);
+  const verb = input.slice(cut + 1);
+  const inGroup = universe.filter((u) => u.startsWith(`${group}:`));
+  const ds = inGroup
+    .map((u) => [u, editDistance(verb, u.slice(group.length + 1)), normalizedEditDistance(verb, u.slice(group.length + 1))] as const)
+    .sort((a, b) => a[1] - b[1]);
+  const [first, second] = ds;
+  if (!first || first[2] > t) return undefined;
+  if (second && second[1] === first[1]) return undefined;
+  return first[0];
+}
+
+/**
  * The tempting-but-wrong variant: uniqueness on the NORMALIZED float. Normalizing by
  * max(len) makes the LONGER of two raw-tied names look strictly nearer
  * (`accounts:npin` is 1 edit from both `accounts:pin` and `accounts:unpin`, but 1/13 vs 1/14),
@@ -192,11 +212,19 @@ describe('ADVERSARIAL_CASES — falsifiability (the corpus can fail a bad resolv
     expect(falseResolves.length).toBeGreaterThan(20);
   });
 
-  it('a unique-nearest gate at a tight T resolves ZERO hard cases (the bar is satisfiable)', () => {
+  it('a group-then-verb (D-005) gate at a tight T resolves ZERO hard cases (the bar is satisfiable)', () => {
     for (const c of HARD_ADVERSARIAL_CASES) {
-      const out = gatedResolve(c.rawInput, ADVERSARIAL_UNIVERSE, 0.2);
+      const out = structuredResolve(c.rawInput, ADVERSARIAL_UNIVERSE, 0.2);
       expect(out === undefined || !c.mustNotResolveTo.includes(out), `${c.id} -> ${out}`).toBe(true);
     }
+  });
+
+  it('a WHOLE-NAME unique-nearest gate at the same T still false-resolves a far synonym — the corpus is what demands D-005', () => {
+    const leaked = HARD_ADVERSARIAL_CASES.filter((c) => {
+      const out = gatedResolve(c.rawInput, ADVERSARIAL_UNIVERSE, 0.2);
+      return out !== undefined && c.mustNotResolveTo.includes(out);
+    });
+    expect(leaked.map((c) => c.id)).toContain('far-synonym:work_items:update');
   });
 
   it('normalized-float uniqueness false-resolves raw ties — resolvers must judge ties on RAW edits (P-004 contract)', () => {
@@ -208,7 +236,7 @@ describe('ADVERSARIAL_CASES — falsifiability (the corpus can fail a bad resolv
   });
 
   it('a margin probe DOES resolve under a bare unique-nearest gate — that is what M must arbitrate', () => {
-    const resolved = MARGIN_ADVERSARIAL_CASES.filter((c) => gatedResolve(c.rawInput, ADVERSARIAL_UNIVERSE, 0.2) === c.nearest[0]);
+    const resolved = MARGIN_ADVERSARIAL_CASES.filter((c) => structuredResolve(c.rawInput, ADVERSARIAL_UNIVERSE, 0.2) === c.nearest[0]);
     expect(resolved.length).toBeGreaterThan(0);
   });
 });
