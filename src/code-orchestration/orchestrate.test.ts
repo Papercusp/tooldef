@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   deriveCodeRunSettledReadReplayProof,
   runToolOrchestration,
+  TIMEOUT_SETTLED_READ_RECOVERY_MAX_BYTES,
   type OrchestrationCallRecord,
 } from './orchestrate';
 import type { StaticToolCall } from './parse-check';
@@ -160,6 +161,41 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     expect(r.ok).toBe(true);
     expect(r.summary).toEqual({ scanned: 3, bad: [2] }); // 4 tool calls collapsed into ONE code:run
   });
+
+  it('returns bounded settled read results when one slow Promise.all sibling reaches the script timeout', async () => {
+    const oversized = mkTool('read:oversized', 'read', async () => json({ body: 'x'.repeat(TIMEOUT_SETTLED_READ_RECOVERY_MAX_BYTES) }));
+    const small = mkTool('read:small', 'read', async () => json({ recovered: true }));
+    const write = mkTool('state:update', 'write', async () => json({ changed: true }));
+    const slow = mkTool('read:slow', 'read', async () => {
+      await new Promise((resolve) => setTimeout(resolve, 2_200));
+      return json({ settledDuringGrace: true });
+    });
+
+    const r = await runToolOrchestration(
+      `await Promise.all([
+        tools.read.oversized({}),
+        tools.read.small({}),
+        tools.state.update({}),
+        tools.read.slow({}),
+      ]);
+      return { allFinished: true };`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [oversized, small, write, slow], timeoutMs: 2_000, timeoutGraceMs: 1_000 },
+    );
+
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('script_timeout');
+    expect(r.timeoutSettledReadRecovery).toMatchObject({
+      totalSettledReadCount: 2,
+      omittedReadCount: 1,
+      maxBytes: TIMEOUT_SETTLED_READ_RECOVERY_MAX_BYTES,
+      calls: [
+        { ordinal: 1, tool: 'read:small', result: { recovered: true } },
+      ],
+    });
+    expect(r.timeoutSettledReadRecovery?.includedBytes).toBeLessThanOrEqual(TIMEOUT_SETTLED_READ_RECOVERY_MAX_BYTES);
+    expect(r.timeoutSettledReadRecovery?.calls.some((call) => call.tool === 'state:update')).toBe(false);
+    expect(r.plannedMutations).toEqual([{ tool: 'state:update', args: {} }]);
+  }, 8_000);
 
   it('preserves capability:bash explicit child failure after the outer script aborts', async () => {
     // A foreground capability:bash child kills its process when code:run aborts, then

@@ -260,6 +260,10 @@ export interface OrchestrateResult {
   /** Exact UTF-8 bytes of every child result that settled and entered the script
    *  runtime. Thrown dispatches have no result body and therefore add zero. */
   intermediateBytes?: number;
+  /** On a script timeout, bounded values from read-only children that settled before
+   *  the host returned. These recover results an awaited sibling (for example one
+   *  slow branch of Promise.all) would otherwise hide when the worker is terminated. */
+  timeoutSettledReadRecovery?: TimeoutSettledReadRecovery;
   /** Independent runtime evidence; never derived from the script's return value. */
   runtimeObservations: OrchestrationRuntimeObservations;
   /** Write-effect calls the script made (recorded in dryRun, observed otherwise).
@@ -337,6 +341,23 @@ export interface OrchestrateResult {
   detachedCalls?: DetachedOrchestrationCall[];
   /** Internal server-owned evidence; code:run carries it in MCP `_meta` and strips it from text. */
   replayProof?: CodeRunSettledReadReplayProof;
+}
+
+/** Hard limits on read bodies returned as recovery data after a script timeout. */
+export const TIMEOUT_SETTLED_READ_RECOVERY_MAX_BYTES = 24 * 1024;
+export const TIMEOUT_SETTLED_READ_RECOVERY_MAX_CALLS = 20;
+
+export interface TimeoutSettledReadRecovery {
+  /** Settled read-only children, in original dispatch order. */
+  calls: Array<{ ordinal: number; tool: string; result: unknown }>;
+  /** All successful read-only child results observed before the outer handler returned. */
+  totalSettledReadCount: number;
+  /** Settled read results omitted because a body was not JSON-serializable or a cap was reached. */
+  omittedReadCount: number;
+  /** UTF-8 bytes in the included serialized result bodies. */
+  includedBytes: number;
+  maxBytes: number;
+  maxCalls: number;
 }
 
 /**
@@ -424,6 +445,13 @@ interface ActiveOrchestrationCall {
   settled: Promise<void>;
   resolveSettled: () => void;
   callId?: string;
+}
+
+interface StoredTimeoutSettledRead {
+  ordinal: number;
+  tool: string;
+  serializedResult: string;
+  bytes: number;
 }
 
 function setContainsAll<T>(superset: ReadonlySet<T> | undefined, subset: ReadonlySet<T> | undefined): boolean {
@@ -952,6 +980,10 @@ export async function runToolOrchestration(
   let authorityWideningDetected = false;
   let dispatchCount = 0;
   let intermediateBytes = 0;
+  const timeoutSettledReads: StoredTimeoutSettledRead[] = [];
+  let timeoutSettledReadCount = 0;
+  let timeoutSettledReadOmittedCount = 0;
+  let timeoutSettledReadBytes = 0;
   const activeCalls = new Set<ActiveOrchestrationCall>();
   let timeoutTriggered = false;
   /** Frozen at the end of the bounded grace, before later handler microtasks can remove calls. */
@@ -1077,13 +1109,35 @@ export async function runToolOrchestration(
       // P-008: measure the exact serialized payload the script receives. Tool
       // results are JSON transport values; keep telemetry fail-soft if a custom
       // in-process fixture returns a non-serializable object.
+      let serializedResult: string | undefined;
+      let serializedResultBytes: number | undefined;
       try {
-        const serialized = JSON.stringify(result);
-        if (serialized !== undefined) {
-          intermediateBytes += new TextEncoder().encode(serialized).byteLength;
+        serializedResult = JSON.stringify(result);
+        if (serializedResult !== undefined) {
+          serializedResultBytes = new TextEncoder().encode(serializedResult).byteLength;
+          intermediateBytes += serializedResultBytes;
         }
       } catch {
         // Telemetry must never turn a settled child call into a failed run.
+      }
+      if (effect === 'read') {
+        timeoutSettledReadCount += 1;
+        if (
+          serializedResult !== undefined &&
+          serializedResultBytes !== undefined &&
+          timeoutSettledReads.length < TIMEOUT_SETTLED_READ_RECOVERY_MAX_CALLS &&
+          timeoutSettledReadBytes + serializedResultBytes <= TIMEOUT_SETTLED_READ_RECOVERY_MAX_BYTES
+        ) {
+          timeoutSettledReads.push({
+            ordinal: callRecord.ordinal,
+            tool: name,
+            serializedResult,
+            bytes: serializedResultBytes,
+          });
+          timeoutSettledReadBytes += serializedResultBytes;
+        } else {
+          timeoutSettledReadOmittedCount += 1;
+        }
       }
       callRecord.outputReferences = extractOutputReferences(result);
       // EI-7669: realDispatch only throws on a dispatch-level failure — a tool that dispatched fine
@@ -1184,6 +1238,23 @@ export async function runToolOrchestration(
           disposition: call.callRecord.disposition,
         }))
     : [];
+  const timeoutSettledReadRecovery: TimeoutSettledReadRecovery | undefined =
+    timeoutTriggered && timeoutSettledReadCount > 0
+      ? {
+          calls: timeoutSettledReads
+            .sort((a, b) => a.ordinal - b.ordinal)
+            .map(({ ordinal, tool, serializedResult }) => ({
+              ordinal,
+              tool,
+              result: JSON.parse(serializedResult) as unknown,
+            })),
+          totalSettledReadCount: timeoutSettledReadCount,
+          omittedReadCount: timeoutSettledReadOmittedCount,
+          includedBytes: timeoutSettledReadBytes,
+          maxBytes: TIMEOUT_SETTLED_READ_RECOVERY_MAX_BYTES,
+          maxCalls: TIMEOUT_SETTLED_READ_RECOVERY_MAX_CALLS,
+        }
+      : undefined;
   const finalResult = run.ok ? parseFinalResult(run.result) : { summary: run.result };
   const generated = validateGeneratedImages(run.generatedImages);
   const media = [...(finalResult.media ?? []), ...generated.media];
@@ -1226,6 +1297,7 @@ export async function runToolOrchestration(
     ...(strandedWrites.length ? { strandedWrites } : {}),
     ...(notDispatchedWrites.length ? { notDispatchedWrites } : {}),
     ...(detachedCalls.length ? { detachedCalls } : {}),
+    ...(timeoutSettledReadRecovery ? { timeoutSettledReadRecovery } : {}),
     ...(replayProof ? { replayProof } : {}),
     ...(run.fieldMisses?.length ? { fieldMisses: run.fieldMisses } : {}),
     ...(run.sleepCaps?.length ? { sleepCaps: run.sleepCaps } : {}),
