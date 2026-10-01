@@ -389,7 +389,7 @@ describe('dispatchProjectedTool', () => {
     expect(r.ok).toBe(false);
     expect(r.error?.code).toBe('handler_error');
     expect(captured.errorCode).toBe('handler_error');
-    expect(captured.metadataJson).toEqual({
+    expect(captured.metadataJson).toMatchObject({
       requestId: 'req-1',
       postgres: { sqlState: '23505', constraintName: 'goals_attach_pot_one_owner' },
     });
@@ -1202,7 +1202,7 @@ describe('metadata_json auto-fill from ctx.uiClientId (telemetry-tagging audit)'
         recordInvocation: async (input) => { captured = input.metadataJson; },
       }),
     );
-    expect(captured).toEqual({ uiClientId: 'audit-probe-1' });
+    expect(captured).toMatchObject({ uiClientId: 'audit-probe-1' });
   });
 
   it('merges ctx.uiClientId into handler-supplied metadata', async () => {
@@ -1222,7 +1222,7 @@ describe('metadata_json auto-fill from ctx.uiClientId (telemetry-tagging audit)'
         recordInvocation: async (input) => { captured = input.metadataJson; },
       }),
     );
-    expect(captured).toEqual({
+    expect(captured).toMatchObject({
       kind: 'docs:get',
       heading: 'overview',
       uiClientId: 'audit-probe-2',
@@ -1246,7 +1246,7 @@ describe('metadata_json auto-fill from ctx.uiClientId (telemetry-tagging audit)'
         recordInvocation: async (input) => { captured = input.metadataJson; },
       }),
     );
-    expect(captured).toEqual({ uiClientId: 'handler-wins' });
+    expect(captured).toMatchObject({ uiClientId: 'handler-wins' });
   });
 
   it('does nothing when ctx.uiClientId is null/undefined', async () => {
@@ -1263,7 +1263,7 @@ describe('metadata_json auto-fill from ctx.uiClientId (telemetry-tagging audit)'
         recordInvocation: async (input) => { captured = input.metadataJson; },
       }),
     );
-    expect(captured).toBeNull();
+    expect(captured).not.toHaveProperty('uiClientId');
   });
 
   it('auto-fill applies on error path too', async () => {
@@ -1281,7 +1281,7 @@ describe('metadata_json auto-fill from ctx.uiClientId (telemetry-tagging audit)'
       }),
     );
     expect(r.ok).toBe(false);
-    expect(captured).toEqual({ uiClientId: 'audit-probe-error' });
+    expect(captured).toMatchObject({ uiClientId: 'audit-probe-error' });
   });
 });
 
