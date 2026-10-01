@@ -388,6 +388,64 @@ describe('runOrchestrationScript (B-CX-1A)', () => {
     expect(r.error).toMatch(/^dynamic_import_unsupported:/);
   });
 
+  // EI-23755181123699088: "Cannot use import statement outside a module" is Node's ESM/CJS
+  // message, whose universal remedy is "use require" -- but the sandbox has no module loader in
+  // either format, so a caller following that implied fix just meets "require is not defined".
+  // The first failure must name the real constraint; the second must be a named error too.
+  it('explains that a static import cannot be fixed by switching to require', async () => {
+    const r = await runOrchestrationScript(
+      `import { readFileSync } from 'node:fs';\nreturn readFileSync;`,
+      facade({}),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('compile_error: Cannot use import statement outside a module');
+    expect(r.error).toMatch(/NOT modules/);
+    expect(r.error).toMatch(/no import\/export and no require\(\)/);
+    expect(r.error).toMatch(/tools\.ns\.verb/);
+  });
+
+  it('gives the same module guidance for a static export', async () => {
+    const r = await runOrchestrationScript(`export const answer = 42;\nreturn answer;`, facade({}));
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/^compile_error:/);
+    expect(r.error).toMatch(/NOT modules/);
+  });
+
+  it('does not add module guidance to an unrelated compile error', async () => {
+    const r = await runOrchestrationScript(`this is ( not valid`, facade({}));
+    expect(r.ok).toBe(false);
+    expect(r.error).not.toMatch(/NOT modules/);
+    expect(r.error).not.toMatch(/no import\/export/);
+  });
+
+  it.each(['require', 'module', 'process', '__dirname', '__filename'])(
+    'rewrites a bare %s reference into named, actionable guidance',
+    async (name) => {
+      const r = await runOrchestrationScript(`return typeof ${name} === 'undefined' ? ${name}.x : 1;`, facade({}));
+      expect(r.ok).toBe(false);
+      expect(r.error).toMatch(/^node_ambient_unsupported:/);
+      expect(r.error).toContain(`no ambient ${name}`);
+      expect(r.error).not.toBe(`${name} is not defined`);
+      expect(r.error).toMatch(/tools\.ns\.verb/);
+    },
+  );
+
+  it('rewrites the CommonJS require fallback a caller reaches for after a failed import', async () => {
+    const r = await runOrchestrationScript(
+      `const { readFileSync } = require('node:fs'); return readFileSync;`,
+      facade({}),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/^node_ambient_unsupported:/);
+    expect(r.error).not.toMatch(/^require is not defined$/);
+  });
+
+  it('leaves an unrelated ReferenceError untouched (no over-broad rewrite)', async () => {
+    const r = await runOrchestrationScript(`return someUndefinedThing + 1;`, facade({}));
+    expect(r.ok).toBe(false);
+    expect(r.error).toBe('someUndefinedThing is not defined');
+  });
+
   // EI-22453933607371328: structuredClone is a host global, not a VM intrinsic, so the
   // restricted code:run sandbox intentionally omits it. The raw ReferenceError was actionable
   // only to someone who already knew the sandbox implementation; name the boundary and give the
