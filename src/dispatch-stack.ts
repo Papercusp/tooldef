@@ -1519,8 +1519,9 @@ function hasExplicitFailurePayload(result: Pick<ToolResult, 'content'>): boolean
  * absent/non-object do we parse the first JSON text item; a conflicting compact
  * text representation must never override the lossless structured result. The
  * match is intentionally narrow — exact top-level `ok === false` plus a nonblank
- * string `reason` — because a false positive becomes a clean, misleading health
- * signal while an unrecognized shape merely stays unclassified.
+ * string `reason`, or a WHOLLY-failed bulk envelope (see bulkEnvelopeFailureReason)
+ * — because a false positive becomes a clean, misleading health signal while an
+ * unrecognized shape merely stays unclassified.
  */
 export function extractSoftFailureOutcome(result: Pick<ToolResult, 'content' | 'structuredContent'>): SoftFailureOutcomeMetadata | null {
   let candidate = objectRecord(result.structuredContent);
@@ -1535,13 +1536,44 @@ export function extractSoftFailureOutcome(result: Pick<ToolResult, 'content' | '
       return null;
     }
   }
-  if (!candidate || candidate.ok !== false || typeof candidate.reason !== 'string') return null;
-  const reason = candidate.reason.trim();
+  if (!candidate || candidate.ok !== false) return null;
+  const reason = typeof candidate.reason === 'string'
+    ? candidate.reason.trim()
+    : bulkEnvelopeFailureReason(candidate);
   if (!reason) return null;
   return {
     resultOutcome: 'soft-failure',
     softFailureReason: reason.slice(0, SOFT_FAILURE_REASON_MAX),
   };
+}
+
+/**
+ * The house BULK envelope — `{ ok, results: [{ ok, id, error, … }], counts }`, used by
+ * work_items:claim / :get / :comment, processes:kill and every other "one failure never
+ * fails the rest" verb — carries its cause PER ITEM, never as a top-level `reason`. So a
+ * single-id `work_items:claim` refused `not_claimable` was written with no effect-level
+ * marker at all: `status='ok'` and no `resultOutcome`, byte-identical in the ledger to a
+ * claim that took (WI-10004868).
+ *
+ * Classified ONLY when the effect failed ENTIRELY — a non-empty `results` array in which
+ * EVERY item is `ok:false` with a nonblank string `error`. A partial batch (any item
+ * succeeded, or an item whose shape is not that) stays unclassified: reporting a
+ * half-successful batch as a failed effect is exactly the false-positive health signal the
+ * narrow match above exists to avoid. The reason is the item error codes, de-duplicated and
+ * sorted, so the watchdog's stable key does not depend on item order.
+ */
+function bulkEnvelopeFailureReason(candidate: Record<string, unknown>): string | null {
+  const results = candidate.results;
+  if (!Array.isArray(results) || results.length === 0) return null;
+  const codes = new Set<string>();
+  for (const item of results) {
+    const record = objectRecord(item);
+    if (!record || record.ok !== false || typeof record.error !== 'string') return null;
+    const code = record.error.trim();
+    if (!code) return null;
+    codes.add(code);
+  }
+  return [...codes].sort().join(',');
 }
 
 /**

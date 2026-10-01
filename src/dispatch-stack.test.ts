@@ -507,6 +507,58 @@ describe('runDispatchStack — custom stack', () => {
     expect(extractSoftFailureOutcome({ content: [{ type: 'text', text: 'not json' }] })).toBeNull();
   });
 
+  it('classifies a WHOLLY-failed bulk envelope (WI-10004868: a refused single-id work_items:claim carried no marker)', () => {
+    // The exact shape work_items:claim returned for an admission-pending item.
+    expect(extractSoftFailureOutcome({
+      content: [{ type: 'text', text: JSON.stringify({
+        ok: false,
+        results: [{ ok: false, id: 'WI-1', error: 'not_claimable', claimFloor: { refusedBy: 'admission-pending' } }],
+        counts: { ok: 0, failed: 1 },
+      }) }],
+    })).toEqual({ resultOutcome: 'soft-failure', softFailureReason: 'not_claimable' });
+
+    // Multi-item, all failed: distinct codes, de-duplicated and order-independent.
+    const reasonFor = (results: unknown[]) => extractSoftFailureOutcome({
+      structuredContent: { ok: false, results },
+      content: [],
+    });
+    expect(reasonFor([
+      { ok: false, error: 'not_found' },
+      { ok: false, error: 'claim_conflict' },
+      { ok: false, error: 'not_found' },
+    ])).toEqual({ resultOutcome: 'soft-failure', softFailureReason: 'claim_conflict,not_found' });
+    expect(reasonFor([
+      { ok: false, error: 'claim_conflict' },
+      { ok: false, error: 'not_found' },
+    ])).toEqual(reasonFor([
+      { ok: false, error: 'not_found' },
+      { ok: false, error: 'claim_conflict' },
+    ]));
+
+    // A top-level reason still wins over per-item errors.
+    expect(extractSoftFailureOutcome({
+      structuredContent: { ok: false, reason: 'top_level', results: [{ ok: false, error: 'item' }] },
+      content: [],
+    })).toEqual({ resultOutcome: 'soft-failure', softFailureReason: 'top_level' });
+  });
+
+  it('leaves partial or malformed bulk envelopes unclassified', () => {
+    for (const value of [
+      { ok: false, results: [] },
+      { ok: false, results: [{ ok: true, id: 'WI-1' }, { ok: false, error: 'not_found' }] },
+      { ok: false, results: [{ ok: false, error: '   ' }] },
+      { ok: false, results: [{ ok: false }] },
+      { ok: false, results: [{ ok: false, error: 42 }] },
+      { ok: false, results: ['not_found'] },
+      { ok: false, results: { ok: false, error: 'not_an_array' } },
+      { ok: true, results: [{ ok: false, error: 'not_found' }] },
+    ]) {
+      expect(extractSoftFailureOutcome({
+        content: [{ type: 'text', text: JSON.stringify(value) }],
+      })).toBeNull();
+    }
+  });
+
   it('records soft-failure outcome metadata after handler metadata without changing call-level status', async () => {
     let captured: {
       status?: string;
