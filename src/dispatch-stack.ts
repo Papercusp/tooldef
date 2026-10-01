@@ -1816,6 +1816,13 @@ export async function runDispatchStack(
   stack: ReadonlyArray<DispatchStep> = DEFAULT_DISPATCH_STACK,
 ): Promise<DispatchProjectedResult> {
   const exec = initExecution(tool, toolName, input, ctx, deps);
+  // P-007: a 1219ms plans:get invocation contained only a 53ms body read.
+  // Attribute the existing dispatch pipeline in its invocation metadata,
+  // including authority waits, rather than treating handler timing as total
+  // server time. These sequential wall-time intervals exclude the telemetry
+  // sink itself; nested handler read intervals must not be added to them.
+  const dispatchStarted = deps.recordInvocation ? performance.now() : null;
+  const dispatchSteps: Array<{ name: DispatchStepName; elapsedMs: number }> = [];
   // Notify the host before any gate or handler work begins. This is deliberately
   // best-effort: a liveness marker must not be able to change dispatch behavior,
   // and it must run before a long-lived handler becomes in-flight.
@@ -1835,7 +1842,17 @@ export async function runDispatchStack(
   let result: DispatchProjectedResult | null = null;
   try {
     for (const step of stack) {
-      result = await step.run(exec);
+      const stepStarted = dispatchStarted === null ? null : performance.now();
+      try {
+        result = await step.run(exec);
+      } finally {
+        if (stepStarted !== null) {
+          dispatchSteps.push({
+            name: step.name,
+            elapsedMs: Math.max(0, performance.now() - stepStarted),
+          });
+        }
+      }
       if (result) break;
     }
     if (!result) {
@@ -1855,6 +1872,18 @@ export async function runDispatchStack(
       ok: false,
       error: { code: 'handler_error' as const, message: 'no result' },
     };
+    if (dispatchStarted !== null) {
+      exec.metadataJson = {
+        ...(exec.metadataJson ?? {}),
+        dispatchStages: {
+          schemaVersion: 'dispatch-stages-v1',
+          unit: 'ms',
+          timing: 'wall-time-sequential-steps',
+          elapsedMs: Math.max(0, performance.now() - dispatchStarted),
+          steps: dispatchSteps,
+        },
+      };
+    }
     await recordTelemetry(exec, settled);
     // Event-reaction observation point (D-001). Fired AFTER telemetry, on every
     // path. Best-effort + non-blocking: the host's postInvoke matches rules and

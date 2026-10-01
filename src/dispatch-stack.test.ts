@@ -54,6 +54,59 @@ const makeTool = (over: Partial<ProjectedTool> = {}): ProjectedTool => ({
 
 afterEach(() => _resetProjectionRegistryForTests());
 
+describe('dispatch stage attribution', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('separates authority waits from a cheap handler and preserves its read metadata', async () => {
+    let clock = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    const record = vi.fn();
+    const result = await runDispatchStack(makeTool({
+      fn: async (_args, ctx) => {
+        clock += 53;
+        ctx.metadata?.({ plansGetRead: { waitMs: 53 }, dispatchStages: 'handler-spoof' });
+        return { content: [{ type: 'text', text: 'body' }] };
+      },
+    }), 'fix.tool', {}, MAKE_CTX(), {
+      recordInvocation: record,
+      kernelEnforcement: async ({ phase }) => {
+        clock += phase === 'preflight' ? 611 : 555;
+        return { decision: 'allow' };
+      },
+    });
+    expect(result.ok).toBe(true);
+    const metadata = record.mock.calls[0][0].metadataJson;
+    expect(metadata.plansGetRead).toEqual({ waitMs: 53 });
+    expect(metadata.dispatchStages).toMatchObject({
+      schemaVersion: 'dispatch-stages-v1', unit: 'ms',
+      timing: 'wall-time-sequential-steps', elapsedMs: 1219,
+    });
+    expect(metadata.dispatchStages.steps.filter((step: { elapsedMs: number }) => step.elapsedMs > 0)).toEqual([
+      { name: 'kernel-preflight', elapsedMs: 611 },
+      { name: 'kernel-enforce', elapsedMs: 555 },
+      { name: 'invoke', elapsedMs: 53 },
+    ]);
+  });
+
+  it('records only visited stages when authority denies before the handler', async () => {
+    let clock = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    const record = vi.fn(), handler = vi.fn();
+    const result = await runDispatchStack(makeTool({ fn: handler }), 'fix.tool', {}, MAKE_CTX(), {
+      recordInvocation: record,
+      kernelEnforcement: async () => {
+        clock += 17;
+        return { decision: 'deny', reason: 'revoked' };
+      },
+    });
+    expect(result.ok).toBe(false);
+    expect(handler).not.toHaveBeenCalled();
+    expect(record.mock.calls[0][0].metadataJson.dispatchStages).toMatchObject({
+      elapsedMs: 17, steps: [{ name: 'kernel-preflight', elapsedMs: 17 }],
+    });
+  });
+});
+
 describe('preflightDispatchStack — gates without run ownership', () => {
   afterEach(() => vi.restoreAllMocks());
 
