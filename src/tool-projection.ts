@@ -733,6 +733,14 @@ export interface UnifiedToolContext {
   uiClientId?: string | null;
 
   /**
+   * Database row id of this caller's adv_sessions launch, set only when the
+   * MCP host verified the native CLI session is bound to that row. The operator
+   * kernel uses it to read this caller's launch authority rather than another
+   * active row owned by the same coordination identity.
+   */
+  advSessionId?: number;
+
+  /**
    * Private stable session key for process-local failure-loop detector state.
    * It is deliberately separate from the public coordination identity exposed
    * by `resolveAgentIdentity` and is never rendered in failure hints.
