@@ -140,6 +140,7 @@ export type {
 export {
   defineTool,
   toArgsJsonSchema,
+  prepareToolArgsForSchema,
   // The effect oracle — for static scanners that cannot execute defineTool (WI-6464).
   inferCapabilityEffect,
   WRITE_CAPABILITIES,

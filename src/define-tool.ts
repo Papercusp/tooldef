@@ -3024,10 +3024,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       payloadTierOverride?: string;
       telemetrySurface?: string;
     };
-    const shimmed = applyHarnessArgAlias(
-      rawSchema,
-      applyPositionalWriteShim(def.name, rawSchema, stripUndefinedArgKeys(tierlessInput)),
-    );
+    const shimmed = prepareToolArgsForSchema(def.name, rawSchema, tierlessInput);
     const validated = await standardValidate(def.args, shimmed);
     // P-016 / D-104 — auto-correct-and-execute, RE-ENCODINGS only. Zero cost on both
     // ordinary paths: a call that validates never reaches the repair, and a tool with no
@@ -3226,10 +3223,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     // Framework-reserved per-call tier override is stripped next — BEFORE
     // validation (context-trimming-tiers D-004; not part of any tool's schema).
     const { input: tierlessInput, callTier } = extractPayloadTier(unwrapUnparsedToolInput(input));
-    const shimmed = applyHarnessArgAlias(
-      rawSchema,
-      applyPositionalWriteShim(def.name, rawSchema, stripUndefinedArgKeys(tierlessInput)),
-    );
+    const shimmed = prepareToolArgsForSchema(def.name, rawSchema, tierlessInput);
     const validated = await standardValidate(def.args, shimmed);
     // P-016 / D-104 — auto-correct-and-execute, RE-ENCODINGS only. See the twin in
     // `registerLegacyAsProjected`; both wrappers must carry it, since which one a tool
