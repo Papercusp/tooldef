@@ -814,6 +814,25 @@ export function applyHarnessArgAlias(argsJsonSchema: Record<string, unknown>, in
   return { ...rest, harness_slug: harness };
 }
 
+/**
+ * Apply the host's schema-visible argument reshaping before validation.
+ * Tool dispatch and static recipe/code preflight must validate the same value:
+ * positional `{ row }` writes are reconstructed from the curated prompt columns,
+ * and the documented `harness` alias is renamed when the tool declares only
+ * `harness_slug`. Callers peel framework controls such as `payloadTier` and
+ * `projection` before using this helper.
+ */
+export function prepareToolArgsForSchema(
+  name: string,
+  argsJsonSchema: Record<string, unknown>,
+  input: unknown,
+): unknown {
+  return applyHarnessArgAlias(
+    argsJsonSchema,
+    applyPositionalWriteShim(name, argsJsonSchema, stripUndefinedArgKeys(input)),
+  );
+}
+
 const SNAKE_CASE_ARG_KEY = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/;
 const LOWER_CAMEL_ARG_KEY = /^[a-z][A-Za-z0-9]*$/;
 
