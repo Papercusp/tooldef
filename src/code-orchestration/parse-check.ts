@@ -43,10 +43,21 @@ let _ts: TsModule | null = null;
 export async function ensureParseCheckReady(): Promise<void> {
   if (!_ts) {
     const m = (await import('typescript')) as unknown as { default?: TsModule } & TsModule;
-    _ts = (m.default ?? m) as TsModule;
+    const candidate = (m.default ?? m) as TsModule;
+    // P-007 / cupboard D-010: a bundle that cannot initialise the compiler (e.g. a Cloudflare
+    // Worker ESM bundle with no CJS `__filename`, which typescript.js reads at init) used to
+    // leave a half-initialised module here (`{}`), after which every checkScript() silently took
+    // the REGEX FALLBACK — which misses destructured calls (`const {coord}=tools; coord.send()`),
+    // the exact evasion class authority analysis exists to catch. Refuse loudly instead: never
+    // cache a module that cannot parse, so a failed init can never degrade to regex unnoticed.
+    if (typeof (candidate as { createSourceFile?: unknown }).createSourceFile !== 'function') {
+      throw new Error(
+        'parse-check: the TypeScript compiler loaded without createSourceFile (half-initialised module — in a bundled Worker, define __filename/__dirname); refusing to fall back to regex analysis',
+      );
+    }
+    _ts = candidate;
   }
 }
-
 function tsc(): TsModule {
   if (!_ts) {
     throw new Error(
