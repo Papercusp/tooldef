@@ -43,7 +43,7 @@ import {
 import { openRun, closeRun, setToolState } from './state-channel';
 import type { CardResponse, CardSpec } from './types';
 import { validateSync, formatIssues, type StandardSchemaV1 } from './standard-schema';
-import { tierFor } from './capability-tiers';
+import { isLateCompletionSafeRead, tierFor } from './capability-tiers';
 import {
   collectEntityRefs,
   formatEntityRefViolations,
@@ -850,7 +850,12 @@ const invokeStep: DispatchStep = {
         // capability ⇒ treat as non-low (don't assume an ungated utility is a safe
         // read). `ProjectedTool` carries `capabilities`, not a precomputed `tier`.
         const caps = exec.tool.capabilities;
-        const isLowTierRead = caps.length > 0 && caps.every((c) => tierFor(c) === 'low');
+        // Host late-completion READ seam (WI-10004577): tier is a poor read signal (the host table
+        // falls back to 'medium' for ~160 `*:read` tools, and tier also drives auth/watchdog), so
+        // the host classifies safe-to-surface-late reads independently. Engine default: false.
+        const isLowTierRead =
+          (caps.length > 0 && caps.every((c) => tierFor(c) === 'low')) ||
+          isLateCompletionSafeRead({ name: toolName, capabilities: caps, effect: exec.tool.effect });
         // Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): a
         // MUTATION the tool DECLARES idempotent whose handler RAN TO COMPLETION is safe to
         // surface past the deadline — the write committed (the handler returned a result),

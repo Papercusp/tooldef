@@ -20,6 +20,12 @@ import {
   type UnifiedToolContext,
 } from './tool-projection';
 import { PASS_THROUGH } from './dispatch-projected';
+import {
+  defaultLateCompletionReadClassifier,
+  defaultTierResolver,
+  setCapabilityTierResolver,
+  setLateCompletionReadClassifier,
+} from './capability-tiers';
 import type { ToolResult } from './wire';
 import type { AuthAuditEvent } from './authz';
 
@@ -919,6 +925,39 @@ describe('dispatchProjectedTool', () => {
     expect(r.ok).toBe(false);
     expect(r.error?.code).toBe('timeout');
   }, 10_000);
+
+  it('ok-on-abort (host late-completion classifier, WI-10004577): a classified READ surfaces past the deadline; the same capability shape declared as a WRITE still times out', async () => {
+    // Tier is a poor read signal: the host table falls back to 'medium' for most `*:read` capabilities.
+    // Pin tier to 'medium' so ONLY the host classifier seam can make the difference.
+    setCapabilityTierResolver(() => 'medium');
+    setLateCompletionReadClassifier(
+      (t) => t.effect === 'read' && t.capabilities.length > 0 && t.capabilities.every((c) => c.endsWith(':read')),
+    );
+    try {
+      const mk = (effect: 'read' | 'write'): ProjectedTool =>
+        makeTool({
+          capabilities: ['intel:read'],
+          effect,
+          timeoutSec: 60,
+          idleTimeoutSec: 1,
+          fn: async () => {
+            await new Promise((r) => setTimeout(r, 3000)); // outlast the idle cap → abort fires
+            return { content: [{ type: 'text', text: 'late-result' }] };
+          },
+        });
+      const read = await dispatchProjectedTool(mk('read'), 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS());
+      expect(read.ok).toBe(true);
+      const first = read.result?.content?.[0];
+      expect(first?.type === 'text' ? first.text : undefined).toBe('late-result');
+      // Same capability, same lateness — but declared a mutation: the abort stays authoritative.
+      const write = await dispatchProjectedTool(mk('write'), 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS());
+      expect(write.ok).toBe(false);
+      expect(write.error?.code).toBe('timeout');
+    } finally {
+      setLateCompletionReadClassifier(defaultLateCompletionReadClassifier);
+      setCapabilityTierResolver(defaultTierResolver);
+    }
+  }, 20_000);
 
   it('ok-on-abort (attempt receipt): a completed non-idempotent write surfaces the exact recorded effect', async () => {
     const tool = makeTool({
