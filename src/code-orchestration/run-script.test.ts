@@ -801,6 +801,38 @@ describe('EI-19301148486657755: reading a field the tool result does not have', 
     expect(miss?.didYouMean).toBeUndefined();
   });
 
+  it('guards an optional release:trace.gate field with an own-property check', async () => {
+    const trace = async () => ({ ok: true, generatedAtMs: 1, target: {} });
+    const stale = await runOrchestrationScript(
+      `const traceResult = await tools.release.trace({ path: 'checkpoint-run.ts' });
+       const gate = traceResult?.gate && typeof traceResult.gate === 'object' ? traceResult.gate : null;
+       return gate;`,
+      facade({ release: { trace } }),
+    );
+    expect(stale.ok).toBe(true);
+    expect(stale.result).toBeNull();
+    expect(stale.fieldMisses).toEqual([
+      expect.objectContaining({
+        tool: 'release:trace',
+        path: '(root)',
+        read: 'gate',
+      }),
+    ]);
+
+    const guarded = await runOrchestrationScript(
+      `const traceResult = await tools.release.trace({ path: 'checkpoint-run.ts' });
+       const hasOwn = (value, key) => Boolean(value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, key));
+       const optional = (value, key) => hasOwn(value, key) ? value[key] : null;
+       const gateValue = optional(traceResult, 'gate');
+       const gate = gateValue && typeof gateValue === 'object' ? gateValue : null;
+       return gate;`,
+      facade({ release: { trace } }),
+    );
+    expect(guarded.ok).toBe(true);
+    expect(guarded.result).toBeNull();
+    expect(guarded.fieldMisses).toBeUndefined();
+  });
+
   // CONTROL: the classifier must actually DISCRIMINATE. If both keys ever land in the same class,
   // the split is decorative and the noise it was built to remove is back.
   it('CONTROL: a typo and an optional probe do not land in the same class', async () => {
