@@ -337,6 +337,11 @@ export {
   setCapabilityTierResolver,
   defaultTierResolver,
   type CapabilityTierResolver,
+  setLateCompletionReadClassifier,
+  defaultLateCompletionReadClassifier,
+  isLateCompletionSafeRead,
+  type LateCompletionReadClassifier,
+  type LateCompletionToolFacts,
 } from './capability-tiers';
 
 /* ─── Entity-reference args (referential integrity at dispatch) ───────── */

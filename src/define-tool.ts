@@ -1030,6 +1030,27 @@ export const WRITE_CAPABILITIES = new Set<string>([
   'tui:dispatch', // performs a control intent against a running pui workbench
   'operator:converse', // brain turn: spawns agents, records spend, mem0.add, dispatches <spawn>
   'activity:report', // inserts an agent-activity row
+  // WI-10004595: fleet-registry control verbs. Each has its OWN dedicated capability (no
+  // `*:read` sibling shares it — fleet:status / fleet:list are the readers, on their own caps)
+  // and each flips registry control state, membership, leadership or headcount, or spawns/respawns
+  // members. They carried no write suffix, so they inferred 'read' and EXECUTED during a code:run
+  // dryRun "preview". `effect` is a DEFAULT inference, never a verification (see
+  // inferCapabilityEffect) — keep this list and effect-marker-audit.test.ts in lockstep.
+  'fleet:create',
+  'fleet:join',
+  'fleet:leave',
+  'fleet:take-leadership',
+  'fleet:resume',
+  'fleet:pause',
+  'fleet:wind-down',
+  'fleet:supersede',
+  'fleet:headcount-target',
+  'fleet:request_remote_spawn',
+  'fleet:recolor',
+  'fleet:reconfigure-member',
+  'fleet:respawn-member',
+  'coord:mark-terminal', // coord:mark-terminal + coord:focus-window: retitle / activate a live terminal window
+  'testing:run', // testing:run (already explicit effect:'write') + testing:record-run: both write test_runs rows
 ]);
 /**
  * THE effect oracle. Exported (not merely used here) because it is the only
