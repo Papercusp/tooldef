@@ -188,8 +188,19 @@ export function partialGuidanceDescription(description: string | undefined): str
  * whole catalog and re-resolves the delivery map at each candidate:
  *
  *     2026-09-25, 907-tool catalog before this cap change:
- *     cap=80  full=1 compact=63 spent= 99,977 fits ← chosen
+ *     cap=80  full=1 compact=63 spent= 99,977 fits
  *     cap=100 full=0 compact=63 spent=100,176 OVER by 176
+ *
+ *     2026-10-01, 927-tool catalog (floor tools grew; WI-10004576):
+ *     cap=80  full=0 compact=63 spent=100,161 OVER by 161  (floors ALONE exceed the budget)
+ *     cap=70  full=0 compact=64 spent= 99,992 fits ← chosen (8 B headroom)
+ *     cap=64  full=0 compact=63 spent= 99,977 fits
+ *     Cost of 80 → 70: 39 of 63 floor leads lose their last ~10 chars, and the two floor rails
+ *     that were already word-truncated at 80 (facts:assert, mode:set) lose ~10 more trailing
+ *     chars — their leading imperative is intact. Every other rail (incl. tools:invoke's
+ *     colon-names rail, ~68 chars) ships whole.
+ *     Headroom is THIN by construction: the next floor-tool schema growth of ≥8 B re-trips
+ *     psu-launcher.test.ts (budgetOverrun must be 0) — re-run the sweep, do not nudge this by feel.
  *
  * THE TRADE, stated because it is real: pricing prose into the tier costs 8
  * advertised seats (71 → 63). That is the right direction — a tool advertised
@@ -198,7 +209,7 @@ export function partialGuidanceDescription(description: string | undefined): str
  * reachable through `tools:find`. Re-run the sweep after any catalog change
  * before editing this number by hand.
  */
-export const SUMMARY_LEAD_MAX_CHARS = 80;
+export const SUMMARY_LEAD_MAX_CHARS = 70;
 
 /** Truncate at a word boundary, marking the cut so a reader knows prose is missing. */
 function truncateAtWord(text: string, maxChars: number): string {
