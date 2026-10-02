@@ -107,6 +107,46 @@ describe('dispatch stage attribution', () => {
   });
 });
 
+describe('exact principal tool allowlists', () => {
+  const piPrincipal = (allowed: string[]) => ({
+    kind: 'pi' as const,
+    slug: 'pi:chat-test',
+    workspaceId: 'default',
+    authMethod: 'bearer-token' as const,
+    trust: 'trusted' as const,
+    capabilities: new Set(['*']),
+    allowedTools: new Set(allowed),
+  });
+
+  it('denies a non-listed canonical name before capability bypass or handler invocation', async () => {
+    const handler = vi.fn(async () => ({ content: [{ type: 'text', text: 'ran' }] }));
+    const result = await runDispatchStack(
+      makeTool({ fn: handler, capabilities: [] }),
+      'fix:other-tool',
+      {},
+      MAKE_CTX({ principal: piPrincipal(['fix:allowed-tool']) }),
+      {},
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error?.code).toBe('authorization_denied');
+    expect(result.error?.meta).toMatchObject({ reason: 'tool_not_in_allowlist', tool: 'fix:other-tool' });
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('allows an exact listed canonical name', async () => {
+    const handler = vi.fn(async () => ({ content: [{ type: 'text', text: 'ran' }] }));
+    const result = await runDispatchStack(
+      makeTool({ fn: handler, capabilities: [] }),
+      'fix:allowed-tool',
+      {},
+      MAKE_CTX({ principal: piPrincipal(['fix:allowed-tool']) }),
+      {},
+    );
+    expect(result.ok).toBe(true);
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('preflightDispatchStack — gates without run ownership', () => {
   afterEach(() => vi.restoreAllMocks());
 
