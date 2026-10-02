@@ -112,6 +112,8 @@ export interface StaticToolResultRead {
   /** Property segments, kept separate so literal keys containing dots remain unambiguous. */
   path: string[];
   position: StaticSourcePosition;
+  /** Optional result ancestors whose absence is guarded by nearby short-circuit syntax. */
+  safeOptionalPaths?: string[][];
 }
 
 export function checkScript(
@@ -452,11 +454,23 @@ export function checkScript(
       const bindings = call.resultBindings ??= [];
       if (!bindings.includes(identifier)) bindings.push(identifier);
     };
-    const addRead = (call: StaticToolCall, path: string[], position: StaticSourcePosition): void => {
+    const samePath = (left: string[], right: string[]): boolean =>
+      left.length === right.length && left.every((segment, index) => segment === right[index]);
+    const addRead = (
+      call: StaticToolCall,
+      path: string[],
+      position: StaticSourcePosition,
+      safeOptionalPaths: string[][] = [],
+    ): void => {
       if (path.length === 0) return;
       const reads = call.resultReads ??= [];
-      if (!reads.some((read) => read.position.offset === position.offset && read.path.join('\0') === path.join('\0'))) {
-        reads.push({ path, position });
+      const existing = reads.find((read) => read.position.offset === position.offset && samePath(read.path, path));
+      if (existing) {
+        const combined = [...(existing.safeOptionalPaths ?? []), ...safeOptionalPaths];
+        existing.safeOptionalPaths = combined
+          .filter((candidate, index, all) => all.findIndex((other) => samePath(candidate, other)) === index);
+      } else {
+        reads.push({ path, position, ...(safeOptionalPaths.length > 0 ? { safeOptionalPaths } : {}) });
       }
     };
     const bindPattern = (pattern: Node, call: StaticToolCall, scope: Node, path: string[] = []): void => {
@@ -584,14 +598,85 @@ export function checkScript(
       }
       return undefined;
     };
-    const readCandidates: Array<{ call: StaticToolCall; path: string[]; position: StaticSourcePosition }> = [];
+    const isWithin = (node: Node, ancestor: Node): boolean => {
+      let current: Node | undefined = node;
+      while (current) {
+        if (current === ancestor) return true;
+        current = current.parent;
+      }
+      return false;
+    };
+    const isPathPrefix = (prefix: string[], path: string[]): boolean =>
+      prefix.length <= path.length && prefix.every((segment, index) => segment === path[index]);
+    const boundPath = (expression: Expression): { call: StaticToolCall; path: string[] } | undefined => {
+      const resolved = propertyPath(expression);
+      const identifier = rootIdentifier(expression);
+      const call = identifier ? boundCall(identifier) : undefined;
+      return resolved && call ? { call, path: resolved.path } : undefined;
+    };
+    const safeOptionalPathsForRead = (
+      node: Node,
+      call: StaticToolCall,
+      resolvedPath: string[],
+    ): string[][] => {
+      const safePaths: string[][] = [];
+      const addSafePath = (path: string[]): void => {
+        if (path.length > 0 && !safePaths.some((other) => samePath(other, path))) safePaths.push(path);
+      };
+
+      let current: Node | undefined = node;
+      while (current) {
+        if (ts.isPropertyAccessExpression(current) && current.questionDotToken) {
+          const base = boundPath(current.expression);
+          if (base?.call === call && isPathPrefix(base.path, resolvedPath)) addSafePath(base.path);
+          if (current === node) addSafePath(resolvedPath);
+        }
+
+        const parent = current.parent;
+        if (!parent) break;
+        if (ts.isBinaryExpression(parent)) {
+          const operator = parent.operatorToken.kind;
+          if (operator === ts.SyntaxKind.AmpersandAmpersandToken) {
+            const left = boundPath(parent.left);
+            if (left?.call === call) {
+              if (isWithin(node, parent.right) && isPathPrefix(left.path, resolvedPath)) {
+                addSafePath(left.path);
+              }
+              if (isWithin(node, parent.left) && samePath(left.path, resolvedPath)) {
+                addSafePath(resolvedPath);
+              }
+            }
+          } else if (
+            operator === ts.SyntaxKind.BarBarToken || operator === ts.SyntaxKind.QuestionQuestionToken
+          ) {
+            // A missing optional leaf evaluates to undefined, so a fallback on the expression
+            // that reads it makes that leaf safe. Any optional ancestor still needs its own guard.
+            if (isWithin(node, parent.left)) addSafePath(resolvedPath);
+          }
+        }
+        current = parent;
+      }
+
+      return safePaths;
+    };
+    const readCandidates: Array<{
+      call: StaticToolCall;
+      path: string[];
+      position: StaticSourcePosition;
+      safeOptionalPaths: string[][];
+    }> = [];
     const visitResultReads = (node: Node): void => {
       if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
         const resolved = propertyPath(node);
         const identifier = rootIdentifier(node);
         const call = identifier ? boundCall(identifier) : undefined;
         if (resolved && resolved.path.length > 0 && call) {
-          readCandidates.push({ call, path: resolved.path, position: positionFor(node) });
+          readCandidates.push({
+            call,
+            path: resolved.path,
+            position: positionFor(node),
+            safeOptionalPaths: safeOptionalPathsForRead(node, call, resolved.path),
+          });
         }
       }
       ts.forEachChild(node, visitResultReads);
@@ -607,7 +692,9 @@ export function checkScript(
         other.position.offset === candidate.position.offset &&
         other.path.length > candidate.path.length,
       );
-      if (!hasLongerChain) addRead(candidate.call, candidate.path, candidate.position);
+      if (!hasLongerChain) {
+        addRead(candidate.call, candidate.path, candidate.position, candidate.safeOptionalPaths);
+      }
     }
   }
 
