@@ -289,3 +289,61 @@ describe('serializeToolResponse — structuredContent opt-in (EI-13245)', () => 
     expect(r._meta.structured).toBeUndefined();
   });
 });
+
+// D-041 (enterprise-data-sources-2026-10-01): a handler-computed base-rate
+// stamp on ToolResponse.denominator renders through the SAME seam as
+// guidance.denominator, so a default filter that withholds rows says so.
+describe('serializeToolResponse — handler-computed denominator (D-041)', () => {
+  const stamp = { matched: 2, population: 5, of: 'work-items', note: '3 withheld; pass audience:"any"' };
+  const textOf = (r: { content: unknown[] }) =>
+    (r.content as Array<{ type: string; text?: string }>).map((c) => c.text ?? '');
+
+  it('renders on the full-body path: structured _meta + one trailing text line', () => {
+    const ctx = { transport: 'http' } as UnifiedToolContext;
+    const r = serializeToolResponse({ data: flatRows, denominator: stamp }, formatOptsFromCtx(ctx, undefined));
+    expect(r._meta._denominator).toEqual(stamp);
+    const texts = textOf(r);
+    expect(texts[0]).toBe(JSON.stringify(flatRows));
+    expect(texts[texts.length - 1]).toBe(
+      'Denominator: 2 of 5 work-items (40%). — 3 withheld; pass audience:"any"',
+    );
+  });
+
+  it('renders on the not_modified path too (body suppressed, stamp kept)', () => {
+    const ctx = { transport: 'http' } as UnifiedToolContext;
+    const opts = { ...formatOptsFromCtx(ctx, undefined), delta: { mode: 'not_modified' as const, supported: true } };
+    const r = serializeToolResponse({ data: flatRows, denominator: stamp }, opts);
+    expect(r._meta._denominator).toEqual(stamp);
+    expect(textOf(r)[0]).toMatch(/^mode: not_modified/);
+    expect(textOf(r).some((t) => t.startsWith('Denominator: 2 of 5'))).toBe(true);
+  });
+
+  it('absent denominator leaves the result exactly as before', () => {
+    const ctx = { transport: 'http' } as UnifiedToolContext;
+    const opts = formatOptsFromCtx(ctx, undefined);
+    const withField = serializeToolResponse({ data: flatRows, denominator: undefined }, opts);
+    const without = serializeToolResponse({ data: flatRows }, opts);
+    expect(withField).toEqual(without);
+    expect(without._meta._denominator).toBeUndefined();
+    expect(without.content).toHaveLength(1);
+  });
+
+  it('drops a malformed stamp (population < matched) instead of rendering a >100% rate', () => {
+    const ctx = { transport: 'http' } as UnifiedToolContext;
+    const r = serializeToolResponse(
+      { data: flatRows, denominator: { matched: 9, population: 2 } },
+      formatOptsFromCtx(ctx, undefined),
+    );
+    expect(r._meta._denominator).toBeUndefined();
+    expect(textOf(r).some((t) => t.startsWith('Denominator:'))).toBe(false);
+  });
+
+  it('is not stamped on a data-less (error-shaped) response', () => {
+    const ctx = { transport: 'http' } as UnifiedToolContext;
+    const r = serializeToolResponse(
+      { data: null, denominator: stamp } as unknown as ToolResponse,
+      formatOptsFromCtx(ctx, undefined),
+    );
+    expect(r._meta._denominator).toBeUndefined();
+  });
+});
