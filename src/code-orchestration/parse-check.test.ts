@@ -142,7 +142,7 @@ describe('checkScript (B-CX-PARSE — AST: computed / aliased / destructured)', 
       tools,
     );
 
-    expect(r.calls).toEqual([
+    expect(r.calls).toMatchObject([
       {
         tool: 'work_items:get',
         args: { id: 'WI-1', harness: 'papercusp' },
@@ -153,6 +153,38 @@ describe('checkScript (B-CX-PARSE — AST: computed / aliased / destructured)', 
         args: { slug: 'release-plan', item: 'P-008', status: 'wip' },
         dynamicArgs: false,
       },
+    ]);
+  });
+
+  it('binds a directly awaited tool result and records its statically-read path and locations', () => {
+    const r = checkScript(
+      'const trace = await tools.workItems.get({ id: "WI-1" });\nreturn trace.item.state;',
+      tools,
+    );
+
+    expect(r.calls).toMatchObject([
+      {
+        tool: 'work_items:get',
+        position: { line: 1, column: 21 },
+        resultBindings: ['trace'],
+        resultReads: [{ path: ['item', 'state'], position: { line: 2, column: 8 } }],
+      },
+    ]);
+  });
+
+  it('binds Promise.all array results to their destructured identifiers', () => {
+    const r = checkScript(
+      `const [work, status] = await Promise.all([
+        tools.workItems.get({ id: 'WI-1' }),
+        tools.plans.setStatus({ slug: 'p', item: 'P-1', status: 'wip' }),
+      ]);
+      return status.status;`,
+      tools,
+    );
+
+    expect(r.calls).toMatchObject([
+      { tool: 'work_items:get', resultBindings: ['work'] },
+      { tool: 'plans:set-status', resultBindings: ['status'], resultReads: [{ path: ['status'] }] },
     ]);
   });
 
