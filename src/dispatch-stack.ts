@@ -390,6 +390,19 @@ const capabilityCheckStep: DispatchStep = {
   name: 'capability-check',
   async run(exec) {
     const { tool, ctx, toolName, deps } = exec;
+    const allowedTools = ctx.principal?.allowedTools;
+    if (allowedTools !== undefined && !allowedTools.has(toolName)) {
+      return {
+        ok: false,
+        error: {
+          code: 'authorization_denied' as DispatchProjectedErrorCode,
+          message:
+            `Principal "${ctx.principal!.slug}" is not allowed to call tool "${toolName}" ` +
+            '(not in its exact MCP tool allowlist)',
+          meta: { tool: toolName, principal: ctx.principal!.slug, reason: 'tool_not_in_allowlist' },
+        },
+      };
+    }
     if (!ctx.principal || ctx.gateBypass?.capability || tool.capabilities.length === 0) return null;
     for (const cap of tool.capabilities) {
       if (
