@@ -1669,7 +1669,7 @@ async function recordTelemetry(
   const status =
     result.ok
       ? 'ok'
-      : code === 'role_not_allowed' || code === 'missing_capability' || code === 'capability_denied'
+      : code === 'role_not_allowed' || code === 'missing_capability' || code === 'capability_denied' || code === 'authorization_denied'
         ? 'role-not-allowed'
         : code === 'quota_exceeded'
           ? 'quota-exceeded'
@@ -1683,6 +1683,7 @@ async function recordTelemetry(
     (code === 'role_not_allowed' ||
       code === 'missing_capability' ||
       code === 'capability_denied' ||
+      code === 'authorization_denied' ||
       code === 'quota_exceeded');
   const isKernelDenial = kernelPreflight?.decision === 'deny' || kernelEnforcement?.decision === 'deny';
   if (!isGateDenial && !isKernelDenial && !windowKey) return;
