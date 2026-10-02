@@ -343,6 +343,14 @@ export interface ToolResponse<T = unknown> {
   /** Pagination cursor (for list tools that support it). */
   nextCursor?: string;
   /**
+   * A base-rate stamp the HANDLER computed (enterprise-data-sources-2026-10-01 D-041):
+   * what this result shows against the set it was filtered from. Use it when the count
+   * is only knowable inside the handler, e.g. rows a default filter WITHHELD. The
+   * result-callback `guidance.denominator` cannot see such a count. Rendered by the
+   * same seam (`_meta._denominator` + one text line), so it reads identically.
+   */
+  denominator?: import('./denominator').Denominator;
+  /**
    * Optional mcp-ui UI fragments returned alongside the JSON `data`.
    * The HTTP MCP transport pushes these into the tool result's `content`
    * array; clients with a UIResource renderer (Oracle dock, Claude
