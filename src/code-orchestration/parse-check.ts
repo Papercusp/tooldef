@@ -632,7 +632,9 @@ export function checkScript(
           if (current === node) addSafePath(resolvedPath);
         }
 
-        const parent = current.parent;
+        // Annotated: `current` is reassigned from `parent` below, so an inferred type here is
+        // circular (TS7022) and the loop variable widens to `any`.
+        const parent: Node | undefined = current.parent;
         if (!parent) break;
         if (ts.isBinaryExpression(parent)) {
           const operator = parent.operatorToken.kind;
