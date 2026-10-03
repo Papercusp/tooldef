@@ -12,6 +12,31 @@ describe('unwrapToolResult (B-CX-1A dispatch binding)', () => {
     });
   });
 
+  it('preserves pagination metadata when unwrapping structured content', () => {
+    const result = unwrapToolResult(tr({
+      structuredContent: { ok: true, hasMore: true, entries: [] },
+      _meta: { nextCursor: 'cursor-page-2' },
+      content: [],
+    }));
+
+    expect(result).toEqual({
+      ok: true,
+      hasMore: true,
+      entries: [],
+      nextCursor: 'cursor-page-2',
+      _meta: { nextCursor: 'cursor-page-2' },
+    });
+  });
+
+  it('preserves pagination metadata when decoding JSON content', () => {
+    const result = unwrapToolResult(tr({
+      content: [{ type: 'text', text: '{"ok":true,"hasMore":true,"entries":[]}' }] as never,
+      _meta: { nextCursor: 'cursor-page-2' },
+    }));
+
+    expect(result).toMatchObject({ ok: true, hasMore: true, nextCursor: 'cursor-page-2' });
+  });
+
   it('parses the JSON text payload when there is no structuredContent', () => {
     expect(
       unwrapToolResult(tr({ content: [{ type: 'text', text: '{"ok":true,"n":3}' }] as never })),
