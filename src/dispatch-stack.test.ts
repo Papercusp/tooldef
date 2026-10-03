@@ -119,7 +119,7 @@ describe('exact principal tool allowlists', () => {
   });
 
   it('denies a non-listed canonical name before capability bypass or handler invocation', async () => {
-    const handler = vi.fn(async () => ({ content: [{ type: 'text', text: 'ran' }] }));
+    const handler = vi.fn(async () => ({ content: [{ type: 'text' as const, text: 'ran' }] }));
     const result = await runDispatchStack(
       makeTool({ fn: handler, capabilities: [] }),
       'fix:other-tool',
@@ -134,7 +134,7 @@ describe('exact principal tool allowlists', () => {
   });
 
   it('allows an exact listed canonical name', async () => {
-    const handler = vi.fn(async () => ({ content: [{ type: 'text', text: 'ran' }] }));
+    const handler = vi.fn(async () => ({ content: [{ type: 'text' as const, text: 'ran' }] }));
     const result = await runDispatchStack(
       makeTool({ fn: handler, capabilities: [] }),
       'fix:allowed-tool',
