@@ -440,6 +440,10 @@ export interface UnifiedToolContext {
    * listing the real keys, but only if the value is an object at all.
    */
   codeMode?: boolean;
+  /** Dispatcher-generated id for this exact handler call; safe as an idempotency key. */
+  dispatchCallId?: string;
+  /** True when this handler was reached through ctx.dispatchTool rather than a top-level call. */
+  indirectDispatch?: boolean;
   /** Aborts on per-tool timeout, parent cancellation, or shutdown. */
   signal: AbortSignal;
 

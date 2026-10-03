@@ -743,6 +743,7 @@ const ctxBindingsStep: DispatchStep = {
 
     exec.handlerCtx = applyWorkspaceTxContract(tool, toolName, {
       ...ctx,
+      dispatchCallId: exec.callId,
       signal: exec.abort.signal,
       emit: wrappedEmit,
       progress: wrappedProgress,
