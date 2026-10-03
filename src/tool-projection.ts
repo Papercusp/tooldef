@@ -550,7 +550,7 @@ export interface UnifiedToolContext {
    */
   principal?:
     | (Pick<Principal, 'slug' | 'workspaceId' | 'capabilities'> &
-        Partial<Pick<Principal, 'kind' | 'authMethod' | 'trust' | 'roles' | 'label'>>)
+        Partial<Pick<Principal, 'kind' | 'authMethod' | 'trust' | 'roles' | 'label' | 'allowedTools'>>)
     | null;
   /**
    * Transaction-bound Sql client with `app.workspace_id` GUC set. Built-in
