@@ -614,6 +614,50 @@ export function checkScript(
       const call = identifier ? boundCall(identifier) : undefined;
       return resolved && call ? { call, path: resolved.path } : undefined;
     };
+    const optionalPathsGuardedByTypeof = (
+      condition: Expression,
+      call: StaticToolCall,
+      branchIsTrue: boolean,
+    ): string[][] => {
+      if (!ts.isBinaryExpression(condition)) return [];
+      const operator = condition.operatorToken.kind;
+      const equals = operator === ts.SyntaxKind.EqualsEqualsToken
+        || operator === ts.SyntaxKind.EqualsEqualsEqualsToken;
+      const notEquals = operator === ts.SyntaxKind.ExclamationEqualsToken
+        || operator === ts.SyntaxKind.ExclamationEqualsEqualsToken;
+      if (!equals && !notEquals) return [];
+
+      const check = ts.isTypeOfExpression(condition.left) && ts.isStringLiteralLike(condition.right)
+        ? { expression: condition.left.expression, typeName: condition.right.text }
+        : ts.isStringLiteralLike(condition.left) && ts.isTypeOfExpression(condition.right)
+          ? { expression: condition.right.expression, typeName: condition.left.text }
+          : null;
+      if (!check) return [];
+
+      const resolved = boundPath(check.expression);
+      if (resolved?.call !== call || resolved.path.length === 0) return [];
+
+      // A typeof comparison proves an optional path exists only for the branch that
+      // excludes undefined. Keep the accepted result types explicit so an unsupported
+      // comparison cannot turn a stale read into a pass.
+      const nonUndefinedType = [
+        'string',
+        'number',
+        'bigint',
+        'boolean',
+        'symbol',
+        'function',
+        'object',
+      ].includes(check.typeName);
+      const presentWhenTrue = (equals && nonUndefinedType)
+        || (notEquals && check.typeName === 'undefined');
+      const presentWhenFalse = (equals && check.typeName === 'undefined')
+        || (notEquals && nonUndefinedType);
+      if (!(branchIsTrue ? presentWhenTrue : presentWhenFalse)) return [];
+
+      // If a deeper access is proven to exist, its ancestors must exist as well.
+      return resolved.path.map((_, index) => resolved.path.slice(0, index + 1));
+    };
     const safeOptionalPathsForRead = (
       node: Node,
       call: StaticToolCall,
@@ -634,6 +678,19 @@ export function checkScript(
 
         // Annotated: `current` is reassigned from `parent` below, so an inferred type here is
         // circular (TS7022) and the loop variable widens to `any`.
+        if (ts.isConditionalExpression(current)) {
+          const branchIsTrue = isWithin(node, current.whenTrue)
+            ? true
+            : isWithin(node, current.whenFalse)
+              ? false
+              : null;
+          if (branchIsTrue !== null) {
+            for (const path of optionalPathsGuardedByTypeof(current.condition, call, branchIsTrue)) {
+              addSafePath(path);
+            }
+          }
+        }
+
         const parent: Node | undefined = current.parent;
         if (!parent) break;
         if (ts.isBinaryExpression(parent)) {
