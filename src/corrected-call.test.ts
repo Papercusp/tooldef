@@ -514,6 +514,41 @@ describe('buildCorrectedCall — declared-key repairs (P-004)', () => {
     ).toBeNull();
   });
 
+  it('withholds a dropped-key call when a required enum remains missing (facts:list regression)', () => {
+    const targetSchema = {
+      type: 'object',
+      required: ['scope'],
+      properties: {
+        scope: { type: 'string', enum: ['workspace', 'role', 'owner', 'harness', 'work_item'] },
+      },
+    };
+    const issues = [{
+      path: ['scope'],
+      message: 'Invalid option: expected one of "workspace" | "role" | "owner" | "harness" | "work_item"',
+    }];
+
+    const missingScope = buildCorrectedCall({
+      toolName: 'facts:list',
+      input: { query: 'thread-post evidence read' },
+      corrections: [],
+      unknownKeys: ['query'],
+      targetSchema,
+      issues,
+    });
+    expect(missingScope).toBeNull();
+    expect(correctedCallHint(missingScope)).toBe('');
+
+    const suppliedScope = buildCorrectedCall({
+      toolName: 'facts:list',
+      input: { query: 'thread-post evidence read', scope: 'workspace' },
+      corrections: [],
+      unknownKeys: ['query'],
+      targetSchema,
+      issues: [],
+    });
+    expect(suppliedScope?.args).toEqual({ scope: 'workspace' });
+  });
+
   it('ignores a NESTED path — a corrected call is a top-level arg object', () => {
     expect(
       buildCorrectedCall({
