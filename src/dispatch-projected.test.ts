@@ -691,6 +691,40 @@ describe('dispatchProjectedTool', () => {
     expect(recorded).toEqual(['timeout']);
   });
 
+  it('classifies parent-signal abort separately from the configured dispatcher timeout', async () => {
+    for (const handlerOutcome of ['return', 'throw'] as const) {
+      const parent = new AbortController();
+      let handlerSawAbort = false;
+      const tool = makeTool({
+        timeoutSec: 60,
+        fn: async (_input, ctx) => {
+          await new Promise<void>((resolve, reject) => {
+            const finish = () => {
+              handlerSawAbort = true;
+              if (handlerOutcome === 'throw') reject(new Error('underlying handler aborted'));
+              else resolve();
+            };
+            if (ctx.signal.aborted) finish();
+            else ctx.signal.addEventListener('abort', finish, { once: true });
+          });
+          return { content: [{ type: 'text', text: 'handler completed after parent abort' }] };
+        },
+      });
+      const startedAt = Date.now();
+      const abortTimer = setTimeout(() => parent.abort(new Error('outer request closed')), 20);
+      const r = await dispatchProjectedTool(
+        tool, 'fix.tool', {}, MAKE_CTX({ signal: parent.signal }), MAKE_DEPS(),
+      );
+      clearTimeout(abortTimer);
+
+      expect(handlerSawAbort).toBe(true);
+      expect(Date.now() - startedAt).toBeLessThan(5_000); // far below the configured 60s deadline
+      expect(r.ok).toBe(false);
+      expect(r.error?.code).toBe('aborted');
+      expect(r.error?.meta).toMatchObject({ abortSource: 'parent-signal' });
+    }
+  });
+
   it('aborts the handler when idleTimeoutSec elapses without an emit', async () => {
     const tool = makeTool({
       timeoutSec: 60,

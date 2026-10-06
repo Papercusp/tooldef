@@ -81,6 +81,7 @@ export type DispatchProjectedErrorCode =
   | 'authorization_denied'
   | 'precondition_failed'
   | 'ungated'
+  | 'aborted'
   | 'timeout';
 
 /**
