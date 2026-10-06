@@ -793,11 +793,21 @@ function stripUndefinedDeep(input: unknown, active: Set<object>): unknown {
  * reconstructed) input unchanged when the tool isn't positional or the caller
  * sent keyed args. Throws on a guard failure so a mis-emitted row fails LOUDLY
  * rather than writing wrong-but-valid data (Zod checks shape, not alignment).
+ *
+ * WI-10006625 — SIBLING keys beside `row` are MERGED into the reconstructed args,
+ * never dropped. The row carries only the prompt-declared columns (e.g.
+ * work_items:claim's id,assignee,harness,force,reason), so an arg the schema
+ * declares but the columns omit (claim's `directiveRef`) can only travel as a
+ * sibling. Returning `rec.args` alone discarded it with ok:true — the directive
+ * bind silently no-op'd. Merged siblings then meet strict Zod validation, so an
+ * UNDECLARED sibling is refused loudly rather than ignored. A key supplied BOTH
+ * as a filled row column and as a sibling is ambiguous and refused: picking
+ * either value silently would be the same wrong-but-valid write D-007 forbids.
  */
 function applyPositionalWriteShim(name: string, argsJsonSchema: Record<string, unknown>, input: unknown): unknown {
   if (!isWritePositional(name)) return input;
   if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
-  const row = (input as Record<string, unknown>).row;
+  const { row, ...siblings } = input as Record<string, unknown>;
   if (typeof row !== 'string') return input; // keyed args (or no row) — leave as-is
   const entry = getPrePromptEntry(name);
   const cols = projectWriteColumns(argsJsonSchema, {
@@ -809,7 +819,13 @@ function applyPositionalWriteShim(name: string, argsJsonSchema: Record<string, u
   if (!cols) return input; // tool doesn't actually fit the bounded positional shape
   const rec = reconstructArgs(row, cols);
   if (!rec.ok) throw new Error(`invalid_positional_row: ${rec.reason}`);
-  return rec.args;
+  const conflicts = Object.keys(siblings).filter((key) => key in rec.args);
+  if (conflicts.length > 0) {
+    throw new Error(
+      `invalid_positional_row: ${conflicts.map((k) => `\`${k}\``).join(', ')} supplied both as a row column and as a sibling arg — pass each value once`,
+    );
+  }
+  return { ...rec.args, ...siblings };
 }
 
 /**

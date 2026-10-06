@@ -118,6 +118,57 @@ describe('positional write shim — end-to-end (P-008/P-009)', () => {
     expect(tool.received()).toEqual({ id: 'WI-12', state: 'passed' });
   });
 
+  it('MERGES a declared non-column sibling arg beside `row` instead of dropping it (WI-10006625)', async () => {
+    // work_items:claim's columns are id,assignee,harness,force,reason; its
+    // `directiveRef` is declared but not a column, so it can only ride as a
+    // sibling. The shim used to return the reconstructed row args alone, so the
+    // sibling vanished with ok:true and the directive bind silently no-op'd.
+    let received: unknown;
+    defineTool({
+      name: 'wi:claim_sib',
+      requirePrincipal: false,
+      capability: 'test:write',
+      args: z
+        .object({
+          id: z.string().regex(/^WI-\d+$/),
+          assignee: z.string().optional(),
+          directiveRef: z.number().int().optional(),
+        })
+        .strict(),
+      handler: async (args) => {
+        received = args;
+        return { data: { ok: true } };
+      },
+    });
+    configurePrePromptRegistry([
+      { name: 'wi:claim_sib', write: 'positional', writeColumnNames: ['id', 'assignee'], writeRequiredColumnNames: ['id'] },
+    ]);
+    const def = lookupByMcpName('wi:claim_sib')!;
+
+    const merged = await dispatchProjectedTool(def, 'wi:claim_sib', { row: 'WI-7,su-a', directiveRef: 1223 }, ctx(), DEPS);
+    expect(merged.ok).toBe(true);
+    expect(received).toEqual({ id: 'WI-7', assignee: 'su-a', directiveRef: 1223 });
+
+    // An UNDECLARED sibling now meets strict validation and is refused loudly,
+    // rather than being discarded together with the declared ones.
+    received = undefined;
+    const undeclared = await dispatchProjectedTool(def, 'wi:claim_sib', { row: 'WI-7', bogus: true }, ctx(), DEPS);
+    expect(undeclared.ok).toBe(false);
+    expect(received).toBeUndefined();
+
+    // A key filled by the row AND sent as a sibling is ambiguous: refused, not
+    // silently resolved to either value.
+    const conflict = await dispatchProjectedTool(def, 'wi:claim_sib', { row: 'WI-7,su-a', assignee: 'su-b' }, ctx(), DEPS);
+    expect(conflict.ok).toBe(false);
+    expect(JSON.stringify(conflict)).toContain('supplied both as a row column and as a sibling arg');
+    expect(received).toBeUndefined();
+
+    // A column the row LEFT EMPTY may be supplied as a sibling (no conflict).
+    const filled = await dispatchProjectedTool(def, 'wi:claim_sib', { row: 'WI-8', assignee: 'su-c' }, ctx(), DEPS);
+    expect(filled.ok).toBe(true);
+    expect(received).toEqual({ id: 'WI-8', assignee: 'su-c' });
+  });
+
   it('GUARD: a misaligned row (bad enum) is rejected, not silently written', async () => {
     const tool = defineSetState('wi:set_state3');
     configurePrePromptRegistry([{ name: 'wi:set_state3', write: 'positional' }]);
