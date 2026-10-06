@@ -13,6 +13,7 @@ import { describe, it, expect } from 'vitest';
 import {
   GUIDANCE_SECTION_LABELS,
   GUIDANCE_SECTION_SEPARATOR,
+  SUMMARY_LEAD_MAX_CHARS,
   isSafetyClause,
   partialGuidanceDescription,
   summaryGuidanceDescription,
@@ -177,6 +178,29 @@ describe('summaryGuidanceDescription', () => {
   it('marks a truncation so a reader knows prose is missing', () => {
     const long = `${'word '.repeat(80)}end.`;
     expect(summaryGuidanceDescription(long, 60)).toContain('…');
+  });
+
+  it('shortens selection prose without cutting the colon-name rule', () => {
+    const rail = '⚠ Use colon tool names (flags:set); NEVER underscored display names.';
+    const lead = 'word '.repeat(30);
+    const summary = summaryGuidanceDescription(`${lead}. ${rail}`);
+    expect(SUMMARY_LEAD_MAX_CHARS).toBe(60);
+    expect(summary).toContain(rail);
+    expect(summary.split('…')[0].length).toBeLessThanOrEqual(SUMMARY_LEAD_MAX_CHARS);
+    // The old shared cap would cut the rule when the lead is tuned below it.
+    expect(rail.length).toBeGreaterThan(SUMMARY_LEAD_MAX_CHARS);
+    expect(rail.slice(0, SUMMARY_LEAD_MAX_CHARS)).not.toContain('names.');
+  });
+
+  it('preserves the previous long-rail text when only the lead cap shrinks', () => {
+    const rail = `NEVER ${'word '.repeat(30)}end.`;
+    const source = `Select an item. ${rail}`;
+    expect(summaryGuidanceDescription(source, 60)).toBe(summaryGuidanceDescription(source, 70));
+  });
+
+  it('does not duplicate a leading rail when the lead and rail caps differ', () => {
+    const rail = '⚠ Use colon tool names (flags:set); NEVER underscored display names.';
+    expect(summaryGuidanceDescription(rail)).toBe(rail);
   });
 
   it('does not emit the lead twice when the lead is itself a rail', () => {
