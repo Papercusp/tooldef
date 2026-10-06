@@ -200,7 +200,41 @@ describe('end-to-end format selection through defineTool', () => {
     defineListTool('fmt:structured', { result: z.array(z.object({ id: z.number(), name: z.string() })) });
     const { result, text } = await call('fmt:structured', { transport: 'mcp', requestedStructured: true });
     expect(text).toMatch(/^format: toon\n/);
-    expect(result.structuredContent).toEqual(ROWS);
+    // WI-10006851: MCP's CallToolResult schema requires structuredContent to be a
+    // record — a bare array fails the whole call with -32602 at the SDK. An
+    // array root is therefore wrapped, losslessly, and the wrap is declared.
+    expect(result.structuredContent).toEqual({ value: ROWS });
+    expect(result._meta).toMatchObject({ structured: true, structuredRoot: 'array' });
+  });
+
+  it('structuredContent is always a JSON object: scalar roots are wrapped, object roots pass as-is (WI-10006851)', async () => {
+    defineTool({
+      name: 'fmt:scalar',
+      requirePrincipal: false,
+      capability: 'test:read',
+      args: z.object({}),
+      handler: async () => ({ data: 'plain-text-root' }),
+    });
+    const scalar = await call('fmt:scalar', { transport: 'mcp', requestedStructured: true });
+    expect(scalar.result.structuredContent).toEqual({ value: 'plain-text-root' });
+    expect(scalar.result._meta).toMatchObject({ structured: true, structuredRoot: 'scalar' });
+
+    defineTool({
+      name: 'fmt:objectroot',
+      requirePrincipal: false,
+      capability: 'test:read',
+      args: z.object({}),
+      handler: async () => ({ data: { ok: true, rows: ROWS } }),
+    });
+    const object = await call('fmt:objectroot', { transport: 'mcp', requestedStructured: true });
+    expect(object.result.structuredContent).toEqual({ ok: true, rows: ROWS });
+    expect(object.result._meta).toMatchObject({ structured: true });
+    expect(object.result._meta).not.toHaveProperty('structuredRoot');
+
+    for (const r of [scalar.result, object.result]) {
+      const sc = r.structuredContent;
+      expect(sc !== null && typeof sc === 'object' && !Array.isArray(sc)).toBe(true);
+    }
   });
 
   it('a handler that returns a raw ToolResult is passed through untouched', async () => {

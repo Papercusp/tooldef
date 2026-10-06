@@ -349,9 +349,28 @@ function serializeToolResponseBody(
   // no registered tool today combines an object-rooted `result` with a
   // `delta` capability, so the not_modified/delta early-returns above are
   // unaffected — see their branches if that combination is ever added.)
+  //
+  // WI-10006851: MCP requires `structuredContent` to be a JSON OBJECT (the SDK
+  // validates `CallToolResult.structuredContent` as a record and fails the whole
+  // call with -32602 otherwise). An array- or scalar-rooted tool therefore
+  // cannot hand its data over raw — doing so turned every structured call to
+  // e.g. work_items:list into a protocol error, which pushed programmatic
+  // callers (the pot apps) back onto the model-facing text the result door is
+  // allowed to shrink or spill. Wrap a non-object root as `{ value: data }` and
+  // say so in `_meta.structuredRoot`, so the payload stays lossless for every
+  // root shape. Object roots are attached as-is (their advertised outputSchema
+  // describes exactly that object).
   if (opts.includeStructured && hasData) {
-    result.structuredContent = data;
+    const root = structuredRootShape(data);
+    result.structuredContent = root === 'object' ? data : { value: data };
     _meta.structured = true;
+    if (root !== 'object') _meta.structuredRoot = root;
   }
   return result;
+}
+
+/** Root shape of a tool's `data`, for MCP's object-only `structuredContent` (WI-10006851). */
+export function structuredRootShape(data: unknown): 'object' | 'array' | 'scalar' {
+  if (Array.isArray(data)) return 'array';
+  return data !== null && typeof data === 'object' ? 'object' : 'scalar';
 }
