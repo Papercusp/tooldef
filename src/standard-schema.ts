@@ -293,7 +293,7 @@ function issueDepth(issue: StandardSchemaV1.Issue): number {
   return Array.isArray(keys) && keys.length > 0 ? pathDepth + 1 : pathDepth;
 }
 
-function bestUnionBranch(
+export function bestUnionBranch(
   issue: StandardSchemaV1.Issue,
 ): ReadonlyArray<StandardSchemaV1.Issue> | null {
   const branches = (issue as IssueExtras).errors;

@@ -18,7 +18,14 @@
 import { type ZodTypeAny } from 'zod';
 import { tierFor } from './capability-tiers';
 import { toJsonSchema } from './schema-adapter';
-import { standardValidate, formatIssues, issuesAreValueLevel, issueLeaves, type StandardSchemaV1 } from './standard-schema';
+import {
+  standardValidate,
+  formatIssues,
+  issuesAreValueLevel,
+  issueLeaves,
+  bestUnionBranch,
+  type StandardSchemaV1,
+} from './standard-schema';
 import {
   applyArgReencodings,
   boundValue,
@@ -1989,6 +1996,105 @@ function leafIssueSummary(
 }
 
 /**
+ * The unrecognized-key leaves of `issues`, each at the path where the key was ACTUALLY
+ * rejected.
+ *
+ * `issueLeaves` deliberately keeps a union whose schema authored its own error message —
+ * that message is contract guidance, and the rendered refusal must show it. But a union's
+ * authored message is often itself an unrecognized-key diagnosis lifted out of ONE branch
+ * (work_items:complete does exactly this), and the leaf left behind is the UNION node at
+ * the union's own path. Every location-aware consumer below then saw a key rejected deep
+ * inside `completion.verification.requirementDisposition[0]` as if it had been sent at the
+ * root, and the refusal told the caller to "re-send using only" top-level keys that were
+ * all already valid — the wrong cause (EI-25240542476501298).
+ *
+ * So, for LOCATION ONLY, descend into such a union's closest-matching branch and report
+ * the unrecognized-key sub-issues it holds. The rendered message is untouched. Falls back
+ * to the union leaf itself when the branch holds no unrecognized-key issue, so a validator
+ * with an unusual issue shape degrades to the previous behaviour, never to silence.
+ */
+function unrecognizedKeyLeaves(
+  issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
+): Array<{ issue: StandardSchemaV1.Issue; segs: PropertyKey[] }> {
+  const out: Array<{ issue: StandardSchemaV1.Issue; segs: PropertyKey[] }> = [];
+  const visit = (issue: StandardSchemaV1.Issue, segs: PropertyKey[], depth: number): void => {
+    if (!/nrecognized key/i.test(issue.message ?? '')) return;
+    if ((issue as { code?: unknown }).code === 'invalid_union' && depth < 4) {
+      const branch = bestUnionBranch(issue);
+      const located: Array<{ issue: StandardSchemaV1.Issue; segs: PropertyKey[] }> = [];
+      if (branch) {
+        for (const sub of issueLeaves(branch)) {
+          const before = out.length;
+          visit(sub.issue, [...segs, ...sub.segs], depth + 1);
+          located.push(...out.splice(before));
+        }
+      }
+      if (located.length > 0) {
+        out.push(...located);
+        return;
+      }
+    }
+    out.push({ issue, segs });
+  };
+  for (const { issue, segs } of issueLeaves((issues ?? []) as StandardSchemaV1.Issue[])) visit(issue, segs, 0);
+  return out;
+}
+
+/** `schemaPathLabel` for the CONTAINER an issue path points at (no trailing key). */
+function schemaContainerLabel(path: ReadonlyArray<PropertyKey>): string {
+  let label = '';
+  for (const segment of path) {
+    const text = String(segment);
+    if (/^\d+$/.test(text)) {
+      label += '[]';
+    } else {
+      label = label.length > 0 ? `${label}.${text}` : text;
+    }
+  }
+  return label;
+}
+
+/**
+ * Unknown keys whose EVERY rejection sits inside a nested object this tool's schema can
+ * resolve — with that object's own accepted keys, and a one-level relocation when the
+ * key exists one level further down (`completion` → `completion.verification.<key>`).
+ *
+ * These are the keys for which the root-scoped "this tool accepts ONLY: …" list names
+ * the wrong cause: the caller's top-level args were fine; one nested object was not.
+ * A key also rejected at the root, or at a path the schema cannot resolve, is left out
+ * so the ordinary root-scoped message still covers it (EI-25240542476501298).
+ */
+function nestedOnlyRejections(
+  issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
+  rawSchema: unknown,
+  unknownKeys: readonly string[],
+): Array<{ key: string; at: string; accepted: string[]; relocation?: string }> {
+  const scopes = new Map<string, { key: string; at: string; accepted: string[]; relocation?: string } | null>();
+  for (const { issue, segs } of unrecognizedKeyLeaves(issues)) {
+    for (const key of issueKeyNames(issue)) {
+      if (!unknownKeys.includes(key)) continue;
+      const nested = segs.length > 0 ? schemaPropertiesAtPath(rawSchema, segs) : undefined;
+      if (!nested || Object.prototype.hasOwnProperty.call(nested, key)) {
+        scopes.set(key, null);
+        continue;
+      }
+      if (scopes.has(key)) continue;
+      const at = schemaContainerLabel(segs);
+      const deeper = nestedArgPaths(nested).get(key);
+      scopes.set(key, {
+        key,
+        at,
+        accepted: Object.keys(nested),
+        ...(deeper ? { relocation: `${at}.${deeper}` } : {}),
+      });
+    }
+  }
+  return Array.from(scopes.values()).filter(
+    (scope): scope is { key: string; at: string; accepted: string[]; relocation?: string } => scope !== null,
+  );
+}
+
+/**
  * Resolve the object whose properties were being validated at an issue path.
  *
  * A flat root-property lookup is insufficient for strict unknown-key issues: the same
@@ -2006,9 +2112,14 @@ function schemaPropertiesAtPath(
   const schema = jsonSchemaForArgHints(rawSchema);
   if (!schema) return undefined;
 
-  let nodes: unknown[] = [schema];
+  // EI-25240542476501298: a reused sub-schema is emitted as a local `$ref` into `$defs`
+  // (work_items:complete's `completion` is one), and `stepSchema` does not follow refs —
+  // so every path through such a property resolved to NOTHING, and a key rejected below
+  // it was judged against the ROOT instead of its own object. Resolve local refs (and
+  // expand union branches) at every step of this walk.
+  let nodes: unknown[] = derefSchemaNodes(schema, [schema]);
   for (const segment of path) {
-    nodes = stepSchema(nodes, segment);
+    nodes = derefSchemaNodes(schema, stepSchema(nodes, segment));
     if (nodes.length === 0) return undefined;
   }
 
@@ -2020,6 +2131,32 @@ function schemaPropertiesAtPath(
     merged = { ...(merged ?? {}), ...(properties as Record<string, unknown>) };
   }
   return merged;
+}
+
+/** Follow a LOCAL JSON-Schema `$ref` (`#/$defs/...`) against `root`; bounded, so a cycle cannot spin. */
+function derefLocalSchema(root: Record<string, unknown>, node: unknown, depth = 0): unknown {
+  if (!node || typeof node !== 'object' || depth > 8) return node;
+  const ref = (node as { $ref?: unknown }).$ref;
+  if (typeof ref !== 'string' || !ref.startsWith('#/')) return node;
+  let current: unknown = root;
+  for (const part of ref.slice(2).split('/')) {
+    if (!current || typeof current !== 'object') return node;
+    current = (current as Record<string, unknown>)[part.replace(/~1/g, '/').replace(/~0/g, '~')];
+  }
+  return current === undefined ? node : derefLocalSchema(root, current, depth + 1);
+}
+
+/** Each node with local refs resolved, plus its (resolved) union branches as their own nodes. */
+function derefSchemaNodes(root: Record<string, unknown>, nodes: readonly unknown[]): unknown[] {
+  const out: unknown[] = [];
+  const visit = (node: unknown, depth: number): void => {
+    const resolved = derefLocalSchema(root, node);
+    if (!resolved || typeof resolved !== 'object') return;
+    out.push(resolved);
+    if (depth < 4) for (const branch of schemaUnionBranches(resolved)) visit(branch, depth + 1);
+  };
+  for (const node of nodes) visit(node, 0);
+  return out;
 }
 
 function issueKeyNames(issue: StandardSchemaV1.Issue): string[] {
@@ -2053,7 +2190,7 @@ function nestedTopLevelArgContexts(
   const root = mergedSchemaProperties(rawSchema);
   if (!root) return [];
   const contexts = new Map<string, string>();
-  for (const { issue, segs } of issueLeaves((issues ?? []) as StandardSchemaV1.Issue[])) {
+  for (const { issue, segs } of unrecognizedKeyLeaves(issues)) {
     if (segs.length === 0) continue;
     if (!/nrecognized key/i.test(issue.message)) continue;
     const nested = schemaPropertiesAtPath(rawSchema, segs);
@@ -2165,12 +2302,15 @@ export function unrecognizedArgKeys(
     ]),
   ];
   const unknown = new Set<string>();
+  // EI-25240542476501298: located through any authored union message, so a nested
+  // rejection is judged against its own object rather than the root.
+  const located = unrecognizedKeyLeaves(issues);
 
   // Compare each rejection against the object at its own path. A root-level key is
   // not a valid reason to suppress a nested rejection: `{ items:[{ harness }] }` and
   // `{ harness, items:[...] }` are different call shapes even when both mention the
   // same field name.
-  for (const { issue, segs } of leaves) {
+  for (const { issue, segs } of located) {
     if (!/nrecognized key/i.test(issue.message)) continue;
     const nested = segs.length > 0 ? schemaPropertiesAtPath(rawSchema, segs) : undefined;
     for (const key of issueKeyNames(issue)) {
@@ -2185,7 +2325,7 @@ export function unrecognizedArgKeys(
   // Preserve the old message/keys fallback for validators that provide an unusual
   // issue shape which `issueLeaves` cannot associate with a path.
   for (const key of reportedKeys) {
-    if (!leaves.some(({ issue }) => issueKeyNames(issue).includes(key))) {
+    if (![...leaves, ...located].some(({ issue }) => issueKeyNames(issue).includes(key))) {
       if (!rootKeys.includes(key)) unknown.add(key);
     }
   }
@@ -2407,7 +2547,26 @@ export function unknownArgHint(
   const props = mergedSchemaProperties(rawSchema);
   const keys = props ? Object.keys(props) : [];
   if (keys.length === 0) return '';
-  const corrections = invalidInputCorrections(issues, rawSchema, argRedirects, input);
+  const unknownKeys = unrecognizedArgKeys(issues, rawSchema, input);
+  const nestedContexts = nestedTopLevelArgContexts(issues, rawSchema)
+    .filter(({ key }) => unknownKeys.includes(key));
+  // EI-25240542476501298: a key rejected ONLY inside a nested object is not a top-level
+  // problem, so the root-scoped "accepts ONLY" list, the root-scoped near-name guesses and
+  // the top-level authored redirects all name the wrong cause for it. Describe the object
+  // it was actually rejected in instead. (A root key sent nested keeps its own,
+  // more specific "move it out to the top level" text below.)
+  const nestedContextKeys = new Set(nestedContexts.map(({ key }) => key));
+  const nestedOnly = nestedOnlyRejections(issues, rawSchema, unknownKeys)
+    .filter(({ key }) => !nestedContextKeys.has(key));
+  const nestedOnlyKeys = new Set(nestedOnly.map(({ key }) => key));
+  const nestedOnlyText = nestedOnly
+    .map(({ key, at, accepted, relocation }) =>
+      ` \`${key}\` was rejected inside \`${at}\`, not at the top level — that object accepts ONLY: ${accepted.join(', ')}.` +
+      (relocation ? ` \`${key}\` is declared one level deeper: did you mean \`${relocation}\`?` : ''),
+    )
+    .join('');
+  const corrections = invalidInputCorrections(issues, rawSchema, argRedirects, input)
+    .filter(({ rejectedArg }) => !nestedOnlyKeys.has(rejectedArg));
   const redirected = corrections.filter(
     (correction) => correction.kind === 'authored-redirect' || correction.kind === 'authored-drop',
   );
@@ -2455,9 +2614,6 @@ export function unknownArgHint(
   const correctionText = localCorrections.length > 0
     ? ` Did you mean ${localCorrections.map(({ rejectedArg, target }) => `\`${target}\` for \`${rejectedArg}\``).join('; ')}?`
     : '';
-  const unknownKeys = unrecognizedArgKeys(issues, rawSchema, input);
-  const nestedContexts = nestedTopLevelArgContexts(issues, rawSchema)
-    .filter(({ key }) => unknownKeys.includes(key));
   const nestedContextText = nestedContexts
     .map(({ key, path }) =>
       ` \`${key}\` is not accepted at \`${path}\`; this tool accepts \`${key}\` only at the top level, so move it out of that nested object.`,
@@ -2540,8 +2696,18 @@ export function unknownArgHint(
         : [];
     })
     .join('');
+  if (unknownKeys.length > 0 && unknownKeys.every((key) => nestedOnlyKeys.has(key))) {
+    // EI-25240542476501298: every rejected key sits inside a nested object, so the
+    // top-level list (and "re-send using only the keys above") would name the wrong cause.
+    return (
+      ` — the rejected key is NESTED, so your top-level args were not the problem.${nestedOnlyText}` +
+      ' An undeclared arg is REJECTED, not silently ignored (EI-10883): passing an arg a tool does not declare used to return ok:true' +
+      ' while quietly doing something else, which is indistinguishable from success. Re-send with that nested object corrected.' +
+      serverVintageHint()
+    );
+  }
   return (
-    ` — this tool accepts ONLY: ${keys.join(', ')}.${ambientText}${envelopeText}${metaEnvelopeText}${siblingText}${redirectText}${nestedContextText}${correctionText}` +
+    ` — this tool accepts ONLY: ${keys.join(', ')}.${ambientText}${envelopeText}${metaEnvelopeText}${siblingText}${redirectText}${nestedOnlyText}${nestedContextText}${correctionText}` +
     ' An undeclared arg is REJECTED, not silently ignored (EI-10883): passing an arg a tool does not declare used to return ok:true' +
     ` while quietly doing something else, which is indistinguishable from success.${reSendHint}` +
     // EI-19953470656367880: an unrecognized-key rejection is ALSO the exact shape a
