@@ -26,6 +26,7 @@ import type {
   ToolResult,
 } from './wire';
 import type { AgentRole, Capability, PluginSpawn } from './host-types';
+import type { BundledDefinitionSite } from './bundle-definition-site';
 import type { PayloadShapers } from './payload-tier';
 import type {
   KernelBoundary,
@@ -1025,6 +1026,13 @@ export interface ProjectedTool {
    */
   sourceFile?: string;
   /**
+   * Set INSTEAD of `sourceFile` when the tool was defined inside a bundle that also
+   * inlines this library: every frame reports the same file, so the file cannot name
+   * the defining module, but the frames' LINES can. A host that can read the bundle
+   * resolves it with `definingModuleOfBundledSite` (P-002 / EI-25176539351759672).
+   */
+  bundledDefinitionSite?: BundledDefinitionSite;
+  /**
    * OpenAI/MCP-safe JSON Schema for tool input. Validated before invocation
    * and advertised to strict function-calling clients. Built-in `defineTool`
    * registrations flatten root unions here because those clients reject a
@@ -1871,6 +1879,16 @@ export function projectedToolSourceFile(toolName: string): string | null {
   // accepts all three and returns undefined rather than guessing when a
   // normalized name is ambiguous.
   return resolveMcpName(toolName)?.sourceFile ?? null;
+}
+
+/**
+ * The bundled definition site of `toolName` — the frames' positions in the one file
+ * a bundle put both this library and the tool into — or `null` when the tool is
+ * unknown or was not defined inside a bundle. Same tolerant name resolution as
+ * {@link projectedToolSourceFile}; a host resolves the site to a module path.
+ */
+export function projectedToolBundledDefinitionSite(toolName: string): BundledDefinitionSite | null {
+  return resolveMcpName(toolName)?.bundledDefinitionSite ?? null;
 }
 
 /**

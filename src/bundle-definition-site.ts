@@ -105,10 +105,19 @@ export function bundleModuleAtLine(markers: BundleModuleMarkers, line: number): 
 }
 
 /**
+ * Frame [0] of every captured site is `captureDefinitionSite`, which lives in this
+ * library's `define-tool` module. A bundle whose marker at that line names anything else
+ * is not the bundle the frames were captured from (rewritten since the process loaded
+ * it), so its line numbers mean nothing and the site must stay unknown.
+ */
+const DEFINE_TOOL_MODULE = /(?:^|\/)define-tool\.[cm]?[jt]s$/;
+
+/**
  * The defining module of a bundled site: the first frame after frame [0] whose module
  * is known and differs from frame [0]'s. Frames that precede every marker (esbuild's
  * runtime helpers, emitted above the first module) are skipped rather than taken.
- * Null when frame [0]'s module is unknown or no frame leaves it.
+ * Null when frame [0]'s module is not this library's `define-tool` module (a mismatched
+ * bundle) or no frame leaves it.
  */
 export function definingModuleOfBundledSite(
   markers: BundleModuleMarkers,
@@ -116,7 +125,7 @@ export function definingModuleOfBundledSite(
 ): BundledDefiningModule | null {
   if (site.lines.length === 0) return null;
   const selfModule = bundleModuleAtLine(markers, site.lines[0]);
-  if (!selfModule) return null;
+  if (!selfModule || !DEFINE_TOOL_MODULE.test(selfModule)) return null;
   for (const line of site.lines.slice(1)) {
     const module = bundleModuleAtLine(markers, line);
     if (module && module !== selfModule) return { selfModule, definingModule: module };

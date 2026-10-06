@@ -402,6 +402,7 @@ export {
   lookupByHttpPath,
   listAllProjectedTools,
   projectedToolSourceFile,
+  projectedToolBundledDefinitionSite,
   listDeclaredToolShapers,
   recordToolShapers,
   PROJECTED_TOOL_REGISTRY_SOURCE,
@@ -577,3 +578,13 @@ export {
   toolOperationName,
   type OpenApiDocumentOptions,
 } from './openapi-assemble';
+
+/* ─── Bundled definition sites (P-002 / EI-25176539351759672) ─────────── */
+export {
+  indexBundleModuleMarkers,
+  bundleModuleAtLine,
+  definingModuleOfBundledSite,
+  type BundledDefinitionSite,
+  type BundleModuleMarkers,
+  type BundledDefiningModule,
+} from './bundle-definition-site';

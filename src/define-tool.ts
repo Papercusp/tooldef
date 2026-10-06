@@ -44,6 +44,7 @@ import {
   type ToolExposure,
   type UnifiedToolContext,
 } from './tool-projection';
+import type { BundledDefinitionSite } from './bundle-definition-site';
 import {
   UnauthorizedToolError,
   InvalidInputError,
@@ -170,7 +171,22 @@ function definitionSitePath(file: string): string {
   }
 }
 
-function captureDefinitionSite(): string | null {
+/**
+ * What the stack walk established about a definition site. `path` is the defining
+ * file when it differs from this one. When every captured frame sat in this SAME file
+ * — tooldef and the tool were bundled together, so no file can be told apart from
+ * this one — `path` is null and `bundled` carries the frames' LINES instead, which a
+ * host that can read the bundle resolves to the defining module
+ * (`bundle-definition-site.ts`, P-002 / EI-25176539351759672).
+ */
+interface CapturedDefinitionSite {
+  readonly path: string | null;
+  readonly bundled: BundledDefinitionSite | null;
+}
+
+const NO_DEFINITION_SITE: CapturedDefinitionSite = { path: null, bundled: null };
+
+function captureDefinitionSite(): CapturedDefinitionSite {
   const ErrorAny = Error as unknown as {
     prepareStackTrace?: (err: Error, stack: unknown[]) => unknown;
   };
@@ -181,21 +197,36 @@ function captureDefinitionSite(): string | null {
     // Bounded: we need the nearest few frames, not a full trace. Measured at
     // ~10.6µs per capture, ~8.7ms across a full 820-tool catalog boot.
     Error.stackTraceLimit = 12;
-    const raw = new Error().stack as unknown as Array<{ getFileName?: () => string }>;
-    if (!Array.isArray(raw) || raw.length === 0) return null;
+    const raw = new Error().stack as unknown as Array<{
+      getFileName?: () => string;
+      getLineNumber?: () => number | null;
+    }>;
+    if (!Array.isArray(raw) || raw.length === 0) return NO_DEFINITION_SITE;
     // Frame [0] is this function, so its file IS this file.
     const selfFile = raw[0]?.getFileName?.() ?? null;
+    const selfLines: number[] = [];
     for (const frame of raw) {
       const file = frame?.getFileName?.();
       if (!file) continue;
-      if (selfFile && file === selfFile) continue;
+      if (selfFile && file === selfFile) {
+        const line = frame.getLineNumber?.();
+        if (typeof line === 'number' && line > 0) selfLines.push(line);
+        continue;
+      }
       // Node internals ('node:internal/...') are never a definition site.
       if (file.startsWith('node:')) continue;
-      return definitionSitePath(file);
+      return { path: definitionSitePath(file), bundled: null };
     }
-    return null;
+    // Every frame sat in this one file. Unbundled, that cannot happen for a real caller
+    // (its module is a different file), so this is the bundled shape: hand the frames'
+    // positions to a host that can map them to modules, instead of recording nothing.
+    // At least two frames are needed — frame [0] to identify this module, one more to
+    // leave it.
+    return selfFile && selfLines.length >= 2
+      ? { path: null, bundled: { file: definitionSitePath(selfFile), lines: selfLines } }
+      : NO_DEFINITION_SITE;
   } catch {
-    return null;
+    return NO_DEFINITION_SITE;
   } finally {
     ErrorAny.prepareStackTrace = orig;
     Error.stackTraceLimit = origLimit;
@@ -1094,7 +1125,7 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
   input: ToolDefinitionInput<TArgs>,
 ): ToolDefinition<TArgs> {
   const definitionSite = captureDefinitionSite();
-  const name = input.name ?? deriveNameFromCallSite(definitionSite);
+  const name = input.name ?? deriveNameFromCallSite(definitionSite.path);
   if (!name) {
     throw new Error(
       'defineTool: could not derive tool name from call site. ' +
@@ -1203,7 +1234,7 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
   input: RoleToolDefinitionInput<TArgs>,
 ): RoleToolDefinition<TArgs> {
   const definitionSite = captureDefinitionSite();
-  const name = input.name ?? deriveNameFromCallSite(definitionSite);
+  const name = input.name ?? deriveNameFromCallSite(definitionSite.path);
   if (!name) {
     throw new Error(
       'defineTool: could not derive tool name from call site. ' +
@@ -2958,7 +2989,7 @@ export function toArgsJsonSchema(toolName: string, args: StandardSchemaV1): Reco
 function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
   def: ToolDefinition<TArgs>,
   expose?: ToolExposure,
-  sourceFile?: string | null,
+  definitionSite: CapturedDefinitionSite = NO_DEFINITION_SITE,
 ): void {
   // tasks:list → /api/agent-tools/tasks/list
   const httpPath = `/api/agent-tools/${def.name.replaceAll(':', '/')}`;
@@ -3136,7 +3167,10 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     description: def.description,
     // Where this tool was defined (absolute, captured from the call stack).
     // Null when the stack was unreadable — never guessed.
-    sourceFile: sourceFile ?? undefined,
+    sourceFile: definitionSite.path ?? undefined,
+    // Bundled: the frames' positions, resolved to a module by a host that can read
+    // the bundle (bundle-definition-site.ts). Absent everywhere else.
+    ...(definitionSite.bundled ? { bundledDefinitionSite: definitionSite.bundled } : {}),
     inputSchema,
     // Keep the complete branch requirements for discovery/introspection while
     // retaining the flattened schema above for strict OpenAI/MCP callers.
@@ -3209,7 +3243,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
 function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
   def: RoleToolDefinition<TArgs>,
   expose?: ToolExposure,
-  sourceFile?: string | null,
+  definitionSite: CapturedDefinitionSite = NO_DEFINITION_SITE,
 ): void {
   const httpPath = `/api/agent-tools/${def.name.replaceAll(':', '/')}`;
   const rawSchema = toArgsJsonSchema(def.name, def.args);
@@ -3345,7 +3379,10 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     description: def.description,
     // Where this tool was defined (absolute, captured from the call stack).
     // Null when the stack was unreadable — never guessed.
-    sourceFile: sourceFile ?? undefined,
+    sourceFile: definitionSite.path ?? undefined,
+    // Bundled: the frames' positions, resolved to a module by a host that can read
+    // the bundle (bundle-definition-site.ts). Absent everywhere else.
+    ...(definitionSite.bundled ? { bundledDefinitionSite: definitionSite.bundled } : {}),
     inputSchema,
     // Keep the complete branch requirements for discovery/introspection while
     // retaining the flattened schema above for strict OpenAI/MCP callers.
