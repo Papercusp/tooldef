@@ -908,20 +908,30 @@ const invokeStep: DispatchStep = {
         const hasAuthoritativeAttemptReceipt =
           attemptReceipt?.status === 'recorded' || attemptReceipt?.status === 'not-recorded';
         if (!handlerReportedFailure && !isLowTierRead && !isIdempotentCompletion && !hasAuthoritativeAttemptReceipt) {
+          const receipt = attemptReceipt ?? {
+            status: 'recovery-incomplete' as const,
+            reason: 'handler completed after abort without an authoritative attempt receipt',
+          };
+          // A parent-signal abort is not a timeout, so it gets its own code, but the handler
+          // still RETURNED: a non-idempotent write may have committed. The receipt is the
+          // caller's only signal not to blindly retry it, so both branches must carry it
+          // (WI-10006764 — the parent-signal branch once returned without it).
           if (exec.abortSource === 'parent-signal') {
             return {
               ok: false,
               error: {
                 code: 'aborted',
                 message: `tool "${toolName}" was aborted by its parent signal after the handler returned`,
-                meta: { abortSource: 'parent-signal' },
+                meta: {
+                  abortSource: 'parent-signal',
+                  abortCompletionReceipt: {
+                    ...receipt,
+                    attemptId: exec.callId,
+                  },
+                },
               },
             };
           }
-          const receipt = attemptReceipt ?? {
-            status: 'recovery-incomplete' as const,
-            reason: 'handler completed after abort without an authoritative attempt receipt',
-          };
           return {
             ok: false,
             error: {

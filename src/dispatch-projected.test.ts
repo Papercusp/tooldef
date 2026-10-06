@@ -722,6 +722,16 @@ describe('dispatchProjectedTool', () => {
       expect(r.ok).toBe(false);
       expect(r.error?.code).toBe('aborted');
       expect(r.error?.meta).toMatchObject({ abortSource: 'parent-signal' });
+      if (handlerOutcome === 'return') {
+        // WI-10006764: the handler RETURNED, so a non-idempotent write may have committed.
+        // The parent-signal code must not drop the receipt that tells the caller not to retry.
+        expect(r.error?.meta).toMatchObject({
+          abortCompletionReceipt: {
+            status: 'recovery-incomplete',
+            attemptId: expect.any(String),
+          },
+        });
+      }
     }
   });
 
