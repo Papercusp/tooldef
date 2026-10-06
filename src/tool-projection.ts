@@ -356,6 +356,17 @@ export interface RequestOriginMetadata {
   query?: Record<string, string>;
   /** Non-secret request headers useful for attribution/debugging. */
   headers?: Record<string, string>;
+  /**
+   * Host-classified native-session presentation. Fingerprints preserve the
+   * carrier without retaining its raw value. A bound pair proves caller/row
+   * consistency, not possession or physical actor identity.
+   */
+  nativeSession?: {
+    carrier: 'header:x-papercusp-native-session' | 'query:native_session';
+    valueFingerprint: string;
+    binding: 'bound' | 'unbound';
+    candidateAdvSessionId: number | null;
+  };
 }
 
 export interface UnifiedToolContext {
