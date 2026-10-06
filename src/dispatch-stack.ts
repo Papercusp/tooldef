@@ -126,6 +126,7 @@ export interface DispatchExecution {
 
   // ─── written by 'timeout' step ──────────────────────────────────────
   abort: AbortController;
+  abortSource: 'dispatcher-timeout' | 'idle-timeout' | 'parent-signal' | null;
   timeoutSec: number;
 
   // ─── written by 'idle-watchdog' step ────────────────────────────────
@@ -206,6 +207,7 @@ function initExecution(
     windowKey,
     quotaLimit,
     abort: new AbortController(),
+    abortSource: null,
     timeoutSec: 0,
     idleSec: 0,
     lastEmitMs: 0,
@@ -596,17 +598,25 @@ const timeoutStep: DispatchStep = {
   name: 'timeout',
   async run(exec) {
     exec.timeoutSec = exec.tool.timeoutSec ?? 60;
-    const timer = setTimeout(() => exec.abort.abort(), exec.timeoutSec * 1000);
+    const timer = setTimeout(() => abortExecution(exec, 'dispatcher-timeout'), exec.timeoutSec * 1000);
     if (typeof timer.unref === 'function') timer.unref();
     exec.timeoutTimer = timer;
     // Compose any caller-supplied signal — caller-side aborts must still
     // propagate to the dispatcher's controller.
-    if (exec.ctx.signal && !exec.ctx.signal.aborted) {
-      exec.ctx.signal.addEventListener('abort', () => exec.abort.abort(), { once: true });
+    if (exec.ctx.signal) {
+      const abortFromParent = () => abortExecution(exec, 'parent-signal');
+      if (exec.ctx.signal.aborted) abortFromParent();
+      else exec.ctx.signal.addEventListener('abort', abortFromParent, { once: true });
     }
     return null;
   },
 };
+
+function abortExecution(exec: DispatchExecution, source: NonNullable<DispatchExecution['abortSource']>): void {
+  if (exec.abort.signal.aborted) return;
+  exec.abortSource = source;
+  exec.abort.abort();
+}
 
 const idleWatchdogStep: DispatchStep = {
   name: 'idle-watchdog',
@@ -617,7 +627,7 @@ const idleWatchdogStep: DispatchStep = {
       const checkMs = Math.max(1_000, Math.floor((exec.idleSec * 1000) / 4));
       const timer = setInterval(() => {
         if (exec.abort.signal.aborted) return;
-        if (Date.now() - exec.lastEmitMs > exec.idleSec * 1000) exec.abort.abort();
+        if (Date.now() - exec.lastEmitMs > exec.idleSec * 1000) abortExecution(exec, 'idle-timeout');
       }, checkMs);
       if (typeof timer.unref === 'function') timer.unref();
       exec.idleTimer = timer;
@@ -898,6 +908,16 @@ const invokeStep: DispatchStep = {
         const hasAuthoritativeAttemptReceipt =
           attemptReceipt?.status === 'recorded' || attemptReceipt?.status === 'not-recorded';
         if (!handlerReportedFailure && !isLowTierRead && !isIdempotentCompletion && !hasAuthoritativeAttemptReceipt) {
+          if (exec.abortSource === 'parent-signal') {
+            return {
+              ok: false,
+              error: {
+                code: 'aborted',
+                message: `tool "${toolName}" was aborted by its parent signal after the handler returned`,
+                meta: { abortSource: 'parent-signal' },
+              },
+            };
+          }
           const receipt = attemptReceipt ?? {
             status: 'recovery-incomplete' as const,
             reason: 'handler completed after abort without an authoritative attempt receipt',
@@ -948,6 +968,16 @@ const invokeStep: DispatchStep = {
     } catch (err) {
       const isTimeout = exec.abort.signal.aborted;
       if (isTimeout) {
+        if (exec.abortSource === 'parent-signal') {
+          return {
+            ok: false,
+            error: {
+              code: 'aborted',
+              message: `tool "${toolName}" was aborted by its parent signal while the handler was running`,
+              meta: { abortSource: 'parent-signal' },
+            },
+          };
+        }
         return {
           ok: false,
           error: {
