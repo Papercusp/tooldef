@@ -18,7 +18,10 @@ import { toArgsJsonSchema, unknownArgHint } from './define-tool';
 const entry = z.object({ requirement: z.string(), disposition: z.enum(['implemented', 'deferred']) }).strict();
 const shared = z
   .object({ summary: z.string(), verification: z.object({ dispositions: z.array(entry) }).strict().optional() })
-  .strict();
+  .strict()
+  // A registry id makes zod emit this as `$ref` into `$defs` (it otherwise inlines reuse),
+  // which is the shape work_items:complete's `completion` actually has.
+  .meta({ id: 'EI25240542476501298SharedCompletion' });
 
 function authoredUnrecognizedMessage(issue: unknown): string {
   // Mirrors complete.ts: lift the first nested unrecognized-key diagnosis, path-prefixed.
