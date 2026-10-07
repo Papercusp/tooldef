@@ -614,6 +614,14 @@ export function checkScript(
       const call = identifier ? boundCall(identifier) : undefined;
       return resolved && call ? { call, path: resolved.path } : undefined;
     };
+    const hasLexicalBinding = (identifier: import('typescript').Identifier, name: string): boolean => {
+      let current: Node | undefined = identifier;
+      while (current) {
+        if (bindingsByScope.get(current)?.has(name)) return true;
+        current = current.parent;
+      }
+      return false;
+    };
     const optionalPathsGuardedByTypeof = (
       condition: Expression,
       call: StaticToolCall,
@@ -669,6 +677,7 @@ export function checkScript(
         !ts.isPropertyAccessExpression(condition.expression) ||
         !ts.isIdentifier(condition.expression.expression) ||
         condition.expression.expression.text !== 'Array' ||
+        hasLexicalBinding(condition.expression.expression, 'Array') ||
         condition.expression.name.text !== 'isArray' ||
         condition.arguments.length !== 1
       ) return [];
