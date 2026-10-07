@@ -165,6 +165,24 @@ describe('strictArgs shared schema identity (EI-25287777702563119)', () => {
     }
   });
 
+  it('keeps bounded array parent chains on the same definition', () => {
+    const row = z.object({ value: z.string().min(1) })
+      .meta({ id: 'strict-args-bounded-array-row' });
+    const source = z.object({
+      single: z.array(row).max(1).optional().describe('single-call evidence'),
+      bulk: z.array(row).max(2).optional().describe('bulk-call evidence'),
+    }).refine((value) => Boolean(value.single || value.bulk));
+    expect(() => toArgsJsonSchema('test:bounded-before', source)).not.toThrow();
+    const strict = strictArgs(source);
+    expect(() => toArgsJsonSchema('test:bounded-after', strict)).not.toThrow();
+    expect(parse(strict, { single: [{ value: 'evidence' }] }).ok).toBe(true);
+    for (const value of [
+      {},
+      { single: [{ value: 'a' }, { value: 'b' }] },
+      { bulk: [{ value: 'evidence', extra: true }] },
+    ]) expect(parse(strict, value).ok).toBe(false);
+  });
+
   it('still refuses different author schemas that declare the same definition id', () => {
     const source = z.object({
       a: z.object({ text: z.string() }).meta({ id: 'strict-args-conflicting-row' }),

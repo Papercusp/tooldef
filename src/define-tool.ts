@@ -1561,10 +1561,18 @@ function deepStrictifyInPlace(schema: unknown, active: Set<object>): unknown {
     const s = schema as {
       strict?: () => unknown;
       meta?: () => Record<string, unknown> | undefined;
-      _zod?: { def?: Record<string, unknown> };
+      _zod?: { def?: Record<string, unknown>; parent?: unknown };
     };
     const def = s._zod?.def;
     if (!def || typeof def.type !== 'string') return schema;
+
+    // Zod's JSON-Schema converter also visits the parent chain retained by
+    // max()/describe()/refine(). An array's current element can be replaced
+    // while its parent's element still points to the original metadata id.
+    // Normalize that conversion path to the SAME strict object replacement.
+    if (s._zod?.parent) {
+      s._zod.parent = deepStrictifyInPlace(s._zod.parent, active);
+    }
 
     switch (def.type) {
       case 'object': {
