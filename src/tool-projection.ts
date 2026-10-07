@@ -990,6 +990,8 @@ export interface AbortCompletionReceipt {
   reason?: string;
   /** Explicit recovery failures; empty/absent when recovery was complete. */
   failures?: readonly string[];
+  /** Bounded, non-authoritative measurements that help explain a late completion. */
+  diagnostics?: Readonly<Record<string, unknown>>;
 }
 
 export interface AbortCompletionContext {

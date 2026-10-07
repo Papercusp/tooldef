@@ -58,7 +58,11 @@ describe('dispatch stage attribution', () => {
   afterEach(() => vi.restoreAllMocks());
 
   it('preserves structured metadata from a nested refusal when mapping handler errors', async () => {
-    const receipt = { status: 'recorded', msg_id: 'm-late' };
+    const receipt = {
+      status: 'recorded',
+      msg_id: 'm-late',
+      diagnostics: { coordSendPhaseTimingsMs: [{ itemIndex: 0, prePersistMs: 8, persistMs: 12, postPersistMs: 5 }] },
+    };
     const nestedRefusal = Object.assign(new Error('nested coord:send timed out'), {
       dispatchMetadata: { abortCompletionReceipt: receipt },
     });
