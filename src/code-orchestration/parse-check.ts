@@ -658,6 +658,28 @@ export function checkScript(
       // If a deeper access is proven to exist, its ancestors must exist as well.
       return resolved.path.map((_, index) => resolved.path.slice(0, index + 1));
     };
+    const optionalPathsGuardedByArrayIsArray = (
+      condition: Expression,
+      call: StaticToolCall,
+      branchIsTrue: boolean,
+    ): string[][] => {
+      if (
+        !branchIsTrue ||
+        !ts.isCallExpression(condition) ||
+        !ts.isPropertyAccessExpression(condition.expression) ||
+        !ts.isIdentifier(condition.expression.expression) ||
+        condition.expression.expression.text !== 'Array' ||
+        condition.expression.name.text !== 'isArray' ||
+        condition.arguments.length !== 1
+      ) return [];
+
+      const resolved = boundPath(condition.arguments[0]);
+      if (resolved?.call !== call || resolved.path.length === 0) return [];
+
+      // `Array.isArray(optionalPath)` returning true proves each path segment exists.
+      // Only the positive branch is safe; the negative branch proves the opposite.
+      return resolved.path.map((_, index) => resolved.path.slice(0, index + 1));
+    };
     const safeOptionalPathsForRead = (
       node: Node,
       call: StaticToolCall,
@@ -685,7 +707,10 @@ export function checkScript(
               ? false
               : null;
           if (branchIsTrue !== null) {
-            for (const path of optionalPathsGuardedByTypeof(current.condition, call, branchIsTrue)) {
+            for (const path of [
+              ...optionalPathsGuardedByTypeof(current.condition, call, branchIsTrue),
+              ...optionalPathsGuardedByArrayIsArray(current.condition, call, branchIsTrue),
+            ]) {
               addSafePath(path);
             }
           }
