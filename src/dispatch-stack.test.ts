@@ -57,6 +57,28 @@ afterEach(() => _resetProjectionRegistryForTests());
 describe('dispatch stage attribution', () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it('preserves structured metadata from a nested refusal when mapping handler errors', async () => {
+    const receipt = { status: 'recorded', msg_id: 'm-late' };
+    const nestedRefusal = Object.assign(new Error('nested coord:send timed out'), {
+      dispatchMetadata: { abortCompletionReceipt: receipt },
+    });
+    const result = await runDispatchStack(
+      makeTool({ fn: async () => { throw nestedRefusal; } }),
+      'tools:invoke',
+      {},
+      MAKE_CTX(),
+      {},
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: 'handler_error',
+        meta: { abortCompletionReceipt: receipt },
+      },
+    });
+  });
+
   it('separates authority waits from a cheap handler and preserves its read metadata', async () => {
     let clock = 0;
     vi.spyOn(performance, 'now').mockImplementation(() => clock);

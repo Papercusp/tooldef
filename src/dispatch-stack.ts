@@ -1035,12 +1035,17 @@ const invokeStep: DispatchStep = {
         };
       }
       const postgresMeta = extractPostgresErrorMetadata(err);
+      const dispatchMeta = extractDispatchErrorMetadata(err);
+      const handlerMeta = {
+        ...(postgresMeta ?? {}),
+        ...(dispatchMeta ?? {}),
+      };
       return {
         ok: false,
         error: {
           code: 'handler_error',
           message: err instanceof Error ? err.message : String(err),
-          ...(postgresMeta ? { meta: postgresMeta } : {}),
+          ...(Object.keys(handlerMeta).length > 0 ? { meta: handlerMeta } : {}),
         },
       };
     }
@@ -1090,6 +1095,20 @@ function extractPostgresErrorMetadata(error: unknown): Record<string, unknown> |
       ...(constraintName ? { constraintName } : {}),
     },
   };
+}
+
+/**
+ * A nested MCP refusal may carry transport metadata that is the only durable
+ * receipt for a write which completed after its caller's deadline. Error
+ * wrappers can opt into forwarding that already-structured metadata without
+ * requiring the generic dispatcher to know about the higher-level wrapper.
+ */
+function extractDispatchErrorMetadata(error: unknown): Record<string, unknown> | undefined {
+  if (error === null || typeof error !== 'object') return undefined;
+  const value = (error as { dispatchMetadata?: unknown }).dispatchMetadata;
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const receipt = (value as Record<string, unknown>).abortCompletionReceipt;
+  return receipt === undefined ? undefined : { abortCompletionReceipt: receipt };
 }
 
 /**
