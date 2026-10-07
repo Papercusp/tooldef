@@ -351,6 +351,8 @@ export interface RequestOriginMetadata {
   transport: string;
   /** Host-observed physical binding; separate from protocol/format policy. */
   connection?: 'http' | 'uds';
+  /** Bounded MCP request trace UUID; correlation only, not caller identity. */
+  mcpRequestTraceId?: string;
   /** URL pathname only; query params are whitelisted separately below. */
   path?: string;
   /** Non-secret request query params useful for attribution/debugging. */
