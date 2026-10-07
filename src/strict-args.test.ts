@@ -132,6 +132,48 @@ describe('strictArgs (EI-10883)', () => {
   });
 });
 
+describe('strictArgs shared schema identity (EI-25287777702563119)', () => {
+  it('keeps a shared strict object and its local definition usable', () => {
+    const shared = z.object({ value: z.string().min(1) }).strict()
+      .meta({ id: 'strict-args-shared-strict-row' });
+    const source = z.object({ a: shared, b: shared });
+    expect(() => toArgsJsonSchema('test:shared-before', source)).not.toThrow();
+
+    const strict = strictArgs(source);
+    expect(strict.shape.a).toBe(strict.shape.b);
+    const json = toArgsJsonSchema('test:shared-after', strict);
+    expect(json.$defs).toHaveProperty('strict-args-shared-strict-row');
+    expect(parse(strict, { a: { value: 'a' }, b: { value: 'b' } }).ok).toBe(true);
+    expect(parse(strict, { a: { value: 'a', extra: true }, b: { value: 'b' } }).ok).toBe(false);
+  });
+
+  it('reuses the same strict replacement across later registrations without losing refinements', () => {
+    const shared = z.object({ value: z.string() })
+      .superRefine((row, ctx) => {
+        if (row.value !== 'evidence') ctx.addIssue({ code: 'custom', message: 'evidence required' });
+      })
+      .meta({ id: 'strict-args-shared-refined-row' });
+    const first = strictArgs(z.object({ direct: shared, wrapped: shared.optional() }));
+    const second = strictArgs(z.object({ original: shared, registered: first.shape.direct }));
+    expect(second.shape.original).toBe(first.shape.direct);
+    expect(second.shape.registered).toBe(first.shape.direct);
+    expect(() => toArgsJsonSchema('test:shared-first', first)).not.toThrow();
+    expect(() => toArgsJsonSchema('test:shared-second', second)).not.toThrow();
+    expect(parse(second, { original: { value: 'evidence' }, registered: { value: 'evidence' } }).ok).toBe(true);
+    for (const original of [{ value: 'other' }, { value: 'evidence', extra: true }]) {
+      expect(parse(second, { original, registered: { value: 'evidence' } }).ok).toBe(false);
+    }
+  });
+
+  it('still refuses different author schemas that declare the same definition id', () => {
+    const source = z.object({
+      a: z.object({ text: z.string() }).meta({ id: 'strict-args-conflicting-row' }),
+      b: z.object({ count: z.number() }).meta({ id: 'strict-args-conflicting-row' }),
+    });
+    expect(() => toArgsJsonSchema('test:conflicting-id', strictArgs(source))).toThrow(/Duplicate schema id/);
+  });
+});
+
 describe('strictArgs deep nesting (EI-18723223344390510)', () => {
   // The reported bug: loop:checkpoint's `checks: z.array(z.object({ claim,
   // recheck, verified }))` accepted `{ claim, status:'verified', evidence:'Y' }`

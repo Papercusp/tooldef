@@ -1539,6 +1539,13 @@ export function flattenForOpenAi(schema: Record<string, unknown>): Record<string
  * `additionalProperties: false` at every level and the model can SEE the shape
  * is closed instead of discovering it by accident.
  */
+// Zod schemas are immutable values, but strict() returns a new object. Reuse
+// that replacement wherever the SAME source schema is used, including later
+// tool registrations. Copying it at each use creates distinct schemas with the
+// same metadata id and makes Zod's local-$defs conversion reject the catalog.
+// Weak keys keep this registration cache from retaining abandoned schemas.
+const strictObjectReplacements = new WeakMap<object, unknown>();
+
 function deepStrictifyInPlace(schema: unknown, active: Set<object>): unknown {
   if (!schema || typeof schema !== 'object') return schema;
   // Stack-based (enter/exit) cycle guard, NOT a permanent "ever visited" set:
@@ -1561,6 +1568,8 @@ function deepStrictifyInPlace(schema: unknown, active: Set<object>): unknown {
 
     switch (def.type) {
       case 'object': {
+        const cached = strictObjectReplacements.get(schema as object);
+        if (cached) return cached;
         const shape = def.shape as Record<string, unknown> | undefined;
         if (shape) {
           for (const key of Object.keys(shape)) {
@@ -1574,7 +1583,12 @@ function deepStrictifyInPlace(schema: unknown, active: Set<object>): unknown {
         // root and nested objects before publishing their JSON Schema. This
         // does not change the catchall/refinements that enforce strictness.
         const metadata = typeof s.meta === 'function' ? s.meta() : undefined;
-        return metadata && typeof strict.meta === 'function' ? strict.meta(metadata) : strict;
+        const result = metadata && typeof strict.meta === 'function' ? strict.meta(metadata) : strict;
+        strictObjectReplacements.set(schema as object, result);
+        // An already-registered replacement can occur beside its original in
+        // another tool's arguments. Strictifying it again must preserve identity.
+        strictObjectReplacements.set(result as object, result);
+        return result;
       }
       case 'array':
         def.element = deepStrictifyInPlace(def.element, active);
