@@ -363,7 +363,7 @@ export interface RequestOriginMetadata {
    * consistency, not possession or physical actor identity.
    */
   nativeSession?: {
-    carrier: 'header:x-papercusp-native-session' | 'query:native_session';
+    carrier: 'meta:threadId' | 'header:x-papercusp-native-session' | 'query:native_session';
     valueFingerprint: string;
     binding: 'bound' | 'unbound';
     candidateAdvSessionId: number | null;
