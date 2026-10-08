@@ -369,6 +369,10 @@ export interface RequestOriginMetadata {
     valueFingerprint: string;
     binding: 'bound' | 'unbound';
     candidateAdvSessionId: number | null;
+    /** Exact per-call native lineage, present only with a bound per-call
+     * thread carrier. Correlation only: the host must also match its observed
+     * call and admitted turn before granting paid execution authority. */
+    callIdFingerprint?: string;
   };
 }
 
