@@ -133,6 +133,35 @@ describe('deriveCodeRunSettledReadReplayProof', () => {
 });
 
 describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', () => {
+  it.each([undefined, 1_500, 10_000])('shares the remaining parent deadline across child calls (%s)', async (parentBudgetMs) => {
+    const startedAt = Date.now();
+    let firstDeadline: number | undefined;
+    const first = mkTool('read:first', 'read', async (_args, ctx) => {
+      firstDeadline = (ctx as { deadlineAtMs?: number }).deadlineAtMs;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return json({ ok: true });
+    });
+    const deadline = mkTool('read:deadline', 'read', async (_args, ctx) => {
+      const value = (ctx as { deadlineAtMs?: number }).deadlineAtMs;
+      return json({ deadlineAtMs: value ?? null, remainingMs: value === undefined ? null : value - Date.now() });
+    });
+    const r = await runToolOrchestration(
+      'await tools.read.first({}); return await tools.read.deadline({});',
+      {
+        ctx: MAKE_CTX(parentBudgetMs === undefined ? {} : { deadlineAtMs: startedAt + parentBudgetMs } as Partial<UnifiedToolContext>),
+        deps: DEPS,
+        tools: [first, deadline],
+        timeoutMs: 3_000,
+      },
+    );
+    expect(r.ok).toBe(true);
+    const summary = r.summary as { deadlineAtMs: number | null; remainingMs: number | null };
+    expect(summary.deadlineAtMs).toEqual(expect.any(Number));
+    expect(summary.deadlineAtMs).toBe(firstDeadline);
+    expect(summary.remainingMs).toBeGreaterThan(0);
+    expect(summary.remainingMs).toBeLessThanOrEqual(Math.min(parentBudgetMs ?? 3_000, 3_000) - 50);
+  });
+
   it('forwards frozen runtime inputs through the orchestration composition seam', async () => {
     const r = await runToolOrchestration(
       `return { value: inputs.query, frozen: Object.isFrozen(inputs) };`,

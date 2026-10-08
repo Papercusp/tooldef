@@ -460,6 +460,12 @@ export interface UnifiedToolContext {
   indirectDispatch?: boolean;
   /** Aborts on per-tool timeout, parent cancellation, or shutdown. */
   signal: AbortSignal;
+  /**
+   * Host-owned absolute parent response deadline (Unix milliseconds). Compound handlers may
+   * return a bounded partial result before it, reserving time for their caller to serialize it.
+   * This supplements cancellation; it never extends the caller's execution budget.
+   */
+  deadlineAtMs?: number;
 
   /**
    * Optional host-selected execution seat for the P-041 kernel port.  A
