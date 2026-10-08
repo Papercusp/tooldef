@@ -1021,6 +1021,17 @@ export type AbortCompletionReceiptResolver<TArgs = unknown> = (
 export interface ProjectedTool {
   /** Owning plugin name. Built-in tools use 'agent-mcp' or similar. */
   pluginName: string;
+  /**
+   * The exact provider installation loaded by the host. Tool aliases do not
+   * identify a release, and a project plugin can shadow the global plugin of
+   * the same name. Supplied by the loader, never by invocation arguments.
+   * Commerce callers still have to verify retained provenance and entitlement.
+   */
+  pluginInstallation?: Readonly<{
+    version: string;
+    path: string;
+    source: 'project' | 'harness' | 'global';
+  }>;
   /** One-line description shown in tool listings. */
   description: string;
   /**
