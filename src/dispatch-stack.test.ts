@@ -54,6 +54,65 @@ const makeTool = (over: Partial<ProjectedTool> = {}): ProjectedTool => ({
 
 afterEach(() => _resetProjectionRegistryForTests());
 
+describe('host invocation admission and settlement', () => {
+  it('refuses before the target handler or override executes', async () => {
+    const handler = vi.fn();
+    const override = vi.fn();
+    const result = await runDispatchStack(makeTool({ fn: handler }), 'fix.tool', {}, MAKE_CTX(), {
+      overrideTool: override,
+      aroundInvoke: async () => ({ content: [{ type: 'text', text: 'entitlement required' }], isError: true }),
+    });
+    expect(handler).not.toHaveBeenCalled();
+    expect(override).not.toHaveBeenCalled();
+    expect(result.result).toMatchObject({ isError: true });
+  });
+
+  it('passes the bound target context and executes once before awaited settlement', async () => {
+    const calls: string[] = [];
+    let boundContext: UnifiedToolContext | undefined;
+    const target = makeTool({ fn: async (_input, ctx) => {
+      calls.push('target');
+      expect(ctx).toBe(boundContext);
+      return { content: [{ type: 'text', text: 'served' }] };
+    } });
+    let release!: () => void;
+    const settlement = new Promise<void>((resolve) => { release = resolve; });
+    let finished = false;
+    const pending = runDispatchStack(target, 'fix.tool', { units: 1 }, MAKE_CTX(), {
+      aroundInvoke: async ({ tool, toolName, input, ctx, callId, invoke }) => {
+        expect(tool).toBe(target);
+        expect(toolName).toBe('fix.tool');
+        expect(input).toEqual({ units: 1 });
+        expect(callId).toEqual(expect.any(String));
+        boundContext = ctx;
+        calls.push('reserve');
+        const [first, second] = await Promise.all([invoke(), invoke()]);
+        expect(second).toBe(first);
+        calls.push('settle');
+        await settlement;
+        return first;
+      },
+    }).then((result) => { finished = true; return result; });
+    await vi.waitFor(() => expect(calls).toEqual(['reserve', 'target', 'settle']));
+    expect(finished).toBe(false);
+    release();
+    expect((await pending).ok).toBe(true);
+  });
+
+  it('allows the host to settle a failed target without repeating its execution', async () => {
+    const handler = vi.fn(async () => { throw new Error('target failed'); });
+    const settle = vi.fn();
+    const result = await runDispatchStack(makeTool({ fn: handler }), 'fix.tool', {}, MAKE_CTX(), {
+      aroundInvoke: async ({ invoke }) => {
+        try { return await invoke(); } finally { settle(); }
+      },
+    });
+    expect(result).toMatchObject({ ok: false, error: { code: 'handler_error', message: 'target failed' } });
+    expect(handler).toHaveBeenCalledOnce();
+    expect(settle).toHaveBeenCalledOnce();
+  });
+});
+
 describe('dispatch stage attribution', () => {
   afterEach(() => vi.restoreAllMocks());
 

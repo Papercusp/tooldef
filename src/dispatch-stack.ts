@@ -811,17 +811,17 @@ const invokeStep: DispatchStep = {
   async run(exec) {
     const { tool, toolName, input, handlerCtx, deps } = exec;
     try {
-      let result: ToolResult;
-      if (deps.overrideTool) {
-        const ov = await deps.overrideTool(toolName, input, handlerCtx);
-        if (ov !== PASS_THROUGH) {
-          result = ov as ToolResult;
-        } else {
-          result = await tool.fn(input, handlerCtx);
+      let invocation: Promise<ToolResult> | undefined;
+      const invoke = (): Promise<ToolResult> => invocation ??= Promise.resolve().then(async () => {
+        if (deps.overrideTool) {
+          const ov = await deps.overrideTool(toolName, input, handlerCtx);
+          if (ov !== PASS_THROUGH) return ov as ToolResult;
         }
-      } else {
-        result = await tool.fn(input, handlerCtx);
-      }
+        return tool.fn(input, handlerCtx);
+      });
+      let result = deps.aroundInvoke
+        ? await deps.aroundInvoke({ tool, toolName, input, ctx: handlerCtx, callId: exec.callId, invoke })
+        : await invoke();
       // guidance.seeAlso — result-aware cross-link pointers rendered uniformly
       // into the envelope (_meta._seeAlso + a one-line "See also:" text block).
       // Self-gates (unchanged result) when the tool declares none / emits none /

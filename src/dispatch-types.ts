@@ -12,7 +12,7 @@
  */
 
 import type { RolesQuota, ToolResult } from './wire';
-import type { UnifiedToolContext } from './tool-projection';
+import type { ProjectedTool, UnifiedToolContext } from './tool-projection';
 import type { AuthAuditEvent } from './authz';
 import type { PreconditionFireRequest } from './requires';
 import type {
@@ -392,6 +392,20 @@ export interface DispatchProjectedDeps {
    * scenario testing. Optional; pass-through is the default.
    */
   overrideTool?: ToolDispatchOverrideFn;
+  /**
+   * Host admission and settlement around the authorized target invocation.
+   * Runs after context binding and kernel enforcement, across every transport.
+   * A host may refuse without calling invoke; repeated invoke calls share one
+   * execution. No callback preserves the ordinary handler/override behavior.
+   */
+  aroundInvoke?(request: {
+    tool: ProjectedTool;
+    toolName: string;
+    input: unknown;
+    ctx: UnifiedToolContext;
+    callId: string;
+    invoke(): Promise<ToolResult>;
+  }): Promise<ToolResult>;
   /** Persist a tool-invocation record. Best-effort. */
   recordInvocation?(input: {
     toolName: string;
