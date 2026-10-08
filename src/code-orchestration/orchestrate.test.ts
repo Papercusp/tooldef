@@ -546,6 +546,36 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     ]);
   });
 
+  it('uses a nested target\'s argument-sensitive read effect for tools:invoke semantic failures', async () => {
+    const invokeFn = vi.fn(async () => json({ ok: false, error: 'no matches' }));
+    const bashFn = vi.fn(async () => json({ ok: false, error: 'no matches' }));
+    const invoke = mkTool('tools:invoke', 'read', invokeFn);
+    const bash = mkTool(
+      'capability:bash',
+      'write',
+      bashFn,
+      (args) => ((args as { command?: string }).command === 'rg -l -F absent fixture.txt' ? 'read' : 'write'),
+    );
+    const r = await runToolOrchestration(
+      `const result = await tools.tools.invoke({ name: 'capability:bash', args: { command: 'rg -l -F absent fixture.txt' } });
+       return { ok: result.ok };`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [invoke, bash] },
+    );
+
+    expect(invokeFn).toHaveBeenCalledOnce();
+    expect(bashFn).not.toHaveBeenCalled(); // the registered tools:invoke mock returned the child result
+    expect(r.ok).toBe(true); // the orchestration script itself completed
+    expect(r.summary).toEqual({ ok: false });
+    expect(r.partial).toBe(true);
+    expect(r.okFalseMutations).toEqual([]);
+    expect(r.childFailures).toEqual([
+      expect.objectContaining({ tool: 'tools:invoke', kind: 'semantic' }),
+    ]);
+    expect(r.callRecords).toEqual([
+      expect.objectContaining({ tool: 'tools:invoke', effect: 'read', disposition: 'semantic_rejected' }),
+    ]);
+  });
+
   it('resolves argument-sensitive effects before applying the dry-run gate', async () => {
     const deployFn = vi.fn(async () => json({ ok: true, state: 'gate-red' }));
     const deploy = mkTool(
