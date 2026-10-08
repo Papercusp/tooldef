@@ -64,9 +64,12 @@ export interface CorrectedCallStep {
   readonly reason?:
     | 'mutually-exclusive'
     | 'authored-call'
+    | 'authored-drop'
     | 'missing-required'
     | 'wrong-type'
     | 'target-occupied';
+  /** The tool-authored explanation for dropping a key with no safe replacement. */
+  readonly note?: string;
   /**
    * For `added` / `retyped` steps: the type the schema declared, as named by the issue
    * itself (`expected string, received undefined`). Rendered as a `<string>` PLACEHOLDER,
@@ -418,7 +421,6 @@ export function buildCorrectedCall(params: {
   // "no counterpart" by the generic dropped-key path.
   const byArg = new Map<string, InvalidInputCorrection>();
   for (const correction of corrections) {
-    if (correction.kind === 'authored-drop') continue;
     if (!byArg.has(correction.rejectedArg)) byArg.set(correction.rejectedArg, correction);
   }
 
@@ -426,6 +428,16 @@ export function buildCorrectedCall(params: {
     if (!(key in args)) continue;
     const value = args[key];
     const correction = byArg.get(key);
+    if (correction?.kind === 'authored-drop') {
+      delete args[key];
+      steps.push({
+        rejectedArg: key,
+        action: 'dropped',
+        reason: 'authored-drop',
+        note: correction.note,
+      });
+      continue;
+    }
     if (correction?.kind === 'authored-redirect' && correction.call?.tool === toolName) {
       delete args[key];
       // Preserve concrete accepted values the caller already supplied (for example
@@ -556,6 +568,9 @@ export function correctedCallHint(corrected: CorrectedCall | null): string {
   const authoredCallDrops = droppedSteps
     .filter((step) => step.reason === 'authored-call')
     .map((step) => `\`${step.rejectedArg}\``);
+  const authoredDrops = droppedSteps
+    .filter((step) => step.reason === 'authored-drop')
+    .map((step) => `\`${step.rejectedArg}\`${step.note ? ` — ${step.note}` : ''}`);
   const wrongVariant = droppedSteps
     .filter((step) => step.acceptedOnOtherVariant && !step.reason)
     .map((step) => `\`${step.rejectedArg}\``);
@@ -583,6 +598,9 @@ export function correctedCallHint(corrected: CorrectedCall | null): string {
   if (relocated.length > 0) changes.push(`moved ${relocated.join(', ')}`);
   if (authoredCallDrops.length > 0) {
     changes.push(`replaced ${authoredCallDrops.join(', ')} with the authored same-tool call shape`);
+  }
+  if (authoredDrops.length > 0) {
+    changes.push(`removed ${authoredDrops.join(', ')}`);
   }
   if (unknownAnywhere.length > 0) {
     changes.push(

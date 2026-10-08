@@ -120,6 +120,25 @@ describe('buildCorrectedCall', () => {
     expect(hint).toContain('declares no counterpart');
   });
 
+  it('keeps an authored drop explanation instead of claiming the key has no counterpart', () => {
+    const note = 'Use `heading` for one section; multiple headings are not supported in one call.';
+    const corrected = buildCorrectedCall({
+      toolName: 'plans:get',
+      input: { slug: 'a-plan-2026-10-08', sections: ['Requirements', 'Design'] },
+      corrections: [{ rejectedArg: 'sections', target: '', kind: 'authored-drop', note }],
+      unknownKeys: ['sections'],
+    });
+
+    expect(corrected!.args).toEqual({ slug: 'a-plan-2026-10-08' });
+    expect(corrected!.steps).toEqual([
+      { rejectedArg: 'sections', action: 'dropped', reason: 'authored-drop', note },
+    ]);
+    const hint = correctedCallHint(corrected);
+    expect(hint).toContain(note);
+    expect(hint).not.toContain('declares no counterpart');
+    expect(hint).not.toContain('replaced `sections` with the authored same-tool call shape');
+  });
+
   it('routes a nested-path correction to its dotted destination', () => {
     const corrected = buildCorrectedCall({
       toolName: 'work_items:create',
