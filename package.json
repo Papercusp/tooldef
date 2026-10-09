@@ -17,6 +17,11 @@
       "import": "./src/define-tool.ts",
       "default": "./src/define-tool.ts"
     },
+    "./tool-projection": {
+      "types": "./src/tool-projection.ts",
+      "import": "./src/tool-projection.ts",
+      "default": "./src/tool-projection.ts"
+    },
     "./delta-client": {
       "types": "./src/delta-client.ts",
       "import": "./src/delta-client.ts",
