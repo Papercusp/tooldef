@@ -127,7 +127,6 @@ describe('compactInputSchema', () => {
 
   it('preserves every validity constraint', () => {
     for (const keyword of [
-      'type',
       'minimum',
       'maximum',
       'exclusiveMinimum',
@@ -148,6 +147,43 @@ describe('compactInputSchema', () => {
         `constraint '${keyword}' must survive compaction`,
       ).toBe(collect(FULL_SCHEMA, keyword).length);
     }
+  });
+
+  it('omits only type constraints already implied by enum or const', () => {
+    const compacted = compactInputSchema({
+      type: 'object',
+      properties: {
+        text: { type: 'string', enum: ['fast', 'slow'] },
+        nullable: { type: ['string', 'null'], enum: ['fast', null] },
+        integer: { type: 'integer', enum: [1, 2] },
+        literal: { type: 'string', const: 'fixed' },
+        mismatchedEnum: { type: 'string', enum: ['kept', 1] },
+        mismatchedConst: { type: 'integer', const: 1.5 },
+        impossibleConst: { type: 'string', const: 1 },
+      },
+    }) as { properties: Record<string, Record<string, unknown>> };
+
+    for (const name of ['text', 'nullable', 'integer', 'literal']) {
+      expect(compacted.properties[name], `${name} keeps its exact enum/const contract`).not.toHaveProperty('type');
+    }
+    for (const name of ['mismatchedEnum', 'mismatchedConst', 'impossibleConst']) {
+      expect(compacted.properties[name], `${name} still needs its non-redundant type`).toHaveProperty('type');
+    }
+  });
+
+  it('does not mistake schema-keyword names for keywords inside a properties map', () => {
+    const compacted = compactInputSchema({
+      type: 'object',
+      properties: {
+        enum: { type: 'string', enum: ['value'] },
+        type: { type: 'string' },
+      },
+    }) as { properties: Record<string, Record<string, unknown>> };
+
+    expect(compacted.properties).toHaveProperty('enum');
+    expect(compacted.properties).toHaveProperty('type');
+    expect(compacted.properties.enum).toEqual({ enum: ['value'] });
+    expect(compacted.properties.type).toEqual({ type: 'string' });
   });
 
   it('preserves $defs/$ref STRUCTURE rather than inlining it', () => {

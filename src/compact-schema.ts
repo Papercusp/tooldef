@@ -11,10 +11,11 @@
  *
  * THE CONTRACT, and it is the whole point: compact is NEVER A PARTIAL CONTRACT.
  * Everything a caller needs to construct an accepted argument object survives —
- * property names, types, the required set, enum members, numeric and length
- * bounds, oneOf/anyOf/allOf discriminators, nested object/array shape, and
- * $defs/$ref structure. What is dropped is PROSE ONLY: `description`, `title`,
- * `examples`/`example`, and `default`.
+ * property names, the required set, enum members, numeric and length bounds,
+ * oneOf/anyOf/allOf discriminators, nested object/array shape, and $defs/$ref
+ * structure. A `type` keyword is omitted only when a sibling `enum` or `const`
+ * already permits exactly values of that type. What else is dropped is PROSE
+ * ONLY: `description`, `title`, `examples`/`example`, and `default`.
  *
  * ⚠ `$defs`/`$ref` STRUCTURE IS PRESERVED, NOT INLINED. `$defs` is precisely
  * what keeps a duplicated sub-schema from being paid for once per use site, so
@@ -43,7 +44,8 @@ const UTF8_ENCODER = new TextEncoder();
  * constrains whether an argument object validates.
  *
  * Deliberately NOT here, because each one does constrain validity: `required`,
- * `enum`, `const`, `type`, `properties`, `items`, `prefixItems`,
+ * `enum`, `const`, `type` (unless implied by `enum`/`const`), `properties`,
+ * `items`, `prefixItems`,
  * `additionalProperties`, `minimum`, `maximum`, `exclusiveMinimum`,
  * `exclusiveMaximum`, `multipleOf`, `minLength`, `maxLength`, `pattern`,
  * `format`, `minItems`, `maxItems`, `uniqueItems`, `minProperties`,
@@ -75,12 +77,54 @@ const NAME_KEYED_CONTAINERS = new Set<string>([
   'dependentSchemas',
 ]);
 
+/** Whether a JSON value belongs to a JSON Schema primitive type. */
+function matchesType(value: unknown, type: unknown): boolean {
+  switch (type) {
+    case 'null':
+      return value === null;
+    case 'object':
+      return value !== null && typeof value === 'object' && !Array.isArray(value);
+    case 'array':
+      return Array.isArray(value);
+    case 'string':
+      return typeof value === 'string';
+    case 'boolean':
+      return typeof value === 'boolean';
+    case 'integer':
+      return typeof value === 'number' && Number.isInteger(value);
+    case 'number':
+      return typeof value === 'number';
+    default:
+      return false;
+  }
+}
+
+/**
+ * `enum` and `const` already restrict the instance to an exact finite set. A
+ * sibling `type` adds no constraint when every allowed value already matches
+ * one of its types. Keep it when even one enum value conflicts: removing it
+ * would then make an otherwise-invalid value valid.
+ */
+function typeIsImplied(schema: Record<string, unknown>): boolean {
+  if (!Object.hasOwn(schema, 'type')) return false;
+  const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+  if (Object.hasOwn(schema, 'const')) {
+    return types.some((type) => matchesType(schema.const, type));
+  }
+  return (
+    Array.isArray(schema.enum) &&
+    schema.enum.every((value) => types.some((type) => matchesType(value, type)))
+  );
+}
+
 function compactNode(node: unknown, inNameKeyedMap: boolean): unknown {
   if (node === null || typeof node !== 'object') return node;
   if (Array.isArray(node)) return node.map((entry) => compactNode(entry, false));
 
   const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+  const schema = node as Record<string, unknown>;
+  const omitType = !inNameKeyedMap && typeIsImplied(schema);
+  for (const [key, value] of Object.entries(schema)) {
     // Inside `properties` (etc.) every key is an author-chosen NAME. Keep it
     // verbatim and compact its subschema; never test it against DROPPED.
     if (inNameKeyedMap) {
@@ -88,6 +132,7 @@ function compactNode(node: unknown, inNameKeyedMap: boolean): unknown {
       continue;
     }
     if (DROPPED.has(key)) continue;
+    if (key === 'type' && omitType) continue;
     out[key] = compactNode(value, NAME_KEYED_CONTAINERS.has(key));
   }
   return out;
