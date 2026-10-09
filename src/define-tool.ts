@@ -1780,13 +1780,13 @@ function editDistance(a: string, b: string): number {
  * tool and wrong on another, and the only discriminator is whether the TARGET can hold
  * the VALUE — which is what this decides.
  *
- * Deliberately narrow: only `enum`/`const` count as proof. Those enumerate the entire
- * admissible set, so "cannot accept" is decidable with no judgment. A projected
- * JSON-Schema `type` is not enough: Zod coercive and strict primitives project to the
- * same type even though coercive schemas may accept representations (including objects)
- * that strict schemas reject. Treating that lossy metadata as proof would suppress a
- * useful correction on the very calls this helper is meant to teach. Absent proof we
- * stay silent about admissibility and let the name-based suggestion stand.
+ * Deliberately narrow: only `enum`/`const` count as proof from projected JSON Schema.
+ * Those enumerate the entire admissible set, so "cannot accept" is decidable with no
+ * judgment. A projected `type` is not enough: Zod coercive and strict primitives project
+ * to the same type even though coercive schemas may accept representations that strict
+ * schemas reject. The dispatch path makes the stronger decision in
+ * `retainValueCompatibleCorrections`, where it can probe the actual source validator;
+ * direct callers of this name-only helper stay conservative without that validator.
  */
 function candidateRefutesValue(
   props: Record<string, unknown> | undefined,
@@ -2368,6 +2368,48 @@ export function argsAcceptedOnOtherVariant(
   return keys.filter((key) => key in merged);
 }
 
+async function retainValueCompatibleCorrections(
+  corrections: readonly InvalidInputCorrection[],
+  input: Record<string, unknown>,
+  validator: StandardSchemaV1,
+): Promise<InvalidInputCorrection[]> {
+  const retained: InvalidInputCorrection[] = [];
+  for (const correction of corrections) {
+    if (
+      correction.kind !== 'near-name' ||
+      !correction.target ||
+      !Object.prototype.hasOwnProperty.call(input, correction.rejectedArg)
+    ) {
+      retained.push(correction);
+      continue;
+    }
+    const value = input[correction.rejectedArg];
+    if (value === undefined) {
+      retained.push(correction);
+      continue;
+    }
+
+    // JSON Schema's `type` projection cannot distinguish a strict primitive from a
+    // coercive one. Check the actual validator with the proposed call instead, so an
+    // array sent to a strict string field is withheld while a coercive string field
+    // keeps its valid array-to-string repair.
+    const candidateInput = { ...input };
+    delete candidateInput[correction.rejectedArg];
+    candidateInput[correction.target] = value;
+    try {
+      const checked = await standardValidate(validator, candidateInput);
+      const candidateRejected = !checked.ok && issueLeaves(checked.issues).some(
+        ({ segs }) => segs[0] === correction.target,
+      );
+      if (candidateRejected) continue;
+    } catch {
+      // A diagnostic probe must never replace the original input-validation error.
+    }
+    retained.push(correction);
+  }
+  return retained;
+}
+
 export function invalidInputCorrections(
   issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
   rawSchema: unknown,
@@ -2375,7 +2417,21 @@ export function invalidInputCorrections(
   /** The caller's raw args, so a near-name guess can be checked against the value it
    *  would relocate (EI-21390759884688723). Optional: absent, behaviour is name-only. */
   input?: unknown,
-): InvalidInputCorrection[] {
+): InvalidInputCorrection[];
+export function invalidInputCorrections(
+  issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
+  rawSchema: unknown,
+  argRedirects: Record<string, ProjectedToolArgRedirect> | undefined,
+  input: unknown,
+  validator: StandardSchemaV1,
+): Promise<InvalidInputCorrection[]>;
+export function invalidInputCorrections(
+  issues: ReadonlyArray<{ message?: string; keys?: readonly string[] }> | undefined,
+  rawSchema: unknown,
+  argRedirects?: Record<string, ProjectedToolArgRedirect>,
+  input?: unknown,
+  validator?: StandardSchemaV1,
+): InvalidInputCorrection[] | Promise<InvalidInputCorrection[]> {
   // The candidate pool for a RELOCATION must be the keys this call can actually accept —
   // the selected union branch when the caller's discriminator picks one, merged otherwise.
   //
@@ -2398,7 +2454,7 @@ export function invalidInputCorrections(
   // the measured failure mode (`tags` on work_items:update, filed 10+ times).
   // Redirected keys are withheld from `corrections` so the same key cannot also
   // draw a string-distance guess that contradicts the authored answer.
-  return unknownKeys.flatMap((rejectedArg): InvalidInputCorrection[] => {
+  const corrections = unknownKeys.flatMap((rejectedArg): InvalidInputCorrection[] => {
     const redirect = argRedirects?.[rejectedArg];
     if (typeof redirect === 'string' && redirect.length > 0) {
       return [{ rejectedArg, target: redirect, kind: 'authored-redirect' }];
@@ -2440,6 +2496,15 @@ export function invalidInputCorrections(
     if (nearName === rejectedArg) return [];
     return nearName ? [{ rejectedArg, target: nearName, kind: 'near-name' }] : [];
   });
+  if (
+    !validator ||
+    !input ||
+    typeof input !== 'object' ||
+    Array.isArray(input)
+  ) {
+    return corrections;
+  }
+  return retainValueCompatibleCorrections(corrections, input as Record<string, unknown>, validator);
 }
 
 /**
@@ -2563,6 +2628,8 @@ export function unknownArgHint(
   /** This tool's own name, so a rejected key can be traced to a `seeAlso` sibling that
    *  declares it (EI-21681203906419973). Omitted: the sibling leg simply stays silent. */
   toolName?: string,
+  /** Already value-checked by the live Standard Schema on the dispatch path. */
+  precomputedCorrections?: readonly InvalidInputCorrection[],
 ): string {
   const { msgs } = leafIssueSummary(issues);
   if (!/nrecognized key/i.test(msgs)) return '';
@@ -2587,7 +2654,7 @@ export function unknownArgHint(
       (relocation ? ` \`${key}\` is declared one level deeper: did you mean \`${relocation}\`?` : ''),
     )
     .join('');
-  const corrections = invalidInputCorrections(issues, rawSchema, argRedirects, input)
+  const corrections = (precomputedCorrections ?? invalidInputCorrections(issues, rawSchema, argRedirects, input))
     .filter(({ rejectedArg }) => !nestedOnlyKeys.has(rejectedArg));
   const redirected = corrections.filter(
     (correction) => correction.kind === 'authored-redirect' || correction.kind === 'authored-drop',
@@ -2742,15 +2809,16 @@ export function unknownArgHint(
   );
 }
 
-function makeInvalidInputError(
+async function makeInvalidInputError(
   toolName: string,
   issues: ReadonlyArray<StandardSchemaV1.Issue>,
   input: unknown,
   rawSchema: unknown,
   argRedirects: Record<string, ProjectedToolArgRedirect> | undefined,
-  argPreconditions?: (rawInput: unknown) => readonly string[],
-): InvalidInputError {
-  const corrections = invalidInputCorrections(issues, rawSchema, argRedirects, input);
+  argPreconditions: ((rawInput: unknown) => readonly string[]) | undefined,
+  validator: StandardSchemaV1,
+): Promise<InvalidInputError> {
+  const corrections = await invalidInputCorrections(issues, rawSchema, argRedirects, input, validator);
   // P-015: the finished call, resolved against what the caller actually sent. Ordered
   // FIRST because D-105 measured that the alternative does not work: `omp:sessions`
   // already returns its entire args schema and ten agents still re-hit the same wall 66
@@ -2773,7 +2841,7 @@ function makeInvalidInputError(
     ...(corrected ? { correctedCall: corrected } : {}),
   };
   return new InvalidInputError(
-    `invalid_args: ${formatIssues(issues, input)}${correctedCallHint(corrected)}${unknownArgHint(issues, rawSchema, argRedirects, input, toolName)}` +
+    `invalid_args: ${formatIssues(issues, input)}${correctedCallHint(corrected)}${unknownArgHint(issues, rawSchema, argRedirects, input, toolName, corrections)}` +
       // EI-21353729155349111: the value-level branch appends no SCHEMA (EI-10943 — a
       // caller who knows the shape and sent a bad value learns nothing from a 1,800-char
       // dump), but "the constraint that just refused you may not exist in the tree any
@@ -3271,13 +3339,14 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     } else {
       const repaired = await reencodeAndRevalidate(def.args, rawSchema, def.argReencodings, shimmed);
       if (!repaired) {
-        throw makeInvalidInputError(
+        throw await makeInvalidInputError(
           def.name,
           validated.issues,
           shimmed,
           rawSchema,
           def.guidance?.argRedirects,
           def.argPreconditions,
+          def.args,
         );
       }
       parsedValue = repaired.value;
@@ -3473,13 +3542,14 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     } else {
       const repaired = await reencodeAndRevalidate(def.args, rawSchema, def.argReencodings, shimmed);
       if (!repaired) {
-        throw makeInvalidInputError(
+        throw await makeInvalidInputError(
           def.name,
           validated.issues,
           shimmed,
           rawSchema,
           def.guidance?.argRedirects,
           def.argPreconditions,
+          def.args,
         );
       }
       parsedValue = repaired.value;

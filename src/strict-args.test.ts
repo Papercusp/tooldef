@@ -889,6 +889,69 @@ describe('suggestArgName', () => {
     );
   });
 
+  it('checks near-name values with the source validator, preserving coercive repairs', async () => {
+    const strictArgs = z.object({
+      scope: z.enum(['workspace', 'owner']),
+      key: z.string().optional(),
+    }).strict();
+    const strictInput = { scope: 'workspace', keys: ['recent'] };
+    const strictResult = strictArgs.safeParse(strictInput);
+    if (strictResult.success) throw new Error('strict facts:list fixture must reject `keys`');
+    const strictSchema = toArgsJsonSchema('facts:list', strictArgs);
+    const strictCorrections = await invalidInputCorrections(
+      strictResult.error.issues,
+      strictSchema,
+      undefined,
+      strictInput,
+      strictArgs,
+    );
+
+    // Projected `type: string` alone cannot tell whether an array will be rejected.
+    // The actual strict validator does, so the rejected `keys` -> `key` relocation is withheld.
+    expect(strictCorrections).toEqual([]);
+    expect(
+      unknownArgHint(
+        strictResult.error.issues,
+        strictSchema,
+        undefined,
+        strictInput,
+        'facts:list',
+        strictCorrections,
+      ),
+    ).not.toContain('`key` for `keys`');
+
+    const coerciveArgs = z.object({
+      scope: z.enum(['workspace', 'owner']),
+      key: z.coerce.string().optional(),
+    }).strict();
+    const coerciveInput = { scope: 'workspace', keys: ['recent'] };
+    const coerciveResult = coerciveArgs.safeParse(coerciveInput);
+    if (coerciveResult.success) throw new Error('coercive fixture must still reject the unknown `keys` arg');
+    expect(coerciveArgs.safeParse({ scope: 'workspace', key: coerciveInput.keys }).success).toBe(true);
+    const coerciveSchema = toArgsJsonSchema('facts:list:coercive-control', coerciveArgs);
+    const coerciveCorrections = await invalidInputCorrections(
+      coerciveResult.error.issues,
+      coerciveSchema,
+      undefined,
+      coerciveInput,
+      coerciveArgs,
+    );
+
+    expect(coerciveCorrections).toEqual([
+      { rejectedArg: 'keys', target: 'key', kind: 'near-name' },
+    ]);
+    expect(
+      unknownArgHint(
+        coerciveResult.error.issues,
+        coerciveSchema,
+        undefined,
+        coerciveInput,
+        'facts:list',
+        coerciveCorrections,
+      ),
+    ).toContain('`key` for `keys`');
+  });
+
   it('stays silent rather than misdirecting when no viable target remains', () => {
     // No `pot` declared and `scope` refuted. A suggestion that cannot work costs a
     // guaranteed extra round-trip AND teaches a false vocabulary the caller carries to
