@@ -806,6 +806,49 @@ const kernelEnforceStep: DispatchStep = {
   },
 };
 
+type SettledThrownValue =
+  | { kind: 'value'; value: unknown }
+  | { kind: 'aborted' };
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return false;
+  try {
+    return typeof (value as { then?: unknown }).then === 'function';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A handler may accidentally throw an async value directly. Preserve the useful
+ * rejection reason instead of stringifying the Promise as `[object Promise]`.
+ * Settlement is bounded by the dispatch signal so a never-settling thrown
+ * Promise cannot outlive the tool's normal timeout/abort contract.
+ */
+async function settleThrownValue(value: unknown, signal: AbortSignal): Promise<SettledThrownValue> {
+  if (!isThenable(value)) return { kind: 'value', value };
+  if (signal.aborted) return { kind: 'aborted' };
+
+  const settled = Promise.resolve(value).then(
+    (resolved) => ({ kind: 'value' as const, value: resolved }),
+    (rejected) => ({ kind: 'value' as const, value: rejected }),
+  );
+
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<SettledThrownValue>((resolve) => {
+    onAbort = () => resolve({ kind: 'aborted' });
+    signal.addEventListener('abort', onAbort, { once: true });
+    // Close the gap between the first signal.aborted check and listener setup.
+    if (signal.aborted) onAbort();
+  });
+
+  try {
+    return await Promise.race([settled, aborted]);
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+  }
+}
+
 const invokeStep: DispatchStep = {
   name: 'invoke',
   async run(exec) {
@@ -976,6 +1019,11 @@ const invokeStep: DispatchStep = {
       exec.handlerResult = result;
       return { ok: true, result };
     } catch (err) {
+      let diagnosticError = err;
+      if (!exec.abort.signal.aborted) {
+        const settled = await settleThrownValue(err, exec.abort.signal);
+        if (settled.kind === 'value') diagnosticError = settled.value;
+      }
       const isTimeout = exec.abort.signal.aborted;
       if (isTimeout) {
         if (exec.abortSource === 'parent-signal') {
@@ -1012,30 +1060,30 @@ const invokeStep: DispatchStep = {
       // UnauthorizedToolError is a DIFFERENT class object and instanceof is
       // false — without the name check the clean 401/precondition codes
       // degrade to a generic handler_error 500.
-      const errName = (err as Error | null)?.name;
-      if (err instanceof UnauthorizedToolError || errName === 'UnauthorizedToolError') {
-        return { ok: false, error: { code: 'unauthorized', message: (err as Error).message } };
+      const errName = (diagnosticError as Error | null)?.name;
+      if (diagnosticError instanceof UnauthorizedToolError || errName === 'UnauthorizedToolError') {
+        return { ok: false, error: { code: 'unauthorized', message: (diagnosticError as Error).message } };
       }
-      if (err instanceof HarnessRequiredError || errName === 'HarnessRequiredError') {
-        return { ok: false, error: { code: 'harness_required', message: (err as Error).message } };
+      if (diagnosticError instanceof HarnessRequiredError || errName === 'HarnessRequiredError') {
+        return { ok: false, error: { code: 'harness_required', message: (diagnosticError as Error).message } };
       }
       // Schema-validation failure thrown by defineTool's projected fn (or any
       // handler-level input check). Coding it `invalid_input` (400) instead of
       // `handler_error` (500) keeps caller mistakes out of the structural
       // tool-error telemetry class (EI-334's false-fire leg).
-      if (err instanceof InvalidInputError || errName === 'InvalidInputError') {
-        const meta = extractInvalidInputErrorMetadata(err);
+      if (diagnosticError instanceof InvalidInputError || errName === 'InvalidInputError') {
+        const meta = extractInvalidInputErrorMetadata(diagnosticError);
         return {
           ok: false,
           error: {
             code: 'invalid_input',
-            message: (err as Error).message,
+            message: (diagnosticError as Error).message,
             ...(meta ? { meta } : {}),
           },
         };
       }
-      const postgresMeta = extractPostgresErrorMetadata(err);
-      const dispatchMeta = extractDispatchErrorMetadata(err);
+      const postgresMeta = extractPostgresErrorMetadata(diagnosticError);
+      const dispatchMeta = extractDispatchErrorMetadata(diagnosticError);
       const handlerMeta = {
         ...(postgresMeta ?? {}),
         ...(dispatchMeta ?? {}),
@@ -1044,7 +1092,7 @@ const invokeStep: DispatchStep = {
         ok: false,
         error: {
           code: 'handler_error',
-          message: err instanceof Error ? err.message : String(err),
+          message: diagnosticError instanceof Error ? diagnosticError.message : String(diagnosticError),
           ...(Object.keys(handlerMeta).length > 0 ? { meta: handlerMeta } : {}),
         },
       };

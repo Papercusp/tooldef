@@ -111,6 +111,45 @@ describe('host invocation admission and settlement', () => {
     expect(handler).toHaveBeenCalledOnce();
     expect(settle).toHaveBeenCalledOnce();
   });
+
+  it('settles a Promise thrown by the handler into its actionable rejection diagnostic', async () => {
+    const handler = async () => {
+      throw new Promise<never>((_resolve, reject) => {
+        setTimeout(() => reject(new Error('database connection refused')), 0);
+      });
+    };
+    const result = await runDispatchStack(
+      makeTool({ fn: handler }),
+      'fix.tool',
+      {},
+      MAKE_CTX(),
+      {},
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: 'handler_error', message: 'database connection refused' },
+    });
+    expect(result.error?.message).not.toContain('[object Promise]');
+  });
+
+  it('keeps a never-settling thrown Promise under the normal dispatch timeout', async () => {
+    const result = await runDispatchStack(
+      makeTool({
+        timeoutSec: 0.05,
+        fn: async () => { throw new Promise<never>(() => {}); },
+      }),
+      'fix.tool',
+      {},
+      MAKE_CTX(),
+      {},
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: 'timeout' },
+    });
+  });
 });
 
 describe('dispatch stage attribution', () => {
