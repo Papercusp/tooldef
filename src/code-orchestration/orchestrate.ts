@@ -54,6 +54,8 @@ export type WrapDispatch = (
 ) => Promise<unknown>;
 
 export interface OrchestrateOptions {
+  /** Host execution placement; the caller's facade, authorization and trace stay local. */
+  executeScript?: typeof runOrchestrationScript;
   /** Trusted host-derived scope, never an authority string supplied by a script. */
   kernel?: { id: string; scope: string };
   ctx: UnifiedToolContext;
@@ -1207,7 +1209,7 @@ export async function runToolOrchestration(
   };
 
   const facade = buildToolFacade(tools, dispatch, allowed, unknownRefs);
-  const run = await runOrchestrationScript(script, facade, {
+  const run = await (opts.executeScript ?? runOrchestrationScript)(script, facade, {
     ...(opts.kernel ? { kernel: opts.kernel } : {}),
     ...(timeoutMs ? { timeoutMs } : {}),
     ...(opts.timeoutGraceMs !== undefined ? { timeoutGraceMs: opts.timeoutGraceMs } : {}),
