@@ -15,6 +15,10 @@ export {
 } from './tool-facade';
 export {
   runOrchestrationScript,
+  openOrchestrationKernel,
+  inspectOrchestrationKernel,
+  closeOrchestrationKernel,
+  type OrchestrationKernelStatus,
   DEFAULT_SCRIPT_TIMEOUT_MS,
   type RunScriptResult,
   type RunScriptOptions,

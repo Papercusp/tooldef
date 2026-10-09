@@ -141,6 +141,8 @@ export type OrchestrationInputs = Readonly<Record<string, OrchestrationInputValu
 
 export interface RunScriptResult {
   ok: boolean;
+  /** Live JavaScript globals persist; lexical locals and process-restart recovery do not. */
+  kernel?: OrchestrationKernelStatus;
   /** The script's returned value — the summary that re-enters the model's context. */
   result?: unknown;
   /** Captured console output from the script (bounded by maxLogLines). */
@@ -192,6 +194,8 @@ export const DEFAULT_SCRIPT_TIMEOUT_MS = 30_000;
 export const DEFAULT_TIMEOUT_SETTLEMENT_GRACE_MS = 1_000;
 
 export interface RunScriptOptions {
+  /** Trusted caller scope and an existing live kernel; never model-supplied authority. */
+  kernel?: { id: string; scope: string };
   /** Wall-clock budget for the whole script. Defaults to {@link DEFAULT_SCRIPT_TIMEOUT_MS} (30s).
    *  Sync loops are killed at this bound. */
   timeoutMs?: number;
@@ -317,9 +321,30 @@ function validateJsonInputs(inputs: unknown): string | null {
  *   host  → worker: { t:'result', id, ok, value? , error? }         a tool-call reply
  */
 const WORKER_SRC = `(() => {
-  const { parentPort, workerData } = require('node:worker_threads');
+  const { parentPort: workerPort, workerData } = require('node:worker_threads');
   const vm = require('node:vm');
-  const { script, maxLogLines, sleepMaxMs, inputs: workerInputs } = workerData;
+  const kernelContext = workerData.persistent ? vm.createContext({}) : null;
+  const kernelProxyToRaw = new WeakMap();
+  let currentTracking;
+  const execute = (execution) => {
+  const { script, maxLogLines, sleepMaxMs, inputs: workerInputs, runId } = execution;
+  let finished = false;
+  const cellTimers = new Set();
+  const parentPort = {
+    on: workerPort.on.bind(workerPort),
+    postMessage(message) {
+      if (finished) return;
+      workerPort.postMessage({ ...message, runId });
+      if (message.t === 'done' || message.t === 'error') {
+        finished = true;
+        for (const timer of cellTimers) clearTimeout(timer);
+        cellTimers.clear();
+        workerPort.removeListener('message', onResult);
+        for (const call of pending.values()) call.reject(new Error('kernel_cell_ended'));
+        pending.clear();
+      }
+    },
+  };
 
   const stringify = (v) => {
     if (typeof v === 'string') return v;
@@ -335,13 +360,15 @@ const WORKER_SRC = `(() => {
   // --- RPC: each tools.* call posts to the host and awaits the reply ---
   let nextId = 1;
   const pending = new Map();
-  parentPort.on('message', (m) => {
-    if (m && m.t === 'result') {
+  const onResult = (m) => {
+    if (m && m.t === 'result' && m.runId === runId) {
       const p = pending.get(m.id);
       if (p) { pending.delete(m.id); m.ok ? p.resolve(m.value) : p.reject(new Error(m.error)); }
     }
-  });
+  };
+  parentPort.on('message', onResult);
   const rpc = (payload) => new Promise((resolve, reject) => {
+    if (finished) { reject(new Error('kernel_cell_ended')); return; }
     const id = nextId++;
     pending.set(id, { resolve, reject });
     // Tool results are wrapped in tracking Proxies before the script sees them. If a script
@@ -380,7 +407,8 @@ const WORKER_SRC = `(() => {
   const AVAIL_LIMIT = 30;
   const fieldMisses = [];
   const missSeen = new Set();
-  const proxyToRaw = new WeakMap();
+  currentTracking = { fieldMisses, missSeen };
+  const proxyToRaw = kernelProxyToRaw;
   const rawToProxy = new WeakMap();
   const PROBE_KEYS = new Set(['then', 'toJSON', 'constructor', 'inspect', 'nodeType', '$$typeof']);
   const ROOT_ENVELOPE_FIELDS = new Set(['content', 'text']);
@@ -453,6 +481,9 @@ const WORKER_SRC = `(() => {
     const isArr = Array.isArray(value);
     const proxy = new Proxy(value, {
       get(target, key) {
+        // Globals can retain a tracked result from an earlier cell. Attribute new reads to
+        // this cell and keep its raw identity available at every worker transport boundary.
+        const { fieldMisses, missSeen } = currentTracking;
         // Symbol keys pass straight through, UNTRACKED and UNWRAPPED. They are protocol lookups
         // (Symbol.iterator for for...of, Symbol.toPrimitive, util.inspect.custom), never an
         // authored field read — and a Symbol cannot be concatenated into the dotted path below:
@@ -615,12 +646,14 @@ const WORKER_SRC = `(() => {
   const SLEEP_CAP_LIMIT = 20;
   const sleepCaps = [];
   const sleep = (ms) => new Promise((resolve) => {
+    if (finished) return;
     const requested = Number(ms) || 0;
     const bounded = Math.max(0, Math.min(requested, SLEEP_MAX_MS));
     if (bounded < requested && sleepCaps.length < SLEEP_CAP_LIMIT) {
       sleepCaps.push({ requestedMs: requested, actualMs: bounded });
     }
-    setTimeout(() => resolve(bounded), bounded);
+    const timer = setTimeout(() => { cellTimers.delete(timer); resolve(bounded); }, bounded);
+    cellTimers.add(timer);
   });
 
   // --- compile + run the body under vm (globals-scoped); a leading newline guards a trailing // comment ---
@@ -819,9 +852,7 @@ const WORKER_SRC = `(() => {
     '})()';
   let factory;
   try {
-    factory = vm.runInNewContext(
-      wrap(script),
-      {
+    const globals = {
         console: { log, error: log, warn: log },
         log,
         sleep,
@@ -831,9 +862,13 @@ const WORKER_SRC = `(() => {
         store,
         load,
         __papercuspInputsJson: JSON.stringify(workerInputs),
-      },
-      { displayErrors: true },
-    );
+    };
+    if (kernelContext) {
+      Object.assign(kernelContext, globals);
+      factory = vm.runInContext(wrap(script), kernelContext, { displayErrors: true });
+    } else {
+      factory = vm.runInNewContext(wrap(script), globals, { displayErrors: true });
+    }
   } catch (err) {
     // EI-21909921686340240 added the plain-JavaScript guidance below because TypeScript-only
     // syntax fails here with an opaque V8 SyntaxError. EI-22099400033832378: it was appended
@@ -1046,7 +1081,108 @@ const WORKER_SRC = `(() => {
       });
     }
   })();
+  };
+  if (workerData.persistent) {
+    workerPort.on('message', (message) => {
+      if (message && message.t === 'execute') execute(message);
+    });
+  } else {
+    execute(workerData);
+  }
 })();`;
+
+export interface OrchestrationKernelStatus {
+  id: string;
+  state: 'live' | 'closed' | 'lost' | 'unrecoverable';
+  busy: boolean;
+  language: 'javascript';
+  statePersistence: 'globalThis';
+  restartRecovery: 'unrecoverable';
+  reason?: string;
+}
+
+interface KernelSession {
+  id: string;
+  scope: string;
+  worker: NodeWorker;
+  state: 'live' | 'closed' | 'lost';
+  busy: boolean;
+  reason?: string;
+  idleTimer?: ReturnType<typeof setTimeout>;
+  stop?: (error: string) => void;
+  endedAt?: number;
+}
+
+const kernels = new Map<string, KernelSession>();
+const KERNEL_IDLE_MS = 5 * 60_000;
+const MAX_KERNELS_PER_SCOPE = 4;
+
+function kernelStatus(id: string, session?: KernelSession): OrchestrationKernelStatus {
+  return {
+    id, state: session?.state ?? 'unrecoverable', busy: session?.busy ?? false,
+    language: 'javascript', statePersistence: 'globalThis', restartRecovery: 'unrecoverable',
+    ...(session?.reason ? { reason: session.reason } : !session ? { reason: 'unknown-or-foreign-kernel; process restarts lose live state' } : {}),
+  };
+}
+
+function endKernel(session: KernelSession, state: 'closed' | 'lost', reason: string): void {
+  if (session.state !== 'live') return;
+  session.state = state;
+  session.reason = reason;
+  session.endedAt = Date.now();
+  if (session.idleTimer) clearTimeout(session.idleTimer);
+  session.idleTimer = undefined;
+  session.stop?.(`kernel_${state}: ${reason}`);
+  void session.worker.terminate();
+}
+
+function armKernelIdle(session: KernelSession): void {
+  if (session.idleTimer) clearTimeout(session.idleTimer);
+  if (session.state !== 'live') return;
+  session.idleTimer = setTimeout(() => endKernel(session, 'closed', 'idle-expired'), KERNEL_IDLE_MS);
+  session.idleTimer.unref?.();
+  session.worker.unref();
+}
+
+/** Create a real, bounded worker/VM lifetime. No state replay or filesystem authority is added. */
+export async function openOrchestrationKernel(scope: string): Promise<OrchestrationKernelStatus> {
+  if (!scope.trim()) throw new Error('kernel_scope_required');
+  for (const [id, session] of kernels) {
+    if (session.endedAt && Date.now() - session.endedAt > KERNEL_IDLE_MS) kernels.delete(id);
+  }
+  if ([...kernels.values()].filter((session) => session.scope === scope && session.state === 'live').length >= MAX_KERNELS_PER_SCOPE) {
+    throw new Error('kernel_scope_limit: close an existing kernel before opening another');
+  }
+  // Dynamic imports preserve the isomorphic tooldef barrel.
+  const [{ Worker }, { randomUUID }] = await Promise.all([import('node:worker_threads'), import('node:crypto')]);
+  // Recheck after imports: simultaneous opens must not exceed the per-scope limit.
+  if ([...kernels.values()].filter((session) => session.scope === scope && session.state === 'live').length >= MAX_KERNELS_PER_SCOPE) {
+    throw new Error('kernel_scope_limit: close an existing kernel before opening another');
+  }
+  const id = randomUUID();
+  const worker = new Worker(WORKER_SRC, {
+    eval: true, name: 'code-orchestration-kernel', workerData: { persistent: true },
+    resourceLimits: { maxOldGenerationSizeMb: 128 },
+  });
+  const session: KernelSession = { id, scope, worker, state: 'live', busy: false };
+  kernels.set(id, session);
+  worker.on('error', (error) => endKernel(session, 'lost', errMsg(error)));
+  worker.on('exit', (code) => endKernel(session, 'lost', `worker-exit:${code}`));
+  armKernelIdle(session);
+  return kernelStatus(id, session);
+}
+
+export function inspectOrchestrationKernel(id: string, scope: string): OrchestrationKernelStatus {
+  const session = kernels.get(id);
+  return kernelStatus(id, session?.scope === scope ? session : undefined);
+}
+
+export function closeOrchestrationKernel(id: string, scope: string): OrchestrationKernelStatus {
+  const session = kernels.get(id);
+  if (!session || session.scope !== scope) return kernelStatus(id);
+  endKernel(session, 'closed', 'explicit-close');
+  return kernelStatus(id, session);
+}
 
 export async function runOrchestrationScript(
   script: string,
@@ -1065,6 +1201,18 @@ export async function runOrchestrationScript(
   // Nothing starts for a caller that already gave up.
   if (opts.signal?.aborted) return { ok: false, error: SCRIPT_ABORTED_ERROR, logs };
 
+  const kernel = opts.kernel ? kernels.get(opts.kernel.id) : undefined;
+  if (opts.kernel && (!kernel || kernel.scope !== opts.kernel.scope || kernel.state !== 'live')) {
+    return { ok: false, error: 'kernel_unrecoverable: unknown, foreign or ended lifetime; open a new kernel',
+      kernel: inspectOrchestrationKernel(opts.kernel.id, opts.kernel.scope), logs };
+  }
+  if (kernel?.busy) return { ok: false, error: 'kernel_busy: a cell is already executing', kernel: kernelStatus(kernel.id, kernel), logs };
+  if (kernel) {
+    kernel.busy = true;
+    if (kernel.idleTimer) clearTimeout(kernel.idleTimer);
+    kernel.worker.ref();
+  }
+
   // Lazy: keeps the barrel browser-safe (see the header note on the type-only import above).
   const { Worker } = await import('node:worker_threads');
 
@@ -1072,7 +1220,8 @@ export async function runOrchestrationScript(
     let settled = false;
     let timeoutTriggered = false;
     let latestState: Record<string, OrchestrationInputValue> | undefined;
-    const worker: NodeWorker = new Worker(WORKER_SRC, {
+    const runId = kernel ? `${kernel.id}:${Date.now()}:${Math.random()}` : undefined;
+    const worker: NodeWorker = kernel?.worker ?? new Worker(WORKER_SRC, {
       eval: true,
       name: 'code-orchestration',
       // Worker construction performs the host→worker structured clone. The worker serializes
@@ -1088,9 +1237,19 @@ export async function runOrchestrationScript(
       settled = true;
       clearTimeout(timer);
       opts.signal?.removeEventListener('abort', onAbort);
-      void worker.terminate();
+      worker.removeListener('message', onMessage);
+      worker.removeListener('error', onError);
+      worker.removeListener('exit', onExit);
+      if (kernel) {
+        kernel.busy = false;
+        kernel.stop = undefined;
+        armKernelIdle(kernel);
+      } else {
+        void worker.terminate();
+      }
       resolve({
         ...out,
+        ...(kernel ? { kernel: kernelStatus(kernel.id, kernel) } : {}),
         ...(out.state ? {} : latestState ? { state: latestState } : {}),
         logs,
       });
@@ -1130,6 +1289,11 @@ export async function runOrchestrationScript(
     const stop = (error: string): void => {
       if (settled || timeoutTriggered) return;
       timeoutTriggered = true;
+      if (kernel?.state === 'live') {
+        kernel.state = 'lost';
+        kernel.reason = error;
+        kernel.endedAt = Date.now();
+      }
       void worker.terminate();
       void awaitTimeoutHook().then(() => {
         finish({ ok: false, error }, true);
@@ -1143,7 +1307,8 @@ export async function runOrchestrationScript(
     }
     opts.signal?.addEventListener('abort', onAbort, { once: true });
 
-    worker.on('message', (m: WorkerMessage) => {
+    const onMessage = (m: WorkerMessage & { runId?: string }) => {
+      if (m.runId !== runId) return;
       if (m.t === 'log') {
         if (logs.length < maxLogLines) logs.push(m.text);
         return;
@@ -1179,14 +1344,21 @@ export async function runOrchestrationScript(
         }
         return;
       }
-      if (m.t === 'call') void handleCall(worker, facade, m, () => settled || timeoutTriggered);
-    });
+      if (m.t === 'call') void handleCall(worker, facade, m, () => settled || timeoutTriggered, runId);
+    };
+    worker.on('message', onMessage);
 
     // A worker that dies without a terminal message (native crash, OOM kill) still settles.
-    worker.on('error', (err) => finish({ ok: false, error: errMsg(err) }));
-    worker.on('exit', (code) => {
+    const onError = (err: Error) => stop(errMsg(err));
+    const onExit = (code: number) => {
       if (!settled && !timeoutTriggered) finish({ ok: false, error: `worker exited unexpectedly (code ${code})` });
-    });
+    };
+    worker.on('error', onError);
+    worker.on('exit', onExit);
+    if (kernel) {
+      kernel.stop = stop;
+      worker.postMessage({ t: 'execute', script, maxLogLines, sleepMaxMs: opts.sleepMaxMs, inputs, runId });
+    }
   });
 }
 
@@ -1196,6 +1368,7 @@ async function handleCall(
   facade: ToolFacade,
   m: CallMessage,
   isSettled: () => boolean,
+  runId?: string,
 ): Promise<void> {
   try {
     const toolName = typeof m.callName === 'string' ? m.callName : `${m.ns ?? '?'}.${m.verb ?? '?'}`;
@@ -1219,14 +1392,14 @@ async function handleCall(
     }
     if (isSettled()) return;
     try {
-      worker.postMessage({ t: 'result', id: m.id, ok: true, value });
+      worker.postMessage({ t: 'result', runId, id: m.id, ok: true, value });
     } catch (cloneErr) {
       // Tool returned something the structured clone can't carry to the worker.
-      worker.postMessage({ t: 'result', id: m.id, ok: false, error: `result_not_serializable: ${errMsg(cloneErr)}` });
+      worker.postMessage({ t: 'result', runId, id: m.id, ok: false, error: `result_not_serializable: ${errMsg(cloneErr)}` });
     }
   } catch (err) {
     if (isSettled()) return;
-    worker.postMessage({ t: 'result', id: m.id, ok: false, error: errMsg(err) });
+    worker.postMessage({ t: 'result', runId, id: m.id, ok: false, error: errMsg(err) });
   }
 }
 

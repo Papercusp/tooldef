@@ -27,6 +27,7 @@ import {
   runOrchestrationScript,
   type FieldMiss,
   type OrchestrationInputs,
+  type OrchestrationKernelStatus,
   type SleepCap,
 } from './run-script';
 import { checkScript, ensureParseCheckReady, type StaticToolCall } from './parse-check';
@@ -53,6 +54,8 @@ export type WrapDispatch = (
 ) => Promise<unknown>;
 
 export interface OrchestrateOptions {
+  /** Trusted host-derived scope, never an authority string supplied by a script. */
+  kernel?: { id: string; scope: string };
   ctx: UnifiedToolContext;
   deps: DispatchProjectedDeps;
   /** Candidate tools (typically the full projected registry). */
@@ -239,6 +242,7 @@ export type CodeRunMediaContent =
 
 export interface OrchestrateResult {
   ok: boolean;
+  kernel?: OrchestrationKernelStatus;
   /** The script's returned summary (what re-enters the model's context). */
   summary?: unknown;
   /** Validated image/audio blocks from an explicit final `{ summary, media }` result. */
@@ -1204,6 +1208,7 @@ export async function runToolOrchestration(
 
   const facade = buildToolFacade(tools, dispatch, allowed, unknownRefs);
   const run = await runOrchestrationScript(script, facade, {
+    ...(opts.kernel ? { kernel: opts.kernel } : {}),
     ...(timeoutMs ? { timeoutMs } : {}),
     ...(opts.timeoutGraceMs !== undefined ? { timeoutGraceMs: opts.timeoutGraceMs } : {}),
     onTimeout: settleOnTimeout,
@@ -1281,6 +1286,7 @@ export async function runToolOrchestration(
     : undefined;
   return {
     ok: effectiveOk,
+    ...(run.kernel ? { kernel: run.kernel } : {}),
     summary: finalResult.summary,
     ...(media.length ? { media } : {}),
     ...(run.state ? { state: run.state } : {}),
