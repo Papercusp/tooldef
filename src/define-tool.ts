@@ -3425,6 +3425,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       // never reaches an agent's context) gets the same exemption
       // (EI-18719561823587590).
       explicitFullRequest,
+      deferHardCeilingToResultDoor: ctx.transport === 'mcp',
       // WI-37843: a tool may raise its OWN hard ceiling (coord:orient, the
       // session-bootstrap read, whose full payload IS the value). Absent ⇒ the
       // shared PAYLOAD_TIER_HARD_CEILING_CHARS, unchanged for every other tool.
@@ -3637,6 +3638,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
       // never reaches an agent's context) gets the same exemption
       // (EI-18719561823587590).
       explicitFullRequest,
+      deferHardCeilingToResultDoor: handlerCtx.transport === 'mcp',
       // WI-37843: a tool may raise its OWN hard ceiling (coord:orient, the
       // session-bootstrap read, whose full payload IS the value). Absent ⇒ the
       // shared PAYLOAD_TIER_HARD_CEILING_CHARS, unchanged for every other tool.

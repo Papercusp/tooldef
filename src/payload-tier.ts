@@ -1609,6 +1609,14 @@ export interface ApplyPayloadTierOpts {
    * a deliberate choice, not a silent failure.
    */
   explicitFullRequest?: boolean;
+  /**
+   * True when this model-facing MCP result will pass through the downstream
+   * result-door, which can spill the untouched body and page it back. If the
+   * domain shaper cannot fit an oversized result under the early hard ceiling,
+   * preserve the source response for that lossless door instead of applying a
+   * field-blind projection here. Non-MCP transports keep the hard ceiling.
+   */
+  deferHardCeilingToResultDoor?: boolean;
   args: unknown;
   log?: (msg: string) => void;
   /**
@@ -1762,6 +1770,18 @@ export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
           `[payload-tier] ${toolName} hard-ceiling force-shape threw (using generic bounded projection): ${err instanceof Error ? err.message : String(err)}`,
         );
       }
+    }
+    // The MCP result-door is the later, lossless enforcement point: it can
+    // spill the complete serialized result and return a page cursor. If the
+    // domain-specific trimmed shape above still cannot fit, projecting here
+    // destroys fields before the door can save them (EI-25522475506690354).
+    // Keep the original response so the downstream door can recover the full
+    // body. Other transports have no such door and retain the bounded fallback.
+    if (opts.deferHardCeilingToResultDoor) {
+      (log ?? console.warn)(
+        `[payload-tier] ${toolName} '${tier}' result ${size} chars > hard ceiling ${ceiling}; deferred intact output to the MCP result-door`,
+      );
+      return response;
     }
     (log ?? console.warn)(
       `[payload-tier] ${toolName} '${tier}' result ${size} chars > hard ceiling ${ceiling}; used the generic bounded projection to fit the transport cap`,

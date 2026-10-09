@@ -243,6 +243,27 @@ describe('applyPayloadTier', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('hard ceiling'));
   });
 
+  it('defers an over-ceiling MCP result intact when the result-door can spill it', () => {
+    const log = vi.fn();
+    const response: ToolResponse = {
+      data: { section: 'Decisions', body: 'complete-body-'.repeat(PAYLOAD_TIER_HARD_CEILING_CHARS / 10) },
+    };
+    const out = applyPayloadTier({
+      toolName: 'plans:get',
+      shape: { trimmed: (data) => data },
+      response,
+      tier: 'full',
+      args: { heading: 'Decisions' },
+      deferHardCeilingToResultDoor: true,
+      log,
+    });
+
+    expect(out).toBe(response);
+    expect(out.payloadProjection).toBeUndefined();
+    expect((out.data as { body: string }).body).toBe((response.data as { body: string }).body);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('deferred intact output to the MCP result-door'));
+  });
+
   it('trimmed picks shape.trimmed; standard picks shape.standard', () => {
     const t = applyPayloadTier({ toolName: 't', shape, response, tier: 'trimmed', args: {} });
     expect(t.data).toEqual({ rows: [1], tierMark: 'trimmed' });
