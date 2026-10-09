@@ -61,7 +61,7 @@ import {
 import { serverVintageHint, constraintVintageHint } from './server-vintage';
 import { readAmbientArgKeys } from './ambient-args';
 import { GUIDANCE_SECTION_LABELS, GUIDANCE_SECTION_SEPARATOR } from './partial-guidance';
-import { buildCorrectedCall, correctedCallHint } from './corrected-call';
+import { buildCorrectedCall, correctedCallHint, valueForCorrectionTarget } from './corrected-call';
 import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
 import { applyPayloadTier, extractPayloadTier, resolvePayloadTier, PAYLOAD_TIER_ARG } from './payload-tier';
 import { boundWorkspaceTx } from './workspace-tx';
@@ -2371,6 +2371,7 @@ export function argsAcceptedOnOtherVariant(
 async function retainValueCompatibleCorrections(
   corrections: readonly InvalidInputCorrection[],
   input: Record<string, unknown>,
+  rawSchema: unknown,
   validator: StandardSchemaV1,
 ): Promise<InvalidInputCorrection[]> {
   const retained: InvalidInputCorrection[] = [];
@@ -2395,7 +2396,9 @@ async function retainValueCompatibleCorrections(
     // keeps its valid array-to-string repair.
     const candidateInput = { ...input };
     delete candidateInput[correction.rejectedArg];
-    candidateInput[correction.target] = value;
+    // Probe the same schema-directed adaptation buildCorrectedCall will render. In
+    // particular, a scalar relocated to an array field must be wrapped before validation.
+    candidateInput[correction.target] = valueForCorrectionTarget(value, correction.target, rawSchema);
     try {
       const checked = await standardValidate(validator, candidateInput);
       const candidateRejected = !checked.ok && issueLeaves(checked.issues).some(
@@ -2504,7 +2507,7 @@ export function invalidInputCorrections(
   ) {
     return corrections;
   }
-  return retainValueCompatibleCorrections(corrections, input as Record<string, unknown>, validator);
+  return retainValueCompatibleCorrections(corrections, input as Record<string, unknown>, rawSchema, validator);
 }
 
 /**

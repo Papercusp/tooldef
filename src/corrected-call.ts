@@ -274,7 +274,7 @@ function isScalarCorrectionValue(value: unknown): boolean {
     (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint');
 }
 
-function valueForCorrectionTarget(value: unknown, target: string, rawSchema: unknown): unknown {
+export function valueForCorrectionTarget(value: unknown, target: string, rawSchema: unknown): unknown {
   if (!isScalarCorrectionValue(value) || Array.isArray(value) || !targetDeclaresArray(rawSchema, target)) {
     return value;
   }
