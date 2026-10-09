@@ -40,8 +40,9 @@ export interface ToolResult {
    */
   outputRef?: string;
   /**
-   * Size in bytes of the artifact pointed to by `outputRef`. Falls back
-   * to `JSON.stringify(content).length` if `outputRef` is unset.
+   * Size in bytes of the artifact pointed to by `outputRef`, or of the
+   * serialized content when no artifact reference is set. The dispatcher
+   * records the serialized content's UTF-8 byte length when this is omitted.
    */
   outputSize?: number;
 }

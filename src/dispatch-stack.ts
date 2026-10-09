@@ -1899,7 +1899,7 @@ async function recordTelemetry(
               errorMessage: refusal?.message ?? REFUSAL_FALLBACK_MESSAGE,
             }
           : {}),
-        outputSize: r.outputSize ?? JSON.stringify(r.content).length,
+        outputSize: r.outputSize ?? new TextEncoder().encode(JSON.stringify(r.content)).byteLength,
         ...(r.outputRef ? { outputRef: r.outputRef } : {}),
         args: input,
         eventCount,

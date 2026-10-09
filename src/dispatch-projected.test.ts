@@ -326,6 +326,20 @@ describe('dispatchProjectedTool', () => {
     expect(recorded[0]?.outputSize).toBeGreaterThan(0);
   });
 
+  it('records UTF-8 bytes for serialized non-ASCII content', async () => {
+    const content: ToolResult['content'] = [{ type: 'text', text: 'café 🧪' }];
+    const serialized = JSON.stringify(content);
+    const recorded: Array<{ outputSize?: number | null }> = [];
+    const tool = makeTool({ fn: async () => ({ content }) });
+
+    await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
+      recordInvocation: vi.fn(async (i) => { recorded.push({ outputSize: i.outputSize }); }),
+    }));
+
+    expect(recorded[0]?.outputSize).toBe(new TextEncoder().encode(serialized).byteLength);
+    expect(recorded[0]?.outputSize).not.toBe(serialized.length);
+  });
+
   it('records a canonical ToolResponse { data:{ ok:false, reason } } as call-ok plus soft-failure metadata', async () => {
     defineTool({
       name: 'test:soft-failure-outcome',
