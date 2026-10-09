@@ -493,6 +493,41 @@ describe('dispatchProjectedTool', () => {
     expect(metadataJson?.invalidInput).toEqual(expected);
   });
 
+  it('awaits async invalid-input construction in the role-gated defineTool wrapper', async () => {
+    let handlerCalled = false;
+    defineTool({
+      name: 'test:role-gated-invalid-input',
+      requirePrincipal: false as const,
+      capability: 'test:read',
+      agentRoles: ['worker'],
+      args: z.object({ slug: z.string() }),
+      async handler() {
+        handlerCalled = true;
+        return { content: [{ type: 'text' as const, text: 'ok' }] };
+      },
+    });
+
+    let recorded: { status?: string; errorCode?: string | null } | undefined;
+    const result = await dispatchProjectedTool(
+      lookupByMcpName('test:role-gated-invalid-input')!,
+      'test:role-gated-invalid-input',
+      { slug: 'adequacy-plan', limit: 10 },
+      MAKE_CTX(),
+      MAKE_DEPS({
+        recordInvocation: vi.fn(async (input) => {
+          recorded = { status: input.status, errorCode: input.errorCode };
+        }),
+      }),
+    );
+
+    expect(handlerCalled).toBe(false);
+    expect(result.ok).toBe(false);
+    expect(result.error?.code).toBe('invalid_input');
+    expect(result.error?.message).toContain('limit');
+    expect(result.error?.message).not.toBe('[object Promise]');
+    expect(recorded).toEqual({ status: 'invalid-input', errorCode: 'invalid_input' });
+  });
+
   it('adapts a scalar near-name relocation to the projected array destination', async () => {
     defineTool({
       name: 'test:invalid-input-array-relocation',
