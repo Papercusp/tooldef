@@ -18,6 +18,7 @@ import type { StaticToolCall } from './parse-check';
 import type { ProjectedTool, UnifiedToolContext } from '../tool-projection';
 import type { DispatchProjectedDeps } from '../dispatch-types';
 import type { ToolResult } from '../wire';
+import { dispatchProjectedTool } from '../dispatch-projected';
 
 const DEPS: DispatchProjectedDeps = {};
 
@@ -302,6 +303,8 @@ line 2";
   it('settles an abort-cooperative write within grace and preserves its exact settled callId', async () => {
     const starts: string[] = [];
     const settles: Array<{ callId?: string; status: string }> = [];
+    const errors: Array<string | undefined> = [];
+    const deps = recordingDeps(starts, settles);
     let resolveAbort!: () => void;
     const abortSeen = new Promise<void>((resolve) => {
       resolveAbort = resolve;
@@ -324,7 +327,13 @@ line 2";
       `await tools.wi.checkpoint({ n: 1 }); return 'unreachable';`,
       {
         ctx: MAKE_CTX(),
-        deps: recordingDeps(starts, settles),
+        deps: {
+          ...deps,
+          recordInvocation: async (event) => {
+            await deps.recordInvocation!(event);
+            errors.push(event.errorCode);
+          },
+        },
         tools: [write],
         timeoutMs: 500,
         timeoutGraceMs: 50,
@@ -338,7 +347,10 @@ line 2";
     await abortSeen;
     // The dispatch settled during the grace window, so it is not detached; the telemetry
     // settlement still carries the exact id opened by onDispatchStart.
-    expect(settles).toEqual([{ callId: starts[0], status: 'timeout' }]);
+    // The worker cancels this dispatch through its parent signal. That is an
+    // aborted, uncertain write, distinct from the dispatcher's own deadline.
+    expect(settles).toEqual([{ callId: starts[0], status: 'error' }]);
+    expect(errors).toEqual(['aborted']);
     expect(r.detachedCalls).toBeUndefined();
     expect(r.callRecords).toEqual([
       {
@@ -349,6 +361,32 @@ line 2";
         outputReferences: [],
       },
     ]);
+  });
+
+  it('keeps a dispatch deadline distinct from parent cancellation', async () => {
+    const starts: string[] = [];
+    const settles: Array<{ callId?: string; status: string }> = [];
+    const write = {
+      ...mkTool('wi:checkpoint', 'write', async (_args, innerCtx) => {
+        const signal = (innerCtx as UnifiedToolContext).signal;
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) resolve();
+          else signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        return json({ ok: true });
+      }),
+      timeoutSec: 0.01,
+    };
+    const r = await dispatchProjectedTool(write, 'wi:checkpoint', {}, MAKE_CTX(), recordingDeps(starts, settles));
+
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe('timeout');
+    expect(starts).toHaveLength(1);
+    expect(settles).toEqual([{ callId: starts[0], status: 'timeout' }]);
+    expect(r.error?.meta?.abortCompletionReceipt).toMatchObject({
+      status: 'recovery-incomplete',
+      attemptId: starts[0],
+    });
   });
 
   it('aborts a pending inner tool when the code:run worker deadline expires', async () => {

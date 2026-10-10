@@ -1,8 +1,10 @@
 /**
  * EI-18719561823587590: `applyPayloadTier` shapes in two INDEPENDENT steps —
  * (1) tier shaping, and (2) a HARD CEILING that force-applies the generic
- * bounded projection to any result over `PAYLOAD_TIER_HARD_CEILING_CHARS`
- * REGARDLESS of the resolved tier. Step 2's exit is a caller-selected full tier
+ * bounded projection to non-MCP results over `PAYLOAD_TIER_HARD_CEILING_CHARS`
+ * REGARDLESS of the resolved tier. MCP instead preserves the complete body for
+ * the downstream result-door's lossless spill (EI-25522475506690354).
+ * Step 2's exit is a caller-selected full tier
  * (`payloadTier:'full'` per call or `ctx_tier=full` for the session) or an
  * in-process transport-cap exemption.
  *
@@ -91,30 +93,34 @@ describe('transportCapExempt — the hard-ceiling exit for in-process consumers 
         },
       });
 
-    it('WITHOUT the flag an over-ceiling result is force-truncated (the pre-fix behaviour, still correct for a transport caller)', async () => {
+    it.each(['mcp', 'http'])('WITHOUT the flag preserves MCP spill input and caps transports without a result-door (%s)', async (transport) => {
       define('test:cap-legacy-off');
       const res = await dispatchProjectedTool(
         lookupByMcpName('test:cap-legacy-off')!,
         'test:cap-legacy-off',
         {},
-        ctx(),
+        ctx({ transport }),
         DEPS,
       );
       const data = readBack(res);
-      // This is the exact failure the bug report measured: fewer rows than the
-      // tool returned, and the searched-for key simply absent.
-      expect(data.visibleRows).toBeLessThan(ROW_COUNT);
-      expect(data.hasNeedle).toBe(false);
-      expect(data.truncated).toBe(true);
+      if (transport === 'mcp') {
+        expect(data.visibleRows).toBe(ROW_COUNT);
+        expect(data.hasNeedle).toBe(true);
+        expect(data.truncated).toBe(false);
+      } else {
+        expect(data.visibleRows).toBeLessThan(ROW_COUNT);
+        expect(data.hasNeedle).toBe(false);
+        expect(data.truncated).toBe(true);
+      }
     });
 
-    it('WITH the flag the script sees every row — including the one the projection dropped', async () => {
+    it.each(['mcp', 'http'])('WITH the flag the script sees every row (%s)', async (transport) => {
       define('test:cap-legacy-on');
       const res = await dispatchProjectedTool(
         lookupByMcpName('test:cap-legacy-on')!,
         'test:cap-legacy-on',
         {},
-        ctx({ transportCapExempt: true }),
+        ctx({ transport, transportCapExempt: true }),
         DEPS,
       );
       const data = readBack(res);
@@ -137,27 +143,34 @@ describe('transportCapExempt — the hard-ceiling exit for in-process consumers 
         },
       });
 
-    it('WITHOUT the flag an over-ceiling result is force-truncated', async () => {
+    it.each(['mcp', 'http'])('WITHOUT the flag preserves MCP spill input and caps transports without a result-door (%s)', async (transport) => {
       define('test:cap-role-off');
       const res = await dispatchProjectedTool(
         lookupByMcpName('test:cap-role-off')!,
         'test:cap-role-off',
         {},
-        ctx(),
+        ctx({ transport }),
         DEPS,
       );
       const data = readBack(res);
-      expect(data.visibleRows).toBeLessThan(ROW_COUNT);
-      expect(data.truncated).toBe(true);
+      if (transport === 'mcp') {
+        expect(data.visibleRows).toBe(ROW_COUNT);
+        expect(data.hasNeedle).toBe(true);
+        expect(data.truncated).toBe(false);
+      } else {
+        expect(data.visibleRows).toBeLessThan(ROW_COUNT);
+        expect(data.hasNeedle).toBe(false);
+        expect(data.truncated).toBe(true);
+      }
     });
 
-    it('WITH the flag the full payload survives', async () => {
+    it.each(['mcp', 'http'])('WITH the flag the full payload survives (%s)', async (transport) => {
       define('test:cap-role-on');
       const res = await dispatchProjectedTool(
         lookupByMcpName('test:cap-role-on')!,
         'test:cap-role-on',
         {},
-        ctx({ transportCapExempt: true }),
+        ctx({ transport, transportCapExempt: true }),
         DEPS,
       );
       const data = readBack(res);
@@ -168,9 +181,9 @@ describe('transportCapExempt — the hard-ceiling exit for in-process consumers 
 
   /**
    * Direction-of-error guard. The exemption must not become a blanket
-   * uncapping: an ordinary transport caller with a bounded session tier must
-   * still be capped, because an over-cap payload on the MCP transport is a hard
-   * failure. A caller-selected full tier — per-call `payloadTier:'full'` or
+   * uncapping: callers on transports without a result-door must still be
+   * capped; MCP must reach the later lossless spill intact. A caller-selected
+   * full tier — per-call `payloadTier:'full'` or
    * session `ctx_tier=full` (WI-5078) — and this ctx flag are exits.
    */
   it('a caller-selected session-level full tier stamps the result-door exemption', async () => {

@@ -247,7 +247,11 @@ describe('serializeToolResponse — Tier-3 prompt-declared columns (read, P-004)
     const r = serializeToolResponse({ data: rows }, opts(ctx));
     expect(r._meta.prePrompt).toBeUndefined();
     expect(r.format).not.toBe('csv'); // not the headerless Tier-3 body
-    expect(r.structuredContent).toEqual(rows); // lossless copy attached
+    // MCP requires an object root; the value remains lossless and the metadata
+    // tells programmatic consumers how to recover the original array.
+    expect(r.structuredContent).toEqual({ value: rows });
+    expect(r._meta.structured).toBe(true);
+    expect(r._meta.structuredRoot).toBe('array');
   });
 
   it('empty array under Tier-3 → just the [0] guard (no rows, no crash)', () => {
