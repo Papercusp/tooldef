@@ -207,6 +207,12 @@ export function partialGuidanceDescription(description: string | undefined): str
  *     70-char rail cap retained all floors plus one extra tool at99,970 B.
  *     The generator sweep now varies selection prose without shortening rails.
  *
+ *     2026-10-10, 959-tool catalog after floor-schema additions to facts:assert and
+ *     dev:pipeline_position: cap=60 measured 100,004 B (4 B over); cap=50 measured
+ *     99,861 B (139 B total headroom; 65 floors cost 99,496 B, leaving 504 B of
+ *     floor headroom). The unchanged 70-char rail cap preserves safety clauses while
+ *     the measured lead cap restores margin.
+ *
  * THE TRADE, stated because it is real: pricing prose into the tier costs 8
  * advertised seats (71 → 63). That is the right direction — a tool advertised
  * with an empty description occupies a budget seat while being unidentifiable,
@@ -214,7 +220,7 @@ export function partialGuidanceDescription(description: string | undefined): str
  * reachable through `tools:find`. Re-run the sweep after any catalog change
  * before editing this number by hand.
  */
-export const SUMMARY_LEAD_MAX_CHARS = 60;
+export const SUMMARY_LEAD_MAX_CHARS = 50;
 
 // WI-10006184: shortening selection prose must not shorten already-delivered
 // rules (notably tools:invoke's colon-name rule). Keep the previous rail cap.

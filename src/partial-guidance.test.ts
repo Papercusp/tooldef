@@ -184,7 +184,7 @@ describe('summaryGuidanceDescription', () => {
     const rail = '⚠ Use colon tool names (flags:set); NEVER underscored display names.';
     const lead = 'word '.repeat(30);
     const summary = summaryGuidanceDescription(`${lead}. ${rail}`);
-    expect(SUMMARY_LEAD_MAX_CHARS).toBe(60);
+    expect(SUMMARY_LEAD_MAX_CHARS).toBe(50);
     expect(summary).toContain(rail);
     expect(summary.split('…')[0].length).toBeLessThanOrEqual(SUMMARY_LEAD_MAX_CHARS);
     // The old shared cap would cut the rule when the lead is tuned below it.
