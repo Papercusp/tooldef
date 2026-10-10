@@ -45,6 +45,26 @@ describe('runOrchestrationScript (B-CX-1A)', () => {
     expect(r.logs).toContain('starting');
   });
 
+  it('reports the rejection reason when a script throws a Promise', async () => {
+    const r = await runOrchestrationScript(
+      `throw Promise.resolve(new Error('promise diagnostic'));`,
+      facade({}),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('promise diagnostic');
+    expect(r.error).not.toContain('[object Promise]');
+  });
+
+  it('bounds a never-settling thrown Promise with the normal script timeout', async () => {
+    const r = await runOrchestrationScript(
+      `throw new Promise(() => {});`,
+      facade({}),
+      { timeoutMs: 50 },
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/script_timeout/);
+  });
+
   it('allows a script to use log as a local tool-result binding', async () => {
     const get = vi.fn(async () => ({ value: 42 }));
     const r = await runOrchestrationScript(

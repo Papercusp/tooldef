@@ -1032,7 +1032,24 @@ const WORKER_SRC = `(() => {
       }
       catch (cloneErr) { parentPort.postMessage({ t: 'error', error: 'result_not_serializable: ' + ((cloneErr && cloneErr.message) || String(cloneErr)) }); }
     } catch (err) {
-      const msg = (err && err.message) || String(err);
+      let diagnosticError = err;
+      // A thrown thenable becomes the async factory's rejection reason, not its settlement. Resolve
+      // it here so the useful rejection value reaches the caller instead of the Promise object tag.
+      // A never-settling thenable remains bounded by this worker's normal wall-clock timeout.
+      try {
+        if (diagnosticError !== null &&
+            (typeof diagnosticError === 'object' || typeof diagnosticError === 'function') &&
+            typeof diagnosticError.then === 'function') {
+          try {
+            diagnosticError = await Promise.resolve(diagnosticError);
+          } catch (rejection) {
+            diagnosticError = rejection;
+          }
+        }
+      } catch (thenableProbeError) {
+        diagnosticError = thenableProbeError;
+      }
+      const msg = (diagnosticError && diagnosticError.message) || String(diagnosticError);
       // EI-19294786663902075: vm.runInNewContext is built with no importModuleDynamically
       // callback, so a script's await import(...) throws this exact V8-level message before
       // the specifier is ever looked at -- indistinguishable, on first read, from a bad path.
