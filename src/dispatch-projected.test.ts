@@ -741,7 +741,11 @@ describe('dispatchProjectedTool', () => {
   });
 
   it('classifies parent-signal abort separately from the configured dispatcher timeout', async () => {
-    for (const handlerOutcome of ['return', 'throw'] as const) {
+    const nestedGradeReceipt = {
+      status: 'recorded',
+      effectRef: 'blender-grade-idea:idea-1:2026-10-02T10:00:00.000Z',
+    };
+    for (const handlerOutcome of ['return', 'throw', 'nested-refusal'] as const) {
       const parent = new AbortController();
       let handlerSawAbort = false;
       const tool = makeTool({
@@ -750,8 +754,16 @@ describe('dispatchProjectedTool', () => {
           await new Promise<void>((resolve, reject) => {
             const finish = () => {
               handlerSawAbort = true;
-              if (handlerOutcome === 'throw') reject(new Error('underlying handler aborted'));
-              else resolve();
+              if (handlerOutcome === 'throw') {
+                reject(new Error('underlying handler aborted'));
+              } else if (handlerOutcome === 'nested-refusal') {
+                reject(Object.assign(new Error('nested blender:grade-idea aborted'), {
+                  name: 'NestedToolRefusalError',
+                  dispatchMetadata: { abortCompletionReceipt: nestedGradeReceipt },
+                }));
+              } else {
+                resolve();
+              }
             };
             if (ctx.signal.aborted) finish();
             else ctx.signal.addEventListener('abort', finish, { once: true });
@@ -779,6 +791,13 @@ describe('dispatchProjectedTool', () => {
             status: 'recovery-incomplete',
             attemptId: expect.any(String),
           },
+        });
+      } else if (handlerOutcome === 'nested-refusal') {
+        // tools:invoke rejects with NestedToolRefusalError after its nested MCP
+        // target returns isError. Preserve that target's grade receipt when the
+        // outer caller's parent signal wins while the wrapper is unwinding.
+        expect(r.error?.meta).toMatchObject({
+          abortCompletionReceipt: nestedGradeReceipt,
         });
       }
     }

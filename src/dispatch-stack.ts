@@ -1032,7 +1032,10 @@ const invokeStep: DispatchStep = {
             error: {
               code: 'aborted',
               message: `tool "${toolName}" was aborted by its parent signal while the handler was running`,
-              meta: { abortSource: 'parent-signal' },
+              meta: {
+                abortSource: 'parent-signal',
+                ...extractDispatchErrorMetadata(diagnosticError),
+              },
             },
           };
         }
