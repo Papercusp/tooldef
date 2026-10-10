@@ -539,6 +539,7 @@ function projectBulkResultsArray(
   path: string,
   state: ProjectionState,
   preservePaths: readonly PreservePathSegment[][],
+  partialTarget?: Record<string, unknown>,
 ): unknown[] {
   const config = state.bulkEnvelope;
   if (config == null || !isBulkResultsPath(path, config)) return [];
@@ -574,9 +575,8 @@ function projectBulkResultsArray(
     if (row === undefined && !projectedByIndex.has(index)) continue;
     projected.push(row);
   }
-  // The row cap and budget can each omit input rows. Count both, but do not
-  // invent a gap in the output: the marker describes the actual projected rows
-  // and the original rendered input population.
+  // The row cap and budget can each omit input rows. Keep the result array
+  // domain-only; the top-level projection metadata carries this omission.
   const droppedCount = value.length - projectedByIndex.size;
   if (droppedCount > 0) {
     recordOmission(
@@ -586,7 +586,7 @@ function projectBulkResultsArray(
       droppedCount,
       true,
     );
-    projected.push(arrayTruncationValue(projected, droppedCount, projected.length, value.length));
+    if (partialTarget) markPartial(partialTarget, state);
   }
   return projected;
 }
@@ -886,12 +886,26 @@ const IDENTITY_PREVIEW_DEPTH = 4;
  *  so a partial object is never read as a complete one (EI-21364503818966104).
  *  Underscore-prefixed to match `_projection` and stay clear of real payload keys. */
 const PARTIAL_MARKER_KEY = '_omitted';
-/** Minimal, machine-readable truth bit for EVERY object that loses a direct
- * field to depth/key/budget projection. The prose `_omitted` marker remains the
- * richer explanation when it fits; this bit is deliberately cheap enough to
- * survive the exact budget edge where that explanation cannot. */
+/** Minimal truth bit for the nearest containing row/envelope with a partial
+ * projection. Nested maps and collections must not receive reserved marker
+ * keys that callers can mistake for domain data. */
 const PARTIAL_FLAG_KEY = '_partial';
 const PARTIAL_MARKER_MAX_KEYS = 6;
+
+function isArrayElementPath(path: string): boolean {
+  const open = path.lastIndexOf('[');
+  if (open < 0 || !path.endsWith(']')) return false;
+  const index = path.slice(open + 1, -1);
+  return index.length > 0 && [...index].every((char) => char >= '0' && char <= '9');
+}
+
+function nearestPartialTarget(
+  path: string,
+  projected: Record<string, unknown>,
+  inherited?: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  return path === '$' || isArrayElementPath(path) ? projected : inherited;
+}
 
 function identityPriority(key: string): number {
   // Correlation outranks outcome. A row with only `{ok:true}` is unusable and
@@ -936,6 +950,7 @@ function projectIdentityPreview(
   depth: number,
   state: ProjectionState,
   preservePaths: readonly PreservePathSegment[][] = state.preservePaths,
+  partialTarget?: Record<string, unknown>,
 ): unknown {
   if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
     return takePrimitive(state, value, path);
@@ -947,7 +962,7 @@ function projectIdentityPreview(
   }
   if (value instanceof Date) return takePrimitive(state, value.toISOString(), path);
   if (value instanceof Error) {
-    return projectIdentityPreview({ name: value.name, error: value.message }, path, depth, state, preservePaths);
+    return projectIdentityPreview({ name: value.name, error: value.message }, path, depth, state, preservePaths, partialTarget);
   }
   if (typeof value !== 'object') return takePrimitive(state, String(value), path);
   if (state.active.has(value)) {
@@ -973,6 +988,7 @@ function projectIdentityPreview(
             depth + 1,
             state,
             preserveArrayChildPaths(preservePaths, i),
+            partialTarget,
           ),
         );
       }
@@ -988,7 +1004,8 @@ function projectIdentityPreview(
           droppedCount,
           true,
         );
-        projected.push(arrayTruncationValue(projected, droppedCount, projected.length, value.length));
+        if (partialTarget) markPartial(partialTarget, state);
+        else projected.push(arrayTruncationValue(projected, droppedCount, projected.length, value.length));
       }
       return projected;
     }
@@ -1012,27 +1029,28 @@ function projectIdentityPreview(
     }
 
     const projected: Record<string, unknown> = {};
+    const localPartialTarget = nearestPartialTarget(path, projected, partialTarget);
     let chosenProjected = 0;
     for (const [key, child] of chosen) {
       const keyCost = jsonLen(key) + 2;
       if (state.remaining < keyCost + 128) {
         recordOmission(state, `${path}.${key}`, 'remaining identity fields omitted to fit projection budget', chosen.length - chosenProjected);
         notePreservedDrops(state, path, chosen.slice(chosenProjected), preservePaths);
-        markPartial(projected, state);
+        markPartial(localPartialTarget ?? projected, state);
         break;
       }
       state.remaining -= keyCost;
       const childPreservePaths = preserveObjectChildPaths(preservePaths, key);
       projected[key] =
         childPreservePaths.length > 0 || STRUCTURED_IDENTITY_FIELDS.has(key)
-          ? projectValue(child, `${path}.${key}`, 0, state, childPreservePaths)
-          : projectIdentityPreview(child, `${path}.${key}`, depth + 1, state, childPreservePaths);
+          ? projectValue(child, `${path}.${key}`, 0, state, childPreservePaths, localPartialTarget)
+          : projectIdentityPreview(child, `${path}.${key}`, depth + 1, state, childPreservePaths, localPartialTarget);
       chosenProjected += 1;
     }
     const dropped = entries.length - chosen.length;
     if (dropped > 0) {
       recordOmission(state, `${path}.*`, `${dropped} non-identity fields omitted at projection depth limit`, dropped);
-      markPartial(projected, state);
+      markPartial(localPartialTarget ?? projected, state);
       // EI-21364503818966104: the surviving identity fields make this object look
       // WHOLE. A reader cannot tell "the field is empty in the store" from "the
       // projection withheld it", and the global _projection.omitted[] list is both
@@ -1051,7 +1069,7 @@ function projectIdentityPreview(
         : shownKeys.join(', ');
       const marker = `[omitted: ${dropped} non-identity field(s) at projection depth limit: ${named} — ${state.recoveryPointer}]`;
       const markerCost = jsonLen(PARTIAL_MARKER_KEY) + jsonLen(marker) + 4;
-      if (state.remaining >= markerCost) {
+      if (localPartialTarget === projected && state.remaining >= markerCost) {
         state.remaining -= markerCost;
         projected[PARTIAL_MARKER_KEY] = marker;
       }
@@ -1068,6 +1086,7 @@ function projectValue(
   depth: number,
   state: ProjectionState,
   preservePaths: readonly PreservePathSegment[][] = state.preservePaths,
+  partialTarget?: Record<string, unknown>,
 ): unknown {
   if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
     return takePrimitive(state, value, path);
@@ -1079,7 +1098,7 @@ function projectValue(
   }
   if (value instanceof Date) return takePrimitive(state, value.toISOString(), path);
   if (value instanceof Error) {
-    return projectValue({ name: value.name, message: value.message }, path, depth, state, preservePaths);
+    return projectValue({ name: value.name, message: value.message }, path, depth, state, preservePaths, partialTarget);
   }
   if (typeof value !== 'object') return takePrimitive(state, String(value), path);
   if (state.active.has(value)) {
@@ -1097,17 +1116,17 @@ function projectValue(
     // caller selected this object, not every descendant, so nested values keep
     // their ordinary depth/key/string limits and circular-reference handling.
     if (preservePaths.some((preservePath) => preservePath.length === 0)) {
-      return projectValue(value, path, 0, state, []);
+      return projectValue(value, path, 0, state, [], partialTarget);
     }
     recordOmission(state, path, 'nested value compacted at projection depth limit');
-    return projectIdentityPreview(value, path, 0, state, preservePaths);
+    return projectIdentityPreview(value, path, 0, state, preservePaths, partialTarget);
   }
 
   state.active.add(value);
   try {
     if (Array.isArray(value)) {
       if (isBulkResultsPath(path, state.bulkEnvelope)) {
-        return projectBulkResultsArray(value, path, state, preservePaths);
+        return projectBulkResultsArray(value, path, state, preservePaths, partialTarget);
       }
       const shown = value.slice(0, state.limits.maxArray);
       const projected: unknown[] = [];
@@ -1116,8 +1135,8 @@ function projectValue(
         const childPreservePaths = preserveArrayChildPaths(preservePaths, i);
         projected.push(
           preservePaths.length > 0 && shown.length > 1
-            ? projectIdentityPreview(shown[i], `${path}[${i}]`, 0, state, childPreservePaths)
-            : projectValue(shown[i], `${path}[${i}]`, depth + 1, state, childPreservePaths),
+            ? projectIdentityPreview(shown[i], `${path}[${i}]`, 0, state, childPreservePaths, partialTarget)
+            : projectValue(shown[i], `${path}[${i}]`, depth + 1, state, childPreservePaths, partialTarget),
         );
       }
       const droppedCount = value.length - projected.length;
@@ -1136,7 +1155,8 @@ function projectValue(
           droppedCount,
           true,
         );
-        projected.push(arrayTruncationValue(projected, droppedCount, projected.length, value.length));
+        if (partialTarget) markPartial(partialTarget, state);
+        else projected.push(arrayTruncationValue(projected, droppedCount, projected.length, value.length));
       }
       return projected;
     }
@@ -1168,6 +1188,7 @@ function projectValue(
         )
       : entries;
     const projected: Record<string, unknown> = {};
+    const localPartialTarget = nearestPartialTarget(path, projected, partialTarget);
     const shown = prioritized.slice(0, state.limits.maxKeys);
     let partial = prioritized.length > shown.length;
     for (let i = 0; i < shown.length; i += 1) {
@@ -1186,13 +1207,14 @@ function projectValue(
         depth + 1,
         state,
         preserveObjectChildPaths(preservePaths, key),
+        localPartialTarget,
       );
     }
     if (prioritized.length > shown.length) {
       recordOmission(state, `${path}.*`, `${prioritized.length - shown.length} object fields omitted`, prioritized.length - shown.length);
       notePreservedDrops(state, path, prioritized.slice(shown.length), preservePaths);
     }
-    if (partial) markPartial(projected, state);
+    if (partial) markPartial(localPartialTarget ?? projected, state);
     return projected;
   } finally {
     state.active.delete(value);

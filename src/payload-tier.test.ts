@@ -387,6 +387,7 @@ describe('applyPayloadTier', () => {
     ) as unknown as {
       results: Array<Record<string, unknown>>;
       counts: { ok: number; failed: number };
+      _partial?: boolean;
       _projection: { omittedCount: number; omitted: Array<{ path: string; reason: string }>; omittedSamplesDropped?: true };
     };
 
@@ -415,16 +416,16 @@ describe('applyPayloadTier', () => {
     expect(projected.counts).toEqual({ ok: 16, failed: 1 });
     expect(projected._projection.omittedCount).toBeGreaterThan(0);
     // The omission sample is intentionally shed after content has been kept;
-    // the in-band typed marker is the durable row-count evidence in that case.
+    // the containing envelope and priority omission entry carry row-count evidence.
     expect(projected._projection.omittedSamplesDropped).toBe(true);
-    expect(projected.results.at(-1)).toMatchObject({
-      kind: 'projection-truncation',
-      type: 'projection-truncation',
-      _truncated: true,
-      omittedCount: 9,
-      shownCount: 8,
-      renderedCount: 17,
-    });
+    expect(projected._partial).toBe(true);
+    expect(projected.results.every((row) => row.kind !== 'projection-truncation')).toBe(true);
+    expect(projected._projection.omitted).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        path: '$.results[8]',
+        reason: expect.stringContaining('9 bulk result row(s) omitted'),
+      }),
+    ]));
   });
 
   it('retains configured failure and correlation keys for a custom bulk envelope', () => {
@@ -856,7 +857,7 @@ describe('applyPayloadTier', () => {
     expect(JSON.stringify(projected).length - projected._projection.returnedChars).toBeLessThanOrEqual(8);
   });
 
-  it('retains every bulk row id and marks budget-partial objects in band (EI-18683546971375407 / EI-21566007420787313)', () => {
+  it('retains every bulk row id and marks the containing row partial (EI-18683546971375407 / EI-21566007420787313)', () => {
     // Each row's bulky fields (workItem.summary, checkpoint) come AFTER id/ok in
     // insertion order — exactly the shape work_items:get returns — so a naive
     // insertion-order key loop starves `id` out once the budget trips partway
@@ -898,8 +899,8 @@ describe('applyPayloadTier', () => {
       const workItem = row.workItem as Record<string, unknown> | undefined;
       const rootLostField = Object.keys(source).some((key) => !(key in row));
       const workItemLostField = workItem != null && Object.keys(source.workItem).some((key) => !(key in workItem));
-      if (rootLostField) expect(row._partial).toBe(true);
-      if (workItemLostField) expect(workItem?._partial).toBe(true);
+      if (rootLostField || workItemLostField) expect(row._partial).toBe(true);
+      if (workItem) expect(workItem).not.toHaveProperty('_partial');
     }
     // Calibration: this scenario MUST include a real partial object. Otherwise
     // the assertions above could all pass on complete rows and fail to guard the
@@ -908,13 +909,59 @@ describe('applyPayloadTier', () => {
       rows.some((row) =>
         typeof row !== 'string' &&
         row._truncated !== true &&
-        (row._partial === true || (row.workItem as Record<string, unknown> | undefined)?._partial === true),
+        row._partial === true,
       ),
     ).toBe(true);
     // The budget genuinely was exhausted (this is what made the old code drop
     // ids in the first place) — confirm we actually exercised that path, not a
     // no-op fast path where nothing needed trimming.
     expect(projected._projection.omittedCount).toBeGreaterThan(0);
+  });
+
+  it('keeps selected keys in a depth-limited keyed evidence map while marking the containing envelope partial', () => {
+    const source = {
+      scope: {
+        evidence: {
+          packet: {
+            detail: {
+              ratings: {
+                'criterion-a': { rating: 'pass', evidence: 'A evidence' },
+                'criterion-b': { rating: 'fail', evidence: 'B evidence' },
+                'criterion-c': { rating: 'unknown', evidence: 'C evidence' },
+              },
+            },
+          },
+        },
+      },
+    };
+    const selectedPaths = [
+      'scope.evidence.packet.detail.ratings.criterion-a.rating',
+      'scope.evidence.packet.detail.ratings.criterion-b.rating',
+    ];
+    const projected = projectBoundedPayload(source, {
+      toolName: 'plans:evaluate-spec-test-adequacy',
+      tier: 'trimmed',
+      preservePaths: selectedPaths,
+    }) as unknown as {
+      scope: { evidence: { packet: { detail: { ratings: Record<string, unknown> } } } };
+      _partial?: boolean;
+      _projection: { omitted: Array<{ path: string; reason: string }> };
+    };
+    const ratings = projected.scope.evidence.packet.detail.ratings;
+
+    // The selected criterion keys survive as domain keys; the unselected
+    // sibling can be omitted, but a reserved marker must not become a fourth
+    // criterion in the dynamic ratings map.
+    expect(Object.keys(ratings).sort()).toEqual(['criterion-a', 'criterion-b']);
+    expect(ratings).not.toHaveProperty('_partial');
+    expect(ratings).not.toHaveProperty('_omitted');
+    expect(projected._partial).toBe(true);
+    expect(projected._projection.omitted).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        path: '$.scope.evidence.packet.detail.ratings.*',
+        reason: expect.stringContaining('depth limit'),
+      }),
+    ]));
   });
 });
 
@@ -1306,7 +1353,7 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     expect(JSON.stringify(out)).not.toContain('[omitted:');
   });
 
-  it('REGRESSION (EI-19965559011729712): an array truncated at the maxArray cap announces the drop IN BAND and in omitted[], never starved by field-level entries', () => {
+  it('REGRESSION (EI-19965559011729712): a maxArray cut keeps domain rows and marks the containing envelope', () => {
     // Mirrors the reported rubrics:get shape: a 17-element array of small
     // objects, each with several nested fields — deep/wide enough that EVERY
     // kept element also trips depth/field omissions of its own. Before the fix,
@@ -1327,29 +1374,23 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     );
 
     const projectedCriteria = (out.rubric as { criteria: unknown[] }).criteria;
-    // The header a downstream TOON/array-length read would derive is no longer
-    // silently short — the drop is visible IN the array's own last element.
-    const marker = projectedCriteria[projectedCriteria.length - 1] as Record<string, unknown>;
-    expect(marker).toMatchObject({
-      kind: 'projection-truncation',
-      type: 'projection-truncation',
-      _truncated: true,
-      omittedCount: 5,
-      shownCount: 12,
-      renderedCount: 17,
-    });
-    expect(marker).not.toHaveProperty('totalCount');
-    expect(marker.note as string).toMatch(/TRUNCATED \+\d+ more item\(s\)/);
-    expect(marker.note as string).toContain('header count includes this marker');
-    expect(marker.note as string).toContain('showing 12 of 17 rendered input entries');
-    expect(marker.note as string).toContain('renderedCount is NOT the query population');
+    expect(projectedCriteria).toHaveLength(12);
+    expect(projectedCriteria.every((entry) =>
+      entry !== null && typeof entry === 'object' && (entry as Record<string, unknown>).key !== undefined,
+    )).toBe(true);
+    expect((out as any)._partial).toBe(true);
 
-    // The actual agent-facing TOON shape still has a projected-length header,
-    // so the adjacent marker must carry the shown/rendered-input distinction
-    // without pretending to know the underlying query population.
+    // The serialized count includes only domain rows. The envelope marker and
+    // omission path disclose why fewer rows are visible.
     const toon = encodeResult(out, 'toon');
-    expect(toon).toContain('criteria[13]:');
-    expect(toon).toContain('header count includes this marker; showing 12 of 17 rendered input entries');
+    expect(toon).toContain('criteria[12]:');
+    expect(toon).not.toContain('projection-truncation');
+    expect(out._projection.omitted).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        path: '$.rubric.criteria[12]',
+        reason: expect.stringContaining('5 array item(s) omitted; showing 12 of 17 rendered input entries'),
+      }),
+    ]));
 
     // And the sample list actually names it — never starved out by the
     // per-element field/depth omissions recorded for the elements that DID
@@ -1357,7 +1398,7 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     expect(out._projection.omitted.some((o) => /array item\(s\) omitted; showing 12 of 17/.test(o.reason))).toBe(true);
   });
 
-  it('REGRESSION (EI-21205111248838257): truncating an object-row array preserves object homogeneity', () => {
+  it('REGRESSION (EI-21205111248838257): an object-row array stays homogeneous and marks its envelope', () => {
     const runs = Array.from({ length: 17 }, (_, i) => ({
       startedAt: `2026-08-23T00:00:${String(i).padStart(2, '0')}Z`,
       filePath: `suite-${i}.test.ts`,
@@ -1367,17 +1408,19 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     const projectedRuns = out.runs as Array<Record<string, unknown>>;
 
     expect(projectedRuns.every((row) => row !== null && typeof row === 'object' && !Array.isArray(row))).toBe(true);
-    expect(projectedRuns.at(-1)).toMatchObject({
-      _truncated: true,
-      omittedCount: 5,
-      shownCount: 12,
-      renderedCount: 17,
-    });
-    expect(projectedRuns.at(-1)).not.toHaveProperty('totalCount');
+    expect(projectedRuns).toHaveLength(12);
+    expect((out as any)._partial).toBe(true);
+    expect(projectedRuns.every((row) => row._truncated !== true)).toBe(true);
+    expect(out._projection.omitted).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        path: '$.runs[12]',
+        reason: expect.stringContaining('5 array item(s) omitted; showing 12 of 17 rendered input entries'),
+      }),
+    ]));
     expect(() => projectedRuns.map((row) => [row.startedAt, row.filePath, row.outputTail])).not.toThrow();
   });
 
-  it('REGRESSION (EI-21219452028880493): the marker matches the PROJECTED array, not the SOURCE — a non-object element beyond the shown window must not downgrade an object-row marker to a string', () => {
+  it('REGRESSION (EI-21219452028880493): non-object source elements past the window do not enter the domain-only projection', () => {
     // Reported: locks:queue returned `active_locks` with a STRING truncation
     // marker sitting among objects, so `jq group_by(.lock_id)` died with
     // "Cannot index string with string lock_id".
@@ -1399,16 +1442,18 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     const projected = out.active_locks as unknown[];
 
     const isRow = (r: unknown) => r !== null && typeof r === 'object' && !Array.isArray(r);
-    const shown = projected.slice(0, -1);
+    const shown = projected;
     expect(shown.length).toBeGreaterThan(0);
     expect(shown.every(isRow)).toBe(true);
-
-    // Every element the caller sees is an object, so the marker must be one too.
-    expect(projected.at(-1)).toMatchObject({
-      kind: 'projection-truncation',
-      type: 'projection-truncation',
-      _truncated: true,
-    });
+    expect(projected).toHaveLength(12);
+    expect((out as any)._partial).toBe(true);
+    expect(projected.every((row) => (row as Record<string, unknown>).kind !== 'projection-truncation')).toBe(true);
+    expect(out._projection.omitted).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        path: '$.active_locks[12]',
+        reason: expect.stringContaining('5 array item(s) omitted; showing 12 of 17 rendered input entries'),
+      }),
+    ]));
 
     // The load-bearing property, stated directly. Deliberately NOT phrased as
     // `expect(() => projected.map((r) => r.lock_id)).not.toThrow()`: unlike jq,
@@ -1417,15 +1462,20 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     expect(projected.some((r) => typeof r === 'string')).toBe(false);
   });
 
-  it('keeps the scalar in-band marker for primitive arrays', () => {
+  it('keeps primitive arrays domain-only and marks the containing envelope partial', () => {
     const out = projectBoundedPayload(
       { values: Array.from({ length: 17 }, (_, i) => i) },
       { toolName: 't', tier: 'trimmed' },
     );
-    const marker = (out.values as unknown[]).at(-1);
-    expect(typeof marker).toBe('string');
-    expect(marker as string).toContain('showing 12 of 17 rendered input entries');
-    expect(marker as string).toContain('renderedCount is NOT the query population');
+    const values = out.values as unknown[];
+    expect(values).toEqual(Array.from({ length: 12 }, (_, i) => i));
+    expect((out as any)._partial).toBe(true);
+    expect(out._projection.omitted).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        path: '$.values[12]',
+        reason: expect.stringContaining('5 array item(s) omitted; showing 12 of 17 rendered input entries'),
+      }),
+    ]));
   });
 
   it('the depth-boundary markers carry the recovery knob too, and pay no stringify for a size', () => {
