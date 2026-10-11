@@ -185,6 +185,37 @@ describe('applyPayloadTier', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('hard ceiling'));
   });
 
+  it('keeps a requested pipeline test route recoverable after oversized details (EI-25679146311569247)', () => {
+    const args = {
+      path: 'packages/operator-core/lib/goal-holder-behavior-metrics.ts',
+      testClass: 'operator-api',
+      marker: 'ideationAttribution',
+    };
+    const route = { id: 'operator-api', runtime: 'staging-operator', readiness: 'ready' };
+    const response: ToolResponse = {
+      data: {
+        input: { path: args.path, sha: null },
+        // A retained cursor can echo the request even when the field-blind
+        // ceiling drops the answer. That is not evidence of argument loss.
+        details: Array.from({ length: 40 }, (_, index) => ({
+          id: index, description: 'historical-detail-'.repeat(100),
+        })),
+        currentBuildTestRoute: route,
+      },
+    };
+    const options = { toolName: 'dev:pipeline_position', response, tier: 'full' as const, args, log: vi.fn() };
+    const lossy = applyPayloadTier(options).data as ReturnType<typeof projectBoundedPayload>;
+    expect(lossy.currentBuildTestRoute).toBeUndefined();
+    expect(lossy._projection).toMatchObject({ forced: true, cursor: { args } });
+
+    // MCP's existing result-door can spill the intact response. Preserve the
+    // route there instead of spilling an already projected body.
+    const recoverable = applyPayloadTier({ ...options, deferHardCeilingToResultDoor: true });
+    expect(recoverable).toBe(response);
+    expect(recoverable.data).toHaveProperty('currentBuildTestRoute', route);
+    expect(recoverable.payloadProjection).toBeUndefined();
+  });
+
   it('hard ceiling: an EXPLICIT payloadTier:full call skips the ceiling (the documented escape hatch, WI-5078)', () => {
     const log = vi.fn();
     const fat: ToolResponse = { data: { rows: [1, 2, 3], blob: 'x'.repeat(PAYLOAD_TIER_HARD_CEILING_CHARS + 500) } };
