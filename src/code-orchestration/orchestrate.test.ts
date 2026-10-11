@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   deriveCodeRunSettledReadReplayProof,
   runToolOrchestration,
+  ORCHESTRATION_DISPATCH_TIMINGS_MAX_CALLS,
   TIMEOUT_SETTLED_READ_RECOVERY_MAX_BYTES,
   type OrchestrationCallRecord,
 } from './orchestrate';
@@ -349,8 +350,52 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
       });
       expect(r.error).toContain('script_aborted');
       expect(r.detachedCalls?.map((call) => call.tool)).toEqual(['stubborn:get']);
+      const detached = r.detachedCalls?.[0];
+      expect(r.dispatchTimings).toEqual({
+        calls: [
+          expect.objectContaining({
+            callId: detached?.callId,
+            ordinal: detached?.ordinal,
+            tool: detached?.tool,
+            effect: detached?.effect,
+            disposition: 'in_flight',
+            elapsedMs: expect.any(Number),
+          }),
+        ],
+        totalCount: 1,
+        omittedCount: 0,
+        maxCalls: ORCHESTRATION_DISPATCH_TIMINGS_MAX_CALLS,
+      });
+      expect(r.dispatchTimings?.calls[0].elapsedMs).toBeGreaterThanOrEqual(0);
       release();
     }, 10_000);
+
+    it('keeps only the newest bounded dispatch timings and reports omitted entries', async () => {
+      let calls = 0;
+      const tick = mkTool('tick:get', 'read', async () => {
+        calls += 1;
+        return json({ ok: true });
+      });
+      const total = ORCHESTRATION_DISPATCH_TIMINGS_MAX_CALLS + 2;
+      const script = 'for (let i = 0; i < ' + total + '; i++) await tools.tick.get({ i }); return \"done\";';
+      const r = await runToolOrchestration(script, {
+        ctx: MAKE_CTX(),
+        deps: DEPS,
+        tools: [tick],
+      });
+
+      expect(r.ok).toBe(true);
+      expect(calls).toBe(total);
+      expect(r.dispatchTimings).toMatchObject({
+        totalCount: total,
+        omittedCount: 2,
+        maxCalls: ORCHESTRATION_DISPATCH_TIMINGS_MAX_CALLS,
+      });
+      expect(r.dispatchTimings?.calls.map((call) => call.ordinal)).toEqual(
+        Array.from({ length: ORCHESTRATION_DISPATCH_TIMINGS_MAX_CALLS }, (_, index) => index + 2),
+      );
+      expect(r.dispatchTimings?.calls.every((call) => Number.isInteger(call.elapsedMs) && call.elapsedMs >= 0)).toBe(true);
+    });
   });
 
   describe('P-027 explicit final media result', () => {

@@ -180,6 +180,27 @@ export interface DetachedOrchestrationCall {
   disposition: OrchestrationCallDisposition;
 }
 
+/** Secret-free timing for one host dispatch. Keeps only routing identity and elapsed time. */
+export interface OrchestrationDispatchTiming {
+  ordinal: number;
+  tool: string;
+  effect: OrchestrationCallRecord['effect'];
+  callId?: string;
+  elapsedMs: number;
+  disposition: OrchestrationCallDisposition;
+}
+
+/** Bounded recent-child timing window; omittedCount accounts for older dispatches. */
+export interface OrchestrationDispatchTimingDiagnostics {
+  calls: OrchestrationDispatchTiming[];
+  totalCount: number;
+  omittedCount: number;
+  maxCalls: number;
+}
+
+/** Maximum number of recent child dispatch timings included in one orchestration result. */
+export const ORCHESTRATION_DISPATCH_TIMINGS_MAX_CALLS = 24;
+
 /**
  * Runtime-owned safety evidence for one orchestration run. This is deliberately
  * outside the script-authored summary: a script cannot prove its own authority
@@ -264,6 +285,8 @@ export interface OrchestrateResult {
    *  Optional so pre-existing hand-built fixture results are unaffected;
    *  runToolOrchestration's own return always populates it. */
   dispatchCount?: number;
+  /** Recent bounded per-child dispatch timings, including calls still in flight at return. */
+  dispatchTimings?: OrchestrationDispatchTimingDiagnostics;
   /** Exact UTF-8 bytes of every child result that settled and entered the script
    *  runtime. Thrown dispatches have no result body and therefore add zero. */
   intermediateBytes?: number;
@@ -451,6 +474,8 @@ interface ActiveOrchestrationCall {
   callRecord: OrchestrationCallRecord;
   settled: Promise<void>;
   resolveSettled: () => void;
+  startedAtMs: number;
+  timing: OrchestrationDispatchTiming;
   callId?: string;
 }
 
@@ -1000,6 +1025,13 @@ export async function runToolOrchestration(
   let timeoutSettledReadOmittedCount = 0;
   let timeoutSettledReadBytes = 0;
   const activeCalls = new Set<ActiveOrchestrationCall>();
+  const dispatchTimings: OrchestrationDispatchTiming[] = [];
+  let dispatchTimingOmittedCount = 0;
+  const updateDispatchTiming = (call: ActiveOrchestrationCall, observedAtMs = Date.now()): void => {
+    call.timing.elapsedMs = Math.max(0, observedAtMs - call.startedAtMs);
+    call.timing.disposition = call.callRecord.disposition;
+    if (call.callId) call.timing.callId = call.callId;
+  };
   let timeoutTriggered = false;
   /** Frozen at the end of the bounded grace, before later handler microtasks can remove calls. */
   let detachedCallsSnapshot: ActiveOrchestrationCall[] | undefined;
@@ -1080,10 +1112,25 @@ export async function runToolOrchestration(
     const settled = new Promise<void>((resolve) => {
       resolveSettled = resolve;
     });
+    const startedAtMs = Date.now();
+    const timing: OrchestrationDispatchTiming = {
+      ordinal: callRecord.ordinal,
+      tool: name,
+      effect,
+      elapsedMs: 0,
+      disposition: callRecord.disposition,
+    };
+    if (dispatchTimings.length === ORCHESTRATION_DISPATCH_TIMINGS_MAX_CALLS) {
+      dispatchTimings.shift();
+      dispatchTimingOmittedCount += 1;
+    }
+    dispatchTimings.push(timing);
     const activeCall: ActiveOrchestrationCall = {
       callRecord,
       settled,
       resolveSettled,
+      startedAtMs,
+      timing,
     };
     activeCalls.add(activeCall);
     // Each runDispatchStack invocation creates its own callId before the first await. A
@@ -1093,6 +1140,7 @@ export async function runToolOrchestration(
       ...deps,
       onDispatchStart: (event) => {
         activeCall.callId = event.callId;
+        activeCall.timing.callId = event.callId;
         deps.onDispatchStart?.(event);
       },
     };
@@ -1203,6 +1251,7 @@ export async function runToolOrchestration(
       }
       throw err;
     } finally {
+      updateDispatchTiming(activeCall);
       activeCalls.delete(activeCall);
       resolveSettled();
     }
@@ -1232,6 +1281,8 @@ export async function runToolOrchestration(
     clearTimeout(timeoutBoundaryTimer);
     timeoutBoundaryTimer = undefined;
   }
+  const timingObservedAtMs = Date.now();
+  for (const call of activeCalls) updateDispatchTiming(call, timingObservedAtMs);
   // P-020: only meaningful when the script ABORTED — a run that completed reached every line
   // it was going to, so an undispatched write there was a branch not taken, not a stranding.
   // A parse-recovered AST is advisory only: TypeScript may surface calls from syntax-invalid
@@ -1254,6 +1305,14 @@ export async function runToolOrchestration(
           disposition: call.callRecord.disposition,
         }))
     : [];
+  const dispatchTimingDiagnostics: OrchestrationDispatchTimingDiagnostics | undefined = dispatchTimings.length
+    ? {
+        calls: dispatchTimings.map((timing) => ({ ...timing })),
+        totalCount: dispatchCount,
+        omittedCount: dispatchTimingOmittedCount,
+        maxCalls: ORCHESTRATION_DISPATCH_TIMINGS_MAX_CALLS,
+      }
+    : undefined;
   const timeoutSettledReadRecovery: TimeoutSettledReadRecovery | undefined =
     timeoutTriggered && timeoutSettledReadCount > 0
       ? {
@@ -1297,6 +1356,7 @@ export async function runToolOrchestration(
     ...(unknownRefs && unknownRefs.length ? { unknownRefs } : {}),
     dryRun,
     dispatchCount,
+    ...(dispatchTimingDiagnostics ? { dispatchTimings: dispatchTimingDiagnostics } : {}),
     intermediateBytes,
     runtimeObservations: {
       authorizationObservationCount,
