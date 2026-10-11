@@ -133,6 +133,32 @@ describe('strictArgs (EI-10883)', () => {
 });
 
 describe('strictArgs shared schema identity (EI-25287777702563119)', () => {
+  it('normalizes shared wrapper DAGs once per node while preserving nested validation', () => {
+    const row = z.object({ value: z.string().min(1) });
+    let shared: z.ZodType = row;
+    let optionsReads = 0;
+    const depth = 8;
+    for (let i = 0; i < depth; i++) {
+      const union = z.union([shared, shared]);
+      let options = union._zod.def.options;
+      Object.defineProperty(union._zod.def, 'options', {
+        configurable: true,
+        get: () => { optionsReads++; return options; },
+        set: (value) => { options = value; },
+      });
+      shared = union;
+    }
+
+    const strict = strictArgs(z.object({ left: shared, right: shared }));
+    // Count actual normalization visits, not elapsed time. This graph has eight
+    // union nodes even though following both branches expands to 510 visits.
+    expect(optionsReads).toBe(depth);
+    expect(strict.shape.left).toBe(strict.shape.right);
+    expect(parse(strict, { left: { value: 'a' }, right: { value: 'b' } }).ok).toBe(true);
+    expect(parse(strict, { left: { value: '' }, right: { value: 'b' } }).ok).toBe(false);
+    expect(parse(strict, { left: { value: 'a', extra: true }, right: { value: 'b' } }).ok).toBe(false);
+  });
+
   it('keeps a shared strict object and its local definition usable', () => {
     const shared = z.object({ value: z.string().min(1) }).strict()
       .meta({ id: 'strict-args-shared-strict-row' });

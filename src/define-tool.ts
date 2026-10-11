@@ -1546,17 +1546,21 @@ export function flattenForOpenAi(schema: Record<string, unknown>): Record<string
 // Weak keys keep this registration cache from retaining abandoned schemas.
 const strictObjectReplacements = new WeakMap<object, unknown>();
 
-function deepStrictifyInPlace(schema: unknown, active: Set<object>): unknown {
+function deepStrictifyInPlace(
+  schema: unknown,
+  active: Set<object>,
+  completed: WeakMap<object, unknown>,
+): unknown {
   if (!schema || typeof schema !== 'object') return schema;
-  // Stack-based (enter/exit) cycle guard, NOT a permanent "ever visited" set:
-  // a sub-schema legitimately gets reused BY REFERENCE across multiple sibling
-  // fields (e.g. the same row schema wrapped by both .optional() and
-  // .nullable()) — that must be processed on each path it's reached from, so
-  // only a schema currently on the ACTIVE recursion stack (a true cycle, e.g. a
-  // self-referential z.lazy()) short-circuits; a shared reference already
-  // popped off the stack by the time a sibling field reaches it recurses fine.
+  // A completed DAG node has already had its descendants normalized. Reuse its
+  // replacement on every sibling path instead of expanding shared wrappers
+  // repeatedly. This memo belongs to ONE walk; the object replacement cache
+  // above separately preserves schema identity across tool registrations.
+  if (completed.has(schema)) return completed.get(schema);
+  // An active node is a true cycle and is not complete yet.
   if (active.has(schema as object)) return schema;
   active.add(schema as object);
+  let normalized: unknown = schema;
   try {
     const s = schema as {
       strict?: () => unknown;
@@ -1571,17 +1575,20 @@ function deepStrictifyInPlace(schema: unknown, active: Set<object>): unknown {
     // while its parent's element still points to the original metadata id.
     // Normalize that conversion path to the SAME strict object replacement.
     if (s._zod?.parent) {
-      s._zod.parent = deepStrictifyInPlace(s._zod.parent, active);
+      s._zod.parent = deepStrictifyInPlace(s._zod.parent, active, completed);
     }
 
     switch (def.type) {
       case 'object': {
         const cached = strictObjectReplacements.get(schema as object);
-        if (cached) return cached;
+        if (cached) {
+          normalized = cached;
+          return normalized;
+        }
         const shape = def.shape as Record<string, unknown> | undefined;
         if (shape) {
           for (const key of Object.keys(shape)) {
-            shape[key] = deepStrictifyInPlace(shape[key], active);
+            shape[key] = deepStrictifyInPlace(shape[key], active, completed);
           }
         }
         if (typeof s.strict !== 'function') return schema;
@@ -1596,10 +1603,11 @@ function deepStrictifyInPlace(schema: unknown, active: Set<object>): unknown {
         // An already-registered replacement can occur beside its original in
         // another tool's arguments. Strictifying it again must preserve identity.
         strictObjectReplacements.set(result as object, result);
+        normalized = result;
         return result;
       }
       case 'array':
-        def.element = deepStrictifyInPlace(def.element, active);
+        def.element = deepStrictifyInPlace(def.element, active, completed);
         return schema;
       case 'optional':
       case 'nullable':
@@ -1607,33 +1615,34 @@ function deepStrictifyInPlace(schema: unknown, active: Set<object>): unknown {
       case 'readonly':
       case 'catch':
       case 'prefault':
-        def.innerType = deepStrictifyInPlace(def.innerType, active);
+        def.innerType = deepStrictifyInPlace(def.innerType, active, completed);
         return schema;
       case 'record':
-        def.valueType = deepStrictifyInPlace(def.valueType, active);
+        def.valueType = deepStrictifyInPlace(def.valueType, active, completed);
         return schema;
       case 'union':
         // Covers z.union AND z.discriminatedUnion (same def.type in Zod 4) — each
         // variant gets strictified too, closing the same class one level further
         // than the pre-existing top-level-union pass-through did.
-        def.options = (def.options as unknown[]).map((o) => deepStrictifyInPlace(o, active));
+        def.options = (def.options as unknown[]).map((o) => deepStrictifyInPlace(o, active, completed));
         return schema;
       case 'pipe':
         // z.preprocess(fn, target) compiles to a pipe { in: <transform>, out: <target> };
         // `out` is what actually gets validated post-transform.
-        def.out = deepStrictifyInPlace(def.out, active);
+        def.out = deepStrictifyInPlace(def.out, active, completed);
         return schema;
       default:
         return schema;
     }
   } finally {
     active.delete(schema as object);
+    completed.set(schema, normalized);
   }
 }
 
 export function strictArgs<T>(schema: T): T {
   try {
-    return deepStrictifyInPlace(schema, new Set()) as unknown as T;
+    return deepStrictifyInPlace(schema, new Set(), new WeakMap()) as unknown as T;
   } catch {
     return schema;
   }
