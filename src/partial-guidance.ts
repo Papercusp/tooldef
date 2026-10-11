@@ -220,7 +220,7 @@ export function partialGuidanceDescription(description: string | undefined): str
  * reachable through `tools:find`. Re-run the sweep after any catalog change
  * before editing this number by hand.
  */
-export const SUMMARY_LEAD_MAX_CHARS = 50;
+export const SUMMARY_LEAD_MAX_CHARS = 40;
 
 // WI-10006184: shortening selection prose must not shorten already-delivered
 // rules (notably tools:invoke's colon-name rule). Keep the previous rail cap.
