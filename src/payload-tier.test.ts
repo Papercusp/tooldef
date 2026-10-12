@@ -708,6 +708,44 @@ describe('applyPayloadTier', () => {
     expect(project([]).results.some((row) => row.authorityWarning === undefined)).toBe(true);
   });
 
+  it('shares the bounded budget across rows with explicitly selected leaf fields', () => {
+    const posts = Array.from({ length: 6 }, (_, i) => ({
+      id: 50 + i,
+      author_id: `agent-${i}`,
+      created_ts: `2026-10-06T00:00:0${i}.000Z`,
+      body: `selected-body-${i}-${'x'.repeat(1_000)}`,
+    }));
+    const payload = { results: [{ id: 'WI-thread', threadWindow: { posts } }] };
+    const preservePaths = [
+      'results[].threadWindow.posts[].body',
+      'results[].threadWindow.posts[].author_id',
+      'results[].threadWindow.posts[].created_ts',
+    ];
+    const projected = projectBoundedPayload(payload, {
+      toolName: 'tools:invoke',
+      tier: 'trimmed',
+      forced: true,
+      targetChars: 6_000,
+      preservePaths,
+    }) as unknown as {
+      results: Array<{ threadWindow: { posts: Array<{ body?: string; author_id?: string; created_ts?: string }> } }>;
+      _projection: { truncated: boolean };
+    };
+
+    expect(projected._projection.truncated).toBe(true);
+    expect(projected.results[0]?.threadWindow.posts).toHaveLength(6);
+    expect(projected.results[0]?.threadWindow.posts.map((post) => post.author_id)).toEqual(
+      Array.from({ length: 6 }, (_, i) => `agent-${i}`),
+    );
+    expect(projected.results[0]?.threadWindow.posts.map((post) => post.created_ts)).toEqual(
+      Array.from({ length: 6 }, (_, i) => `2026-10-06T00:00:0${i}.000Z`),
+    );
+    expect(projected.results[0]?.threadWindow.posts.map((post, i) => post.body?.startsWith(`selected-body-${i}-`))).toEqual(
+      Array.from({ length: 6 }, () => true),
+    );
+    expect(projected.results[0]?.threadWindow.posts.some((post) => (post.body?.length ?? 0) < 1_000)).toBe(true);
+  });
+
   it('REGRESSION (EI-22186855527494865): a dropped preserved path is NAMED in omittedPreserved, which sample-shedding cannot take away', () => {
     // `omitted` is a SAMPLE list the budget ladder trades away entirely (to 5,
     // then to 0) to buy back content — so the one omission a caller cannot infer,

@@ -386,6 +386,60 @@ function preserveArrayChildPaths(
   return childPaths;
 }
 
+/** True when at least one selected path resolves on this value. */
+function hasPreservedValue(
+  value: unknown,
+  paths: readonly PreservePathSegment[][],
+  ancestors: ReadonlySet<object> = new Set(),
+): boolean {
+  for (const path of paths) {
+    if (path.length === 0) return true;
+  }
+  if (value === null || typeof value !== 'object' || ancestors.has(value)) return false;
+  const nextAncestors = new Set(ancestors);
+  nextAncestors.add(value);
+  for (const path of paths) {
+    const [head, ...tail] = path;
+    if (head.kind === 'key' && !Array.isArray(value) &&
+      Object.hasOwn(value, head.name) && hasPreservedValue((value as Record<string, unknown>)[head.name], [tail], nextAncestors)) {
+      return true;
+    }
+    if (head.kind === 'array' && Array.isArray(value) &&
+      value.some((item) => hasPreservedValue(item, [tail], nextAncestors))) {
+      return true;
+    }
+    if (head.kind === 'index' && Array.isArray(value) && head.index < value.length &&
+      hasPreservedValue(value[head.index], [tail], nextAncestors)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Run one selected array row on a fair slice, reserving room for its sibling picks. */
+function projectWithFairPreservedShare<T>(
+  state: ProjectionState,
+  selectedRowsRemaining: number,
+  project: () => T,
+): T {
+  if (selectedRowsRemaining <= 1) return project();
+  const totalRemaining = state.remaining;
+  const rowBudget = Math.floor(totalRemaining / selectedRowsRemaining);
+  const originalMaxString = state.limits.maxString;
+  state.remaining = rowBudget;
+  // A caller may list a large selected body before smaller selected identity
+  // fields. Clip strings within each row's share so the first path cannot spend
+  // that row's entire allowance and starve its sibling picks.
+  state.limits.maxString = Math.min(originalMaxString, Math.max(64, Math.floor(rowBudget * 0.55)));
+  try {
+    return project();
+  } finally {
+    const rowRemaining = state.remaining;
+    state.limits.maxString = originalMaxString;
+    state.remaining = totalRemaining - (rowBudget - rowRemaining);
+  }
+}
+
 function hasPreservedObjectChild(paths: readonly PreservePathSegment[][], key: string): boolean {
   return preserveObjectChildPaths(paths, key).length > 0;
 }
@@ -978,20 +1032,33 @@ function projectIdentityPreview(
   try {
     if (Array.isArray(value)) {
       const shown = value.slice(0, state.limits.maxArray);
-      const projected: unknown[] = [];
-      for (let i = 0; i < shown.length; i += 1) {
+      const childPathsByIndex = shown.map((_, i) => preserveArrayChildPaths(preservePaths, i));
+      const selectedByIndex = shown.map((item, i) => hasPreservedValue(item, childPathsByIndex[i] ?? []));
+      let selectedRowsRemaining = selectedByIndex.filter(Boolean).length;
+      const projectionOrder = selectedRowsRemaining > 0
+        ? [
+            ...shown.map((_, i) => i).filter((i) => selectedByIndex[i]),
+            ...shown.map((_, i) => i).filter((i) => !selectedByIndex[i]),
+          ]
+        : shown.map((_, i) => i);
+      const projectedByIndex: unknown[] = new Array(shown.length);
+      for (const i of projectionOrder) {
         if (state.remaining < 128) break;
-        projected.push(
-          projectIdentityPreview(
-            shown[i],
-            `${path}[${i}]`,
-            depth + 1,
-            state,
-            preserveArrayChildPaths(preservePaths, i),
-            partialTarget,
-          ),
-        );
+        const selected = selectedByIndex[i] === true;
+        if (selected && selectedRowsRemaining > 1) {
+          projectedByIndex[i] = projectWithFairPreservedShare(state, selectedRowsRemaining, () =>
+            projectIdentityPreview(
+              shown[i], `${path}[${i}]`, depth + 1, state, childPathsByIndex[i] ?? [], partialTarget,
+            ));
+          selectedRowsRemaining -= 1;
+        } else {
+          projectedByIndex[i] = projectIdentityPreview(
+            shown[i], `${path}[${i}]`, depth + 1, state, childPathsByIndex[i] ?? [], partialTarget,
+          );
+          if (selected) selectedRowsRemaining -= 1;
+        }
       }
+      const projected = projectedByIndex.filter((item) => item !== undefined);
       const droppedCount = value.length - projected.length;
       if (droppedCount > 0) {
         // priority: an element-count drop must survive the omitted[] sample cap
@@ -1129,16 +1196,39 @@ function projectValue(
         return projectBulkResultsArray(value, path, state, preservePaths, partialTarget);
       }
       const shown = value.slice(0, state.limits.maxArray);
-      const projected: unknown[] = [];
-      for (let i = 0; i < shown.length; i += 1) {
+      const childPathsByIndex = shown.map((_, i) => preserveArrayChildPaths(preservePaths, i));
+      const selectedByIndex = shown.map((item, i) => hasPreservedValue(item, childPathsByIndex[i] ?? []));
+      let selectedRowsRemaining = selectedByIndex.filter(Boolean).length;
+      // Explicit picks inside a multi-row array are row-scoped obligations. If
+      // an early selected string spends the shared remainder, later rows can
+      // degrade to identity-only stubs even though their selected fields fit
+      // when the remaining budget is shared. Visit selected rows first and
+      // give each a fair slice; return them in their original order below.
+      const projectionOrder = selectedRowsRemaining > 0
+        ? [
+            ...shown.map((_, i) => i).filter((i) => selectedByIndex[i]),
+            ...shown.map((_, i) => i).filter((i) => !selectedByIndex[i]),
+          ]
+        : shown.map((_, i) => i);
+      const projectedByIndex: unknown[] = new Array(shown.length);
+      for (const i of projectionOrder) {
         if (state.remaining < 128) break;
-        const childPreservePaths = preserveArrayChildPaths(preservePaths, i);
-        projected.push(
-          preservePaths.length > 0 && shown.length > 1
+        const childPreservePaths = childPathsByIndex[i] ?? [];
+        const selected = selectedByIndex[i] === true;
+        if (selected && selectedRowsRemaining > 1) {
+          projectedByIndex[i] = projectWithFairPreservedShare(state, selectedRowsRemaining, () =>
+            preservePaths.length > 0 && shown.length > 1
+              ? projectIdentityPreview(shown[i], `${path}[${i}]`, 0, state, childPreservePaths, partialTarget)
+              : projectValue(shown[i], `${path}[${i}]`, depth + 1, state, childPreservePaths, partialTarget));
+          selectedRowsRemaining -= 1;
+        } else {
+          projectedByIndex[i] = preservePaths.length > 0 && shown.length > 1
             ? projectIdentityPreview(shown[i], `${path}[${i}]`, 0, state, childPreservePaths, partialTarget)
-            : projectValue(shown[i], `${path}[${i}]`, depth + 1, state, childPreservePaths, partialTarget),
-        );
+            : projectValue(shown[i], `${path}[${i}]`, depth + 1, state, childPreservePaths, partialTarget);
+          if (selected) selectedRowsRemaining -= 1;
+        }
       }
+      const projected = projectedByIndex.filter((item) => item !== undefined);
       const droppedCount = value.length - projected.length;
       if (droppedCount > 0) {
         // priority: an element-count drop must survive the omitted[] sample cap
