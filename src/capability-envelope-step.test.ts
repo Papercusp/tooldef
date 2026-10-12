@@ -164,4 +164,35 @@ describe('capability-envelope step', () => {
     expect(received!.capabilities).toEqual(['cup:spawn']);
     expect(received!.args).toEqual({ foo: 1 });
   });
+
+  it('observes failures and measured policy recovery, excluding unwired and exempt calls', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const observeFallback = vi.fn();
+    const deps: DispatchProjectedDeps = { observeFallback };
+    const tool = makeTool();
+    const context = MAKE_CTX();
+    await runDispatchStack(tool, 'fix.tool', {}, context, deps);
+    deps.checkCapabilityEnvelope = () => null;
+    await runDispatchStack(tool, 'fix.tool', {}, context, deps);
+    deps.checkCapabilityEnvelope = () => ({ decision: 'allow', posture: 'auto', applied: false });
+    await runDispatchStack(tool, 'fix.tool', {}, context, deps);
+    expect(observeFallback).not.toHaveBeenCalled();
+    deps.checkCapabilityEnvelope = () => { throw new Error('unavailable'); };
+    expect((await runDispatchStack(tool, 'fix.tool', {}, context, deps)).ok).toBe(true);
+    deps.checkCapabilityEnvelope = () => ({ decision: 'deny', posture: 'rejected', applied: true, reason: 'outside envelope' });
+    expect((await runDispatchStack(tool, 'fix.tool', {}, context, deps)).ok).toBe(false);
+    deps.checkCapabilityEnvelope = () => ({ decision: 'allow', posture: 'auto', applied: true });
+    expect((await runDispatchStack(tool, 'fix.tool', {}, context, deps)).ok).toBe(true);
+    expect(observeFallback.mock.calls.map(([mechanism, row, observedCtx]) => [
+      mechanism, row.applied, row.reason, observedCtx.workspaceId,
+    ])).toEqual([
+      ['capability-envelope', 0, 'evaluator-threw', 'default'],
+      ['capability-envelope', 1, 'applied', 'default'],
+      ['capability-envelope', 1, 'applied', 'default'],
+    ]);
+    observeFallback.mockImplementation(() => { throw new Error('sink unavailable'); });
+    expect((await runDispatchStack(tool, 'fix.tool', {}, context, deps)).ok).toBe(true);
+    deps.checkCapabilityEnvelope = () => { throw new Error('unavailable'); };
+    expect((await runDispatchStack(tool, 'fix.tool', {}, context, deps)).ok).toBe(true);
+  });
 });

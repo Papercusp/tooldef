@@ -339,6 +339,10 @@ export interface DispatchStartEvent {
 }
 
 export interface DispatchProjectedDeps {
+  /** Best-effort host sink for measured primary/fallback decisions; never policy. */
+  observeFallback?(mechanism: string, observation: {
+    eligible: number; applied: number; reason: string; scope?: string;
+  }, ctx: UnifiedToolContext): void;
   /**
    * Host-owned kernel enforcement port (identities-v1 D-030).  The generic
    * dispatcher supplies two observations for each call: a `preflight` before

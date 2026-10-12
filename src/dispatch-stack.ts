@@ -459,6 +459,11 @@ const capabilityEnvelopeStep: DispatchStep = {
     try {
       verdict = await port({ toolName, capabilities: tool.capabilities, ctx, args: input });
     } catch (err) {
+      try {
+        deps.observeFallback?.('capability-envelope', {
+          eligible: 1, applied: 0, reason: 'evaluator-threw',
+        }, ctx);
+      } catch { /* An observation failure must not change the existing policy result. */ }
       // FAIL-OPEN (D-006): an evaluator bug must never wedge the fleet; the OS sandbox is the
       // containment backstop. Matches the quota gate's fail-open-on-error posture.
       // eslint-disable-next-line no-console
@@ -468,6 +473,13 @@ const capabilityEnvelopeStep: DispatchStep = {
       return null;
     }
     if (!verdict) return null;
+    if (verdict.applied) {
+      try {
+        deps.observeFallback?.('capability-envelope', {
+          eligible: 1, applied: 1, reason: 'applied',
+        }, ctx);
+      } catch { /* An observation failure must not change the existing policy result. */ }
+    }
     exec.envelopeVerdict = verdict; // threaded into PostInvokeEvent for the decision-ledger emit
     if (verdict.decision === 'deny') {
       return {
