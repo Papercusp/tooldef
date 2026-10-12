@@ -891,6 +891,17 @@ export interface UnifiedToolContext {
    * Always installed by the dispatcher (no opt-out).
    */
   metadata?: (data: Record<string, unknown>) => void;
+
+  /**
+   * Per-call phase tracker. Wrap each named stage of the handler's work in
+   * `await ctx.phases?.track('stage', () => work())`. The dispatcher persists the
+   * completed intervals as `metadata_json.handlerPhases` (schema
+   * `handler-phases-v1`) on EVERY call, success or failure, beside
+   * `dispatchStages`. It is merged after the handler's own `ctx.metadata()`
+   * payload, so neither can overwrite the other. Installed by the dispatcher
+   * whenever invocation telemetry is recorded.
+   */
+  phases?: import('./phase-tracker').PhaseTracker;
 }
 
 /** ctx.publishState — snapshot-only in v1. */

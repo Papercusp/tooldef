@@ -73,6 +73,7 @@ import {
 import { evaluateDataCondition } from '@papercusp/rules';
 import type { ToolPreInvokeEvent, ToolRequireSpec } from './requires';
 import { applyWorkspaceTxContract } from './workspace-tx';
+import { createPhaseTracker, type PhaseTracker } from './phase-tracker';
 
 /* ─── Step names ─────────────────────────────────────────────────────── */
 
@@ -143,6 +144,8 @@ export interface DispatchExecution {
   eventCount: number;
   /** Per-call metadata accumulator. Most recent ctx.metadata() wins. */
   metadataJson: Record<string, unknown> | null;
+  /** Per-call handler phase tracker exposed as ctx.phases; persisted as handlerPhases. */
+  phaseTracker: PhaseTracker | null;
   /** ctx with emit/progress/askUser/publishState/metadata wrappers applied. */
   handlerCtx: UnifiedToolContext;
 
@@ -216,6 +219,7 @@ function initExecution(
     bufferWriter: null,
     eventCount: 0,
     metadataJson: null,
+    phaseTracker: null,
     handlerCtx: contractCtx,
     handlerResult: null,
     envelopeVerdict: null,
@@ -762,6 +766,8 @@ const ctxBindingsStep: DispatchStep = {
     const metadataCallback = (data: Record<string, unknown>): void => {
       exec.metadataJson = { ...data };
     };
+    // One tracker per call; the dispatch-stack finally folds it into telemetry.
+    exec.phaseTracker = createPhaseTracker();
 
     exec.handlerCtx = applyWorkspaceTxContract(tool, toolName, {
       ...ctx,
@@ -770,6 +776,7 @@ const ctxBindingsStep: DispatchStep = {
       emit: wrappedEmit,
       progress: wrappedProgress,
       metadata: metadataCallback,
+      phases: exec.phaseTracker,
       ...(askUser ? { askUser } : {}),
       ...(publishState ? { publishState } : {}),
     });
@@ -2047,8 +2054,12 @@ export async function runDispatchStack(
       error: { code: 'handler_error' as const, message: 'no result' },
     };
     if (dispatchStarted !== null) {
+      // Framework-owned: applied after handler metadata so a handler cannot
+      // spoof either record by calling ctx.metadata({ handlerPhases: … }).
+      const handlerPhases = exec.phaseTracker?.toMetadata() ?? null;
+      const { handlerPhases: _spoofedPhases, ...handlerMetadata } = exec.metadataJson ?? {};
       exec.metadataJson = {
-        ...(exec.metadataJson ?? {}),
+        ...handlerMetadata,
         dispatchStages: {
           schemaVersion: 'dispatch-stages-v1',
           unit: 'ms',
@@ -2056,6 +2067,7 @@ export async function runDispatchStack(
           elapsedMs: Math.max(0, performance.now() - dispatchStarted),
           steps: dispatchSteps,
         },
+        ...(handlerPhases ? { handlerPhases } : {}),
       };
     }
     await recordTelemetry(exec, settled);

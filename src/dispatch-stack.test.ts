@@ -229,6 +229,55 @@ describe('dispatch stage attribution', () => {
       elapsedMs: 17, steps: [{ name: 'kernel-preflight', elapsedMs: 17 }],
     });
   });
+
+  it('persists handler phases on a completed call, merged with ctx.metadata and immune to a spoof', async () => {
+    let clock = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const record = vi.fn();
+    const result = await runDispatchStack(makeTool({
+      fn: async (_args, ctx) => {
+        expect(ctx.phases).toBeDefined();
+        await ctx.phases!.track('read-claims', async () => { clock += 40; });
+        await ctx.phases!.track('compose', async () => { clock += 9; });
+        ctx.metadata?.({ rows: 3, handlerPhases: 'handler-spoof' });
+        return { content: [{ type: 'text', text: 'body' }] };
+      },
+    }), 'fix.tool', {}, MAKE_CTX(), { recordInvocation: record });
+    expect(result.ok).toBe(true);
+    const metadata = record.mock.calls[0][0].metadataJson;
+    expect(metadata.rows).toBe(3);
+    expect(metadata.dispatchStages.schemaVersion).toBe('dispatch-stages-v1');
+    expect(metadata.handlerPhases).toMatchObject({
+      schemaVersion: 'handler-phases-v1',
+      attributedMs: 49,
+      phases: [
+        { phase: 'read-claims', startMs: 0, durationMs: 40 },
+        { phase: 'compose', startMs: 40, durationMs: 9 },
+      ],
+      pending: [],
+    });
+  });
+
+  it('persists handler phases when the handler fails, and omits them when none were tracked', async () => {
+    let clock = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const failing = vi.fn();
+    await runDispatchStack(makeTool({
+      fn: async (_args, ctx) => {
+        await ctx.phases!.track('fetch', async () => { clock += 12; });
+        throw new Error('downstream exploded');
+      },
+    }), 'fix.tool', {}, MAKE_CTX(), { recordInvocation: failing });
+    expect(failing.mock.calls[0][0].metadataJson.handlerPhases.phases).toEqual([
+      { phase: 'fetch', startMs: 0, durationMs: 12 },
+    ]);
+
+    const quiet = vi.fn();
+    await runDispatchStack(makeTool({
+      fn: async () => ({ content: [{ type: 'text', text: 'ok' }] }),
+    }), 'fix.tool', {}, MAKE_CTX(), { recordInvocation: quiet });
+    expect(quiet.mock.calls[0][0].metadataJson).not.toHaveProperty('handlerPhases');
+  });
 });
 
 describe('exact principal tool allowlists', () => {
