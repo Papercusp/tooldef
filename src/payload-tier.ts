@@ -416,6 +416,20 @@ function hasPreservedValue(
   return false;
 }
 
+/**
+ * Is this array element a ROW-SCOPED selection that earns a fair budget slice?
+ *
+ * Only when every pick reaching it continues INSIDE the element
+ * (`posts[].body`). An empty child path means the caller selected the whole
+ * element by picking the array itself; element-count truncation governs that
+ * case. Counting those rows as obligations gives each of N rows a 1/N slice, so
+ * a 200-row pick renders 200 clipped rows and the oversized manifest then sheds
+ * the element-count omission the caller needs (WI-6554700010008776).
+ */
+function isRowScopedSelection(value: unknown, paths: readonly PreservePathSegment[][]): boolean {
+  return paths.length > 0 && paths.every((path) => path.length > 0) && hasPreservedValue(value, paths);
+}
+
 /** Run one selected array row on a fair slice, reserving room for its sibling picks. */
 function projectWithFairPreservedShare<T>(
   state: ProjectionState,
@@ -1033,7 +1047,7 @@ function projectIdentityPreview(
     if (Array.isArray(value)) {
       const shown = value.slice(0, state.limits.maxArray);
       const childPathsByIndex = shown.map((_, i) => preserveArrayChildPaths(preservePaths, i));
-      const selectedByIndex = shown.map((item, i) => hasPreservedValue(item, childPathsByIndex[i] ?? []));
+      const selectedByIndex = shown.map((item, i) => isRowScopedSelection(item, childPathsByIndex[i] ?? []));
       let selectedRowsRemaining = selectedByIndex.filter(Boolean).length;
       const projectionOrder = selectedRowsRemaining > 0
         ? [
@@ -1197,7 +1211,7 @@ function projectValue(
       }
       const shown = value.slice(0, state.limits.maxArray);
       const childPathsByIndex = shown.map((_, i) => preserveArrayChildPaths(preservePaths, i));
-      const selectedByIndex = shown.map((item, i) => hasPreservedValue(item, childPathsByIndex[i] ?? []));
+      const selectedByIndex = shown.map((item, i) => isRowScopedSelection(item, childPathsByIndex[i] ?? []));
       let selectedRowsRemaining = selectedByIndex.filter(Boolean).length;
       // Explicit picks inside a multi-row array are row-scoped obligations. If
       // an early selected string spends the shared remainder, later rows can

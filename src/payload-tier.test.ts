@@ -746,6 +746,41 @@ describe('applyPayloadTier', () => {
     expect(projected.results[0]?.threadWindow.posts.some((post) => (post.body?.length ?? 0) < 1_000)).toBe(true);
   });
 
+  it('REGRESSION (WI-6554700010008776): picking a whole array keeps element-count truncation instead of fair-sharing every row', () => {
+    // Picking the array itself selects each element WHOLE (an empty child path).
+    // That is not a row-scoped leaf pick: if every row earns a 1/N slice, a
+    // 200-row pick renders 200 clipped rows and the element-count omission is
+    // shed with the oversized manifest.
+    const waiters = Array.from({ length: 200 }, (_, i) => ({
+      await_id: i + 1,
+      subscriber_id: `su-${i}`,
+      note: 'y'.repeat(320),
+    }));
+    const projected = projectBoundedPayload({ ok: true, inspection: { waiters } }, {
+      toolName: 'events:status',
+      tier: 'trimmed',
+      forced: true,
+      targetChars: 6_000,
+      preservePaths: ['ok', 'inspection.waiters'],
+    }) as unknown as {
+      inspection: { waiters: Array<{ note?: string }> };
+      _projection: { truncated: boolean; omitted: Array<{ path: string; reason: string }> };
+    };
+
+    const shown = projected.inspection.waiters;
+    expect(projected._projection.truncated).toBe(true);
+    expect(shown.length).toBeGreaterThan(0);
+    expect(shown.length).toBeLessThan(200);
+    // Whole rows, not 64-char husks of all 200.
+    expect(shown[0]?.note).toBe('y'.repeat(320));
+    expect(projected._projection.omitted).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        path: `$.inspection.waiters[${shown.length}]`,
+        reason: expect.stringMatching(/array item\(s\) omitted/),
+      }),
+    ]));
+  });
+
   it('REGRESSION (EI-22186855527494865): a dropped preserved path is NAMED in omittedPreserved, which sample-shedding cannot take away', () => {
     // `omitted` is a SAMPLE list the budget ladder trades away entirely (to 5,
     // then to 0) to buy back content — so the one omission a caller cannot infer,
