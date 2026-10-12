@@ -2420,6 +2420,26 @@ export function mcpObjectOutputSchema(
   return undefined;
 }
 
+/**
+ * MCP tool input schemas require an object root. An anyOf/oneOf whose every
+ * branch is object-typed can safely hoist that type while preserving each
+ * branch's input constraints.
+ */
+export function mcpObjectInputSchema(
+  schema: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!schema) return undefined;
+  if (schema.type === 'object') return schema;
+  if (schema.type !== undefined) return undefined;
+  for (const key of ['anyOf', 'oneOf'] as const) {
+    const branches = schema[key];
+    if (Array.isArray(branches) && branches.length > 0 && branches.every(isObjectTypedBranch)) {
+      return { type: 'object', ...schema };
+    }
+  }
+  return undefined;
+}
+
 export function listMcpProjections(role?: AgentRole, profile?: 'engineer' | 'power'): McpToolListing[] {
   const out: McpToolListing[] = [];
   const registryRevision = projectedToolRegistryRevision();
@@ -2434,7 +2454,7 @@ export function listMcpProjections(role?: AgentRole, profile?: 'engineer' | 'pow
     const listing: McpToolListing = {
       name: tool.expose.mcp.name,
       description: tool.description,
-      inputSchema: tool.inputSchema,
+      inputSchema: mcpObjectInputSchema(tool.discoveryInputSchema) ?? tool.inputSchema,
       _meta: {
         'papercusp/toolRegistryRevision': registryRevision,
         'papercusp/toolRegistrySource': PROJECTED_TOOL_REGISTRY_SOURCE,

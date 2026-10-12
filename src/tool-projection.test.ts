@@ -287,6 +287,43 @@ describe('listMcpProjections', () => {
     expect(listMcpProjections().map((t) => t.name)).toEqual(['mcp.one']);
   });
 
+  it('preserves branch-specific fields from object-union discovery schemas in MCP listings', () => {
+    const blocked = {
+      type: 'object',
+      properties: { state: { type: 'string', enum: ['blocked'] } },
+      additionalProperties: false,
+    };
+    const progress = {
+      type: 'object',
+      properties: {
+        state: { type: 'string', enum: ['wip'] },
+        reason: { type: 'string' },
+      },
+      additionalProperties: false,
+    };
+    registerProjectedTool(baseTool({
+      expose: { mcp: { name: 'work_items:set_state' } },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          state: { type: 'string', enum: ['blocked', 'wip'] },
+          reason: { type: 'string' },
+        },
+        additionalProperties: false,
+      },
+      discoveryInputSchema: { anyOf: [blocked, progress] },
+    }));
+
+    const listed = listMcpProjections()[0]!.inputSchema as {
+      type?: string;
+      anyOf?: Array<{ properties?: Record<string, unknown> }>;
+    };
+    expect(listed.type).toBe('object');
+    expect(listed.anyOf).toEqual([blocked, progress]);
+    expect(listed.anyOf![0]!.properties).not.toHaveProperty('reason');
+    expect(listed.anyOf![1]!.properties).toHaveProperty('reason');
+  });
+
   it('filters by role allowlist when provided', () => {
     registerProjectedTool(baseTool({
       expose: { mcp: { name: 'a.worker' } }, agentRoles: ['worker'],
