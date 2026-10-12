@@ -472,6 +472,16 @@ export {
 } from './dispatch-projected';
 // The canonical named stack is also used for no-handler authorization probes.
 export { DEFAULT_DISPATCH_STACK, runDispatchStack, preflightDispatchStack, withReplacedStep } from './dispatch-stack';
+export {
+  createPhaseTracker,
+  unionCoveredMs,
+  type PhaseTracker,
+  type PhaseTrackerOptions,
+  type PhaseSnapshot,
+  type PhaseDuration,
+  type PhaseInterval,
+  type HandlerPhasesMetadata,
+} from './phase-tracker';
 
 /**
  * P-015 — the shared refusal helper. Exported so a host can render or act on the corrected
