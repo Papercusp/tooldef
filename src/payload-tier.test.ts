@@ -203,7 +203,7 @@ describe('applyPayloadTier', () => {
         currentBuildTestRoute: route,
       },
     };
-    const options = { toolName: 'dev:pipeline_position', response, tier: 'full' as const, args, log: vi.fn() };
+    const options = { toolName: 'dev:pipeline_position', shape: undefined, response, tier: 'full' as const, args, log: vi.fn() };
     const lossy = applyPayloadTier(options).data as ReturnType<typeof projectBoundedPayload>;
     expect(lossy.currentBuildTestRoute).toBeUndefined();
     expect(lossy._projection).toMatchObject({ forced: true, cursor: { args } });

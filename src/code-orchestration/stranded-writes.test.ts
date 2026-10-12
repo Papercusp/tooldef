@@ -331,7 +331,7 @@ line 2";
           ...deps,
           recordInvocation: async (event) => {
             await deps.recordInvocation!(event);
-            errors.push(event.errorCode);
+            errors.push(event.errorCode ?? undefined);
           },
         },
         tools: [write],

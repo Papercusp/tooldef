@@ -93,7 +93,7 @@ describe('transportCapExempt — the hard-ceiling exit for in-process consumers 
         },
       });
 
-    it.each(['mcp', 'http'])('WITHOUT the flag preserves MCP spill input and caps transports without a result-door (%s)', async (transport) => {
+    it.each(['mcp', 'http'] as const)('WITHOUT the flag preserves MCP spill input and caps transports without a result-door (%s)', async (transport) => {
       define('test:cap-legacy-off');
       const res = await dispatchProjectedTool(
         lookupByMcpName('test:cap-legacy-off')!,
@@ -114,7 +114,7 @@ describe('transportCapExempt — the hard-ceiling exit for in-process consumers 
       }
     });
 
-    it.each(['mcp', 'http'])('WITH the flag the script sees every row (%s)', async (transport) => {
+    it.each(['mcp', 'http'] as const)('WITH the flag the script sees every row (%s)', async (transport) => {
       define('test:cap-legacy-on');
       const res = await dispatchProjectedTool(
         lookupByMcpName('test:cap-legacy-on')!,
@@ -143,7 +143,7 @@ describe('transportCapExempt — the hard-ceiling exit for in-process consumers 
         },
       });
 
-    it.each(['mcp', 'http'])('WITHOUT the flag preserves MCP spill input and caps transports without a result-door (%s)', async (transport) => {
+    it.each(['mcp', 'http'] as const)('WITHOUT the flag preserves MCP spill input and caps transports without a result-door (%s)', async (transport) => {
       define('test:cap-role-off');
       const res = await dispatchProjectedTool(
         lookupByMcpName('test:cap-role-off')!,
@@ -164,7 +164,7 @@ describe('transportCapExempt — the hard-ceiling exit for in-process consumers 
       }
     });
 
-    it.each(['mcp', 'http'])('WITH the flag the full payload survives (%s)', async (transport) => {
+    it.each(['mcp', 'http'] as const)('WITH the flag the full payload survives (%s)', async (transport) => {
       define('test:cap-role-on');
       const res = await dispatchProjectedTool(
         lookupByMcpName('test:cap-role-on')!,
