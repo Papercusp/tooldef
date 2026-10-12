@@ -474,6 +474,7 @@ export {
 export { DEFAULT_DISPATCH_STACK, runDispatchStack, preflightDispatchStack, withReplacedStep } from './dispatch-stack';
 export {
   createPhaseTracker,
+  trackPhase,
   unionCoveredMs,
   type PhaseTracker,
   type PhaseTrackerOptions,

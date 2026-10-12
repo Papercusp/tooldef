@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createPhaseTracker, unionCoveredMs } from './phase-tracker';
+import { createPhaseTracker, trackPhase, unionCoveredMs } from './phase-tracker';
 
 function clock(start = 1_000) {
   let t = start;
@@ -103,5 +103,29 @@ describe('unionCoveredMs', () => {
 
   it('is zero for an empty set', () => {
     expect(unionCoveredMs([], 10)).toBe(0);
+  });
+});
+
+describe('trackPhase', () => {
+  it('records the work as the named phase when a tracker is present', async () => {
+    const c = clock();
+    const tracker = createPhaseTracker({ now: c.now });
+    const value = await trackPhase(tracker, 'list:read', async () => { c.advance(25); return 7; });
+    expect(value).toBe(7);
+    expect(tracker.intervals()).toEqual([{ phase: 'list:read', startMs: 0, durationMs: 25 }]);
+  });
+
+  it('runs the work untracked, with the same result, when no tracker is present', async () => {
+    let calls = 0;
+    const value = await trackPhase(undefined, 'list:read', () => { calls += 1; return 'rows'; });
+    expect(value).toBe('rows');
+    expect(calls).toBe(1);
+  });
+
+  it('propagates a rejection from the work whether or not a tracker is present', async () => {
+    const tracker = createPhaseTracker();
+    await expect(trackPhase(tracker, 'boom', () => { throw new Error('x'); })).rejects.toThrow('x');
+    await expect(trackPhase(undefined, 'boom', () => { throw new Error('y'); })).rejects.toThrow('y');
+    expect(tracker.intervals().map((i) => i.phase)).toEqual(['boom']);
   });
 });

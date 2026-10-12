@@ -149,3 +149,16 @@ export function createPhaseTracker(options: PhaseTrackerOptions = {}): PhaseTrac
     },
   };
 }
+
+/**
+ * Run `work` as the named phase when a tracker is present, or untracked when it is not.
+ * Handlers receive `ctx.phases` only through the dispatcher; a direct handler call (a
+ * unit test) has none, and the work must still run identically.
+ */
+export function trackPhase<T>(
+  tracker: PhaseTracker | undefined,
+  phase: string,
+  work: () => T | Promise<T>,
+): Promise<T> {
+  return tracker ? tracker.track(phase, work) : Promise.resolve().then(work);
+}
