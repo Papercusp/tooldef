@@ -997,6 +997,92 @@ describe('EI-19301148486657755: reading a field the tool result does not have', 
     expect(corrected.fieldMisses).toBeUndefined();
   });
 
+  it('keeps post-carry activity recipes on timeline fields and guards optional coverage fields', async () => {
+    const updatedAtMs = Date.parse('2026-10-12T18:00:00.000Z');
+    const loopStatus = async () => ({
+      carryNote: { note: 'continue', contentHash: 'abc123', updatedAtMs },
+    });
+    const timeline = vi.fn(async (args: { owner: string; since?: string; cursor?: string }) => ({
+      ok: true,
+      owner: args.owner,
+      since: args.since ?? '2026-10-11T18:00:00.000Z',
+      until: '2026-10-12T18:01:00.000Z',
+      filters: {},
+      stamp_coverage: {
+        goal_scoped: false,
+        assumption_sets_resolved: 0,
+        assumptions_observed: 0,
+        assumption_coverage: 'not-goal-scoped',
+      },
+      raw_count: args.cursor ? 1 : 120,
+      count: 1,
+      hasMore: !args.cursor,
+      ...(!args.cursor ? { nextCursor: 'cursor-page-2', entriesTruncated: {
+        requested: 120,
+        returned: 1,
+        raw_requested: 120,
+        raw_returned: 1,
+        reason: 'response_budget' as const,
+      } } : {}),
+      entries: [{
+        kind: 'tool' as const,
+        ts: args.cursor ? '2026-10-12T18:00:20.000Z' : '2026-10-12T18:00:30.000Z',
+        ref: args.cursor ? 'tool_invocation:2' : 'tool_invocation:1',
+        text: args.cursor ? 'coord:send completed' : 'work_items:get completed',
+        tool_name: args.cursor ? 'coord:send' : 'work_items:get',
+        status: 'ok',
+      }],
+    }));
+    const sessions = { timeline };
+    const staleScript = `const t = await tools.sessions.timeline({ owner: 'self' });
+      return t.entries.map((entry) => String(entry.summary ?? entry.text ?? entry.name ?? ''));`;
+    const stale = await runOrchestrationScript(staleScript, facade({ sessions }));
+    expect(stale.ok).toBe(true);
+    expect(stale.fieldMisses).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'sessions:timeline', path: 'entries.0', read: 'summary' }),
+    ]));
+    timeline.mockClear();
+
+    const correctedScript = `const loopState = await tools.loop.status({});
+      const carryNote = loopState && 'carryNote' in loopState ? loopState.carryNote : null;
+      const hasTimestamp = carryNote && typeof carryNote === 'object' && 'updatedAtMs' in carryNote;
+      const timestamp = hasTimestamp ? Number(carryNote.updatedAtMs) : NaN;
+      const since = Number.isFinite(timestamp) && timestamp > 0 ? new Date(timestamp).toISOString() : undefined;
+      const entries = [];
+      let cursor = null;
+      let complete = false;
+      for (let pageIndex = 0; pageIndex < 20; pageIndex += 1) {
+        const page = await tools.sessions.timeline({ owner: 'self', ...(since ? { since } : {}), ...(cursor ? { cursor } : {}) });
+        if (!page || !('ok' in page) || page.ok !== true) throw new Error('timeline read failed');
+        if (Array.isArray(page.entries)) entries.push(...page.entries);
+        if (page.hasMore !== true) { complete = true; cursor = null; break; }
+        if (!('nextCursor' in page) || typeof page.nextCursor !== 'string') throw new Error('timeline cursor missing');
+        cursor = page.nextCursor;
+      }
+      return {
+        since: since ?? null,
+        timeline: entries.map((entry) => String(entry.text ?? '').slice(0, 360)),
+        complete,
+        nextCursor: cursor,
+      };`;
+    const corrected = await runOrchestrationScript(
+      correctedScript,
+      facade({ loop: { status: loopStatus }, sessions }),
+    );
+    expect(corrected.ok).toBe(true);
+    expect(corrected.result).toEqual({
+      since: '2026-10-12T18:00:00.000Z',
+      timeline: ['work_items:get completed', 'coord:send completed'],
+      complete: true,
+      nextCursor: null,
+    });
+    expect(timeline).toHaveBeenNthCalledWith(1, { owner: 'self', since: '2026-10-12T18:00:00.000Z' });
+    expect(timeline).toHaveBeenNthCalledWith(2, {
+      owner: 'self', since: '2026-10-12T18:00:00.000Z', cursor: 'cursor-page-2',
+    });
+    expect(corrected.fieldMisses).toBeUndefined();
+  });
+
   it('catches a NESTED miss inside an array element, with the dotted path', async () => {
     // The coord:send case: `r.woken` read on each row of `results[]`, where the rows carry
     // different keys entirely. A top-level-only check would miss this.
