@@ -534,9 +534,17 @@ async function serializeProjectedResult(
  *   - parse the text FIRST, then wrap `{ data: parsed }` — NOT `{ data: theWholeResult }`,
  *     which is the double-wrap that broke the past blanket attempt (define-tool L548).
  *   - only array / object-with-array-field payloads (a scalar / plain object round-trips
- *     to identical JSON — no win — so leave it untouched).
+ *     to identical JSON — no win — so leave it untouched). EXCEPT `acceptPlainObject`:
+ *     a tool that DECLARES a `shape` also routes a plain-object body here, because the
+ *     caller then feeds it through `applyPayloadTier` and the win is the shaper, not
+ *     TOON (WI-6554700010008923 — improvements:capture's declared write-echo shape never
+ *     ran because its success path returns raw content).
  */
-function reencodableJsonPayload(out: ToolResult, ctx: UnifiedToolContext): unknown | undefined {
+function reencodableJsonPayload(
+  out: ToolResult,
+  ctx: UnifiedToolContext,
+  opts: { acceptPlainObject?: boolean } = {},
+): unknown | undefined {
   if (ctx.transport !== 'mcp') return undefined;
   if (out.isError) return undefined;
   if (out.structuredContent !== undefined) return undefined;
@@ -553,8 +561,9 @@ function reencodableJsonPayload(out: ToolResult, ctx: UnifiedToolContext): unkno
   } catch {
     return undefined; // non-JSON text (a plain string / human message) — leave as-is
   }
-  if (!Array.isArray(parsed) && !isObjectWithArrayField(parsed)) return undefined;
-  return parsed;
+  if (Array.isArray(parsed) || isObjectWithArrayField(parsed)) return parsed;
+  if (opts.acceptPlainObject && parsed !== null && typeof parsed === 'object') return parsed;
+  return undefined;
 }
 
 /**
@@ -3390,22 +3399,19 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       const marked = markExplicitFullRawResult(response, explicitFullRequest);
       return disclose(serializeHybridToolResponse(marked, ctx, eligibility, def, readColumns, parsed.value));
     }
+    let tierInput = response as ToolResponse;
     if (response && typeof response === 'object' && Array.isArray((response as ToolResult).content)) {
       const marked = markExplicitFullRawResult(response as ToolResult, explicitFullRequest);
-      const reencodable = reencodableJsonPayload(marked, ctx);
-      if (reencodable !== undefined) {
-        return disclose(
-          serializeProjectedResult(
-            { data: reencodable, ...(explicitFullRequest ? { explicitFullRequest: true } : {}) },
-            ctx,
-            eligibility,
-            def,
-            readColumns,
-            parsed.value,
-          ),
-        );
+      const reencodable = reencodableJsonPayload(marked, ctx, { acceptPlainObject: def.shape !== undefined });
+      if (reencodable === undefined) return disclose(attachRequestedStructuredContent(marked, ctx, def));
+      const reencoded = { data: reencodable, ...(explicitFullRequest ? { explicitFullRequest: true } : {}) };
+      if (def.shape === undefined) {
+        return disclose(serializeProjectedResult(reencoded, ctx, eligibility, def, readColumns, parsed.value));
       }
-      return disclose(attachRequestedStructuredContent(marked, ctx, def));
+      // A tool that DECLARES a shape gets it on its raw-content branches too: fall
+      // through into applyPayloadTier exactly like a `{ data }` result. Returning
+      // here (the old behavior) silently voided the shape (WI-6554700010008923).
+      tierInput = reencoded;
     }
     // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
     // the session/call tier before format-aware serialization. Unshaped tools
@@ -3413,7 +3419,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     const shaped = applyPayloadTier({
       toolName: def.name,
       shape: def.shape,
-      response: response as ToolResponse,
+      response: tierInput,
       // WI-37843: a tool may opt OUT of routine per-session shaping, in which
       // case the session tier is discarded and an un-overridden call resolves
       // to 'full'. An explicit per-call payloadTier still wins either way.
@@ -3602,22 +3608,19 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
       const marked = markExplicitFullRawResult(out, explicitFullRequest);
       return disclose(serializeHybridToolResponse(marked, handlerCtx, eligibility, def, readColumns, parsed.value));
     }
+    let tierInput = out as ToolResponse;
     if (out && typeof out === 'object' && Array.isArray((out as ToolResult).content)) {
       const marked = markExplicitFullRawResult(out as ToolResult, explicitFullRequest);
-      const reencodable = reencodableJsonPayload(marked, handlerCtx);
-      if (reencodable !== undefined) {
-        return disclose(
-          serializeProjectedResult(
-            { data: reencodable, ...(explicitFullRequest ? { explicitFullRequest: true } : {}) },
-            handlerCtx,
-            eligibility,
-            def,
-            readColumns,
-            parsed.value,
-          ),
-        );
+      const reencodable = reencodableJsonPayload(marked, handlerCtx, { acceptPlainObject: def.shape !== undefined });
+      if (reencodable === undefined) return disclose(attachRequestedStructuredContent(marked, handlerCtx, def));
+      const reencoded = { data: reencodable, ...(explicitFullRequest ? { explicitFullRequest: true } : {}) };
+      if (def.shape === undefined) {
+        return disclose(serializeProjectedResult(reencoded, handlerCtx, eligibility, def, readColumns, parsed.value));
       }
-      return disclose(attachRequestedStructuredContent(marked, handlerCtx, def));
+      // Declared shape applies to raw-content branches too (WI-6554700010008923) —
+      // mirror of the principal-gated wrapper above; a fix at only one site is
+      // invisible from the other.
+      tierInput = reencoded;
     }
 
     // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
@@ -3626,7 +3629,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     const shaped = applyPayloadTier({
       toolName: def.name,
       shape: def.shape,
-      response: out as ToolResponse,
+      response: tierInput,
       // WI-37843: a tool may opt OUT of routine per-session shaping, in which
       // case the session tier is discarded and an un-overridden call resolves
       // to 'full'. An explicit per-call payloadTier still wins either way.
