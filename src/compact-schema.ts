@@ -14,8 +14,23 @@
  * property names, the required set, enum members, numeric and length bounds,
  * oneOf/anyOf/allOf discriminators, nested object/array shape, and $defs/$ref
  * structure. A `type` keyword is omitted only when a sibling `enum` or `const`
- * already permits exactly values of that type. What else is dropped is PROSE
- * ONLY: `description`, `title`, `examples`/`example`, and `default`.
+ * already permits exactly values of that type, and a `pattern` only when it is
+ * zod's OWN regex for a sibling `format` that names the same contract (see
+ * FORMAT_IMPLIED_PATTERNS). What else is dropped is PROSE ONLY: `description`,
+ * `title`, `examples`/`example`, and `default`.
+ *
+ * ⚠ A FORMAT-IMPLIED `pattern` IS DROPPED, AND THAT IS THE SECOND NARROW BET.
+ * zod emits its implementation regex beside every string format it knows, so a
+ * single uuid costs ~180 bytes and an offset date-time ~320 — on every floor
+ * tool, every launch — to restate what the `format` keyword already names. Only
+ * EXACT zod-canonical pairs are dropped, and only for variants whose regex
+ * accepts what the format name promises; a variant that NARROWS the format
+ * (Z-only or local-only date-time, a fixed precision, a uuid VERSION) keeps its
+ * pattern, as does any hand-written pattern. The residue is deliberate: zod's
+ * uuid regex also checks the version/variant nibbles of what are, here,
+ * server-minted identifiers a caller copies from an earlier result, and its
+ * email regex rejects quoted local parts. The server still enforces the full
+ * pattern, so the worst case is a typed refusal, never an accepted bad value.
  *
  * ⚠ `$defs`/`$ref` STRUCTURE IS PRESERVED, NOT INLINED. `$defs` is precisely
  * what keeps a duplicated sub-schema from being paid for once per use site, so
@@ -35,6 +50,8 @@
  * nothing below knows what a Papercusp tool, workspace or role is.
  */
 
+import { z } from 'zod';
+
 import { summaryGuidanceDescription } from './partial-guidance';
 
 const UTF8_ENCODER = new TextEncoder();
@@ -47,8 +64,8 @@ const UTF8_ENCODER = new TextEncoder();
  * `enum`, `const`, `type` (unless implied by `enum`/`const`), `properties`,
  * `items`, `prefixItems`,
  * `additionalProperties`, `minimum`, `maximum`, `exclusiveMinimum`,
- * `exclusiveMaximum`, `multipleOf`, `minLength`, `maxLength`, `pattern`,
- * `format`, `minItems`, `maxItems`, `uniqueItems`, `minProperties`,
+ * `exclusiveMaximum`, `multipleOf`, `minLength`, `maxLength`, `pattern`
+ * (unless implied by `format` — FORMAT_IMPLIED_PATTERNS), `format`, `minItems`, `maxItems`, `uniqueItems`, `minProperties`,
  * `maxProperties`, `oneOf`, `anyOf`, `allOf`, `not`, `if`/`then`/`else`,
  * `discriminator`, `$ref`, `$defs`, `definitions`, `nullable`.
  */
@@ -117,6 +134,51 @@ function typeIsImplied(schema: Record<string, unknown>): boolean {
   );
 }
 
+/**
+ * `format` + `pattern` pairs whose pattern is zod's OWN implementation of the
+ * named format. DERIVED from zod at load, never hand-copied: a zod upgrade that
+ * changes a regex simply stops matching, and the pattern is then KEPT (the
+ * budget grows and its gate notices — the failure is loud, never a silent loss).
+ *
+ * Only variants whose regex accepts what the format NAME promises belong here.
+ * `z.guid()` is the RFC 4122 shape itself; `z.iso.datetime({ offset: true })`
+ * is RFC 3339 date-time. The default `z.iso.datetime()` (Z only), `local`-only,
+ * a fixed `precision` and `z.uuidv4()` and friends are ABSENT on purpose: each
+ * narrows its format, so there the pattern carries a constraint the format does
+ * not, and it must survive.
+ */
+const FORMAT_IMPLIED_PATTERNS: ReadonlySet<string> = (() => {
+  const pairs = new Set<string>();
+  const variants: ReadonlyArray<() => z.ZodType> = [
+    () => z.uuid(),
+    () => z.guid(),
+    () => z.email(),
+    () => z.iso.datetime({ offset: true }),
+    () => z.iso.datetime({ offset: true, local: true }),
+    () => z.iso.date(),
+  ];
+  for (const variant of variants) {
+    try {
+      const json = z.toJSONSchema(variant()) as { format?: unknown; pattern?: unknown };
+      if (typeof json.format === 'string' && typeof json.pattern === 'string') {
+        pairs.add(`${json.format}\u0000${json.pattern}`);
+      }
+    } catch {
+      // A zod build that cannot project this variant: keep its pattern (fail-safe).
+    }
+  }
+  return pairs;
+})();
+
+/** Whether `pattern` is exactly zod's regex for the sibling `format` (see above). */
+function patternIsImplied(schema: Record<string, unknown>): boolean {
+  return (
+    typeof schema.format === 'string' &&
+    typeof schema.pattern === 'string' &&
+    FORMAT_IMPLIED_PATTERNS.has(`${schema.format}\u0000${schema.pattern}`)
+  );
+}
+
 function compactNode(node: unknown, inNameKeyedMap: boolean): unknown {
   if (node === null || typeof node !== 'object') return node;
   if (Array.isArray(node)) return node.map((entry) => compactNode(entry, false));
@@ -124,6 +186,7 @@ function compactNode(node: unknown, inNameKeyedMap: boolean): unknown {
   const out: Record<string, unknown> = {};
   const schema = node as Record<string, unknown>;
   const omitType = !inNameKeyedMap && typeIsImplied(schema);
+  const omitPattern = !inNameKeyedMap && patternIsImplied(schema);
   for (const [key, value] of Object.entries(schema)) {
     // Inside `properties` (etc.) every key is an author-chosen NAME. Keep it
     // verbatim and compact its subschema; never test it against DROPPED.
@@ -133,6 +196,7 @@ function compactNode(node: unknown, inNameKeyedMap: boolean): unknown {
     }
     if (DROPPED.has(key)) continue;
     if (key === 'type' && omitType) continue;
+    if (key === 'pattern' && omitPattern) continue;
     out[key] = compactNode(value, NAME_KEYED_CONTAINERS.has(key));
   }
   return out;

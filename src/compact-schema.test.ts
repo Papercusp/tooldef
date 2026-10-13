@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import {
   COMPACT_DROPPED_KEYS,
@@ -321,5 +322,84 @@ describe('compactWireBytes', () => {
     const m = compactWireBytes('bare:verb', {});
     expect(m.full).toBeGreaterThan(0);
     expect(m.saved).toBe(0);
+  });
+});
+
+describe('format-implied patterns', () => {
+  /** What zod itself emits for a field, so these tests track the real pairs. */
+  const emitted = (schema: z.ZodType) => z.toJSONSchema(schema) as Record<string, unknown>;
+
+  it('drops zod\'s own regex beside a format that names the same contract, keeping the format', () => {
+    for (const schema of [
+      z.uuid(),
+      z.guid(),
+      z.email(),
+      z.iso.datetime({ offset: true }),
+      z.iso.datetime({ offset: true, local: true }),
+      z.iso.date(),
+    ]) {
+      const full = emitted(schema);
+      // Non-vacuity: without an emitted pattern there is nothing to drop.
+      expect(typeof full.pattern, `${String(full.format)} must emit a pattern`).toBe('string');
+      const compact = compactInputSchema(full) as Record<string, unknown>;
+      expect(compact, `${String(full.format)} pattern should be implied`).not.toHaveProperty('pattern');
+      expect(compact.format).toBe(full.format);
+    }
+  });
+
+  it('KEEPS the pattern of a variant that NARROWS its format', () => {
+    // Z-only and local-only date-times, a fixed precision and a uuid VERSION each
+    // reject values the bare format name allows, so the regex is real contract.
+    for (const schema of [
+      z.iso.datetime(),
+      z.iso.datetime({ local: true }),
+      z.iso.datetime({ offset: true, precision: 3 }),
+      z.uuidv4(),
+    ]) {
+      const full = emitted(schema);
+      expect(typeof full.pattern).toBe('string');
+      expect((compactInputSchema(full) as Record<string, unknown>).pattern).toBe(full.pattern);
+    }
+  });
+
+  it('KEEPS a hand-written pattern beside a format, and a canonical pattern without its format', () => {
+    const custom = { type: 'string', format: 'uuid', pattern: '^[0-9a-f-]{36}$' };
+    expect(compactInputSchema(custom)).toEqual(custom);
+
+    const uuidPattern = emitted(z.uuid()).pattern;
+    const bare = { type: 'string', pattern: uuidPattern };
+    expect(compactInputSchema(bare)).toEqual(bare);
+    // The pair must match, not just the regex: a uuid regex under `email` is real contract.
+    const crossed = { type: 'string', format: 'email', pattern: uuidPattern };
+    expect(compactInputSchema(crossed)).toEqual(crossed);
+  });
+
+  it('applies at depth, keeps a property NAMED pattern, and is idempotent', () => {
+    const full = emitted(
+      z.object({
+        id: z.uuid(),
+        at: z.iso.datetime({ offset: true }),
+        list: z.array(z.uuid()),
+        pattern: z.string().regex(/^[a-z]+$/),
+      }),
+    );
+    const once = compactInputSchema(full) as {
+      properties: Record<string, Record<string, unknown>>;
+    };
+    expect(once.properties.id).not.toHaveProperty('pattern');
+    expect(once.properties.at).not.toHaveProperty('pattern');
+    expect((once.properties.list.items as Record<string, unknown>)).not.toHaveProperty('pattern');
+    // A property literally named `pattern` is an argument, and its own regex is not
+    // format-implied, so both survive.
+    expect(once.properties.pattern.pattern).toBe('^[a-z]+$');
+    expect(compactInputSchema(once)).toEqual(once);
+  });
+
+  it('MEASURES the bytes a uuid field returns rather than asserting a magic number', () => {
+    const tool = { inputSchema: emitted(z.object({ id: z.uuid() })) };
+    const withPattern = compactWireBytes('x:y', tool);
+    const pattern = String((tool.inputSchema.properties as Record<string, Record<string, unknown>>).id.pattern);
+    // Removing `,"pattern":"<regex>"` must account for at least the regex itself.
+    expect(withPattern.saved).toBeGreaterThanOrEqual(JSON.stringify(pattern).length);
   });
 });
