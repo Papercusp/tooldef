@@ -404,6 +404,14 @@ export interface UnifiedToolContext {
    */
   sourceProjection?: unknown;
   /**
+   * Host-stamped audit record of how a transport-level reduction (a caller
+   * projection or a named result view) materialized this call's source — for
+   * example whether it promoted the inner dispatch to the full tier. Hosts
+   * record it with the invocation so the cost of that promotion is measurable.
+   * Handlers must never read it, and it is never a validated tool argument.
+   */
+  sourceMaterialization?: Readonly<Record<string, unknown>>;
+  /**
    * True when this call's result does NOT cross the agent-facing transport and
    * therefore must not be force-shaped by `applyPayloadTier`'s hard ceiling
    * (EI-18719561823587590). Set by an IN-PROCESS consumer that reads the data
