@@ -403,3 +403,120 @@ describe('format-implied patterns', () => {
     expect(withPattern.saved).toBeGreaterThanOrEqual(JSON.stringify(pattern).length);
   });
 });
+
+describe('verbatim-repeated subschemas are hoisted into $defs', () => {
+  // The batch envelope shape: the SAME sub-object at the root and in every items[] entry.
+  const big = () => ({
+    type: 'object',
+    properties: {
+      kind: { type: 'string', enum: ['alpha', 'beta', 'gamma'] },
+      refs: { type: 'array', items: { type: 'string', minLength: 1 }, maxItems: 20 },
+    },
+    required: ['kind'],
+    additionalProperties: false,
+  });
+  const batch = (extra: Record<string, unknown> = {}) => ({
+    type: 'object',
+    properties: {
+      report: big(),
+      items: { type: 'array', items: { type: 'object', properties: { report: big(), ...extra } } },
+    },
+  });
+  /** Inline every root-definition ref: the contract a validator actually applies. */
+  const resolve = (schema: any, node: any = schema): any => {
+    if (Array.isArray(node)) return node.map((entry) => resolve(schema, entry));
+    if (node === null || typeof node !== 'object') return node;
+    if (typeof node.$ref === 'string') return resolve(schema, schema.$defs[node.$ref.slice('#/$defs/'.length)]);
+    return Object.fromEntries(
+      Object.entries(node).filter(([key]) => key !== '$defs').map(([key, value]) => [key, resolve(schema, value)]),
+    );
+  };
+
+  it('pays for a repeated sub-object ONCE, named for the property its sites share, with the contract intact', () => {
+    const out = compactInputSchema(batch()) as any;
+    const report = compactInputSchema(big());
+    const inline = {
+      type: 'object',
+      properties: { report, items: { type: 'array', items: { type: 'object', properties: { report } } } },
+    };
+    expect(out.properties.report).toEqual({ $ref: '#/$defs/report' });
+    expect(out.properties.items.items.properties.report).toEqual({ $ref: '#/$defs/report' });
+    expect(out.$defs).toEqual({ report });
+    expect(resolve(out)).toEqual(inline);
+    expect(JSON.stringify(out).length).toBeLessThan(JSON.stringify(inline).length);
+  });
+
+  it('leaves a small repeated leaf inline, so a short field never costs a reader a ref', () => {
+    const leaf = { type: 'string', minLength: 1 };
+    const out = compactInputSchema({ type: 'object', properties: { a: leaf, b: { ...leaf }, c: { ...leaf } } }) as any;
+    expect(out.$defs).toBeUndefined();
+    expect(out.properties).toEqual({ a: leaf, b: leaf, c: leaf });
+  });
+
+  it('names a def by its SHAPE when sites disagree, without clobbering an existing def', () => {
+    const list = () => ({ type: 'array', items: { type: 'string', minLength: 1, maxLength: 200 }, minItems: 1, maxItems: 50 });
+    const out = compactInputSchema({
+      type: 'object',
+      properties: { left: list(), middle: list(), right: list(), other: { $ref: '#/$defs/array' } },
+      $defs: { array: { type: 'number' } },
+    }) as any;
+    for (const key of ['left', 'middle', 'right']) expect(out.properties[key]).toEqual({ $ref: '#/$defs/array_2' });
+    expect(out.$defs).toEqual({ array: { type: 'number' }, array_2: list() });
+    expect(out.properties.other).toEqual({ $ref: '#/$defs/array' });
+  });
+
+  it('names a def in URI-safe characters, so its $ref fragment needs no escaping', () => {
+    // The parents differ (x vs y), so the shared repeat is the sub-object under
+    // an author-chosen property NAME that would need pointer + percent escaping.
+    const odd = 'my key/%#';
+    const out = compactInputSchema({
+      type: 'object',
+      properties: {
+        a: { type: 'object', properties: { [odd]: big(), x: { type: 'string' } } },
+        b: { type: 'object', properties: { [odd]: big(), y: { type: 'integer' } } },
+      },
+    }) as any;
+    const report = compactInputSchema(big());
+    expect(Object.keys(out.$defs)).toEqual(['my_key_']);
+    expect(out.properties.a.properties[odd]).toEqual({ $ref: '#/$defs/my_key_' });
+    expect(out.properties.b.properties[odd]).toEqual({ $ref: '#/$defs/my_key_' });
+    expect(resolve(out)).toEqual({
+      type: 'object',
+      properties: {
+        a: { type: 'object', properties: { [odd]: report, x: { type: 'string' } } },
+        b: { type: 'object', properties: { [odd]: report, y: { type: 'integer' } } },
+      },
+    });
+  });
+
+  it('never rewrites a DATA keyword, even one that repeats verbatim', () => {
+    const members = ['first-long-member-name', 'second-long-member-name', 'third-long-member-name'];
+    const out = compactInputSchema({
+      type: 'object',
+      properties: { a: { enum: [...members] }, b: { enum: [...members] } },
+      'x-meta': { a: [...members], b: [...members] },
+    }) as any;
+    expect(out['x-meta']).toEqual({ a: members, b: members });
+    expect(resolve(out).properties).toEqual({ a: { enum: members }, b: { enum: members } });
+  });
+
+  it('moves nothing when a ref or anchor depends on WHERE a subschema sits', () => {
+    const pinned = [
+      { pointer: { $ref: '#/properties/report/properties/kind' } },
+      { anchored: { $anchor: 'here', type: 'string' } },
+    ];
+    for (const extra of pinned) {
+      const out = compactInputSchema(batch(extra)) as any;
+      expect(out.$defs).toBeUndefined();
+      expect(out.properties.report).toEqual(compactInputSchema(big()));
+    }
+  });
+
+  it('is idempotent and never mutates its input', () => {
+    const input = batch();
+    const snapshot = JSON.stringify(input);
+    const once = compactInputSchema(input);
+    expect(JSON.stringify(input)).toBe(snapshot);
+    expect(compactInputSchema(once)).toEqual(once);
+  });
+});

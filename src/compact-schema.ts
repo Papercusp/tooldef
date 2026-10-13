@@ -170,8 +170,12 @@ const FORMAT_IMPLIED_PATTERNS: ReadonlySet<string> = (() => {
   return pairs;
 })();
 
-/** Whether `pattern` is exactly zod's regex for the sibling `format` (see above). */
-function patternIsImplied(schema: Record<string, unknown>): boolean {
+/**
+ * Whether `pattern` is exactly zod's regex for the sibling `format` (see above).
+ * Exported so a consumer that compares contracts (compact-schema-catalog.test.ts)
+ * applies THIS rule instead of re-deriving the zod regex set and drifting from it.
+ */
+export function isFormatImpliedPattern(schema: Record<string, unknown>): boolean {
   return (
     typeof schema.format === 'string' &&
     typeof schema.pattern === 'string' &&
@@ -186,7 +190,7 @@ function compactNode(node: unknown, inNameKeyedMap: boolean): unknown {
   const out: Record<string, unknown> = {};
   const schema = node as Record<string, unknown>;
   const omitType = !inNameKeyedMap && typeIsImplied(schema);
-  const omitPattern = !inNameKeyedMap && patternIsImplied(schema);
+  const omitPattern = !inNameKeyedMap && isFormatImpliedPattern(schema);
   for (const [key, value] of Object.entries(schema)) {
     // Inside `properties` (etc.) every key is an author-chosen NAME. Keep it
     // verbatim and compact its subschema; never test it against DROPPED.
@@ -203,14 +207,180 @@ function compactNode(node: unknown, inNameKeyedMap: boolean): unknown {
 }
 
 /**
- * Project a JSON Schema onto its compact form: same contract, prose removed.
+ * Keywords whose value is ONE subschema, or a LIST of subschemas (`items` is
+ * both, by draft). Hoisting walks only these and NAME_KEYED_CONTAINERS: `enum`,
+ * `const`, `required` and `x-*` hold DATA, and swapping an identical data value
+ * for a `$ref` would corrupt it.
+ */
+const SUBSCHEMA_KEYS = new Set<string>([
+  'items', 'additionalItems', 'additionalProperties', 'unevaluatedItems',
+  'unevaluatedProperties', 'contains', 'propertyNames', 'not', 'if', 'then', 'else',
+]);
+const SUBSCHEMA_LIST_KEYS = new Set<string>(['anyOf', 'oneOf', 'allOf', 'prefixItems', 'items']);
+/** Keywords that make a subschema's meaning depend on WHERE it sits. */
+const LOCATION_SENSITIVE_KEYS = new Set<string>([
+  '$id', '$anchor', '$dynamicAnchor', '$dynamicRef', '$recursiveAnchor', '$recursiveRef',
+]);
+/** Only a root or root-level-definition ref still resolves after its holder moves. */
+const MOVABLE_REF = /^#(?:\/(?:\$defs|definitions)\/[^/]+)?$/;
+/** A smaller subschema stays inline: a field a reader would otherwise chase a ref for. */
+const HOIST_MIN_SUBSCHEMA_BYTES = 64;
+const HOIST_MIN_SAVED_BYTES = 32;
+const HOIST_MAX_ROUNDS = 64;
+
+type JsonObject = Record<string, unknown>;
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function utf8Bytes(text: string): number {
+  return UTF8_ENCODER.encode(text).byteLength;
+}
+
+interface SubschemaSite {
+  holder: JsonObject | unknown[];
+  slot: string | number;
+  node: JsonObject;
+  /** Nearest enclosing property (or definition) name. */
+  nameHint: string;
+}
+
+/** Collect every replaceable subschema below `node`; false when moving one would be unsafe. */
+function collectSites(node: JsonObject, nameHint: string, sites: SubschemaSite[]): boolean {
+  for (const [key, value] of Object.entries(node)) {
+    if (LOCATION_SENSITIVE_KEYS.has(key)) return false;
+    if (key === '$ref' && (typeof value !== 'string' || !MOVABLE_REF.test(value))) return false;
+    if (NAME_KEYED_CONTAINERS.has(key) && isJsonObject(value)) {
+      const isDefinitions = key === '$defs' || key === 'definitions';
+      for (const [name, child] of Object.entries(value)) {
+        if (!isJsonObject(child)) continue;
+        const hint = key === 'properties' || isDefinitions ? name : nameHint;
+        // A definition body is what refs POINT AT: walked, never replaced.
+        if (!isDefinitions) sites.push({ holder: value, slot: name, node: child, nameHint: hint });
+        if (!collectSites(child, hint, sites)) return false;
+      }
+    } else if (SUBSCHEMA_KEYS.has(key) && isJsonObject(value)) {
+      sites.push({ holder: node, slot: key, node: value, nameHint });
+      if (!collectSites(value, nameHint, sites)) return false;
+    } else if (SUBSCHEMA_LIST_KEYS.has(key) && Array.isArray(value)) {
+      for (let index = 0; index < value.length; index++) {
+        const child = value[index];
+        if (!isJsonObject(child)) continue;
+        sites.push({ holder: value, slot: index, node: child, nameHint });
+        if (!collectSites(child, nameHint, sites)) return false;
+      }
+    }
+  }
+  return true;
+}
+
+/** `JSON.stringify` text, memoized per node so one pass costs ~linear in the document. */
+function jsonText(value: unknown, memo: Map<object, string>): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  const cached = memo.get(value);
+  if (cached !== undefined) return cached;
+  const text = Array.isArray(value)
+    ? `[${value.map((entry) => jsonText(entry, memo)).join(',')}]`
+    : `{${Object.entries(value)
+        .filter(([, entry]) => entry !== undefined)
+        .map(([key, entry]) => `${JSON.stringify(key)}:${jsonText(entry, memo)}`)
+        .join(',')}}`;
+  memo.set(value, text);
+  return text;
+}
+
+/** Def name when the sites disagree on a property name: say what the shape IS. */
+function shapeName(node: JsonObject): string {
+  if (typeof node.format === 'string') return node.format;
+  if (typeof node.type === 'string') return node.type;
+  if (Array.isArray(node.type)) return node.type.join('_');
+  for (const key of ['anyOf', 'oneOf', 'allOf']) if (Object.hasOwn(node, key)) return key;
+  return 'schema';
+}
+
+/**
+ * Keep a def name inside [A-Za-z0-9_.-], so the `$ref` fragment compaction writes
+ * needs neither pointer- nor percent-escaping: a validator that decodes the
+ * fragment (RFC 6901 §6) and one that does not resolve it identically. A
+ * property name is author-chosen and may hold a space, `%`, `/` or `#`.
+ */
+function safeDefinitionName(name: string): string {
+  const safe = name.replace(/[^A-Za-z0-9_.-]+/g, '_');
+  return /[A-Za-z0-9]/.test(safe) ? safe : 'schema';
+}
+
+function definitionRef(definitionsKey: string, name: string): string {
+  return `#/${definitionsKey}/${name.replace(/~/g, '~0').replace(/\//g, '~1')}`;
+}
+
+/**
+ * Move every subschema repeated VERBATIM into one definition plus `$ref`s —
+ * greedily, largest saving first, so an enclosing repeat is taken before the
+ * repeats inside it. Mutates `root`, which must be compaction's own fresh copy.
+ */
+function hoistRepeatedSubschemas(root: unknown): unknown {
+  if (!isJsonObject(root) || Object.hasOwn(root, '$ref')) return root;
+  const definitionsKey =
+    !Object.hasOwn(root, '$defs') && isJsonObject(root.definitions) ? 'definitions' : '$defs';
+  for (let round = 0; round < HOIST_MAX_ROUNDS; round++) {
+    const sites: SubschemaSite[] = [];
+    // Only the untouched input can refuse: every ref this pass writes is movable.
+    if (!collectSites(root, 'schema', sites)) return root;
+    const memo = new Map<object, string>();
+    const groups = new Map<string, SubschemaSite[]>();
+    for (const site of sites) {
+      const text = jsonText(site.node, memo);
+      const group = groups.get(text);
+      if (group) group.push(site);
+      else groups.set(text, [site]);
+    }
+    const existing = root[definitionsKey];
+    const definitions = isJsonObject(existing) ? existing : undefined;
+    let best: { sites: SubschemaSite[]; name: string; saved: number } | undefined;
+    for (const [text, group] of groups) {
+      const bytes = utf8Bytes(text);
+      if (group.length < 2 || bytes < HOIST_MIN_SUBSCHEMA_BYTES) continue;
+      const hint = group[0].nameHint;
+      const base = safeDefinitionName(
+        group.every((site) => site.nameHint === hint) ? hint : shapeName(group[0].node),
+      );
+      let name = base;
+      for (let n = 2; definitions !== undefined && Object.hasOwn(definitions, name); n++) {
+        name = `${base}_${n}`;
+      }
+      const refBytes = utf8Bytes(JSON.stringify({ $ref: definitionRef(definitionsKey, name) }));
+      const entryBytes = utf8Bytes(JSON.stringify(name)) + bytes + 2 +
+        (definitions === undefined ? utf8Bytes(`"${definitionsKey}":{}`) : 0);
+      const saved = group.length * (bytes - refBytes) - entryBytes;
+      if (saved >= HOIST_MIN_SAVED_BYTES && (best === undefined || saved > best.saved)) {
+        best = { sites: group, name, saved };
+      }
+    }
+    if (best === undefined) break;
+    const target: JsonObject = definitions ?? {};
+    root[definitionsKey] = target;
+    target[best.name] = best.sites[0].node;
+    for (const site of best.sites) {
+      (site.holder as Record<string | number, unknown>)[site.slot] = {
+        $ref: definitionRef(definitionsKey, best.name),
+      };
+    }
+  }
+  return root;
+}
+
+/**
+ * Project a JSON Schema onto its compact form: same contract, prose removed,
+ * verbatim repeats hoisted into `$defs`.
  *
  * Pure and total — it never throws on a malformed schema, because it is used on
  * a measurement path where a single bad tool must not take down the whole
- * catalog reading. A non-object input is returned unchanged.
+ * catalog reading. A non-object input is returned unchanged; the input itself
+ * is never mutated (hoisting rewrites compaction's own copy).
  */
 export function compactInputSchema(schema: unknown): unknown {
-  return compactNode(schema, false);
+  return hoistRepeatedSubschemas(compactNode(schema, false));
 }
 
 /** Exact UTF-8 byte length of a value's JSON serialization (0 when undefined). */
