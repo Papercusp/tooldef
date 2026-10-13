@@ -258,6 +258,52 @@ describe('dispatch stage attribution', () => {
     });
   });
 
+  it('attributes slow pre-handler steps as dispatch: phases from dispatch entry, never the invoke step', async () => {
+    // A 121 s kernel-enforce wait used to land before the tracker existed and showed up
+    // as an unnamed gap ahead of the handler's first phase.
+    let clock = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const record = vi.fn();
+    const result = await runDispatchStack(makeTool({
+      fn: async (_args, ctx) => {
+        await ctx.phases!.track('compose', async () => { clock += 30; });
+        return { content: [{ type: 'text', text: 'body' }] };
+      },
+    }), 'fix.tool', {}, MAKE_CTX(), {
+      recordInvocation: record,
+      kernelEnforcement: async ({ phase }) => {
+        clock += phase === 'enforce' ? 120 : 40;
+        return { decision: 'allow' };
+      },
+    });
+    expect(result.ok).toBe(true);
+    const phases = record.mock.calls[0][0].metadataJson.handlerPhases;
+    expect(phases.phases).toEqual([
+      { phase: 'dispatch:kernel-preflight', startMs: 0, durationMs: 40 },
+      { phase: 'dispatch:kernel-enforce', startMs: 40, durationMs: 120 },
+      { phase: 'compose', startMs: 160, durationMs: 30 },
+    ]);
+    expect(phases.elapsedMs).toBe(190);
+    expect(phases.attributedMs).toBe(190);
+    expect(phases.phases.map((p: { phase: string }) => p.phase)).not.toContain('dispatch:invoke');
+  });
+
+  it('records no handler phases for a call refused before its handler, even after a slow gate', async () => {
+    let clock = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const record = vi.fn(), handler = vi.fn();
+    const result = await runDispatchStack(makeTool({ fn: handler }), 'fix.tool', {}, MAKE_CTX(), {
+      recordInvocation: record,
+      kernelEnforcement: async () => {
+        clock += 50;
+        return { decision: 'deny', reason: 'revoked' };
+      },
+    });
+    expect(result.ok).toBe(false);
+    expect(handler).not.toHaveBeenCalled();
+    expect(record.mock.calls[0][0].metadataJson).not.toHaveProperty('handlerPhases');
+  });
+
   it('persists handler phases when the handler fails, and omits them when none were tracked', async () => {
     let clock = 0;
     vi.spyOn(Date, 'now').mockImplementation(() => clock);

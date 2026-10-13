@@ -176,6 +176,12 @@ export interface DispatchExecution {
  */
 let callSeq = 0;
 const CALL_ID_PREFIX = Math.random().toString(36).slice(2, 8);
+/**
+ * A dispatch step shorter than this is not recorded as a `dispatch:<step>` phase. Most
+ * gates finish in microseconds; recording all ~16 per call would roughly double the
+ * handlerPhases payload on every tool_invocations row while attributing no time.
+ */
+export const DISPATCH_PHASE_MIN_MS = 1;
 function nextCallId(): string {
   callSeq += 1;
   return `${CALL_ID_PREFIX}-${callSeq.toString(36)}`;
@@ -766,8 +772,10 @@ const ctxBindingsStep: DispatchStep = {
     const metadataCallback = (data: Record<string, unknown>): void => {
       exec.metadataJson = { ...data };
     };
-    // One tracker per call; the dispatch-stack finally folds it into telemetry.
-    exec.phaseTracker = createPhaseTracker();
+    // One tracker per call; the dispatch-stack finally folds it into telemetry. The stack
+    // runner creates it at dispatch entry (so pre-handler steps are attributed); a direct
+    // step run without the runner still gets one here.
+    exec.phaseTracker ??= createPhaseTracker();
 
     exec.handlerCtx = applyWorkspaceTxContract(tool, toolName, {
       ...ctx,
@@ -1997,6 +2005,11 @@ export async function runDispatchStack(
   stack: ReadonlyArray<DispatchStep> = DEFAULT_DISPATCH_STACK,
 ): Promise<DispatchProjectedResult> {
   const exec = initExecution(tool, toolName, input, ctx, deps);
+  // The per-call phase tracker starts HERE, at dispatch entry, so `handlerPhases.elapsedMs`
+  // is the call's dispatch wall time and pre-handler steps land in it as `dispatch:<step>`
+  // phases. Created inside ctx-bindings it began after kernel-preflight and
+  // capability-envelope, and a 121 s kernel-enforce wait showed up as an unnamed gap.
+  exec.phaseTracker = createPhaseTracker();
   // P-007: a 1219ms plans:get invocation contained only a 53ms body read.
   // Attribute the existing dispatch pipeline in its invocation metadata,
   // including authority waits, rather than treating handler timing as total
@@ -2024,6 +2037,7 @@ export async function runDispatchStack(
   try {
     for (const step of stack) {
       const stepStarted = dispatchStarted === null ? null : performance.now();
+      const stepStartedAt = Date.now();
       try {
         result = await step.run(exec);
       } finally {
@@ -2032,6 +2046,13 @@ export async function runDispatchStack(
             name: step.name,
             elapsedMs: Math.max(0, performance.now() - stepStarted),
           });
+        }
+        // Attribute measurable pre-handler time (authority evaluation, capability
+        // envelope, ...) by step name. `invoke` is NOT recorded: the handler's own
+        // phases attribute its time, and a catch-all phase would hide unattributed gaps.
+        const stepMs = Date.now() - stepStartedAt;
+        if (step.name !== 'invoke' && stepMs >= DISPATCH_PHASE_MIN_MS) {
+          exec.phaseTracker?.addCompleted(`dispatch:${step.name}`, stepStartedAt, stepMs);
         }
       }
       if (result) break;
@@ -2056,7 +2077,11 @@ export async function runDispatchStack(
     if (dispatchStarted !== null) {
       // Framework-owned: applied after handler metadata so a handler cannot
       // spoof either record by calling ctx.metadata({ handlerPhases: … }).
-      const handlerPhases = exec.phaseTracker?.toMetadata() ?? null;
+      // Only a call that reached its handler carries handlerPhases. The tracker now exists
+      // from dispatch entry, so a call refused by a gate could otherwise emit a record
+      // holding only `dispatch:` phases; that call ran no handler and records none.
+      const reachedHandler = dispatchSteps.some((step) => step.name === 'invoke');
+      const handlerPhases = reachedHandler ? (exec.phaseTracker?.toMetadata() ?? null) : null;
       const { handlerPhases: _spoofedPhases, ...handlerMetadata } = exec.metadataJson ?? {};
       exec.metadataJson = {
         ...handlerMetadata,

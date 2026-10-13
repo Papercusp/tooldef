@@ -26,6 +26,7 @@ describe('createPhaseTracker', () => {
       timing: 'wall-time-possibly-concurrent',
       elapsedMs: 60,
       attributedMs: 50,
+      completedAttributedMs: 50,
       pending: [],
       omittedCompletedCount: 0,
     });
@@ -66,8 +67,43 @@ describe('createPhaseTracker', () => {
     const meta = tracker.toMetadata()!;
     expect(meta.phases).toEqual([]);
     expect(meta.pending).toEqual([{ phase: 'slow-fold', startMs: 0, elapsedMs: 1_200 }]);
-    expect(meta.attributedMs).toBe(0);
+    // The in-flight phase covered the wall time it has run so far; the completed-only
+    // union keeps the old reading visible beside it.
+    expect(meta.attributedMs).toBe(1_200);
+    expect(meta.completedAttributedMs).toBe(0);
     expect(tracker.snapshot()).toMatchObject({ activePhase: 'slow-fold', activePhaseElapsedMs: 1_200 });
+  });
+
+  it('counts an in-flight phase only from its start, so a gap before it stays unattributed', async () => {
+    // A handler that returned on its deadline: 300 ms with no phase, then a branch that is
+    // still running when the snapshot is taken 900 ms later.
+    const c = clock();
+    const tracker = createPhaseTracker({ now: c.now });
+    c.advance(300);
+    void tracker.track('compose', () => new Promise<void>(() => undefined));
+    c.advance(900);
+    const meta = tracker.toMetadata()!;
+    expect(meta.elapsedMs).toBe(1_200);
+    expect(meta.attributedMs).toBe(900);
+    expect(meta.completedAttributedMs).toBe(0);
+  });
+
+  it('records a caller-timed completed phase on the tracker clock (addCompleted)', async () => {
+    const c = clock();
+    const tracker = createPhaseTracker({ now: c.now });
+    const stepStartedAt = c.now();
+    c.advance(120);
+    tracker.addCompleted('dispatch:kernel-enforce', stepStartedAt, 120);
+    await tracker.track('handler:preflight', () => { c.advance(30); });
+    c.advance(50); // unattributed tail
+    const meta = tracker.toMetadata()!;
+    expect(meta.phases).toEqual([
+      { phase: 'dispatch:kernel-enforce', startMs: 0, durationMs: 120 },
+      { phase: 'handler:preflight', startMs: 120, durationMs: 30 },
+    ]);
+    expect(meta.elapsedMs).toBe(200);
+    expect(meta.attributedMs).toBe(150);
+    expect(meta.completedAttributedMs).toBe(150);
   });
 
   it('caps history and counts what it dropped', async () => {

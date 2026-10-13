@@ -10,8 +10,16 @@
  *
  * Phases may run concurrently (a handler that fans out with Promise.all), so the
  * sum of phase durations can exceed the wall time. `attributedMs` is therefore the
- * UNION of the completed intervals, clipped to the elapsed window: the share of
- * wall time that some named phase covered.
+ * UNION of the phase intervals, clipped to the elapsed window: the share of wall time
+ * that some named phase covered. A phase still running when the snapshot is taken
+ * (a handler that returned on its own deadline while a branch kept working) covered
+ * the wall time from its start to the snapshot, so it counts up to that instant;
+ * `completedAttributedMs` keeps the completed-only union beside it, and `pending`
+ * still names every in-flight phase. Gaps where no phase ran stay unattributed.
+ *
+ * The dispatcher also records its own pre-handler steps (authority evaluation,
+ * capability envelope, ...) as `dispatch:<step>` phases via `addCompleted`, so wall
+ * time spent before the handler starts is attributed by name instead of vanishing.
  */
 
 /** One completed phase, as exposed by `snapshot()` (shape kept stable for callers). */
@@ -42,8 +50,13 @@ export interface HandlerPhasesMetadata {
   timing: 'wall-time-possibly-concurrent';
   /** Wall time from tracker creation to the snapshot. */
   elapsedMs: number;
-  /** Wall time covered by the union of completed phase intervals, clipped to elapsedMs. */
+  /**
+   * Wall time covered by the union of phase intervals, clipped to elapsedMs. A phase
+   * still in flight at the snapshot counts from its start up to the snapshot.
+   */
   attributedMs: number;
+  /** The same union over COMPLETED phases only (in-flight phases excluded). */
+  completedAttributedMs: number;
   phases: PhaseInterval[];
   /** Phases still running when the call ended (a timeout or an abandoned branch). */
   pending: Array<{ phase: string; startMs: number; elapsedMs: number }>;
@@ -52,6 +65,12 @@ export interface HandlerPhasesMetadata {
 
 export interface PhaseTracker {
   track<T>(phase: string, work: () => T | Promise<T>): Promise<T>;
+  /**
+   * Record a phase that already finished, timed by the caller on this tracker's clock
+   * (`startedAt` is an absolute clock reading). Used by the dispatcher, which times its
+   * steps itself and records only the ones that took measurable time.
+   */
+  addCompleted(phase: string, startedAt: number, durationMs: number): void;
   snapshot(): PhaseSnapshot;
   /** Completed intervals with start offsets, oldest first. */
   intervals(): PhaseInterval[];
@@ -91,6 +110,18 @@ export function createPhaseTracker(options: PhaseTrackerOptions = {}): PhaseTrac
   const active = new Map<number, { phase: string; startedAt: number }>();
   const completed: PhaseInterval[] = [];
 
+  const pushCompleted = (phase: string, startedAt: number, durationMs: number): void => {
+    completed.push({
+      phase,
+      startMs: Math.max(0, startedAt - createdAt),
+      durationMs: Math.max(0, durationMs),
+    });
+    if (completed.length > historyCap) {
+      completed.shift();
+      omittedCompletedCount += 1;
+    }
+  };
+
   return {
     async track<T>(phase: string, work: () => T | Promise<T>): Promise<T> {
       const id = ++nextId;
@@ -100,18 +131,11 @@ export function createPhaseTracker(options: PhaseTrackerOptions = {}): PhaseTrac
       } finally {
         const started = active.get(id);
         active.delete(id);
-        if (started) {
-          completed.push({
-            phase,
-            startMs: Math.max(0, started.startedAt - createdAt),
-            durationMs: Math.max(0, now() - started.startedAt),
-          });
-          if (completed.length > historyCap) {
-            completed.shift();
-            omittedCompletedCount += 1;
-          }
-        }
+        if (started) pushCompleted(phase, started.startedAt, now() - started.startedAt);
       }
+    },
+    addCompleted(phase: string, startedAt: number, durationMs: number): void {
+      pushCompleted(phase, startedAt, durationMs);
     },
     snapshot(): PhaseSnapshot {
       const pending = [...active.values()];
@@ -132,18 +156,21 @@ export function createPhaseTracker(options: PhaseTrackerOptions = {}): PhaseTrac
       if (completed.length === 0 && active.size === 0 && omittedCompletedCount === 0) return null;
       const at = now();
       const elapsedMs = Math.max(0, at - createdAt);
+      const pending = [...active.values()].map(({ phase, startedAt }) => ({
+        phase,
+        startMs: Math.max(0, startedAt - createdAt),
+        elapsedMs: Math.max(0, at - startedAt),
+      }));
+      const inFlight = pending.map(({ startMs, elapsedMs: ran }) => ({ startMs, durationMs: ran }));
       return {
         schemaVersion: 'handler-phases-v1',
         unit: 'ms',
         timing: 'wall-time-possibly-concurrent',
         elapsedMs,
-        attributedMs: unionCoveredMs(completed, elapsedMs),
+        attributedMs: unionCoveredMs([...completed, ...inFlight], elapsedMs),
+        completedAttributedMs: unionCoveredMs(completed, elapsedMs),
         phases: completed.map((interval) => ({ ...interval })),
-        pending: [...active.values()].map(({ phase, startedAt }) => ({
-          phase,
-          startMs: Math.max(0, startedAt - createdAt),
-          elapsedMs: Math.max(0, at - startedAt),
-        })),
+        pending,
         omittedCompletedCount,
       };
     },
