@@ -89,9 +89,12 @@ export function unwrapToolResult(result: ToolResult | undefined): unknown {
   // Narrow on the `type` discriminant — the prior `c is { text: string }` predicate was not a
   // subtype of the content union (TS2677) so it failed to narrow, leaving `.text` unreadable on
   // the image/resource variants (TS2339). Extracting the 'text' member fixes both.
-  const textItem = result.content?.find((c): c is TextContent => c.type === 'text');
-  if (!textItem) return result;
-  const text = textItem.text;
+  const textItems = result.content?.filter((c): c is TextContent => c.type === 'text');
+  if (!textItems?.length) return result;
+  // Projection advisories precede their body in separate MCP text blocks. Decode
+  // the complete text stream so a raw line projection cannot lose its body, and
+  // split JSON/NDJSON follows the same lossless decoding rules as one text block.
+  const text = textItems.map((item) => item.text).join('\n');
   const marker = FORMAT_MARKER_RE.exec(text);
   if (marker && isResultFormat(marker[1]) && marker[1] !== 'md') {
     try {

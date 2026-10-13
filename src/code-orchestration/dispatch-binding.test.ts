@@ -1,7 +1,11 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { z } from 'zod';
 import { encode } from '@papercusp/result-encoding';
 import { unwrapToolResult } from './dispatch-binding';
 import type { ToolResult } from '../wire';
+import { defineTool } from '../define-tool';
+import { dispatchProjectedTool } from '../dispatch-projected';
+import { lookupByMcpName, _resetProjectionRegistryForTests } from '../tool-projection';
 
 const tr = (r: Partial<ToolResult>) => r as ToolResult;
 
@@ -45,6 +49,48 @@ describe('unwrapToolResult (B-CX-1A dispatch binding)', () => {
 
   it('falls back to raw text when the payload is not JSON', () => {
     expect(unwrapToolResult(tr({ content: [{ type: 'text', text: 'hello' }] as never }))).toBe('hello');
+  });
+
+  it('preserves a projected body after its advisory through the real dispatch path', async () => {
+    const advisory = 'Projection inspects rendered JSON lines; the source is partial.';
+    const body = '        "state": "done",';
+    defineTool({
+      name: 't:projection-body',
+      requirePrincipal: false,
+      capability: 'test:read',
+      args: z.object({}),
+      handler: async () => ({ content: [
+        { type: 'text' as const, text: advisory },
+        { type: 'text' as const, text: body },
+      ] }),
+    });
+    try {
+      const dispatched = await dispatchProjectedTool(
+        lookupByMcpName('t:projection-body')!, 't:projection-body', {},
+        { log: vi.fn(), signal: new AbortController().signal, progress: vi.fn(),
+          emit: vi.fn(), workspaceId: 'w', runId: 'r', transport: 'mcp', codeMode: true }, {},
+      );
+      expect(dispatched.ok).toBe(true);
+      expect(unwrapToolResult(dispatched.result)).toBe(`${advisory}\n${body}`);
+    } finally {
+      _resetProjectionRegistryForTests();
+    }
+  });
+
+  it('decodes JSON split across text blocks', () => {
+    expect(unwrapToolResult(tr({ content: [
+      { type: 'text', text: '{"ok":true,' },
+      { type: 'text', text: '"n":3}' },
+    ] as never }))).toEqual({ ok: true, n: 3 });
+  });
+
+  it('preserves both JSON records when distinct text blocks form an NDJSON stream', () => {
+    const first = '{"first":1}';
+    const second = '{"second":2}';
+    expect(unwrapToolResult(tr({ content: [
+      { type: 'text', text: first },
+      { type: 'text', text: second },
+    ] as never }))).toBe(`${first}\n${second}`);
   });
 
   it('returns undefined for a missing result', () => {
