@@ -1043,6 +1043,19 @@ function projectIdentityPreview(
     return '[circular]';
   }
   if (depth >= IDENTITY_PREVIEW_DEPTH) {
+    // A selected leaf can be deeper than both the normal walk and this
+    // identity-only continuation. Keep walking only the named branch, resetting
+    // the preview depth at each boundary; its preserve-path suffix shrinks as
+    // each selected key/array element is visited. Without this, an explicit
+    // projection such as workItem.payload.evidence.packet.ratings.selected
+    // stops at the first preview boundary and reads like the selected value is
+    // absent (EI-25896291821926520).
+    if (preservePaths.some((preservePath) => preservePath.length === 0)) {
+      return projectValue(value, path, 0, state, [], partialTarget);
+    }
+    if (preservePaths.length > 0 && hasPreservedValue(value, preservePaths)) {
+      return projectIdentityPreview(value, path, 0, state, preservePaths, partialTarget);
+    }
     recordOmission(state, path, 'non-identity detail omitted at compact preview depth');
     return omissionMarker(state.recoveryPointer, 'compact preview depth');
   }
