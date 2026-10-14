@@ -1355,6 +1355,35 @@ describe('projectBoundedPayload — truncation is announced in band', () => {
 // `[omitted: projection budget]` carrying neither size nor recovery path, which
 // is opencode's `[Old tool result content cleared]` shape and strictly dominated
 // by OMP's `[shaken ~N tokens — recover: artifact://<id>]`.
+describe('projectBoundedPayload — scorecards:emit nested audit evidence', () => {
+  it('reproduces the reported bare criterion object under forced trimmed projection', () => {
+    const ratings = Object.fromEntries([
+      'criterion-0',
+      'criterion-1',
+      'criterion-2',
+      'criterion-3',
+      'criterion-4',
+      'degenerate-distribution',
+    ].map((key) => [key, { rating: 'pass', evidence: 'e'.repeat(1_063) }]));
+    const source = {
+      ok: true,
+      created: true,
+      issueId: 'EI-25875035190373891',
+      canonicalRatings: ratings,
+    };
+    const projected = projectBoundedPayload(source, {
+      toolName: 'scorecards:emit',
+      tier: 'trimmed',
+      forced: true,
+      originalChars: JSON.stringify(source).length,
+    }) as typeof source & { _projection?: unknown };
+
+    expect(JSON.stringify(source).length).toBeGreaterThan(6_500);
+    expect(JSON.stringify(source).length).toBeLessThan(7_000);
+    expect(projected.canonicalRatings['degenerate-distribution']).toEqual({});
+  });
+});
+
 describe('projectBoundedPayload — a value dropped WHOLE says how much and how to recover it', () => {
   it('EVERY omission marker it emits names the recovery knob', () => {
     // Deliberately shape-agnostic: it asserts the CONTRACT over whatever markers
