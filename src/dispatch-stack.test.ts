@@ -766,6 +766,18 @@ describe('runDispatchStack — custom stack', () => {
     expect(extractSoftFailureOutcome({ content: [{ type: 'text', text: 'not json' }] })).toBeNull();
   });
 
+  it('retains bounded top-level in-band error/message text for soft failures', () => {
+    for (const field of ['error', 'message'] as const) {
+      expect(extractSoftFailureOutcome({
+        structuredContent: { ok: false, [field]: `  ${'failure '.repeat(100)}  ` },
+        content: [],
+      })).toEqual({
+        resultOutcome: 'soft-failure',
+        softFailureReason: 'failure '.repeat(64),
+      });
+    }
+  });
+
   it('classifies a WHOLLY-failed bulk envelope (WI-10004868: a refused single-id work_items:claim carried no marker)', () => {
     // The exact shape work_items:claim returned for an admission-pending item.
     expect(extractSoftFailureOutcome({
@@ -842,9 +854,10 @@ describe('runDispatchStack — custom stack', () => {
         resultOutcome: 'soft-failure',
         softFailureReason: 'no_assistant_turn',
       },
+      errorMessage: 'no_assistant_turn',
     });
     expect(captured?.errorCode).toBeUndefined();
-    expect(captured?.errorMessage).toBeUndefined();
+    expect(captured?.errorMessage).toBe('no_assistant_turn');
   });
 
   it('captures the served result _meta.format into recorded metadata_json (usage-insights P-002)', async () => {

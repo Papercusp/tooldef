@@ -1690,7 +1690,11 @@ export function extractSoftFailureOutcome(result: Pick<ToolResult, 'content' | '
   if (!candidate || candidate.ok !== false) return null;
   const reason = typeof candidate.reason === 'string'
     ? candidate.reason.trim()
-    : bulkEnvelopeFailureReason(candidate);
+    : typeof candidate.error === 'string'
+      ? candidate.error.trim()
+      : typeof candidate.message === 'string'
+        ? candidate.message.trim()
+        : bulkEnvelopeFailureReason(candidate);
   if (!reason) return null;
   return {
     resultOutcome: 'soft-failure',
@@ -1928,7 +1932,9 @@ async function recordTelemetry(
               errorCode: refusal?.code ?? REFUSAL_FALLBACK_CODE,
               errorMessage: refusal?.message ?? REFUSAL_FALLBACK_MESSAGE,
             }
-          : {}),
+          : softFailure
+            ? { errorMessage: softFailure.softFailureReason }
+            : {}),
         outputSize: r.outputSize ?? new TextEncoder().encode(JSON.stringify(r.content)).byteLength,
         ...(r.outputRef ? { outputRef: r.outputRef } : {}),
         args: input,
