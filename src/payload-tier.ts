@@ -1620,6 +1620,7 @@ export function projectBoundedPayload(
       if (contentBudget < 200) break;
       const reState: ProjectionState = {
         remaining: contentBudget,
+        arrayTruncation: state.arrayTruncation,
         omittedCount: 0,
         omitted: [],
         priorityOmitted: [],
@@ -1669,6 +1670,7 @@ export function projectBoundedPayload(
 
     const identityState: ProjectionState = {
       remaining: Math.max(400, Math.floor(target * 0.2)),
+      arrayTruncation: state.arrayTruncation,
       omittedCount: 0,
       omitted: [],
       priorityOmitted: [],
