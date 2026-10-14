@@ -347,7 +347,7 @@ describe('dispatchProjectedTool', () => {
       capability: 'test:read',
       args: z.object({}),
       async handler() {
-        return { data: { ok: false, recorded: false, reason: 'transcript_not_found' } };
+        return { data: { ok: false, recorded: false, error: 'transcript_not_found' } };
       },
     });
     let captured: {
@@ -373,9 +373,10 @@ describe('dispatchProjectedTool', () => {
         resultOutcome: 'soft-failure',
         softFailureReason: 'transcript_not_found',
       },
+      errorMessage: 'transcript_not_found',
     });
     expect(captured?.errorCode).toBeUndefined();
-    expect(captured?.errorMessage).toBeUndefined();
+    expect(captured?.errorMessage).toBe('transcript_not_found');
   });
 
   it('records handler_error when fn throws', async () => {
