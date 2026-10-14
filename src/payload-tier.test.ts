@@ -763,7 +763,7 @@ describe('applyPayloadTier', () => {
       targetChars: 6_000,
       preservePaths: ['ok', 'inspection.waiters'],
     }) as unknown as {
-      inspection: { waiters: Array<{ note?: string }> };
+      inspection: { waiters: Array<{ note?: string; kind?: string; _truncated?: boolean; omittedCount?: number }> };
       _projection: { truncated: boolean; omitted: Array<{ path: string; reason: string }> };
     };
 
@@ -773,9 +773,14 @@ describe('applyPayloadTier', () => {
     expect(shown.length).toBeLessThan(200);
     // Whole rows, not 64-char husks of all 200.
     expect(shown[0]?.note).toBe('y'.repeat(320));
+    expect(shown.at(-1)).toMatchObject({
+      kind: 'projection-truncation',
+      _truncated: true,
+      omittedCount: 188,
+    });
     expect(projected._projection.omitted).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        path: `$.inspection.waiters[${shown.length}]`,
+        path: `$.inspection.waiters[${shown.length - 1}]`,
         reason: expect.stringMatching(/array item\(s\) omitted/),
       }),
     ]));
@@ -1165,6 +1170,50 @@ describe('projectBoundedPayload — truncation is announced in band', () => {
     expect(out.note as string).not.toMatch(/TRUNCATED/);
   });
 
+  it('REGRESSION (EI-25825545378178967): budget-truncated code:run key arrays carry their own marker', () => {
+    const argsKeys = [
+      'harness', 'slug', 'classRef', 'evaluatorBuild', 'specIds', 'evidenceRefs', 'planItemIds',
+      'includeDraft', 'limit', 'specRevision', 'specFingerprint', 'replaySnapshot', 'current',
+    ];
+    const out = projectBoundedPayload(
+      {
+        summary: {
+          paddingA: 'a'.repeat(600),
+          paddingB: 'b'.repeat(610),
+          argsKeys,
+        },
+      },
+      {
+        toolName: 'code:run',
+        tier: 'trimmed',
+        targetChars: 3_000,
+        preservePaths: ['summary'],
+      },
+    );
+    const returnedKeys = (out.summary as { argsKeys: unknown[] }).argsKeys;
+
+    // This reproduces the reported shape: only the first two keys fit, while
+    // `_partial` and `_projection.omittedCount` live outside the array itself.
+    expect(returnedKeys.slice(0, 2)).toEqual(argsKeys.slice(0, 2));
+    expect(returnedKeys.at(-1)).toEqual(expect.stringMatching(/^\[TRUNCATED \+11 more item/));
+    expect((out as any)._partial).toBe(true);
+    expect(out._projection.omittedCount).toBeGreaterThan(0);
+  });
+
+  it('REGRESSION (EI-25825545378178967): depth-preview arrays carry their own marker too', () => {
+    const out = projectBoundedPayload(
+      {
+        ok: true,
+        a: { b: { c: { d: { items: Array.from({ length: 13 }, (_, index) => `key-${index}`) } } } },
+      },
+      { toolName: 'code:run', tier: 'trimmed' },
+    );
+    const items = (out.a as any).b.c.d.items as unknown[];
+
+    expect(items.slice(0, 12)).toEqual(Array.from({ length: 12 }, (_, index) => `key-${index}`));
+    expect(items.at(-1)).toEqual(expect.stringMatching(/^\[TRUNCATED \+1 more item/));
+  });
+
   it('marks AND records the BUDGET-pressure clip, which was previously silent in both channels', () => {
     // Sized to pass the per-string maxString gate (800 at trimmed) on every row
     // while collectively exhausting the running budget, so the halving loop —
@@ -1478,17 +1527,25 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     );
 
     const projectedCriteria = (out.rubric as { criteria: unknown[] }).criteria;
-    expect(projectedCriteria).toHaveLength(12);
-    expect(projectedCriteria.every((entry) =>
+    const domainCriteria = projectedCriteria.slice(0, -1);
+    expect(domainCriteria).toHaveLength(12);
+    expect(domainCriteria.every((entry) =>
       entry !== null && typeof entry === 'object' && (entry as Record<string, unknown>).key !== undefined,
     )).toBe(true);
+    expect(projectedCriteria.at(-1)).toMatchObject({
+      kind: 'projection-truncation',
+      _truncated: true,
+      omittedCount: 5,
+      shownCount: 12,
+      renderedCount: 17,
+    });
     expect((out as any)._partial).toBe(true);
 
-    // The serialized count includes only domain rows. The envelope marker and
-    // omission path disclose why fewer rows are visible.
+    // The TOON count includes the marker row, so a consumer cannot read the
+    // shortened prefix as a complete 12-row result.
     const toon = encodeResult(out, 'toon');
-    expect(toon).toContain('criteria[12]:');
-    expect(toon).not.toContain('projection-truncation');
+    expect(toon).toContain('criteria[13]:');
+    expect(toon).toContain('projection-truncation');
     expect(out._projection.omitted).toEqual(expect.arrayContaining([
       expect.objectContaining({
         path: '$.rubric.criteria[12]',
@@ -1512,9 +1569,16 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     const projectedRuns = out.runs as Array<Record<string, unknown>>;
 
     expect(projectedRuns.every((row) => row !== null && typeof row === 'object' && !Array.isArray(row))).toBe(true);
-    expect(projectedRuns).toHaveLength(12);
+    expect(projectedRuns).toHaveLength(13);
+    expect(projectedRuns.at(-1)).toMatchObject({
+      kind: 'projection-truncation',
+      _truncated: true,
+      omittedCount: 5,
+      shownCount: 12,
+      renderedCount: 17,
+    });
     expect((out as any)._partial).toBe(true);
-    expect(projectedRuns.every((row) => row._truncated !== true)).toBe(true);
+    expect(projectedRuns.slice(0, -1).every((row) => row._truncated !== true)).toBe(true);
     expect(out._projection.omitted).toEqual(expect.arrayContaining([
       expect.objectContaining({
         path: '$.runs[12]',
@@ -1549,9 +1613,16 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     const shown = projected;
     expect(shown.length).toBeGreaterThan(0);
     expect(shown.every(isRow)).toBe(true);
-    expect(projected).toHaveLength(12);
+    expect(projected).toHaveLength(13);
+    expect(projected.at(-1)).toMatchObject({
+      kind: 'projection-truncation',
+      _truncated: true,
+      omittedCount: 5,
+      shownCount: 12,
+      renderedCount: 17,
+    });
     expect((out as any)._partial).toBe(true);
-    expect(projected.every((row) => (row as Record<string, unknown>).kind !== 'projection-truncation')).toBe(true);
+    expect(projected.slice(0, -1).every((row) => (row as Record<string, unknown>).kind !== 'projection-truncation')).toBe(true);
     expect(out._projection.omitted).toEqual(expect.arrayContaining([
       expect.objectContaining({
         path: '$.active_locks[12]',
@@ -1572,7 +1643,8 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
       { toolName: 't', tier: 'trimmed' },
     );
     const values = out.values as unknown[];
-    expect(values).toEqual(Array.from({ length: 12 }, (_, i) => i));
+    expect(values.slice(0, 12)).toEqual(Array.from({ length: 12 }, (_, i) => i));
+    expect(values.at(-1)).toEqual(expect.stringMatching(/^\[TRUNCATED \+5 more item/));
     expect((out as any)._partial).toBe(true);
     expect(out._projection.omitted).toEqual(expect.arrayContaining([
       expect.objectContaining({

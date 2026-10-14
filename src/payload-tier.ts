@@ -1086,7 +1086,10 @@ function projectIdentityPreview(
           true,
         );
         if (partialTarget) markPartial(partialTarget, state);
-        else projected.push(arrayTruncationValue(projected, droppedCount, projected.length, value.length));
+        // Parent-level partialness is useful context, but it is not carried with
+        // the array when a caller reads or encodes that value on its own. Keep
+        // the count marker inside every shortened array as well.
+        projected.push(arrayTruncationValue(projected, droppedCount, projected.length, value.length));
       }
       return projected;
     }
@@ -1260,7 +1263,9 @@ function projectValue(
           true,
         );
         if (partialTarget) markPartial(partialTarget, state);
-        else projected.push(arrayTruncationValue(projected, droppedCount, projected.length, value.length));
+        // The enclosing row's `_partial` flag can be separated from this array;
+        // preserve its own completeness signal for downstream `.length` reads.
+        projected.push(arrayTruncationValue(projected, droppedCount, projected.length, value.length));
       }
       return projected;
     }
