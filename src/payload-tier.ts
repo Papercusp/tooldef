@@ -262,6 +262,10 @@ export interface ProjectBoundedPayloadOpts {
    * door's own machine-readable metadata path.
    */
   preserveArrayRoot?: boolean;
+  /** Keep shortened nested arrays domain-only when their containing object
+   * carries `_partial` and the host retains projection/recovery metadata.
+   * Bare array roots still need an in-band marker. Default: `marker`. */
+  arrayTruncation?: 'marker' | 'envelope';
   /**
    * Explicit caller-selected paths that must remain addressable when the bounded
    * preview reaches its depth/key fallback. The result door supplies the same
@@ -330,6 +334,7 @@ interface ProjectionState {
    */
   recoveryPointer: string;
   preservePaths: readonly PreservePathSegment[][];
+  arrayTruncation: 'marker' | 'envelope';
   bulkEnvelope?: Required<BulkEnvelopeProjectionOpts>;
 }
 
@@ -1086,10 +1091,11 @@ function projectIdentityPreview(
           true,
         );
         if (partialTarget) markPartial(partialTarget, state);
-        // Parent-level partialness is useful context, but it is not carried with
-        // the array when a caller reads or encodes that value on its own. Keep
-        // the count marker inside every shortened array as well.
-        projected.push(arrayTruncationValue(projected, droppedCount, projected.length, value.length));
+        // Standalone arrays need their own completeness signal. Hosts retaining
+        // the enclosing envelope can instead keep the array's domain contract.
+        if (!partialTarget || state.arrayTruncation === 'marker') {
+          projected.push(arrayTruncationValue(projected, droppedCount, projected.length, value.length));
+        }
       }
       return projected;
     }
@@ -1263,9 +1269,9 @@ function projectValue(
           true,
         );
         if (partialTarget) markPartial(partialTarget, state);
-        // The enclosing row's `_partial` flag can be separated from this array;
-        // preserve its own completeness signal for downstream `.length` reads.
-        projected.push(arrayTruncationValue(projected, droppedCount, projected.length, value.length));
+        if (!partialTarget || state.arrayTruncation === 'marker') {
+          projected.push(arrayTruncationValue(projected, droppedCount, projected.length, value.length));
+        }
       }
       return projected;
     }
@@ -1358,6 +1364,7 @@ function projectCursorArgs(args: unknown): {
     priorityOmitted: [],
     preservedOmittedPaths: [],
     active: new WeakSet<object>(),
+    arrayTruncation: 'marker',
     limits: { maxArray: 12, maxDepth: 5, maxKeys: 40, maxString: 800 },
     // This projection BUILDS the cursor args, so it cannot point at the cursor
     // it is producing. It defers to `_projection.next` instead — which, for
@@ -1434,6 +1441,7 @@ export function projectBoundedPayload(
     : GENERIC_PROJECTION_TARGET_CHARS[projectionTier];
   const state: ProjectionState = {
     remaining: Math.max(1_000, target - 1_600),
+    arrayTruncation: opts.arrayTruncation ?? 'marker',
     omittedCount: 0,
     omitted: [],
     priorityOmitted: [],
