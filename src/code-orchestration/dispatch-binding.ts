@@ -91,10 +91,13 @@ export function unwrapToolResult(result: ToolResult | undefined): unknown {
   // the image/resource variants (TS2339). Extracting the 'text' member fixes both.
   const textItems = result.content?.filter((c): c is TextContent => c.type === 'text');
   if (!textItems?.length) return result;
-  // Projection advisories precede their body in separate MCP text blocks. Decode
-  // the complete text stream so a raw line projection cannot lose its body, and
-  // split JSON/NDJSON follows the same lossless decoding rules as one text block.
-  const text = textItems.map((item) => item.text).join('\n');
+  // Projection advisories precede the actual body. Ignore only those recognized
+  // metadata blocks for decoding; preserve the complete stream if the remaining
+  // body is raw text or NDJSON. Arbitrary prose is never a reason to select a
+  // later JSON record, and split JSON still decodes as one complete value.
+  const rawText = textItems.map((item) => item.text).join('\n');
+  const bodyItems = textItems.filter(item => !/^(?:\[projection:|⚠ (?:pick path\(s\)|the tool or its payload shaper marked)|Projection inspects rendered JSON lines;|See also:)/.test(item.text));
+  const text = bodyItems.map(item => item.text).join('\n');
   const marker = FORMAT_MARKER_RE.exec(text);
   if (marker && isResultFormat(marker[1]) && marker[1] !== 'md') {
     try {
@@ -109,7 +112,7 @@ export function unwrapToolResult(result: ToolResult | undefined): unknown {
   } catch {
     const withTrailer = parseJsonWithTrailer(text);
     if (withTrailer) return unwrapValue(result, withTrailer.value);
-    return text;
+    return rawText;
   }
 }
 

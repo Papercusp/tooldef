@@ -93,6 +93,42 @@ describe('unwrapToolResult (B-CX-1A dispatch binding)', () => {
     ] as never }))).toBe(`${first}\n${second}`);
   });
 
+  it('decodes the JSON body after projection advisories through real dispatch', async () => {
+    const advisory = '⚠ pick path(s) matched nothing: missing\n[projection: pick results[].section → 8 lines]';
+    defineTool({ name: 't:projected-json', requirePrincipal: false, capability: 'test:read', args: z.object({}),
+      handler: async () => ({ content: [
+        { type: 'text' as const, text: advisory },
+        { type: 'text' as const, text: '{"ok":true,"results":[{"section":{"body":"actual plan"}}]}' },
+        { type: 'text' as const, text: 'See also: plans:items' },
+      ] }) });
+    try {
+      const dispatched = await dispatchProjectedTool(lookupByMcpName('t:projected-json')!, 't:projected-json', {},
+        { log: vi.fn(), signal: new AbortController().signal, progress: vi.fn(), emit: vi.fn(),
+          workspaceId: 'w', runId: 'r', transport: 'mcp', codeMode: true }, {});
+      expect(dispatched.ok).toBe(true);
+      expect(unwrapToolResult(dispatched.result)).toEqual({ ok: true, results: [{ section: { body: 'actual plan' } }] });
+    } finally { _resetProjectionRegistryForTests(); }
+  });
+
+  it('decodes a compact body after a projection advisory and preserves metadata/error flags', () => {
+    const body = encode({ error: 'scope_missing' }, 'toon');
+    expect(unwrapToolResult(tr({ isError: true, _meta: { nextCursor: 'page-2' }, content: [
+      { type: 'text', text: '[projection: pick error → 1 line]' },
+      { type: 'text', text: `format: toon\n${body}` },
+    ] as never }))).toMatchObject({ error: 'scope_missing', ok: false, nextCursor: 'page-2' });
+  });
+
+  it('does not select one record from NDJSON or from arbitrary prose followed by JSON', () => {
+    const advisory = '[projection: pick count → 2 records]';
+    const first = '{"first":1}', second = '{"second":2}';
+    expect(unwrapToolResult(tr({ content: [
+      { type: 'text', text: advisory }, { type: 'text', text: first }, { type: 'text', text: second },
+    ] as never }))).toBe(`${advisory}\n${first}\n${second}`);
+    expect(unwrapToolResult(tr({ content: [
+      { type: 'text', text: 'Opaque output must survive.' }, { type: 'text', text: first },
+    ] as never }))).toBe(`Opaque output must survive.\n${first}`);
+  });
+
   it('returns undefined for a missing result', () => {
     expect(unwrapToolResult(undefined)).toBeUndefined();
   });
