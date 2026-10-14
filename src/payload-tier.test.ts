@@ -1637,6 +1637,36 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     expect(projected.some((r) => typeof r === 'string')).toBe(false);
   });
 
+  it.each([
+    { name: 'normal projection', depth: 0 },
+    { name: 'compact identity preview', depth: 5 },
+  ])('EI-25974584172289918: envelope truncation keeps domain rows in $name', ({ depth }) => {
+    const rows = Array.from({ length: 17 }, (_, index) => ({ id: `row-${index}`, kind: 'message' }));
+    let source: Record<string, unknown> = { items: rows };
+    for (let index = 0; index < depth; index++) source = { results: source };
+    const out = projectBoundedPayload(source, {
+      toolName: 'coord:thread', tier: 'trimmed', arrayTruncation: 'envelope',
+    });
+    let envelope = out as Record<string, unknown>;
+    for (let index = 0; index < depth; index++) envelope = envelope.results as Record<string, unknown>;
+    expect(envelope.items).toEqual(rows.slice(0, 12));
+    expect((out as Record<string, unknown>)._partial).toBe(true);
+    expect(out._projection.omittedCount).toBeGreaterThanOrEqual(5);
+    expect(out._projection.omitted).toEqual(expect.arrayContaining([
+      expect.objectContaining({ reason: expect.stringContaining('showing 12 of 17 rendered input entries') }),
+    ]));
+  });
+
+  it('EI-25974584172289918: envelope truncation retains a standalone array marker', () => {
+    const out = projectBoundedPayload(Array.from({ length: 17 }, (_, index) => ({ id: `row-${index}` })), {
+      toolName: 'work_items:list', tier: 'trimmed', arrayTruncation: 'envelope', preserveArrayRoot: true,
+    });
+    expect(Array.isArray(out)).toBe(true);
+    expect((out as unknown as unknown[]).at(-1)).toMatchObject({
+      kind: 'projection-truncation', omittedCount: 5, shownCount: 12, renderedCount: 17,
+    });
+  });
+
   it('keeps primitive arrays domain-only and marks the containing envelope partial', () => {
     const out = projectBoundedPayload(
       { values: Array.from({ length: 17 }, (_, i) => i) },
