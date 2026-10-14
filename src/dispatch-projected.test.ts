@@ -576,6 +576,36 @@ describe('dispatchProjectedTool', () => {
     });
   });
 
+  it('withholds an array ids correction when the real target is a scalar numeric id', async () => {
+    // Regression for EI-25888359186521283: the captured orders:get refusal suggested
+    // copying `ids: [1483, 1485]` into scalar `id`, so following the hint failed again.
+    // The actual validator must screen a near-name correction even when `id` is coercive.
+    defineTool({
+      name: 'test:orders-get-scalar-id',
+      requirePrincipal: false as const,
+      capability: 'test:read',
+      args: z.strictObject({ id: z.coerce.number().int().positive() }),
+      async handler() {
+        return { content: [{ type: 'text' as const, text: 'ok' }] };
+      },
+    });
+
+    const result = await dispatchProjectedTool(
+      lookupByMcpName('test:orders-get-scalar-id')!,
+      'test:orders-get-scalar-id',
+      { ids: [1483, 1485] },
+      MAKE_CTX(),
+      MAKE_DEPS(),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error?.code).toBe('invalid_input');
+    expect(result.error?.message).toContain('id');
+    expect(result.error?.message).not.toContain('CORRECTED CALL');
+    expect(result.error?.message).not.toContain('Did you mean `id` for `ids`?');
+    expect(result.error?.meta?.invalidInput).not.toHaveProperty('correctedCall');
+  });
+
   it('returns a corrected call for known-key mutually-exclusive refinement failures', async () => {
     defineTool({
       name: 'test:invalid-input-known-conflict',
