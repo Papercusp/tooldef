@@ -1112,6 +1112,8 @@ export interface ProjectedTool {
    * an invalid value or throws.
    */
   effectForCall?: (args: unknown) => 'read' | 'write';
+  /** A static marker or argument-sensitive irreversible effect classifier. */
+  irreversible?: boolean | ((args: unknown) => boolean);
   /**
    * Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6 / P-007). When
    * `true`, a handler that RAN TO COMPLETION but whose `ctx.signal` had already aborted

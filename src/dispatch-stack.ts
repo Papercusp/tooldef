@@ -74,6 +74,7 @@ import { evaluateDataCondition } from '@papercusp/rules';
 import type { ToolPreInvokeEvent, ToolRequireSpec } from './requires';
 import { applyWorkspaceTxContract } from './workspace-tx';
 import { createPhaseTracker, type PhaseTracker } from './phase-tracker';
+import { prepareDispatchPremises } from './dispatch-premises';
 
 /* ─── Step names ─────────────────────────────────────────────────────── */
 
@@ -89,6 +90,7 @@ export type DispatchStepName =
   | 'authorize'
   | 'preconditions'
   | 'entity-check'
+  | 'premises'
   | 'timeout'
   | 'idle-watchdog'
   | 'replay-buffer'
@@ -109,6 +111,8 @@ export interface DispatchExecution {
   readonly tool: ProjectedTool;
   readonly toolName: string;
   readonly input: unknown;
+  /** Framework-owned evidence; handler metadata cannot overwrite it. */
+  readonly premises: ReturnType<typeof prepareDispatchPremises> & { irreversible?: boolean; resolutions?: unknown[] };
   /** Original ctx as received by the dispatcher. */
   readonly ctx: UnifiedToolContext;
   readonly deps: DispatchProjectedDeps;
@@ -194,6 +198,8 @@ function initExecution(
   ctx: UnifiedToolContext,
   deps: DispatchProjectedDeps,
 ): DispatchExecution {
+  const premises = prepareDispatchPremises(input, toolName);
+  input = premises.input;
   // EI-18808330244321407: enforce the tx contract before ANY gate or
   // authorizer can observe ctx. The final handler-decorator spread below
   // reapplies the guard because its getter is deliberately non-enumerable.
@@ -209,6 +215,7 @@ function initExecution(
     tool,
     toolName,
     input,
+    premises,
     ctx: contractCtx,
     deps,
     callId: nextCallId(),
@@ -1514,6 +1521,36 @@ export const DEFAULT_DISPATCH_STACK: ReadonlyArray<DispatchStep> = Object.freeze
   authorizeStep,
   preconditionsStep,
   entityCheckStep,
+  {
+    name: 'premises',
+    async run(exec) {
+      const p = exec.premises;
+      if (p.error) return { ok: false, error: { code: 'invalid_input', message: p.error } };
+      try {
+        p.irreversible = typeof exec.tool.irreversible === 'function'
+          ? exec.tool.irreversible(exec.input) : exec.tool.irreversible === true;
+      } catch {
+        p.irreversible = true;
+      }
+      if (!p.provided || p.refs.length === 0) return null;
+      let rows: Awaited<ReturnType<NonNullable<DispatchProjectedDeps['resolvePremises']>>>;
+      try {
+        rows = await exec.deps.resolvePremises?.(p.refs, exec.ctx) ?? [];
+      } catch {
+        rows = [];
+      }
+      const resolutions = p.refs.map(ref => rows.find(row => row.ref === ref) ??
+        { ref, status: 'unknown' as const, reason: 'premise resolver unavailable' });
+      p.resolutions = resolutions;
+      const invalid = resolutions.filter(row => row.status !== 'confirmed');
+      if (p.irreversible && invalid.length) return { ok: false, error: {
+        code: 'premise_unconfirmed',
+        message: `Irreversible call refused: ${invalid.map(row => `${row.ref} (${row.status})`).join(', ')}`,
+        meta: { premises: invalid },
+      } };
+      return null;
+    },
+  },
   timeoutStep,
   idleWatchdogStep,
   replayBufferStep,
@@ -1528,7 +1565,7 @@ const PREFLIGHT_STEP: Record<DispatchStepName, boolean> = {
   'kernel-preflight': true, 'default-deny': true, 'role-allowlist': true,
   'capability-check': true, 'capability-envelope': true, 'role-requirement': true,
   'harness-check': true, quota: true, authorize: true, preconditions: true,
-  'entity-check': true, timeout: false, 'idle-watchdog': false,
+  'entity-check': true, premises: true, timeout: false, 'idle-watchdog': false,
   'replay-buffer': false, 'ctx-bindings': false, 'kernel-enforce': true, invoke: false,
 };
 
@@ -1828,7 +1865,10 @@ async function recordTelemetry(
       code === 'authorization_denied' ||
       code === 'quota_exceeded');
   const isKernelDenial = kernelPreflight?.decision === 'deny' || kernelEnforcement?.decision === 'deny';
-  if (!isGateDenial && !isKernelDenial && !windowKey) return;
+  // Declared premises and irreversible calls need evidence even when this
+  // transport has no quota window (HTTP/IPC and unscoped internal calls).
+  if (!isGateDenial && !isKernelDenial && !windowKey &&
+      !exec.premises.provided && !exec.premises.irreversible) return;
 
   // Keep the original context byte-for-byte on the legacy/no-port path. Once
   // a kernel decision exists, hand sinks the enriched context as well as the
@@ -1968,6 +2008,14 @@ async function recordTelemetry(
 }
 
 function finalizeMetadata(exec: DispatchExecution): Record<string, unknown> | null {
+  if (exec.premises.provided || exec.premises.irreversible) {
+    exec.metadataJson = { ...(exec.metadataJson ?? {}), premises: {
+      provided: exec.premises.provided, refs: exec.premises.refs,
+      irreversible: exec.premises.irreversible ?? false,
+      resolutions: exec.premises.resolutions ?? [],
+      ...(exec.premises.error ? { error: exec.premises.error } : {}),
+    } };
+  }
   if (exec.ctx.uiClientId) {
     const base = exec.metadataJson ?? {};
     if (base.uiClientId === undefined) {

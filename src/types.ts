@@ -631,6 +631,8 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
    * cannot classify a call.
    */
   effectForCall?: (args: StandardSchemaV1.InferOutput<TArgs>) => 'read' | 'write';
+  /** Irreversible/outward effect; mixed tools classify the actual call. */
+  irreversible?: boolean | ((args: StandardSchemaV1.InferOutput<TArgs>) => boolean);
   /** Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): when
    *  true, a handler that COMPLETED but whose `ctx.signal` had already aborted (the
    *  wall-clock/idle timeout fired mid-handler under load) surfaces its completed result as
@@ -753,6 +755,7 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
   effect?: 'read' | 'write';
   /** Optional argument-sensitive effect classifier; see ToolDefinition.effectForCall. */
   effectForCall?: (args: StandardSchemaV1.InferOutput<TArgs>) => 'read' | 'write';
+  irreversible?: boolean | ((args: StandardSchemaV1.InferOutput<TArgs>) => boolean);
   /** Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): when
    *  true, a handler that COMPLETED but whose `ctx.signal` had already aborted (the
    *  wall-clock/idle timeout fired mid-handler under load) surfaces its completed result as
@@ -910,6 +913,7 @@ export interface RoleToolDefinition<
   effect?: 'read' | 'write';
   /** Optional argument-sensitive effect classifier; see ToolDefinition.effectForCall. */
   effectForCall?: (args: StandardSchemaV1.InferOutput<TArgs>) => 'read' | 'write';
+  irreversible?: boolean | ((args: StandardSchemaV1.InferOutput<TArgs>) => boolean);
   /** Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): when
    *  true, a handler that COMPLETED but whose `ctx.signal` had already aborted (the
    *  wall-clock/idle timeout fired mid-handler under load) surfaces its completed result as
@@ -1177,6 +1181,7 @@ export interface RoleToolDefinitionInput<
   effect?: 'read' | 'write';
   /** Optional argument-sensitive effect classifier; see RoleToolDefinition.effectForCall. */
   effectForCall?: (args: StandardSchemaV1.InferOutput<TArgs>) => 'read' | 'write';
+  irreversible?: boolean | ((args: StandardSchemaV1.InferOutput<TArgs>) => boolean);
   /** Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): when
    *  true, a handler that COMPLETED but whose `ctx.signal` had already aborted (the
    *  wall-clock/idle timeout fired mid-handler under load) surfaces its completed result as

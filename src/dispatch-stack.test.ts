@@ -460,6 +460,7 @@ describe('DEFAULT_DISPATCH_STACK — enumeration', () => {
       'authorize',
       'preconditions',
       'entity-check',
+      'premises',
       'timeout',
       'idle-watchdog',
       'replay-buffer',

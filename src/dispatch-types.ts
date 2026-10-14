@@ -80,6 +80,7 @@ export type DispatchProjectedErrorCode =
   | 'handler_error'
   | 'authorization_denied'
   | 'precondition_failed'
+  | 'premise_unconfirmed'
   | 'ungated'
   | 'aborted'
   | 'timeout';
@@ -339,6 +340,13 @@ export interface DispatchStartEvent {
 }
 
 export interface DispatchProjectedDeps {
+  /** Resolve declared fact premises in the caller's workspace. Never a model call. */
+  resolvePremises?(refs: readonly string[], ctx: UnifiedToolContext): Promise<Array<{
+    ref: string;
+    status: 'confirmed' | 'missing' | 'retracted' | 'superseded' | 'expired' | 'provisional' | 'suspected' | 'unknown';
+    factId?: string | number;
+    reason?: string;
+  }>>;
   /** Best-effort host sink for measured primary/fallback decisions; never policy. */
   observeFallback?(mechanism: string, observation: {
     eligible: number; applied: number; reason: string; scope?: string;

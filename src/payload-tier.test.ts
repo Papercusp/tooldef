@@ -1356,7 +1356,7 @@ describe('projectBoundedPayload — truncation is announced in band', () => {
 // is opencode's `[Old tool result content cleared]` shape and strictly dominated
 // by OMP's `[shaken ~N tokens — recover: artifact://<id>]`.
 describe('projectBoundedPayload — scorecards:emit nested audit evidence', () => {
-  it('reproduces the reported bare criterion object under forced trimmed projection', () => {
+  it('preserves the stored verdict when forced trimmed projection exhausts nested evidence budget', () => {
     const evidenceChars = {
       'base-rate-check': 1_376,
       'instrument-split': 1_150,
@@ -1385,24 +1385,48 @@ describe('projectBoundedPayload — scorecards:emit nested audit evidence', () =
       gradingAuditRecorded: true,
       gradingAudit: {
         state: 'passed',
+        metaRubricRef: 'grading-integrity',
+        stampedAt: '2026-10-13T14:13:45.272Z',
+        rubricRevision: 12,
+        criteriaHash: '23b30ebfb4d6d84caa23787ecc249521b09183bd291a9bf38efdb18916272c85',
         auditIssueId: 'EI-25875035190373891',
         auditor: 'su-78b906b2-e9a8-4a3c-83f9-e5f65ce58458',
-        rubricRevision: 12,
+        auditedAt: '2026-10-13T14:32:36.711Z',
       },
       canonicalRatings: ratings,
       completionReceipt: { status: 'recorded', effectRef: 'EI-25875035190373891' },
     };
-    const projected = projectBoundedPayload(source, {
+    const project = (preservePaths: string[]) => projectBoundedPayload(source, {
       toolName: 'scorecards:emit',
       tier: 'trimmed',
       targetChars: 6_000,
       forced: true,
       originalChars: JSON.stringify(source).length,
-    }) as typeof source & { _projection?: unknown };
+      preservePaths,
+    }) as typeof source & { _projection: { omitted: Array<{ path: string; reason: string }> } };
+    const unpreserved = project([]);
+    const projected = project([
+      'ok',
+      'committed',
+      'completionReceipt',
+      'canonicalRatings.degenerate-distribution.rating',
+      'created',
+      'issueId',
+      'previousIssueId',
+    ]);
 
     expect(JSON.stringify(source).length).toBeGreaterThan(7_000);
     expect(JSON.stringify(source).length).toBeLessThan(9_000);
-    expect(projected.canonicalRatings['degenerate-distribution']).toEqual({});
+    // Without the result door's explicitly preserved scorecard verdict, budget
+    // exhaustion drops the final populated criterion object altogether.
+    expect(unpreserved.canonicalRatings['degenerate-distribution']).toBeUndefined();
+    // The real result-door selection retains its rating and marks the evidence
+    // clipped by its shared budget, rather than presenting the verdict as absent.
+    expect(projected.canonicalRatings['degenerate-distribution']).toMatchObject({ rating: 'pass' });
+    expect(projected.canonicalRatings['degenerate-distribution'].evidence).toContain('[TRUNCATED');
+    expect(projected._projection.omitted).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: '$.canonicalRatings.degenerate-distribution.evidence' }),
+    ]));
   });
 });
 
