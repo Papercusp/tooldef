@@ -591,6 +591,55 @@ describe('applyPayloadTier', () => {
     ]));
   });
 
+  it('continues an explicitly selected leaf past repeated identity-preview depth boundaries', () => {
+    const payload = {
+      results: [{
+        workItem: {
+          summary: {
+            source: {
+              details: {
+                adequacy: {
+                  packet: {
+                    deep: {
+                      a: {
+                        b: {
+                          c: {
+                            d: {
+                              ratings: {
+                                selected: 'the requested grade',
+                                unselected: 'must remain omitted',
+                              },
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      }],
+    };
+    const preservePath = 'results[].workItem.summary.source.details.adequacy.packet.deep.a.b.c.d.ratings.selected';
+
+    const projected = projectBoundedPayload(payload, {
+      toolName: 'work_items:get',
+      tier: 'trimmed',
+      preservePaths: [preservePath],
+    }) as any;
+    const ratings = projected.results[0]!.workItem.summary.source.details.adequacy.packet.deep.a.b.c.d.ratings;
+
+    expect(ratings.selected).toBe('the requested grade');
+    expect(ratings).not.toHaveProperty('unselected');
+    expect(ratings._partial).toBe(true);
+    expect(projected._projection.omittedPreserved ?? []).not.toContain(preservePath);
+
+    const unselected = projectBoundedPayload(payload, { toolName: 'work_items:get', tier: 'trimmed' });
+    expect(JSON.stringify(unselected)).not.toContain('the requested grade');
+  });
+
   it('REGRESSION (EI-23347725227642394): an explicit object endpoint is not reduced to identity keys at the depth boundary', () => {
     const observation = {
       rubricRef: 'spec-quality',
