@@ -1357,29 +1357,51 @@ describe('projectBoundedPayload — truncation is announced in band', () => {
 // by OMP's `[shaken ~N tokens — recover: artifact://<id>]`.
 describe('projectBoundedPayload — scorecards:emit nested audit evidence', () => {
   it('reproduces the reported bare criterion object under forced trimmed projection', () => {
-    const ratings = Object.fromEntries([
-      'criterion-0',
-      'criterion-1',
-      'criterion-2',
-      'criterion-3',
-      'criterion-4',
-      'degenerate-distribution',
-    ].map((key) => [key, { rating: 'pass', evidence: 'e'.repeat(1_063) }]));
+    const evidenceChars = {
+      'base-rate-check': 1_376,
+      'instrument-split': 1_150,
+      'terminal-re-rate': 810,
+      'platform-telemetry-excluded': 713,
+      're-runnable-evidence': 2_286,
+      'degenerate-distribution': 1_063,
+    } as const;
+    const ratings = Object.fromEntries(
+      Object.entries(evidenceChars).map(([key, chars]) => [key, { rating: 'pass', evidence: 'e'.repeat(chars) }]),
+    );
     const source = {
       ok: true,
       created: true,
       issueId: 'EI-25875035190373891',
+      evidenceFingerprint: 'a4bc20a02cad2415db39a92bb7a9522f84edda1516c7dd2b5ec3f1c42c0c0e0b',
+      gradedGeneration: {
+        deployedSha: '4d900e278e',
+        hostStartedAt: '2026-10-13T00:00:00.000Z',
+        bootHeadSha: '4d900e278e',
+        scoutCodeHash: '4d900e278e',
+        staleHost: false,
+      },
+      staleHost: false,
+      deployedSha: '4d900e278e',
+      gradingAuditRecorded: true,
+      gradingAudit: {
+        state: 'passed',
+        auditIssueId: 'EI-25875035190373891',
+        auditor: 'su-78b906b2-e9a8-4a3c-83f9-e5f65ce58458',
+        rubricRevision: 12,
+      },
       canonicalRatings: ratings,
+      completionReceipt: { status: 'recorded', effectRef: 'EI-25875035190373891' },
     };
     const projected = projectBoundedPayload(source, {
       toolName: 'scorecards:emit',
       tier: 'trimmed',
+      targetChars: 6_000,
       forced: true,
       originalChars: JSON.stringify(source).length,
     }) as typeof source & { _projection?: unknown };
 
-    expect(JSON.stringify(source).length).toBeGreaterThan(6_500);
-    expect(JSON.stringify(source).length).toBeLessThan(7_000);
+    expect(JSON.stringify(source).length).toBeGreaterThan(7_000);
+    expect(JSON.stringify(source).length).toBeLessThan(9_000);
     expect(projected.canonicalRatings['degenerate-distribution']).toEqual({});
   });
 });
