@@ -163,6 +163,19 @@ const GENERIC_PROJECTION_TARGET_CHARS: Record<'trimmed' | 'standard', number> = 
 // (for example, a bulk coord:send body) cannot re-expand a bounded result.
 const GENERIC_PROJECTION_CURSOR_ARGS_TARGET_CHARS = 2_000;
 const GENERIC_PROJECTION_OMISSION_SAMPLES = 20;
+// Keep per-array receipts independent of the omission-example budget while
+// bounding their total size, including pathological object-key paths.
+const GENERIC_PROJECTION_ARRAY_TRUNCATIONS = 8;
+const GENERIC_PROJECTION_ARRAY_PATH_MAX_CHARS = 120;
+
+export interface ArrayTruncationReceipt {
+  /** Path of the shortened array; clipped paths carry pathTruncated:true. */
+  path: string;
+  omittedCount: number;
+  shownCount: number;
+  renderedCount: number;
+  pathTruncated?: true;
+}
 
 export interface BoundedPayloadProjection {
   _projection: {
@@ -194,6 +207,11 @@ export interface BoundedPayloadProjection {
      * detail while a REQUESTED one going missing inverts the reading.
      */
     omittedPreserved?: readonly string[];
+    /** Bounded, never-shed receipt for arrays whose elements were omitted. */
+    arrayTruncationCount?: number;
+    arrayTruncations?: readonly ArrayTruncationReceipt[];
+    /** Number of array receipts omitted because the bounded sample was full. */
+    arrayTruncationsOmittedCount?: number;
     cursor: {
       /** Host-defined recovery cursors may page a durable spill instead of
        * re-running the producing tool. `full-detail` remains the default. */
@@ -321,6 +339,8 @@ interface ProjectionState {
    * Merged ahead of `omitted` when the metadata is assembled.
    */
   priorityOmitted: Array<{ path: string; reason: string }>;
+  arrayTruncations: ArrayTruncationReceipt[];
+  arrayTruncationCount: number;
   /** Explicitly-preserved paths this walk dropped anyway — see
    *  BoundedPayloadProjection._projection.omittedPreserved. */
   preservedOmittedPaths: string[];
@@ -659,6 +679,7 @@ function projectBulkResultsArray(
       droppedCount,
       true,
     );
+    recordArrayTruncation(state, path, droppedCount, projected.length, value.length);
     if (partialTarget) markPartial(partialTarget, state);
   }
   return projected;
@@ -715,6 +736,64 @@ function recordOmission(
   if (bucket.length < GENERIC_PROJECTION_OMISSION_SAMPLES) {
     bucket.push({ path, reason });
   }
+}
+
+function recordArrayTruncation(
+  state: ProjectionState,
+  path: string,
+  omittedCount: number,
+  shownCount: number,
+  renderedCount: number,
+): void {
+  if (omittedCount <= 0) return;
+  state.arrayTruncationCount += 1;
+  const pathTruncated = path.length > GENERIC_PROJECTION_ARRAY_PATH_MAX_CHARS;
+  const receipt: ArrayTruncationReceipt = {
+    path: pathTruncated
+      ? path.slice(0, GENERIC_PROJECTION_ARRAY_PATH_MAX_CHARS - 1) + '…'
+      : path,
+    omittedCount,
+    shownCount,
+    renderedCount,
+    ...(pathTruncated ? { pathTruncated: true as const } : {}),
+  };
+  if (state.arrayTruncations.length < GENERIC_PROJECTION_ARRAY_TRUNCATIONS) {
+    state.arrayTruncations.push(receipt);
+    return;
+  }
+  // Keep the largest omissions visible when a payload has more arrays than
+  // the receipt cap. Ties use path order for deterministic output.
+  let smallestIndex = 0;
+  for (let index = 1; index < state.arrayTruncations.length; index += 1) {
+    if (state.arrayTruncations[index].omittedCount < state.arrayTruncations[smallestIndex].omittedCount) {
+      smallestIndex = index;
+    }
+  }
+  const smallest = state.arrayTruncations[smallestIndex];
+  if (
+    omittedCount > smallest.omittedCount ||
+    (omittedCount === smallest.omittedCount && receipt.path.localeCompare(smallest.path) < 0)
+  ) {
+    state.arrayTruncations[smallestIndex] = receipt;
+  }
+}
+
+function arrayTruncationMetadata(
+  state: ProjectionState,
+): Pick<
+  BoundedPayloadProjection['_projection'],
+  'arrayTruncationCount' | 'arrayTruncations' | 'arrayTruncationsOmittedCount'
+> {
+  if (state.arrayTruncationCount === 0) return {};
+  const arrayTruncations = [...state.arrayTruncations]
+    .sort((a, b) => b.omittedCount - a.omittedCount || a.path.localeCompare(b.path));
+  return {
+    arrayTruncationCount: state.arrayTruncationCount,
+    arrayTruncations,
+    ...(state.arrayTruncationCount > arrayTruncations.length
+      ? { arrayTruncationsOmittedCount: state.arrayTruncationCount - arrayTruncations.length }
+      : {}),
+  };
 }
 
 /**
@@ -1103,6 +1182,7 @@ function projectIdentityPreview(
           droppedCount,
           true,
         );
+        recordArrayTruncation(state, path, droppedCount, projected.length, value.length);
         if (partialTarget) markPartial(partialTarget, state);
         // Standalone arrays need their own completeness signal. Hosts retaining
         // the enclosing envelope can instead keep the array's domain contract.
@@ -1281,6 +1361,7 @@ function projectValue(
           droppedCount,
           true,
         );
+        recordArrayTruncation(state, path, droppedCount, projected.length, value.length);
         if (partialTarget) markPartial(partialTarget, state);
         if (!partialTarget || state.arrayTruncation === 'marker') {
           projected.push(arrayTruncationValue(projected, droppedCount, projected.length, value.length));
@@ -1375,6 +1456,8 @@ function projectCursorArgs(args: unknown): {
     omittedCount: 0,
     omitted: [],
     priorityOmitted: [],
+    arrayTruncations: [],
+    arrayTruncationCount: 0,
     preservedOmittedPaths: [],
     active: new WeakSet<object>(),
     arrayTruncation: 'marker',
@@ -1458,6 +1541,8 @@ export function projectBoundedPayload(
     omittedCount: 0,
     omitted: [],
     priorityOmitted: [],
+    arrayTruncations: [],
+    arrayTruncationCount: 0,
     preservedOmittedPaths: [],
     active: new WeakSet<object>(),
     limits: projectionTier === 'standard'
@@ -1491,6 +1576,7 @@ export function projectBoundedPayload(
     // out of the sample by lower-priority field/depth entries recorded for the
     // elements that survived (EI-19965559011729712).
     omitted: [...state.priorityOmitted, ...state.omitted].slice(0, GENERIC_PROJECTION_OMISSION_SAMPLES),
+    ...arrayTruncationMetadata(state),
     // EI-22186855527494865: a separate, never-shed list. `omitted` above is a
     // SAMPLE the ladder below trades away for content; a field the caller asked
     // for BY NAME must stay nameable after that trade.
@@ -1637,6 +1723,8 @@ export function projectBoundedPayload(
         omittedCount: 0,
         omitted: [],
         priorityOmitted: [],
+        arrayTruncations: [],
+        arrayTruncationCount: 0,
         preservedOmittedPaths: [],
         active: new WeakSet<object>(),
         limits: { maxArray: 6, maxDepth: 4, maxKeys: 24, maxString: 300 },
@@ -1654,9 +1742,16 @@ export function projectBoundedPayload(
       // narrower one clipped its bulky sibling instead and kept it. That is the
       // opposite direction from `omittedCount`, where over-reporting is the safe
       // side; here it manufactures a phantom absence.
-      const { omittedPreserved: _discardedPreserved, ...reBase } = leanMetadata;
+      const {
+        omittedPreserved: _discardedPreserved,
+        arrayTruncationCount: _discardedArrayTruncationCount,
+        arrayTruncations: _discardedArrayTruncations,
+        arrayTruncationsOmittedCount: _discardedArrayTruncationsOmittedCount,
+        ...reBase
+      } = leanMetadata;
       const reMetadata: BoundedPayloadProjection['_projection'] = {
         ...reBase,
+        ...arrayTruncationMetadata(reState),
         // Count the omissions of the projection ACTUALLY RETURNED, and never
         // under-report the fuller walk that was discarded: a bounded measurement
         // that reads as a real zero is the failure mode this whole block exists to
@@ -1687,6 +1782,8 @@ export function projectBoundedPayload(
       omittedCount: 0,
       omitted: [],
       priorityOmitted: [],
+      arrayTruncations: [],
+      arrayTruncationCount: 0,
       preservedOmittedPaths: [],
       active: new WeakSet<object>(),
       limits: { maxArray: 8, maxDepth: 3, maxKeys: 20, maxString: 300 },
@@ -1711,9 +1808,16 @@ export function projectBoundedPayload(
       }
     }
     // Same rule as the re-walk above: describe the husk actually returned.
-    const { omittedPreserved: _supersededPreserved, ...fallbackBase } = leanMetadata;
+    const {
+      omittedPreserved: _supersededPreserved,
+      arrayTruncationCount: _supersededArrayTruncationCount,
+      arrayTruncations: _supersededArrayTruncations,
+      arrayTruncationsOmittedCount: _supersededArrayTruncationsOmittedCount,
+      ...fallbackBase
+    } = leanMetadata;
     const fallbackMetadata = {
       ...fallbackBase,
+      ...arrayTruncationMetadata(identityState),
       ...(identityState.preservedOmittedPaths.length > 0
         ? { omittedPreserved: [...identityState.preservedOmittedPaths] }
         : {}),
