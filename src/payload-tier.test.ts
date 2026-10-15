@@ -1791,6 +1791,65 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     });
   });
 
+  it('REGRESSION (EI-25931837571490305): envelope arrays retain path/count metadata when omission samples are shed', () => {
+    const evidence = Array.from({ length: 17 }, (_, index) => ({
+      id: 'evidence-' + index,
+      detail: {
+        a: {
+          b: {
+            c: Object.fromEntries(
+              Array.from({ length: 8 }, (_, field) => ['field-' + field, 'value-' + index + '-' + field]),
+            ),
+          },
+        },
+      },
+    }));
+    const out = projectBoundedPayload(
+      { evidence },
+      {
+        toolName: 'plans:get-spec-evidence',
+        tier: 'trimmed',
+        targetChars: 1_500,
+        arrayTruncation: 'envelope',
+      },
+    );
+
+    expect(out._projection.omittedSamplesDropped).toBe(true);
+    expect(out._projection.omitted).toHaveLength(0);
+    const receipt = out._projection.arrayTruncations?.find((entry) => entry.path === '$.evidence');
+    if (!receipt) throw new Error('evidence array truncation receipt was lost: ' + JSON.stringify({
+      count: out._projection.arrayTruncationCount,
+      receipts: out._projection.arrayTruncations,
+      evidence: out.evidence,
+    }));
+    expect(receipt.renderedCount).toBe(17);
+    expect(receipt.omittedCount).toBeGreaterThan(0);
+    expect(receipt.omittedCount + receipt.shownCount).toBe(receipt.renderedCount);
+    expect(receipt.shownCount).toBeLessThan(receipt.renderedCount);
+    expect(out.evidence as unknown[]).toHaveLength(receipt.shownCount);
+    expect((out as any)._partial).toBe(true);
+  });
+
+  it('bounds the never-shed array receipt and reports how many paths were left out', () => {
+    const data = Object.fromEntries(
+      Array.from({ length: 16 }, (_, index) => [
+        'array-' + index,
+        Array.from({ length: 17 }, (_, item) => 'r-' + index + '-' + item),
+      ]),
+    );
+    const out = projectBoundedPayload(data, {
+      toolName: 'bulk:arrays',
+      tier: 'trimmed',
+      targetChars: 7_000,
+      arrayTruncation: 'envelope',
+    });
+
+    expect(out._projection.arrayTruncationCount).toBe(16);
+    expect(out._projection.arrayTruncations).toHaveLength(8);
+    expect(out._projection.arrayTruncationsOmittedCount).toBe(8);
+    expect(JSON.stringify(out).length).toBeLessThan(7_000);
+  });
+
   it('keeps primitive arrays domain-only and marks the containing envelope partial', () => {
     const out = projectBoundedPayload(
       { values: Array.from({ length: 17 }, (_, i) => i) },
