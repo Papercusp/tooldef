@@ -1452,7 +1452,7 @@ describe('projectBoundedPayload — scorecards:emit nested audit evidence', () =
       forced: true,
       originalChars: JSON.stringify(source).length,
       preservePaths,
-    }) as typeof source & { _projection: { omitted: Array<{ path: string; reason: string }> } };
+    }) as unknown as typeof source & { _projection: { omitted: Array<{ path: string; reason: string }> } };
     const unpreserved = project([]);
     const projected = project([
       'ok',
