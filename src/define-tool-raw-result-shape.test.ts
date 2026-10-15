@@ -86,8 +86,35 @@ for (const wrapper of ['principal-gated (legacy)', 'role-gated'] as const) {
       },
     });
 
+  const callResult = async (name: string, over: Partial<UnifiedToolContext> = {}) => {
+    const result = await dispatchProjectedTool(lookupByMcpName(name)!, name, {}, ctx(over), DEPS);
+    if (!result.ok) throw new Error('dispatch failed: ' + result.error?.code);
+    return result.result!;
+  };
+
   const call = async (name: string, over: Partial<UnifiedToolContext> = {}) =>
-    textOf(await dispatchProjectedTool(lookupByMcpName(name)!, name, {}, ctx(over), DEPS));
+    textOf(await callResult(name, over));
+
+  it.each([false, true])(
+    'preserves handler _meta through MCP raw-JSON re-encoding with shape=%s',
+    async (withShape) => {
+      const name = 'test:raw-meta-' + slug + '-' + (withShape ? 'shaped' : 'unshaped');
+      const preservePaths = ['rows[].detail'];
+      define(name, raw(rows(), {
+        _meta: { __papercusp_nested_result_door_preserve_paths: preservePaths },
+      }), withShape);
+
+      const result = await callResult(name, { contextTier: 'trimmed' });
+
+      expect(result._meta?.__papercusp_nested_result_door_preserve_paths).toEqual(preservePaths);
+      expect(result._meta?.format).toBe('toon');
+      if (withShape) {
+        expect(textOf(result)).toContain(SHAPED_MARK);
+      } else {
+        expect(textOf(result)).toMatch(/^format: toon\n/);
+      }
+    },
+  );
 
   describe(`raw-content result + declared shape through the ${wrapper} wrapper`, () => {
     it('shapes a raw JSON body with an array field on a trimmed mcp session', async () => {

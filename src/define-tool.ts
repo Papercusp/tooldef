@@ -588,6 +588,25 @@ function markExplicitFullRawResult<T extends ToolResult>(
   } as T;
 }
 
+/**
+ * MCP raw-result JSON re-encoding changes the content representation, but
+ * handler metadata still belongs to that same result. Keep it across the
+ * serializer pass; transport wrappers use private metadata to carry controls
+ * such as selected result-door paths to the final MCP boundary.
+ *
+ * Serializer-owned fields win on collision, matching the hybrid response path.
+ */
+function mergeReencodedRawResultMetadata(
+  serialized: ToolResult,
+  sourceMeta: Record<string, unknown> | undefined,
+): ToolResult {
+  if (!sourceMeta || Object.keys(sourceMeta).length === 0) return serialized;
+  return {
+    ...serialized,
+    _meta: { ...sourceMeta, ...(serialized._meta ?? {}) },
+  };
+}
+
 function isExplicitFullPayloadRequest(
   callTier: ReturnType<typeof extractPayloadTier>['callTier'],
   ctx: Pick<UnifiedToolContext, 'contextTier' | 'transportCapExempt' | 'requestedStructured'>,
@@ -3402,17 +3421,22 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       return disclose(serializeHybridToolResponse(marked, ctx, eligibility, def, readColumns, parsed.value));
     }
     let tierInput = response as ToolResponse;
+    let reencodedRawResultMeta: Record<string, unknown> | undefined;
     if (response && typeof response === 'object' && Array.isArray((response as ToolResult).content)) {
       const marked = markExplicitFullRawResult(response as ToolResult, explicitFullRequest);
       const reencodable = reencodableJsonPayload(marked, ctx, { acceptPlainObject: def.shape !== undefined });
       if (reencodable === undefined) return disclose(attachRequestedStructuredContent(marked, ctx, def));
       const reencoded = { data: reencodable, ...(explicitFullRequest ? { explicitFullRequest: true } : {}) };
       if (def.shape === undefined) {
-        return disclose(serializeProjectedResult(reencoded, ctx, eligibility, def, readColumns, parsed.value));
+        return disclose(
+          serializeProjectedResult(reencoded, ctx, eligibility, def, readColumns, parsed.value)
+            .then((serialized) => mergeReencodedRawResultMetadata(serialized, marked._meta)),
+        );
       }
       // A tool that DECLARES a shape gets it on its raw-content branches too: fall
       // through into applyPayloadTier exactly like a `{ data }` result. Returning
       // here (the old behavior) silently voided the shape (WI-6554700010008923).
+      reencodedRawResultMeta = marked._meta;
       tierInput = reencoded;
     }
     // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
@@ -3453,7 +3477,10 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       // the recovery `next` — absent ⇒ the generic host-neutral wording.
       rawDispatchTemplate: ctx.rawDispatchTemplate,
     });
-    return disclose(serializeProjectedResult(shaped, ctx, eligibility, def, readColumns, parsed.value));
+    return disclose(
+      serializeProjectedResult(shaped, ctx, eligibility, def, readColumns, parsed.value)
+        .then((serialized) => mergeReencodedRawResultMetadata(serialized, reencodedRawResultMeta)),
+    );
   };
 
   registerProjectedTool({
@@ -3612,17 +3639,22 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
       return disclose(serializeHybridToolResponse(marked, handlerCtx, eligibility, def, readColumns, parsed.value));
     }
     let tierInput = out as ToolResponse;
+    let reencodedRawResultMeta: Record<string, unknown> | undefined;
     if (out && typeof out === 'object' && Array.isArray((out as ToolResult).content)) {
       const marked = markExplicitFullRawResult(out as ToolResult, explicitFullRequest);
       const reencodable = reencodableJsonPayload(marked, handlerCtx, { acceptPlainObject: def.shape !== undefined });
       if (reencodable === undefined) return disclose(attachRequestedStructuredContent(marked, handlerCtx, def));
       const reencoded = { data: reencodable, ...(explicitFullRequest ? { explicitFullRequest: true } : {}) };
       if (def.shape === undefined) {
-        return disclose(serializeProjectedResult(reencoded, handlerCtx, eligibility, def, readColumns, parsed.value));
+        return disclose(
+          serializeProjectedResult(reencoded, handlerCtx, eligibility, def, readColumns, parsed.value)
+            .then((serialized) => mergeReencodedRawResultMetadata(serialized, marked._meta)),
+        );
       }
       // Declared shape applies to raw-content branches too (WI-6554700010008923) —
       // mirror of the principal-gated wrapper above; a fix at only one site is
       // invisible from the other.
+      reencodedRawResultMeta = marked._meta;
       tierInput = reencoded;
     }
 
@@ -3665,7 +3697,10 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
       rawDispatchTemplate: handlerCtx.rawDispatchTemplate,
     });
     // ToolResponse envelope → format-aware MCP content[] + _meta.
-    return disclose(serializeProjectedResult(shaped, handlerCtx, eligibility, def, readColumns, parsed.value));
+    return disclose(
+      serializeProjectedResult(shaped, handlerCtx, eligibility, def, readColumns, parsed.value)
+        .then((serialized) => mergeReencodedRawResultMetadata(serialized, reencodedRawResultMeta)),
+    );
   };
 
   registerProjectedTool({
