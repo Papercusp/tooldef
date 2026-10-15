@@ -226,6 +226,49 @@ describe('facade-types (B-CX-API)', () => {
     );
   });
 
+  it('preserves string regex constraints in nested code:tools signatures', () => {
+    const proofObligationIdPattern = '^[a-z0-9]+(?:[._:-][a-z0-9]+)*$';
+    const renderedPattern = JSON.stringify(proofObligationIdPattern);
+    const plansSetSpecs = mkTool('plans:set-specs', {
+      type: 'object',
+      properties: {
+        spec: {
+          type: 'object',
+          properties: {
+            falsifier: {
+              type: 'object',
+              properties: {
+                requiredScenarios: {
+                  type: 'array',
+                  items: { type: 'string', pattern: proofObligationIdPattern },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const out = generateToolFacadeTypes([plansSetSpecs]);
+
+    expect(out).toContain(
+      `requiredScenarios?: Array<string /* pattern: ${renderedPattern} */>`,
+    );
+  });
+
+  it('escapes comment terminators inside string regex constraints', () => {
+    const pattern = String.raw`^.*\*/.*$`;
+    const encodedPattern = JSON.stringify(pattern).replace(/\*\//g, '*\\u002f');
+    const tool = mkTool('demo:regex', {
+      type: 'object',
+      properties: { value: { type: 'string', pattern } },
+    });
+
+    const out = generateToolFacadeTypes([tool]);
+
+    expect(out).toContain(`pattern: ${encodedPattern} */`);
+  });
+
   it('emits balanced, well-formed TS (braces match)', () => {
     const out = generateToolFacadeTypes(all);
     const opens = (out.match(/\{/g) ?? []).length;

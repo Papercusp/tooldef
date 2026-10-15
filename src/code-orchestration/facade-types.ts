@@ -134,10 +134,17 @@ function primitiveType(t: string): string {
   }
 }
 
-/** Map a primitive and retain numeric validator constraints as a TS comment. */
+/** Keep a JSON-Schema string pattern readable and safe inside a TS comment. */
+function stringPatternNote(schema: JsonSchema): string {
+  if (typeof schema.pattern !== 'string' || schema.pattern.length === 0) return '';
+  const encoded = JSON.stringify(schema.pattern).replace(/\*\//g, '*\\u002f');
+  return `pattern: ${encoded}`;
+}
+
+/** Map a primitive and retain validator constraints as a TS comment. */
 function primitiveSchemaType(t: string, schema: JsonSchema): string {
   const base = primitiveType(t);
-  const note = numericConstraintNote(schema, t);
+  const note = t === 'string' ? stringPatternNote(schema) : numericConstraintNote(schema, t);
   return note ? `${base} /* ${note} */` : base;
 }
 
