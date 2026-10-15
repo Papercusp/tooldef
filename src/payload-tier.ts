@@ -1224,16 +1224,35 @@ function projectIdentityPreview(
       }
       state.remaining -= keyCost;
       const childPreservePaths = preserveObjectChildPaths(preservePaths, key);
-      projected[key] =
-        childPreservePaths.length > 0 || STRUCTURED_IDENTITY_FIELDS.has(key)
-          ? projectValue(child, `${path}.${key}`, 0, state, childPreservePaths, localPartialTarget)
-          : projectIdentityPreview(child, `${path}.${key}`, depth + 1, state, childPreservePaths, localPartialTarget);
+      const preservesEndpoint = childPreservePaths.some((preservePath) => preservePath.length === 0);
+      const continuesPreservedBranch = childPreservePaths.length > 0 && !preservesEndpoint;
+      const needsFullProjection = preservesEndpoint || (!continuesPreservedBranch && STRUCTURED_IDENTITY_FIELDS.has(key));
+      // A deeper explicit pick selects one branch, not its siblings. Continue
+      // through the identity walker at each reset boundary; use the full walker
+      // only when the caller selected this object endpoint itself.
+      projected[key] = needsFullProjection
+        ? projectValue(child, `${path}.${key}`, 0, state, childPreservePaths, localPartialTarget)
+        : projectIdentityPreview(
+            child,
+            `${path}.${key}`,
+            continuesPreservedBranch ? 0 : depth + 1,
+            state,
+            childPreservePaths,
+            localPartialTarget,
+          );
       chosenProjected += 1;
     }
     const dropped = entries.length - chosen.length;
     if (dropped > 0) {
       recordOmission(state, `${path}.*`, `${dropped} non-identity fields omitted at projection depth limit`, dropped);
       markPartial(localPartialTarget ?? projected, state);
+      // When the caller selects a leaf directly below this object, the object
+      // itself is the boundary whose sibling was withheld. Mark that object
+      // too, so a reader can tell the selected value is a lossy branch without
+      // adding a domain-shaped `_omitted` marker to dynamic keyed maps (which
+      // intentionally keep their completeness bit on the containing envelope).
+      const hasDirectPreservedEndpoint = preservePaths.some((preservePath) => preservePath.length === 1);
+      if (hasDirectPreservedEndpoint) markPartial(projected, state);
       // EI-21364503818966104: the surviving identity fields make this object look
       // WHOLE. A reader cannot tell "the field is empty in the store" from "the
       // projection withheld it", and the global _projection.omitted[] list is both
