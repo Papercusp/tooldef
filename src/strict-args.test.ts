@@ -24,6 +24,7 @@ import {
   unknownArgHint,
   siblingToolArgOwner,
 } from './define-tool';
+import { buildCorrectedCall, correctedCallHint } from './corrected-call';
 import {
   registerProjectedTool,
   unregisterProjectedToolsForPlugin,
@@ -976,6 +977,38 @@ describe('suggestArgName', () => {
         coerciveCorrections,
       ),
     ).toContain('`key` for `keys`');
+  });
+
+  it('does not rewrite an array-valued `sources` filter to the scalar `source` enum', async () => {
+    const args = z.object({
+      source: z.enum(['ci', 'local', 'admin-ui', 'mutation-probe']).optional(),
+    }).strict();
+    const input = { sources: ['mutation-probe', 'local', 'ci', 'admin-ui'] };
+    const rejected = args.safeParse(input);
+    if (rejected.success) throw new Error('strict testing:runs fixture must reject `sources`');
+
+    const rawSchema = toArgsJsonSchema('testing:runs', args);
+    const corrections = await invalidInputCorrections(
+      rejected.error.issues,
+      rawSchema,
+      undefined,
+      input,
+      args,
+    );
+    expect(corrections).toEqual([]);
+    expect(
+      unknownArgHint(rejected.error.issues, rawSchema, undefined, input, 'testing:runs', corrections),
+    ).not.toContain('`source` for `sources`');
+
+    const corrected = buildCorrectedCall({
+      toolName: 'testing:runs',
+      input,
+      corrections,
+      unknownKeys: ['sources'],
+      targetSchema: rawSchema,
+    });
+    expect(corrected?.args).toEqual({});
+    expect(correctedCallHint(corrected)).not.toContain('"source": [');
   });
 
   it('stays silent rather than misdirecting when no viable target remains', () => {
