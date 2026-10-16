@@ -1663,6 +1663,11 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
       shownCount: 12,
       renderedCount: 17,
     });
+    const marker = projectedCriteria.at(-1) as { note: string; shownCount: number };
+    expect(marker.note).toContain('showing 12 of 17 rendered input entries');
+    expect(marker.note).toContain('these counts exclude the marker; array length includes it');
+    expect(marker.note).not.toContain('header count includes this marker');
+    expect(projectedCriteria).toHaveLength(marker.shownCount + 1);
     expect((out as any)._partial).toBe(true);
 
     // The TOON count includes the marker row, so a consumer cannot read the
