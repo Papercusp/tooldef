@@ -274,6 +274,43 @@ function isScalarCorrectionValue(value: unknown): boolean {
     (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint');
 }
 
+/**
+ * Safety controls are meaning-bearing even when a serving build rejects their names.
+ * Dropping one from a corrected retry can turn a read-only preflight into the tool's
+ * default mutation, which is strictly worse than leaving the caller at the refusal.
+ * Keep this classifier name-based and fail closed; an unknown safety-shaped key must
+ * be checked against a compatible serving generation by the caller instead.
+ */
+const MUTATION_SUPPRESSING_ARG_NAMES = new Set([
+  'dryrun',
+  'validateonly',
+  'validationonly',
+  'preview',
+  'whatif',
+  'readonly',
+  'nowrite',
+]);
+
+function normalizedArgName(key: string): string {
+  return key.replace(/[-_]/g, '').toLowerCase();
+}
+
+function isMutationSuppressingArg(key: string, value: unknown): boolean {
+  const normalized = normalizedArgName(key);
+  if (normalized === 'confirm') return value === false;
+  return MUTATION_SUPPRESSING_ARG_NAMES.has(normalized);
+}
+
+/** Return unknown caller keys whose removal could change a read-only/mutation boundary. */
+export function mutationSuppressingUnknownKeys(
+  unknownKeys: readonly string[],
+  input: unknown,
+): string[] {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return [];
+  const args = input as Record<string, unknown>;
+  return [...new Set(unknownKeys.filter((key) => key in args && isMutationSuppressingArg(key, args[key])))];
+}
+
 export function valueForCorrectionTarget(value: unknown, target: string, rawSchema: unknown): unknown {
   if (!isScalarCorrectionValue(value) || Array.isArray(value) || !targetDeclaresArray(rawSchema, target)) {
     return value;
@@ -403,6 +440,12 @@ export function buildCorrectedCall(params: {
   const { toolName, input, corrections, unknownKeys } = params;
   const acceptedElsewhere = new Set(params.acceptedOnOtherVariant ?? []);
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  // EI-26090803230047111: never manufacture a retry that drops a caller's safety
+  // control. A serving generation that rejects `dryRun` (or its siblings) may be
+  // older than the caller; emitting `{ ...argsWithoutDryRun }` turns a preflight
+  // into a real write. Leave the original refusal in place so the caller can select
+  // a compatible runtime and re-send the safety key intact.
+  if (mutationSuppressingUnknownKeys(unknownKeys, input).length > 0) return null;
   const conflicts = mutuallyExclusiveArgConflicts(params.issues, input);
   // P-004: offer declared-key repairs only to a caller who is MID-CORRECTION. For one who sent
   // nothing at all, a placeholder for every required field is just the args schema restated —

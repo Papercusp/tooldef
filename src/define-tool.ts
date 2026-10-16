@@ -61,7 +61,12 @@ import {
 import { serverVintageHint, constraintVintageHint } from './server-vintage';
 import { readAmbientArgKeys } from './ambient-args';
 import { GUIDANCE_SECTION_LABELS, GUIDANCE_SECTION_SEPARATOR } from './partial-guidance';
-import { buildCorrectedCall, correctedCallHint, valueForCorrectionTarget } from './corrected-call';
+import {
+  buildCorrectedCall,
+  correctedCallHint,
+  mutationSuppressingUnknownKeys,
+  valueForCorrectionTarget,
+} from './corrected-call';
 import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
 import { applyPayloadTier, extractPayloadTier, resolvePayloadTier, PAYLOAD_TIER_ARG } from './payload-tier';
 import { boundWorkspaceTx } from './workspace-tx';
@@ -2488,6 +2493,7 @@ export function invalidInputCorrections(
   const keys = props ? Object.keys(props) : [];
   const unknownKeys = unrecognizedArgKeys(issues, rawSchema, input);
   if (unknownKeys.length === 0) return [];
+  const safetyKeySet = new Set(mutationSuppressingUnknownKeys(unknownKeys, input));
   const nested = nestedArgPaths(props);
   // EI-20281509195248260: an AUTHORED cross-tool redirect outranks both guesses
   // below. A key whose real home is a different TOOL matches neither the nested
@@ -2497,6 +2503,10 @@ export function invalidInputCorrections(
   // Redirected keys are withheld from `corrections` so the same key cannot also
   // draw a string-distance guess that contradicts the authored answer.
   const corrections = unknownKeys.flatMap((rejectedArg): InvalidInputCorrection[] => {
+    // A safety-shaped key is intentionally withheld from generic relocation/drop
+    // suggestions. The refusal renderer explains the generation mismatch instead;
+    // suggesting any retry that removes the key is unsafe.
+    if (safetyKeySet.has(rejectedArg)) return [];
     const redirect = argRedirects?.[rejectedArg];
     if (typeof redirect === 'string' && redirect.length > 0) {
       return [{ rejectedArg, target: redirect, kind: 'authored-redirect' }];
@@ -2679,6 +2689,8 @@ export function unknownArgHint(
   const keys = props ? Object.keys(props) : [];
   if (keys.length === 0) return '';
   const unknownKeys = unrecognizedArgKeys(issues, rawSchema, input);
+  const safetyKeys = mutationSuppressingUnknownKeys(unknownKeys, input);
+  const safetyKeySet = new Set(safetyKeys);
   const nestedContexts = nestedTopLevelArgContexts(issues, rawSchema)
     .filter(({ key }) => unknownKeys.includes(key));
   // EI-25240542476501298: a key rejected ONLY inside a nested object is not a top-level
@@ -2697,7 +2709,7 @@ export function unknownArgHint(
     )
     .join('');
   const corrections = (precomputedCorrections ?? invalidInputCorrections(issues, rawSchema, argRedirects, input))
-    .filter(({ rejectedArg }) => !nestedOnlyKeys.has(rejectedArg));
+    .filter(({ rejectedArg }) => !nestedOnlyKeys.has(rejectedArg) && !safetyKeySet.has(rejectedArg));
   const redirected = corrections.filter(
     (correction) => correction.kind === 'authored-redirect' || correction.kind === 'authored-drop',
   );
@@ -2782,9 +2794,15 @@ export function unknownArgHint(
   const ambientText = ambientKeys.length > 0
     ? ` (Dispatch-level args, handled by the transport before this tool's own schema and therefore not in the list above but also accepted: ${ambientKeys.join(', ')}.)`
     : '';
+  const safetyText = safetyKeys.length > 0
+    ? ` The rejected key${safetyKeys.length === 1 ? '' : 's'} ${safetyKeys.map((key) => `\`${key}\``).join(', ')} ${safetyKeys.length === 1 ? 'is' : 'are'} mutation-suppressing safety control${safetyKeys.length === 1 ? '' : 's'}. This serving build does not declare ${safetyKeys.length === 1 ? 'it' : 'them'}; do NOT re-send the call without ${safetyKeys.length === 1 ? 'that key' : 'those keys'}, because dropping ${safetyKeys.length === 1 ? 'it' : 'them'} can turn a read-only preflight into a mutation. Use a compatible serving generation first.`
+    : '';
   const reSendHint = ambientKeys.length > 0
+    && safetyKeys.length === 0
     ? ' Re-send using only the keys above (or the dispatch-level ones just listed).'
-    : ' Re-send using only the keys above.';
+    : safetyKeys.length > 0
+      ? ''
+      : ' Re-send using only the keys above.';
   const envelopeText =
     unknownKeys.includes('name')
     && unknownKeys.includes('args')
@@ -2818,6 +2836,7 @@ export function unknownArgHint(
   // tool's own `seeAlso` names. Rendered after the envelope legs because those diagnose a
   // wrong call LAYER, which outranks a wrong call TARGET.
   const siblingText = unknownKeys
+    .filter((rejectedArg) => !safetyKeySet.has(rejectedArg))
     .flatMap((rejectedArg) => {
       const owner = siblingToolArgOwner(toolName, rejectedArg, resolveMcpName);
       return owner
@@ -2831,14 +2850,14 @@ export function unknownArgHint(
     // EI-25240542476501298: every rejected key sits inside a nested object, so the
     // top-level list (and "re-send using only the keys above") would name the wrong cause.
     return (
-      ` — the rejected key is NESTED, so your top-level args were not the problem.${nestedOnlyText}` +
+      ` — the rejected key is NESTED, so your top-level args were not the problem.${nestedOnlyText}${safetyText}` +
       ' An undeclared arg is REJECTED, not silently ignored (EI-10883): passing an arg a tool does not declare used to return ok:true' +
-      ' while quietly doing something else, which is indistinguishable from success. Re-send with that nested object corrected.' +
+      ` while quietly doing something else, which is indistinguishable from success.${safetyKeys.length > 0 ? '' : ' Re-send with that nested object corrected.'}` +
       serverVintageHint()
     );
   }
   return (
-    ` — this tool accepts ONLY: ${keys.join(', ')}.${ambientText}${envelopeText}${metaEnvelopeText}${siblingText}${redirectText}${nestedOnlyText}${nestedContextText}${correctionText}` +
+    ` — this tool accepts ONLY: ${keys.join(', ')}.${ambientText}${envelopeText}${metaEnvelopeText}${siblingText}${redirectText}${nestedOnlyText}${nestedContextText}${correctionText}${safetyText}` +
     ' An undeclared arg is REJECTED, not silently ignored (EI-10883): passing an arg a tool does not declare used to return ok:true' +
     ` while quietly doing something else, which is indistinguishable from success.${reSendHint}` +
     // EI-19953470656367880: an unrecognized-key rejection is ALSO the exact shape a
