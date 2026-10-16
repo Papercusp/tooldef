@@ -415,6 +415,59 @@ describe('unknownArgHint argRedirects (EI-20281509195248260)', () => {
   });
 });
 
+describe('mutation-suppressing unknown keys stay out of corrected retries (EI-26090803230047111)', () => {
+  const schema = {
+    properties: { slug: { type: 'string' }, harness: { type: 'string' }, status: { type: 'string' } },
+  };
+
+  it('withholds the corrected call and warns before dropping dryRun', () => {
+    const input = { slug: 'consult-backed-parking-2026-10-12', harness: 'papercusp', status: 'shipped', dryRun: true };
+    const issues = [{ message: 'Unrecognized key: "dryRun"', keys: ['dryRun'] }];
+    const corrected = buildCorrectedCall({
+      toolName: 'plans:set-plan-status',
+      input,
+      corrections: [],
+      unknownKeys: ['dryRun'],
+      targetSchema: schema,
+    });
+
+    expect(corrected).toBeNull();
+    const hint = unknownArgHint(issues, schema, undefined, input, 'plans:set-plan-status');
+    expect(hint).toContain('mutation-suppressing safety control');
+    expect(hint).toContain('do NOT re-send the call without that key');
+    expect(hint).toContain('compatible serving generation');
+    expect(hint).not.toContain('Re-send using only the keys above');
+  });
+
+  it.each([
+    ['validateOnly', true],
+    ['preview', true],
+    ['whatIf', true],
+    ['confirm', false],
+  ])('withholds a corrected retry for %s=%s', (key, value) => {
+    const input = { slug: 'p', [key]: value };
+    expect(buildCorrectedCall({
+      toolName: 'demo:mutating-tool',
+      input,
+      corrections: [],
+      unknownKeys: [key],
+      targetSchema: schema,
+    })).toBeNull();
+  });
+
+  it('keeps the ordinary drop behavior for a non-safety unknown key', () => {
+    const corrected = buildCorrectedCall({
+      toolName: 'omp:sessions',
+      input: { limit: 10, cwd: '/tmp' },
+      corrections: [],
+      unknownKeys: ['cwd'],
+      targetSchema: { properties: { limit: { type: 'number' } } },
+    });
+    expect(corrected?.args).toEqual({ limit: 10 });
+    expect(correctedCallHint(corrected)).toContain('declares no counterpart');
+  });
+});
+
 describe('unknownArgHint same-tool relocation vs cross-tool redirect (EI-21119949290826530)', () => {
   // An authored redirect means two different things and only the CROSS-TOOL one was
   // rendered. `improvements:capture` already redirects `linkTo -> observation.linkTo`
