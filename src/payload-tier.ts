@@ -881,16 +881,17 @@ function omissionMarker(pointer: string, reason: string, omittedChars?: number):
  * element so the signal travels WITH the array into whatever the caller does
  * with it — a `.length` read, a completeness check, a rendered table header —
  * rather than living only in a `_projection.omitted` entry a reader has to
- * think to correlate (EI-19965559011729712). The marker names both numbers and
- * explains that the downstream header includes the marker itself: TOON has no
- * lossless `N of TOTAL` header syntax, so the adjacent marker is the honest
- * bounded-count label. `renderedCount` is deliberately named as a rendered
- * input count: this generic projector cannot know how many rows the underlying
- * query matched before its input was materialized, so it must never imply that
- * this number is a query population total.
+ * think to correlate (EI-19965559011729712). `shownCount` and `renderedCount`
+ * count source-array entries only; the synthetic marker is an extra array
+ * entry. State both facts so readers do not mistake the marker for a domain row
+ * or subtract it from an unrelated top-level count. `renderedCount` is
+ * deliberately named as a rendered input count: this generic projector cannot
+ * know how many rows the underlying query matched before its input was
+ * materialized, so it must never imply that this number is a query population
+ * total.
  */
 function arrayTruncationMarker(droppedCount: number, shownCount: number, renderedCount: number): string {
-  return `[TRUNCATED +${droppedCount} more item(s) — header count includes this marker; showing ${shownCount} of ${renderedCount} rendered input entries — renderedCount is NOT the query population; see _projection.cursor]`;
+  return `[TRUNCATED +${droppedCount} more item(s) — showing ${shownCount} of ${renderedCount} rendered input entries (these counts exclude the marker; array length includes it) — renderedCount is NOT the query population; see _projection.cursor]`;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
