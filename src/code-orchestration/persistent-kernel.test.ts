@@ -75,7 +75,9 @@ describe('persistent orchestration worker lifetime', () => {
     await runOrchestrationScript('globalThis.stale = () => tools.write.commit({}); return true;', facade({ write: { commit: write } }), { kernel });
     const result = await runOrchestrationScript('return await stale();', facade(), { kernel });
     expect(result.ok).toBe(false);
-    expect(result.error).toContain('kernel_cell_ended');
+    expect(result.error).toContain('kernel_tools_proxy_expired');
+    expect(result.error).toContain("pass the current cell's tools facade");
+    expect(result.kernel).toMatchObject({ state: 'live', busy: false });
     expect(write).not.toHaveBeenCalled();
   });
 

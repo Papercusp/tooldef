@@ -69,6 +69,15 @@ import type { Worker as NodeWorker } from 'node:worker_threads';
 import type { ToolFacade } from './tool-facade';
 
 /**
+ * A helper retained on `globalThis` can outlive the cell whose `tools` facade it captured.
+ * Keep this diagnostic stable across the local worker path and the managed kernel owner RPC so
+ * callers can distinguish an expired facade from an unrecoverable kernel.
+ */
+export const STALE_TOOLS_PROXY_ERROR =
+  'kernel_tools_proxy_expired: this tools proxy belongs to an ended cell; ' +
+  "pass the current cell's tools facade into cross-cell helpers";
+
+/**
  * EI-19301148486657755 — one recorded read of a field the tool result does NOT have.
  *
  * A wrong TOOL name has always been caught (typed signatures come back inline); a wrong FIELD
@@ -323,6 +332,7 @@ function validateJsonInputs(inputs: unknown): string | null {
 const WORKER_SRC = `(() => {
   const { parentPort: workerPort, workerData } = require('node:worker_threads');
   const vm = require('node:vm');
+  const STALE_TOOLS_PROXY_ERROR = ${JSON.stringify(STALE_TOOLS_PROXY_ERROR)};
   const kernelContext = workerData.persistent ? vm.createContext({}) : null;
   const kernelProxyToRaw = new WeakMap();
   let currentTracking;
@@ -368,7 +378,10 @@ const WORKER_SRC = `(() => {
   };
   parentPort.on('message', onResult);
   const rpc = (payload) => new Promise((resolve, reject) => {
-    if (finished) { reject(new Error('kernel_cell_ended')); return; }
+    // A call made through a facade retained by a prior cell reaches this path after that cell
+    // has settled. Report the expired authority token directly; kernel_cell_ended remains the
+    // internal cleanup error used to reject calls that were pending when the cell finished.
+    if (finished) { reject(new Error(STALE_TOOLS_PROXY_ERROR)); return; }
     const id = nextId++;
     pending.set(id, { resolve, reject });
     // Tool results are wrapped in tracking Proxies before the script sees them. If a script
