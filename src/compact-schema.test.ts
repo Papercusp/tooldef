@@ -453,6 +453,39 @@ describe('verbatim-repeated subschemas are hoisted into $defs', () => {
     expect(out.properties).toEqual({ a: leaf, b: leaf, c: leaf });
   });
 
+  it('hoists a frequently repeated bounded scalar when its complete wire representation is smaller', () => {
+    const leaf = { type: 'string', minLength: 1, maxLength: 200 };
+    const input = {
+      type: 'object',
+      properties: Object.fromEntries(Array.from({ length: 8 }, (_, index) => [`field${index}`, { ...leaf }])),
+    };
+    const out = compactInputSchema(input) as any;
+    expect(out.$defs).toEqual({ string: leaf });
+    expect(Object.values(out.properties)).toEqual(Array.from({ length: 8 }, () => ({ $ref: '#/$defs/string' })));
+    expect(resolve(out)).toEqual(input);
+    expect(JSON.stringify(input).length - JSON.stringify(out).length).toBeGreaterThanOrEqual(16);
+  });
+
+  it('keeps a bounded scalar inline when the definition and refs would cost more', () => {
+    const leaf = { type: 'string', minLength: 1, maxLength: 200 };
+    const input = { type: 'object', properties: { left: { ...leaf }, right: { ...leaf } } };
+    expect(compactInputSchema(input)).toEqual(input);
+  });
+
+  it('hoists frequent bounded scalar fields when their net savings pay for the references', () => {
+    const leaf = { type: 'string', minLength: 1, maxLength: 100 };
+    const input = {
+      type: 'object',
+      properties: Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`field${i}`, { ...leaf }])),
+    };
+    const out = compactInputSchema(input) as any;
+    expect(out.$defs).toEqual({ string: leaf });
+    expect(resolve(out)).toEqual(input);
+    expect(JSON.stringify(out).length).toBeLessThan(JSON.stringify(input).length - 32);
+    expect(compactInputSchema(out)).toEqual(out);
+    expect(input.properties.field0).toEqual(leaf);
+  });
+
   it('names a def by its SHAPE when sites disagree, without clobbering an existing def', () => {
     const list = () => ({ type: 'array', items: { type: 'string', minLength: 1, maxLength: 200 }, minItems: 1, maxItems: 50 });
     const out = compactInputSchema({

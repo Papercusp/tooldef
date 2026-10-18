@@ -223,8 +223,8 @@ const LOCATION_SENSITIVE_KEYS = new Set<string>([
 ]);
 /** Only a root or root-level-definition ref still resolves after its holder moves. */
 const MOVABLE_REF = /^#(?:\/(?:\$defs|definitions)\/[^/]+)?$/;
-/** A smaller subschema stays inline: a field a reader would otherwise chase a ref for. */
-const HOIST_MIN_SUBSCHEMA_BYTES = 64;
+/** Small repeated constraints can save bytes too; the net-savings floor still pays for every ref. */
+const HOIST_MIN_SUBSCHEMA_BYTES = 32;
 const HOIST_MIN_SAVED_BYTES = 32;
 const HOIST_MAX_ROUNDS = 64;
 
