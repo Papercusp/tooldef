@@ -1020,10 +1020,41 @@ export async function runToolOrchestration(
   let authorityWideningDetected = false;
   let dispatchCount = 0;
   let intermediateBytes = 0;
+  // Keep the newest settled reads, not the first ones. A long sequential pagination script can
+  // settle hundreds of pages before the worker deadline; retaining the prefix leaves the caller
+  // with an old cursor and forces it to replay the whole prefix on resume. The bounded ring below
+  // preserves the latest cursor/hash state while retaining the same byte/call caps.
   const timeoutSettledReads: StoredTimeoutSettledRead[] = [];
   let timeoutSettledReadCount = 0;
   let timeoutSettledReadOmittedCount = 0;
   let timeoutSettledReadBytes = 0;
+  const retainTimeoutSettledRead = (call: StoredTimeoutSettledRead): void => {
+    timeoutSettledReadCount += 1;
+    if (call.bytes > TIMEOUT_SETTLED_READ_RECOVERY_MAX_BYTES) {
+      timeoutSettledReadOmittedCount += 1;
+      return;
+    }
+    while (
+      timeoutSettledReads.length >= TIMEOUT_SETTLED_READ_RECOVERY_MAX_CALLS ||
+      timeoutSettledReadBytes + call.bytes > TIMEOUT_SETTLED_READ_RECOVERY_MAX_BYTES
+    ) {
+      const evicted = timeoutSettledReads.shift();
+      if (!evicted) break;
+      timeoutSettledReadBytes -= evicted.bytes;
+      timeoutSettledReadOmittedCount += 1;
+    }
+    // The call fits after evicting older entries, but keep this guard defensive if a cap changes
+    // independently of the loop above.
+    if (
+      timeoutSettledReads.length >= TIMEOUT_SETTLED_READ_RECOVERY_MAX_CALLS ||
+      timeoutSettledReadBytes + call.bytes > TIMEOUT_SETTLED_READ_RECOVERY_MAX_BYTES
+    ) {
+      timeoutSettledReadOmittedCount += 1;
+      return;
+    }
+    timeoutSettledReads.push(call);
+    timeoutSettledReadBytes += call.bytes;
+  };
   const activeCalls = new Set<ActiveOrchestrationCall>();
   const dispatchTimings: OrchestrationDispatchTiming[] = [];
   let dispatchTimingOmittedCount = 0;
@@ -1184,21 +1215,15 @@ export async function runToolOrchestration(
         // Telemetry must never turn a settled child call into a failed run.
       }
       if (effect === 'read') {
-        timeoutSettledReadCount += 1;
-        if (
-          serializedResult !== undefined &&
-          serializedResultBytes !== undefined &&
-          timeoutSettledReads.length < TIMEOUT_SETTLED_READ_RECOVERY_MAX_CALLS &&
-          timeoutSettledReadBytes + serializedResultBytes <= TIMEOUT_SETTLED_READ_RECOVERY_MAX_BYTES
-        ) {
-          timeoutSettledReads.push({
+        if (serializedResult !== undefined && serializedResultBytes !== undefined) {
+          retainTimeoutSettledRead({
             ordinal: callRecord.ordinal,
             tool: name,
             serializedResult,
             bytes: serializedResultBytes,
           });
-          timeoutSettledReadBytes += serializedResultBytes;
         } else {
+          timeoutSettledReadCount += 1;
           timeoutSettledReadOmittedCount += 1;
         }
       }
