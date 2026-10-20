@@ -339,10 +339,11 @@ function jsonLen(v: unknown): number {
  * O(FLAT_LEAF_MAX_ENTRIES) at every depth boundary.
  */
 const FLAT_LEAF_MAX_ENTRIES = 8;
+const isFlatPrimitive = (v: unknown) =>
+  v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean';
 function isFlatLeaf(value: object): boolean {
   if (value instanceof Date || value instanceof Error) return false;
-  const isPrimitive = (v: unknown) =>
-    v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean';
+  const isPrimitive = isFlatPrimitive;
   if (Array.isArray(value)) {
     return value.length <= FLAT_LEAF_MAX_ENTRIES && value.every(isPrimitive);
   }
@@ -354,6 +355,24 @@ function isFlatLeaf(value: object): boolean {
     if (!isPrimitive((value as Record<string, unknown>)[key])) return false;
   }
   return true;
+}
+
+/**
+ * A short array whose rows are primitives or flat leaves: a small table with no
+ * structure below its rows (EI-26207913945554644). When such an ARRAY is the
+ * value on the depth boundary, the gate would identity-preview it and reduce
+ * every row to `{ id }`. Measured 2026-10-20: work_items:get rendered each
+ * threadWindow.posts[] row that way, so a review comment's body read as missing.
+ * Walking it lets each row reach the flat-leaf exemption below the boundary.
+ * Long arrays still take the identity preview, which keeps every row's identity
+ * in a bulk envelope at the cost of its content. Applied only at projectValue's
+ * gate; the identity preview itself stays lossy, since pick narrowing and bulk
+ * row-count retention depend on that.
+ */
+function isFlatTable(value: object): boolean {
+  if (!Array.isArray(value) || value.length > FLAT_LEAF_MAX_ENTRIES) return false;
+  return value.every((row) =>
+    isFlatPrimitive(row) || (typeof row === 'object' && row !== null && isFlatLeaf(row)));
 }
 
 interface ProjectionState {
@@ -1340,9 +1359,10 @@ function projectValue(
     recordOmission(state, path, 'circular reference omitted');
     return '[circular]';
   }
-  // A flat leaf passes the depth gate: there is nothing below it to bound, and
-  // its primitives are still clipped and budget-charged by the normal walk.
-  if (depth >= state.limits.maxDepth && !isFlatLeaf(value)) {
+  // A flat leaf or flat table passes the depth gate: there is no structure below
+  // it to bound, and its primitives are still clipped and budget-charged by the
+  // normal walk.
+  if (depth >= state.limits.maxDepth && !isFlatLeaf(value) && !isFlatTable(value)) {
     // An explicit `projection.pick` may end exactly at this object (the empty
     // preserve-path suffix means "keep this value"). The ordinary identity
     // preview is intentionally lossy and therefore wrong for that request:

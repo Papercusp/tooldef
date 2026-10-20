@@ -1942,6 +1942,45 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     expect(JSON.stringify(origins)).not.toContain('depth limit');
   });
 
+  // EI-26207913945554644, second entry route. When the ARRAY holding flat rows is
+  // the value on the depth boundary, the array is identity-previewed and each row
+  // is previewed directly, never passing projectValue's depth gate. Measured
+  // 2026-10-20: work_items:get rendered every threadWindow.posts[] row as `{ id }`
+  // plus "[omitted: 4 non-identity field(s) …: thread_id, author_id, body, …]",
+  // so a review comment's body read as missing.
+  it('keeps flat rows whole when their array is the value on the depth boundary', () => {
+    const post = (i: number) => ({
+      id: 1_000 + i,
+      thread_id: 'wi:EI-1',
+      author_id: `su-author-${i}`,
+      body: `REVIEW ${i}: revision requested ${'b'.repeat(300)}`,
+      created_at: `2026-10-1${i}T22:05:51Z`,
+    });
+    const payload = {
+      ok: true,
+      summary: {
+        wi: [0, 1].map((i) => ({ id: `EI-${i}`, summary: `LESSON ${i} ${'s'.repeat(2_500)}` })),
+        // summary(1) → a(2) → b(3) → c(4) → posts(5): the array itself sits on
+        // the trimmed tier's depth boundary.
+        a: { b: { c: { posts: [post(1), post(2)], total: 2 } } },
+      },
+    };
+
+    const out = projectBoundedPayload(payload, { toolName: 'work_items:get', tier: 'trimmed' }) as unknown as {
+      _projection: { truncated: boolean };
+      summary: { a: { b: { c: { posts: Array<Record<string, unknown>> } } } };
+    };
+
+    expect(out._projection.truncated).toBe(true);
+    const posts = out.summary.a.b.c.posts;
+    expect(posts).toHaveLength(2);
+    for (const [i, row] of posts.entries()) {
+      expect(row).toEqual(expect.objectContaining({ id: 1_001 + i, author_id: `su-author-${i + 1}` }));
+      expect(String(row.body)).toContain(`REVIEW ${i + 1}: revision requested`);
+    }
+    expect(JSON.stringify(posts)).not.toContain('depth limit');
+  });
+
   // EI-21364503818966104 — a depth-compacted object keeps its identity fields and
   // so still LOOKS whole. On a rubric criterion that is actively dangerous: the
   // survivors are `title`+`check` while `model`/`method`/`driftMarkers` — the
