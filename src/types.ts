@@ -166,6 +166,17 @@ export type RouteAuth = 'public' | 'loopback' | PrincipalRequirements;
 export type RouteMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'OPTIONS';
 
 /**
+ * Optional request-scoped timing for host route diagnostics. Implementations
+ * must keep phase names and values bounded before exposing them to telemetry.
+ * A direct handler call may omit this helper; route behavior must not depend
+ * on diagnostics being installed.
+ */
+export interface RouteDiagnostics {
+  measure<T>(phase: string, work: () => T | PromiseLike<T>): Promise<T>;
+  snapshot(): Readonly<Record<string, number>>;
+}
+
+/**
  * Per-call context handed to a route handler. Host-neutral: `req` and
  * the return value are Web-standard `Request`/`Response`. `params`
  * carries the path parameters (`:slug`) that aren't in the URL.
@@ -187,6 +198,8 @@ export interface RouteContext<TInput = undefined> {
   log: (level: 'info' | 'warn' | 'error', msg: string, meta?: Record<string, unknown>) => void;
   /** Abort signal — fires at `timeoutSec`. Handlers racing I/O should pass it through. */
   signal: AbortSignal;
+  /** Optional bounded server-side phase timing for diagnostic callers. */
+  routeDiagnostics?: RouteDiagnostics;
 }
 
 /**

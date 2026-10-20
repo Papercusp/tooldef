@@ -535,6 +535,7 @@ export type {
   PrincipalRequirements,
   RouteAuth,
   RouteMethod,
+  RouteDiagnostics,
   RouteContext,
   RouteDefinition,
   CapabilityTier,
