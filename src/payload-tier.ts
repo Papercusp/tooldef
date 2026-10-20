@@ -324,6 +324,38 @@ function jsonLen(v: unknown): number {
   }
 }
 
+/**
+ * A FLAT LEAF is an object or array with at most FLAT_LEAF_MAX_ENTRIES children,
+ * every one a primitive (string / number / boolean / null). There is no
+ * structure below it, so the depth limit has nothing to bound there.
+ * Collapsing it to "[omitted: depth limit]" saves at most a few strings, and
+ * each of those is already clipped to `maxString` and charged to the shared
+ * budget by takePrimitive. In exchange it erases small structured evidence
+ * whole (EI-26207913945554644). The case that surfaced this: a
+ * sessions:search `provenance.turn_origin` `{ verdict, origin, note }`
+ * replaced by a marker while longer prose beside it survived.
+ *
+ * Counts children with an early exit and never stringifies, so the check costs
+ * O(FLAT_LEAF_MAX_ENTRIES) at every depth boundary.
+ */
+const FLAT_LEAF_MAX_ENTRIES = 8;
+function isFlatLeaf(value: object): boolean {
+  if (value instanceof Date || value instanceof Error) return false;
+  const isPrimitive = (v: unknown) =>
+    v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean';
+  if (Array.isArray(value)) {
+    return value.length <= FLAT_LEAF_MAX_ENTRIES && value.every(isPrimitive);
+  }
+  let entries = 0;
+  for (const key in value) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    entries += 1;
+    if (entries > FLAT_LEAF_MAX_ENTRIES) return false;
+    if (!isPrimitive((value as Record<string, unknown>)[key])) return false;
+  }
+  return true;
+}
+
 interface ProjectionState {
   remaining: number;
   omittedCount: number;
@@ -1308,7 +1340,9 @@ function projectValue(
     recordOmission(state, path, 'circular reference omitted');
     return '[circular]';
   }
-  if (depth >= state.limits.maxDepth) {
+  // A flat leaf passes the depth gate: there is nothing below it to bound, and
+  // its primitives are still clipped and budget-charged by the normal walk.
+  if (depth >= state.limits.maxDepth && !isFlatLeaf(value)) {
     // An explicit `projection.pick` may end exactly at this object (the empty
     // preserve-path suffix means "keep this value"). The ordinary identity
     // preview is intentionally lossy and therefore wrong for that request:

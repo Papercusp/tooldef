@@ -1873,8 +1873,10 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
   });
 
   it('the depth-boundary markers carry the recovery knob too, and pay no stringify for a size', () => {
-    // A deeply nested object with no identity fields hits the depth limit.
-    const deep = { a: { b: { c: { d: { e: { noIdentityHere: 'x', more: 'y' } } } } } };
+    // A deeply nested object with no identity fields hits the depth limit. The
+    // node on the boundary (`e`) must have structure below it: a FLAT leaf there
+    // is now kept whole (EI-26207913945554644), so it would not fire a marker.
+    const deep = { a: { b: { c: { d: { e: { f: { noIdentityHere: 'x', more: 'y' } } } } } } };
     const text = JSON.stringify(projectBoundedPayload(deep, { toolName: 't', tier: 'trimmed' }));
 
     // If a depth/preview marker fired at all, it must name the recovery path.
@@ -1912,15 +1914,16 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
       ok: true,
       summary: {
         wi: [0, 1].map((i) => ({ id: `EI-${i}`, summary: `LESSON ${i} ${'s'.repeat(2_500)}` })),
-        s4163: [hit(1), hit(2)],
-        scc07: [hit(3), hit(4)],
+        // One level deeper than the flat-shaped script return: each `origin`
+        // sits exactly on the trimmed tier's depth boundary (depth 5).
+        sessions: { s4163: [hit(1), hit(2)], scc07: [hit(3), hit(4)] },
         errs: [null, null],
       },
     };
 
     const out = projectBoundedPayload(payload, { toolName: 'code:run', tier: 'trimmed' }) as unknown as {
       _projection: { truncated: boolean };
-      summary: Record<string, Array<{ origin: unknown }>>;
+      summary: { wi: unknown; sessions: Record<string, Array<{ origin: unknown }>> };
     };
 
     // Precondition: the payload really was budget-shaped (the prose was clipped),
@@ -1928,7 +1931,7 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     expect(out._projection.truncated).toBe(true);
     expect(JSON.stringify(out.summary.wi)).toContain('TRUNCATED');
 
-    const origins = [...out.summary.s4163, ...out.summary.scc07].map((h) => h.origin);
+    const origins = [...out.summary.sessions.s4163, ...out.summary.sessions.scc07].map((h) => h.origin);
     expect(origins).toHaveLength(4);
     for (const [i, origin] of origins.entries()) {
       expect(origin).toEqual(expect.objectContaining({
