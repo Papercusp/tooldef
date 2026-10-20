@@ -1889,6 +1889,56 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     }
   });
 
+  // EI-26207913945554644: a FLAT leaf object (every child a primitive) sitting
+  // on the depth boundary has no structure below it for the depth limit to
+  // bound. Collapsing it to a marker saves almost nothing and erases small
+  // structured evidence. Measured 2026-10-20: a code:run result shaped from
+  // 7,280 to 5,792 chars replaced each sessions:search provenance.turn_origin
+  // `{ verdict, origin, note }` with "[omitted: depth limit]". That was the one
+  // field that answers "did the owner type this turn?", while the longer prose
+  // excerpts beside it survived.
+  it('keeps a flat leaf object on the depth boundary instead of collapsing it to a marker', () => {
+    const hit = (i: number) => ({
+      ts: `2026-09-1${i}T15:21:37Z`,
+      speaker: i % 2 ? 'user' : 'assistant',
+      origin: {
+        verdict: i % 2 ? 'owner-typed' : 'agent-injected',
+        origin: i % 2 ? null : 'loop-fire',
+        note: `turn ${i} provenance note ${'n'.repeat(260)}`,
+      },
+      text: `[assistant su-x 2026-09-17] excerpt ${i} ${'t'.repeat(220)}`,
+    });
+    const payload = {
+      ok: true,
+      summary: {
+        wi: [0, 1].map((i) => ({ id: `EI-${i}`, summary: `LESSON ${i} ${'s'.repeat(2_500)}` })),
+        s4163: [hit(1), hit(2)],
+        scc07: [hit(3), hit(4)],
+        errs: [null, null],
+      },
+    };
+
+    const out = projectBoundedPayload(payload, { toolName: 'code:run', tier: 'trimmed' }) as unknown as {
+      _projection: { truncated: boolean };
+      summary: Record<string, Array<{ origin: unknown }>>;
+    };
+
+    // Precondition: the payload really was budget-shaped (the prose was clipped),
+    // so this is not a vacuous pass on an untouched result.
+    expect(out._projection.truncated).toBe(true);
+    expect(JSON.stringify(out.summary.wi)).toContain('TRUNCATED');
+
+    const origins = [...out.summary.s4163, ...out.summary.scc07].map((h) => h.origin);
+    expect(origins).toHaveLength(4);
+    for (const [i, origin] of origins.entries()) {
+      expect(origin).toEqual(expect.objectContaining({
+        verdict: (i + 1) % 2 ? 'owner-typed' : 'agent-injected',
+        origin: (i + 1) % 2 ? null : 'loop-fire',
+      }));
+    }
+    expect(JSON.stringify(origins)).not.toContain('depth limit');
+  });
+
   // EI-21364503818966104 — a depth-compacted object keeps its identity fields and
   // so still LOOKS whole. On a rubric criterion that is actively dangerous: the
   // survivors are `title`+`check` while `model`/`method`/`driftMarkers` — the
