@@ -31,6 +31,7 @@ export {
   compactInputSchema,
   compactWireBytes,
   isFormatImpliedPattern,
+  isVacuousPropertyNames,
 } from './compact-schema';
 // Partial-guidance tier (same plan, P-010 / D-006): the PROSE analogue of the
 // compact schema projection. COMPACT drops `description` entirely, which on the

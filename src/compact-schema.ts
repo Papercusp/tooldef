@@ -14,10 +14,11 @@
  * property names, the required set, enum members, numeric and length bounds,
  * oneOf/anyOf/allOf discriminators, nested object/array shape, and $defs/$ref
  * structure. A `type` keyword is omitted only when a sibling `enum` or `const`
- * already permits exactly values of that type, and a `pattern` only when it is
+ * already permits exactly values of that type, a `pattern` only when it is
  * zod's OWN regex for a sibling `format` that names the same contract (see
- * FORMAT_IMPLIED_PATTERNS). What else is dropped is PROSE ONLY: `description`,
- * `title`, `examples`/`example`, and `default`.
+ * FORMAT_IMPLIED_PATTERNS), and a `propertyNames` only when every possible key
+ * satisfies it (see isVacuousPropertyNames). What else is dropped is PROSE ONLY:
+ * `description`, `title`, `examples`/`example`, and `default`.
  *
  * ⚠ A FORMAT-IMPLIED `pattern` IS DROPPED, AND THAT IS THE SECOND NARROW BET.
  * zod emits its implementation regex beside every string format it knows, so a
@@ -183,6 +184,29 @@ export function isFormatImpliedPattern(schema: Record<string, unknown>): boolean
   );
 }
 
+/**
+ * Whether a `propertyNames` subschema is VACUOUS: one that every JSON object key
+ * satisfies. A key is always a string, so `true`, an empty (or prose-only)
+ * subschema and `{ type: 'string' }` constrain nothing. zod emits the last one
+ * beside every `z.record(z.string(), …)`, so each map-valued argument on a floor
+ * tool paid ~33 bytes per launch for it (WI-10006197).
+ *
+ * This is NOT a denylist entry: `propertyNames` stays out of COMPACT_DROPPED_KEYS
+ * because a real one (`pattern`, `enum`, a length bound, a non-string `type`)
+ * DOES constrain which keys validate, and every such one is kept verbatim.
+ * Exported for the same reason as isFormatImpliedPattern: a contract comparison
+ * (compact-schema-catalog.test.ts) applies THIS rule instead of re-deriving it.
+ */
+export function isVacuousPropertyNames(value: unknown): boolean {
+  if (value === true) return true;
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const constraining = Object.keys(value).filter((key) => !DROPPED.has(key));
+  if (constraining.length === 0) return true;
+  if (constraining.length !== 1 || constraining[0] !== 'type') return false;
+  const type = (value as Record<string, unknown>).type;
+  return type === 'string' || (Array.isArray(type) && type.includes('string'));
+}
+
 function compactNode(node: unknown, inNameKeyedMap: boolean): unknown {
   if (node === null || typeof node !== 'object') return node;
   if (Array.isArray(node)) return node.map((entry) => compactNode(entry, false));
@@ -201,6 +225,7 @@ function compactNode(node: unknown, inNameKeyedMap: boolean): unknown {
     if (DROPPED.has(key)) continue;
     if (key === 'type' && omitType) continue;
     if (key === 'pattern' && omitPattern) continue;
+    if (key === 'propertyNames' && isVacuousPropertyNames(value)) continue;
     out[key] = compactNode(value, NAME_KEYED_CONTAINERS.has(key));
   }
   return out;

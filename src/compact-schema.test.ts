@@ -5,6 +5,7 @@ import {
   COMPACT_DROPPED_KEYS,
   compactInputSchema,
   compactWireBytes,
+  isVacuousPropertyNames,
 } from './compact-schema';
 
 /**
@@ -551,5 +552,62 @@ describe('verbatim-repeated subschemas are hoisted into $defs', () => {
     const once = compactInputSchema(input);
     expect(JSON.stringify(input)).toBe(snapshot);
     expect(compactInputSchema(once)).toEqual(once);
+  });
+});
+
+// WI-10006197: a JSON object key is always a string, so a `propertyNames` that
+// every string satisfies restates nothing. zod emits `{ type: 'string' }` beside
+// every z.record, which each map-valued floor-tool argument paid for per launch.
+describe('vacuous propertyNames', () => {
+  const recordArgs = () =>
+    z.toJSONSchema(
+      z.object({ env: z.record(z.string(), z.string()), tags: z.record(z.string(), z.number()) }),
+    ) as Record<string, any>;
+
+  it('drops the propertyNames zod emits beside a z.record, keeping the value schema', () => {
+    const full = recordArgs();
+    // The precondition this rule exists for: zod really does emit it.
+    expect(full.properties.env.propertyNames).toEqual({ type: 'string' });
+    const out = compactInputSchema(full) as Record<string, any>;
+    expect(out.properties.env.propertyNames).toBeUndefined();
+    expect(out.properties.env.additionalProperties).toEqual({ type: 'string' });
+    expect(out.properties.tags.propertyNames).toBeUndefined();
+    expect(out.properties.tags.additionalProperties).toEqual({ type: 'number' });
+    expect(JSON.stringify(out)).not.toContain('propertyNames');
+  });
+
+  it.each([
+    ['true', true],
+    ['an empty subschema', {}],
+    ['a prose-only subschema', { description: 'any key' }],
+    ['type string', { type: 'string' }],
+    ['type string plus prose', { type: 'string', title: 'Key' }],
+    ['a type union containing string', { type: ['string', 'null'] }],
+  ])('treats %s as vacuous', (_label, names) => {
+    expect(isVacuousPropertyNames(names)).toBe(true);
+    const out = compactInputSchema({ type: 'object', propertyNames: names }) as Record<string, unknown>;
+    expect(out).not.toHaveProperty('propertyNames');
+  });
+
+  it.each([
+    ['a key pattern', { type: 'string', pattern: '^[A-Z_]+$' }],
+    ['a key enum', { enum: ['a', 'b'] }],
+    ['a key length bound', { type: 'string', minLength: 2 }],
+    ['a non-string type, which no key satisfies', { type: 'number' }],
+    ['false', false],
+    ['a $ref', { $ref: '#/$defs/Key' }],
+  ])('KEEPS a propertyNames that constrains keys: %s', (_label, names) => {
+    expect(isVacuousPropertyNames(names)).toBe(false);
+    const out = compactInputSchema({ type: 'object', propertyNames: names }) as Record<string, unknown>;
+    expect(out).toHaveProperty('propertyNames');
+  });
+
+  it('never touches a PROPERTY that is merely named propertyNames', () => {
+    const schema = {
+      type: 'object',
+      required: ['propertyNames'],
+      properties: { propertyNames: { type: 'string' } },
+    };
+    expect(compactInputSchema(schema)).toEqual(schema);
   });
 });
