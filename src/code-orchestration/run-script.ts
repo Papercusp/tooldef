@@ -320,8 +320,8 @@ function validateJsonInputs(inputs: unknown): string | null {
  *
  * Embedding (vs a sibling .js file) avoids runtime path-resolution that differs across vitest /
  * tsx / compiled dist — the one consumer is this module, so the source travels with it. The code
- * is plain JS (CommonJS `require` is available in an eval worker) and self-contained: it imports
- * nothing from this package.
+ * is plain JS and self-contained: it imports nothing from this package. Builtin dynamic imports
+ * work in both CommonJS and ESM, including when a parent's --input-type=module reaches the worker.
  *
  * Host↔worker protocol (all messages are `{ t: <kind>, … }`):
  *   worker → host : { t:'call', id, ns?, verb?, callName?, args }   a `tools.*` invocation
@@ -329,9 +329,10 @@ function validateJsonInputs(inputs: unknown): string | null {
  *                   { t:'done', result } | { t:'error', error }     terminal
  *   host  → worker: { t:'result', id, ok, value? , error? }         a tool-call reply
  */
-const WORKER_SRC = `(() => {
-  const { parentPort: workerPort, workerData } = require('node:worker_threads');
-  const vm = require('node:vm');
+const WORKER_SRC = `(async () => {
+  const [{ parentPort: workerPort, workerData }, vm] = await Promise.all([
+    import('node:worker_threads'), import('node:vm'),
+  ]);
   const STALE_TOOLS_PROXY_ERROR = ${JSON.stringify(STALE_TOOLS_PROXY_ERROR)};
   const kernelContext = workerData.persistent ? vm.createContext({}) : null;
   const kernelProxyToRaw = new WeakMap();
