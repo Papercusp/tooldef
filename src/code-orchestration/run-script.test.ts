@@ -1292,13 +1292,27 @@ describe('EI-19301148486657755: reading a field the tool result does not have', 
   });
 
   it('retains the latest explicit state when a later synchronous loop times out', async () => {
-    const r = await runOrchestrationScript(`store('cursor', 4); while (true) {}`, facade({}), {
-      inputs: { cursor: 3 },
-      timeoutMs: 100,
-    });
-
-    expect(r.ok).toBe(false);
-    expect(r.error).toContain('script_timeout');
-    expect(r.state).toEqual({ cursor: 4 });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const started = Promise.withResolvers<void>();
+    const pending = runOrchestrationScript(
+      `store('cursor', 4); void tools.probe.ready(); while (true) {}`,
+      facade({ probe: { ready: () => { started.resolve(); } } }),
+      { inputs: { cursor: 3 }, timeoutMs: 100 },
+    );
+    try {
+      // Worker startup is outside the behavior under test. Its state message
+      // precedes ready on the same port; only then fire the real kill switch.
+      await Promise.race([started.promise, pending.then((result) => {
+        throw new Error(`worker stopped before its state checkpoint: ${JSON.stringify(result)}`);
+      })]);
+      await vi.advanceTimersByTimeAsync(100);
+      const r = await pending;
+      expect(r.ok).toBe(false);
+      expect(r.error).toContain('script_timeout');
+      expect(r.state).toEqual({ cursor: 4 });
+    } finally {
+      await vi.advanceTimersByTimeAsync(100);
+      vi.useRealTimers();
+    }
   });
 });
