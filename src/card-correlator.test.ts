@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import type { CardResponse } from './types';
 
 import {
   _cardCorrelatorStatsForTests,
@@ -8,6 +9,8 @@ import {
   cancelPendingCardsForWorkspaceSwitch,
   registerCard,
   resolveCardResponse,
+  resolveCardResponseAsync,
+  deliverCommittedCardResponse,
 } from './card-correlator';
 import {
   _resetStateChannelForTests,
@@ -28,8 +31,132 @@ describe('card-correlator', () => {
     _resetStateChannelForTests();
   });
   afterEach(() => {
+    vi.useRealTimers();
     _resetCardCorrelatorForTests();
     _resetStateChannelForTests();
+  });
+
+  it('awaits the durable response commit before acknowledging or settling the waiter', async () => {
+    openRun({ workspaceId: ws, runId: 'durable' });
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const commitResponse = vi.fn(async (response: CardResponse) => { await gate; return { accepted: true, response }; });
+    const { correlationId, result } = registerCard({ workspaceId: ws, runId: 'durable',
+      spec: { prompt: 'choose', dataSchema: choiceSchema, commitResponse } });
+    let delivered = false;
+    void result.then(() => { delivered = true; });
+    const opts = { correlationId, action: 'submit' as const, payload: { picks: ['a'] }, expectedWorkspaceId: ws };
+    expect(resolveCardResponse(opts)).toMatchObject({ ok: false, status: 409 });
+    expect(commitResponse).not.toHaveBeenCalled();
+    let acknowledged = false;
+    const answer = resolveCardResponseAsync(opts).then(value => { acknowledged = true; return value; });
+    await Promise.resolve();
+    expect(acknowledged).toBe(false);
+    expect(delivered).toBe(false);
+    expect(getSnapshot('durable')!.snapshot.openCards).toHaveLength(1);
+    expect(commitResponse).toHaveBeenCalledWith({ action: 'submit', payload: { picks: ['a'] } },
+      { correlationId, workspaceId: ws, runId: 'durable' }, 'response');
+    release();
+    expect(await answer).toEqual({ ok: true });
+    expect(await result).toEqual({ action: 'submit', payload: { picks: ['a'] } });
+    expect(getSnapshot('durable')!.snapshot.openCards).toEqual([]);
+  });
+
+  it('validates scope and schema before invoking the durable response writer', async () => {
+    const commitResponse = vi.fn(async (response: CardResponse) => ({ accepted: true, response }));
+    const { correlationId } = registerCard({ workspaceId: ws, runId: 'validation',
+      spec: { prompt: 'choose', dataSchema: choiceSchema, allowDecline: false, commitResponse } });
+    expect(await resolveCardResponseAsync({ correlationId, action: 'submit', payload: { picks: [] } }))
+      .toMatchObject({ ok: false, status: 400 });
+    expect(await resolveCardResponseAsync({ correlationId, action: 'decline' })).toMatchObject({ ok: false, status: 400 });
+    expect(await resolveCardResponseAsync({ correlationId, action: 'cancel', expectedWorkspaceId: 'foreign' }))
+      .toMatchObject({ ok: false, status: 404 });
+    expect(commitResponse).not.toHaveBeenCalled();
+  });
+
+  it('leaves an unknown response commit pending and accepts only a scoped committed delivery', async () => {
+    const commitResponse = vi.fn(async () => { throw new Error('ack-lost'); });
+    const { correlationId, result } = registerCard({ workspaceId: ws, runId: 'recovery',
+      spec: { prompt: 'choose', dataSchema: choiceSchema, commitResponse } });
+    expect(await resolveCardResponseAsync({ correlationId, action: 'submit', payload: { picks: ['a'] } }))
+      .toMatchObject({ ok: false, status: 503 });
+    expect(_cardCorrelatorStatsForTests().pendingCount).toBe(1);
+    const delivery = { correlationId, runId: 'recovery', workspaceId: ws,
+      response: { action: 'submit' as const, payload: { picks: ['a'] } } };
+    for (const wrong of [{ ...delivery, runId: 'foreign' }, { ...delivery, workspaceId: 'foreign' }]) {
+      expect(deliverCommittedCardResponse(wrong)).toMatchObject({ ok: false, status: 404 });
+    }
+    expect(deliverCommittedCardResponse({ ...delivery, response: { action: 'submit' } as CardResponse }))
+      .toMatchObject({ ok: false, status: 400 });
+    expect(deliverCommittedCardResponse(delivery)).toEqual({ ok: true });
+    expect(await result).toEqual(delivery.response);
+    expect(commitResponse).toHaveBeenCalledOnce();
+  });
+
+  it('delivers the exact committed schema output without applying input transforms again', async () => {
+    let transforms = 0;
+    const schema = z.preprocess(value => {
+      transforms++;
+      return { picks: choiceSchema.parse(value).picks.map(pick => `${pick}-normalized`) };
+    }, choiceSchema);
+    const commitResponse = async (response: CardResponse) => ({ accepted: true, response });
+    const first = registerCard({ workspaceId: ws, runId: 'transform',
+      spec: { prompt: 'choose', dataSchema: schema, commitResponse } });
+    expect(await resolveCardResponseAsync({ correlationId: first.correlationId, action: 'submit', payload: { picks: ['a'] } }))
+      .toEqual({ ok: true });
+    const committed = { action: 'submit' as const, payload: { picks: ['a-normalized'] } };
+    expect(await first.result).toEqual(committed);
+    expect(transforms).toBe(1);
+    const recovered = registerCard({ workspaceId: ws, runId: 'transform',
+      spec: { prompt: 'choose', dataSchema: schema, commitResponse } });
+    expect(deliverCommittedCardResponse({ correlationId: recovered.correlationId,
+      workspaceId: ws, runId: 'transform', response: committed })).toEqual({ ok: true });
+    expect(await recovered.result).toEqual(committed);
+    expect(transforms).toBe(1);
+  });
+
+  it('refuses a losing response while delivering the actual committed winner', async () => {
+    const winner = { action: 'submit' as const, payload: { picks: ['b'] } };
+    const { correlationId, result } = registerCard({ workspaceId: ws, runId: 'loser',
+      spec: { prompt: 'choose', dataSchema: choiceSchema,
+        commitResponse: async () => ({ accepted: false, response: winner }) } });
+    expect(await resolveCardResponseAsync({ correlationId, action: 'submit', payload: { picks: ['a'] } }))
+      .toMatchObject({ ok: false, status: 409 });
+    expect(await result).toEqual(winner);
+  });
+
+  it('does not settle timeout cancellation before its commit and preserves a winning answer', async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const winner = { action: 'submit' as const, payload: { picks: ['b'] } };
+    const commitResponse = vi.fn(async () => { await gate; return { accepted: false, response: winner }; });
+    const { correlationId, result } = registerCard({ workspaceId: ws, runId: 'timeout',
+      spec: { prompt: 'choose', dataSchema: choiceSchema, timeoutMs: 100, commitResponse } });
+    let delivered = false;
+    void result.then(() => { delivered = true; });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(delivered).toBe(false);
+    expect(_cardCorrelatorStatsForTests().pendingCount).toBe(1);
+    expect(commitResponse).toHaveBeenCalledWith({ action: 'cancel' },
+      { correlationId, runId: 'timeout', workspaceId: ws }, 'timeout');
+    release();
+    expect(await result).toEqual(winner);
+  });
+
+  it.each(['abort', 'run-end', 'workspace-switch'] as const)('rejects %s cleanup when cancellation storage fails', async origin => {
+    const commitResponse = vi.fn(async (_response: CardResponse, _info: unknown, _origin: string) => {
+      throw new Error('cancel-write-failed');
+    });
+    const { result } = registerCard({ workspaceId: ws, runId: 'failure',
+      spec: { prompt: 'choose', dataSchema: choiceSchema, commitResponse } });
+    const rejected = expect(result).rejects.toThrow('cancel-write-failed');
+    if (origin === 'workspace-switch') cancelPendingCardsForWorkspaceSwitch(ws);
+    else cancelPendingCardsForRun('failure', origin);
+    await rejected;
+    expect(commitResponse).toHaveBeenCalledOnce();
+    expect(commitResponse.mock.calls[0][2]).toBe(origin);
+    expect(_cardCorrelatorStatsForTests().pendingCount).toBe(0);
   });
 
   it('registerCard publishes the card into the state-channel snapshot', () => {

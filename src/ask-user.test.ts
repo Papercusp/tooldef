@@ -5,6 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import type { CardResponse } from './types';
 
 import {
   dispatchProjectedTool,
@@ -124,6 +125,142 @@ describe('ctx.askUser dispatcher integration', () => {
       const c = (result.result.content?.[0] as { text?: string })?.text;
       expect(c).toBe('picked:a');
     }
+  });
+
+  it('awaits durable preparation before publishing a card, using the same identity', async () => {
+    let prepared!: { correlationId: string; runId: string; workspaceId: string };
+    let finish!: () => void;
+    const committed = new Promise<void>(resolve => { finish = resolve; });
+    const onCard = vi.fn();
+    const tool: ProjectedTool = { ...makeAskTool(), timeoutSec: 2, fn: async (_input, ctx) => {
+      const response = await ctx.askUser!({ prompt: 'persist first', dataSchema: choiceSchema,
+        beforeCard: async info => { prepared = info; await committed; }, onCard });
+      return { content: [{ type: 'text', text: response.action }] };
+    } };
+    const running = dispatchProjectedTool(tool, 'test:ask', {}, MAKE_CTX({ runId: 'durable' }), MAKE_DEPS());
+    await vi.waitFor(() => expect(prepared).toBeDefined());
+    expect(getSnapshot('durable')?.snapshot.openCards ?? []).toEqual([]);
+    expect(onCard).not.toHaveBeenCalled();
+    finish();
+    await vi.waitFor(() => expect(onCard).toHaveBeenCalledWith(prepared));
+    expect(getSnapshot('durable')!.snapshot.openCards[0].correlationId).toBe(prepared.correlationId);
+    resolveCardResponse({ correlationId: prepared.correlationId, action: 'submit', payload: { picks: ['a'] },
+      expectedWorkspaceId: 'workspace-Z' });
+    expect((await running).ok).toBe(true);
+  });
+
+  it('failed durable preparation publishes no card and does not run the best-effort link hook', async () => {
+    const onCard = vi.fn();
+    const tool: ProjectedTool = { ...makeAskTool(), timeoutSec: 0.1, fn: async (_input, ctx) => {
+      await ctx.askUser!({ prompt: 'persist first', dataSchema: choiceSchema,
+        beforeCard: async () => { throw new Error('storage-unavailable'); }, onCard });
+      return { content: [] };
+    } };
+    const result = await dispatchProjectedTool(tool, 'test:ask', {}, MAKE_CTX({ runId: 'failed-prepare' }), MAKE_DEPS());
+    expect(result.ok).toBe(false);
+    expect(getSnapshot('failed-prepare')?.snapshot.openCards ?? []).toEqual([]);
+    expect(onCard).not.toHaveBeenCalled();
+    expect(_cardCorrelatorStatsForTests().pendingCount).toBe(0);
+  });
+
+  it('abort during durable preparation never publishes the late committed identity', async () => {
+    let finish!: () => void;
+    const committed = new Promise<void>(resolve => { finish = resolve; });
+    const beforeCard = vi.fn(async () => { await committed; });
+    const onCard = vi.fn();
+    const abort = new AbortController();
+    const tool: ProjectedTool = { ...makeAskTool(), fn: async (_input, ctx) => {
+      await ctx.askUser!({ prompt: 'persist first', dataSchema: choiceSchema, beforeCard, onCard });
+      return { content: [] };
+    } };
+    const running = dispatchProjectedTool(tool, 'test:ask', {},
+      MAKE_CTX({ runId: 'abort-prepare', signal: abort.signal }), MAKE_DEPS());
+    await vi.waitFor(() => expect(beforeCard).toHaveBeenCalledOnce());
+    abort.abort();
+    finish();
+    await running;
+    expect(onCard).not.toHaveBeenCalled();
+    expect(getSnapshot('abort-prepare')?.snapshot.openCards ?? []).toEqual([]);
+    expect(_cardCorrelatorStatsForTests().pendingCount).toBe(0);
+  });
+
+  it('awaits committed cancellation when the dispatcher aborts a published durable card', async () => {
+    let finish!: () => void;
+    const gate = new Promise<void>(resolve => { finish = resolve; });
+    const commitResponse = vi.fn(async (response: CardResponse) => { await gate; return { accepted: true, response }; });
+    const abort = new AbortController();
+    const onCard = vi.fn();
+    let handlerSettled = false;
+    const tool: ProjectedTool = { ...makeAskTool(), fn: async (_input, ctx) => {
+      await ctx.askUser!({ prompt: 'persist cancellation', dataSchema: choiceSchema,
+        beforeCard: async () => {}, commitResponse, onCard });
+      handlerSettled = true;
+      return { content: [] };
+    } };
+    const running = dispatchProjectedTool(tool, 'test:ask', {},
+      MAKE_CTX({ runId: 'durable-abort', signal: abort.signal }), MAKE_DEPS());
+    await vi.waitFor(() => expect(onCard).toHaveBeenCalledOnce());
+    abort.abort();
+    await vi.waitFor(() => expect(commitResponse).toHaveBeenCalledOnce());
+    expect(handlerSettled).toBe(false);
+    expect(getSnapshot('durable-abort')?.snapshot.openCards).toHaveLength(1);
+    finish();
+    await running;
+    expect(handlerSettled).toBe(true);
+    expect(commitResponse).toHaveBeenCalledWith({ action: 'cancel' },
+      expect.objectContaining({ runId: 'durable-abort', workspaceId: 'workspace-Z' }), 'abort');
+    expect(_cardCorrelatorStatsForTests().pendingCount).toBe(0);
+  });
+
+  it('commits cancellation after an abort during preparation before returning without publication', async () => {
+    let finishPrepare!: () => void;
+    const prepared = new Promise<void>(resolve => { finishPrepare = resolve; });
+    const beforeCard = vi.fn(async () => { await prepared; });
+    let finishCancel!: () => void;
+    const cancelled = new Promise<void>(resolve => { finishCancel = resolve; });
+    const commitResponse = vi.fn(async (response: CardResponse) => { await cancelled; return { accepted: true, response }; });
+    const onCard = vi.fn();
+    const abort = new AbortController();
+    let handlerSettled = false;
+    const tool: ProjectedTool = { ...makeAskTool(), fn: async (_input, ctx) => {
+      await ctx.askUser!({ prompt: 'persist first', dataSchema: choiceSchema, beforeCard, commitResponse, onCard });
+      handlerSettled = true;
+      return { content: [] };
+    } };
+    const running = dispatchProjectedTool(tool, 'test:ask', {},
+      MAKE_CTX({ runId: 'durable-prepare-abort', signal: abort.signal }), MAKE_DEPS());
+    await vi.waitFor(() => expect(beforeCard).toHaveBeenCalledOnce());
+    abort.abort();
+    finishPrepare();
+    await vi.waitFor(() => expect(commitResponse).toHaveBeenCalledOnce());
+    expect(handlerSettled).toBe(false);
+    expect(onCard).not.toHaveBeenCalled();
+    expect(getSnapshot('durable-prepare-abort')?.snapshot.openCards ?? []).toEqual([]);
+    finishCancel();
+    await running;
+    expect(handlerSettled).toBe(true);
+    expect(onCard).not.toHaveBeenCalled();
+    expect(_cardCorrelatorStatsForTests().pendingCount).toBe(0);
+  });
+
+  it('completed idempotency hit skips durable preparation and republishes no card', async () => {
+    const beforeCard = vi.fn(async () => {});
+    const onCard = vi.fn();
+    const tool: ProjectedTool = { ...makeAskTool(), fn: async (_input, ctx) => {
+      const spec = { prompt: 'persist once', dataSchema: choiceSchema, beforeCard, onCard, idempotencyKey: 'same' };
+      const a = await ctx.askUser!(spec);
+      const b = await ctx.askUser!(spec);
+      expect(b).toEqual(a);
+      return { content: [] };
+    } };
+    const running = dispatchProjectedTool(tool, 'test:ask', {}, MAKE_CTX({ runId: 'cached-prepare' }), MAKE_DEPS());
+    await vi.waitFor(() => expect(onCard).toHaveBeenCalledOnce());
+    const correlationId = getSnapshot('cached-prepare')!.snapshot.openCards[0].correlationId;
+    resolveCardResponse({ correlationId, action: 'submit', payload: { picks: ['a'] }, expectedWorkspaceId: 'workspace-Z' });
+    expect((await running).ok).toBe(true);
+    expect(beforeCard).toHaveBeenCalledOnce();
+    expect(onCard).toHaveBeenCalledOnce();
+    expect(_cardCorrelatorStatsForTests().pendingCount).toBe(0);
   });
 
   it('onCard fires with the freshly-minted correlationId (P-032 — Phase D link hook)', async () => {

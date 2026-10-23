@@ -330,7 +330,10 @@ export type { RowsDeltaResult } from './rows-delta';
 export {
   registerCard,
   resolveCardResponse,
+  resolveCardResponseAsync,
+  deliverCommittedCardResponse,
   cancelPendingCardsForRun,
+  cancelPendingCardsForRunAsync,
   cancelPendingCardsForWorkspaceSwitch,
   _resetCardCorrelatorForTests,
 } from './card-correlator';

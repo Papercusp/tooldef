@@ -39,6 +39,7 @@ import {
 import {
   cancelPendingCardsForRun,
   registerCard,
+  registerPreparedCard,
 } from './card-correlator';
 import { openRun, closeRun, setToolState } from './state-channel';
 import type { CardResponse, CardSpec } from './types';
@@ -725,16 +726,25 @@ const ctxBindingsStep: DispatchStep = {
       askUser = async <TSchema extends StandardSchemaV1>(
         spec: CardSpec<TSchema>,
       ): Promise<CardResponse<TSchema>> => {
-        const { correlationId, result } = registerCard({ workspaceId: wsId, runId, spec });
+        const { correlationId, result } = spec.beforeCard
+          ? await registerPreparedCard({ workspaceId: wsId, runId, spec, signal: exec.abort.signal })
+          : registerCard({ workspaceId: wsId, runId, spec });
         // Surface the freshly-minted id so a caller can link an external
         // durable record (Phase D). Skip an idempotency-cache hit (no card was
         // registered — correlationId is the 'idempotent' sentinel).
-        if (spec.onCard && correlationId !== 'idempotent') {
+        if (spec.onCard && correlationId !== 'idempotent' && correlationId !== 'cancelled') {
           try {
             spec.onCard({ correlationId, runId, workspaceId: wsId });
           } catch {
             /* onCard must never break the card flow */
           }
+        }
+        if (spec.commitResponse) {
+          const onAbort = () => cancelPendingCardsForRun(runId, 'abort');
+          exec.abort.signal.addEventListener('abort', onAbort);
+          if (exec.abort.signal.aborted) onAbort();
+          try { return await result; }
+          finally { exec.abort.signal.removeEventListener('abort', onAbort); }
         }
         return await new Promise<CardResponse<TSchema>>((resolve) => {
           const onAbort = () => {
