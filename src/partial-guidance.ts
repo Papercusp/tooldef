@@ -217,6 +217,11 @@ export function partialGuidanceDescription(description: string | undefined): str
  *     tools (374 B over); cap=30 measures 99,937 B and 65 compact tools, with
  *     zero overrun. The independent 70-char rail floor remains unchanged.
  *
+ *     2026-10-23, literal five-key schema preservation plus reference reuse:
+ *     the same 64 floors cost 100,511 B at cap=30. Cap=20 returns 518 B
+ *     of selection prose, pricing that population at 99,993 B without
+ *     changing a schema constraint or the independent 70-char rail cap.
+ *
  * THE TRADE, stated because it is real: pricing prose into the tier costs 8
  * advertised seats (71 → 63). That is the right direction — a tool advertised
  * with an empty description occupies a budget seat while being unidentifiable,
@@ -224,7 +229,7 @@ export function partialGuidanceDescription(description: string | undefined): str
  * reachable through `tools:find`. Re-run the sweep after any catalog change
  * before editing this number by hand.
  */
-export const SUMMARY_LEAD_MAX_CHARS = 30;
+export const SUMMARY_LEAD_MAX_CHARS = 20;
 
 // WI-10006184: shortening selection prose must not shorten already-delivered
 // rules (notably tools:invoke's colon-name rule). Keep the previous rail cap.

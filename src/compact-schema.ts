@@ -192,9 +192,8 @@ const LOCATION_SENSITIVE_KEYS = new Set<string>([
 ]);
 /** Only a root or root-level-definition ref still resolves after its holder moves. */
 const MOVABLE_REF = /^#(?:\/(?:\$defs|definitions)\/[^/]+)?$/;
-/** Small repeated constraints can save bytes too; the net-savings floor still pays for every ref. */
-const HOIST_MIN_SUBSCHEMA_BYTES = 32;
-const HOIST_MIN_SAVED_BYTES = 32;
+/** Charge the complete definition and every reference; only positive net savings qualify. */
+const HOIST_MIN_SAVED_BYTES = 1;
 const HOIST_MAX_ROUNDS = 64;
 
 type JsonObject = Record<string, unknown>;
@@ -253,30 +252,22 @@ function jsonText(value: unknown, memo: Map<object, string>): string {
     ? `[${value.map((entry) => jsonText(entry, memo)).join(',')}]`
     : `{${Object.entries(value)
         .filter(([, entry]) => entry !== undefined)
+        .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
         .map(([key, entry]) => `${JSON.stringify(key)}:${jsonText(entry, memo)}`)
         .join(',')}}`;
   memo.set(value, text);
   return text;
 }
 
-/** Def name when the sites disagree on a property name: say what the shape IS. */
-function shapeName(node: JsonObject): string {
-  if (typeof node.format === 'string') return node.format;
-  if (typeof node.type === 'string') return node.type;
-  if (Array.isArray(node.type)) return node.type.join('_');
-  for (const key of ['anyOf', 'oneOf', 'allOf']) if (Object.hasOwn(node, key)) return key;
-  return 'schema';
-}
-
 /**
- * Keep a def name inside [A-Za-z0-9_.-], so the `$ref` fragment compaction writes
- * needs neither pointer- nor percent-escaping: a validator that decodes the
- * fragment (RFC 6901 §6) and one that does not resolve it identically. A
- * property name is author-chosen and may hold a space, `%`, `/` or `#`.
+ * New definitions use short URI-safe labels. Authored names remain unchanged.
+ * A long property name must not be charged at every reference to its shape.
  */
-function safeDefinitionName(name: string): string {
-  const safe = name.replace(/[^A-Za-z0-9_.-]+/g, '_');
-  return /[A-Za-z0-9]/.test(safe) ? safe : 'schema';
+function nextDefinitionName(definitions: JsonObject | undefined): string {
+  for (let n = 0; ; n++) {
+    const name = n.toString(36);
+    if (definitions === undefined || !Object.hasOwn(definitions, name)) return name;
+  }
 }
 
 function definitionRef(definitionsKey: string, name: string): string {
@@ -306,30 +297,29 @@ function hoistRepeatedSubschemas(root: unknown): unknown {
     }
     const existing = root[definitionsKey];
     const definitions = isJsonObject(existing) ? existing : undefined;
-    let best: { sites: SubschemaSite[]; name: string; saved: number } | undefined;
+    let best: { sites: SubschemaSite[]; name: string; saved: number; reuse: boolean } | undefined;
     for (const [text, group] of groups) {
       const bytes = utf8Bytes(text);
-      if (group.length < 2 || bytes < HOIST_MIN_SUBSCHEMA_BYTES) continue;
-      const hint = group[0].nameHint;
-      const base = safeDefinitionName(
-        group.every((site) => site.nameHint === hint) ? hint : shapeName(group[0].node),
-      );
-      let name = base;
-      for (let n = 2; definitions !== undefined && Object.hasOwn(definitions, name); n++) {
-        name = `${base}_${n}`;
-      }
-      const refBytes = utf8Bytes(JSON.stringify({ $ref: definitionRef(definitionsKey, name) }));
-      const entryBytes = utf8Bytes(JSON.stringify(name)) + bytes + 2 +
-        (definitions === undefined ? utf8Bytes(`"${definitionsKey}":{}`) : 0);
-      const saved = group.length * (bytes - refBytes) - entryBytes;
-      if (saved >= HOIST_MIN_SAVED_BYTES && (best === undefined || saved > best.saved)) {
-        best = { sites: group, name, saved };
+      const candidates = [
+        { name: nextDefinitionName(definitions), reuse: false },
+        ...Object.entries(definitions ?? {})
+          .filter(([, body]) => jsonText(body, memo) === text)
+          .map(([name]) => ({ name, reuse: true })),
+      ];
+      for (const { name, reuse } of candidates) {
+        const refBytes = utf8Bytes(JSON.stringify({ $ref: definitionRef(definitionsKey, name) }));
+        const entryBytes = reuse ? 0 : utf8Bytes(JSON.stringify(name)) + bytes + 2 +
+          (definitions === undefined ? utf8Bytes(`"${definitionsKey}":{}`) : 0);
+        const saved = group.length * (bytes - refBytes) - entryBytes;
+        if (saved >= HOIST_MIN_SAVED_BYTES && (best === undefined || saved > best.saved)) {
+          best = { sites: group, name, saved, reuse };
+        }
       }
     }
     if (best === undefined) break;
     const target: JsonObject = definitions ?? {};
     root[definitionsKey] = target;
-    target[best.name] = best.sites[0].node;
+    if (!best.reuse) target[best.name] = best.sites[0].node;
     for (const site of best.sites) {
       (site.holder as Record<string | number, unknown>)[site.slot] = {
         $ref: definitionRef(definitionsKey, best.name),
