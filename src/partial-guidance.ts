@@ -222,6 +222,11 @@ export function partialGuidanceDescription(description: string | undefined): str
  *     of selection prose, pricing that population at 99,993 B without
  *     changing a schema constraint or the independent 70-char rail cap.
  *
+ *     2026-10-23, full-schema factoring with compact-cost preservation:
+ *     the 64 floors cost 100,019 B at cap=20, 99,963 B at cap=19, and
+ *     99,921 B at cap=18. Cap=18 retains the measured 64-byte margin;
+ *     the independent 70-char safety-rail cap remains unchanged.
+ *
  * THE TRADE, stated because it is real: pricing prose into the tier costs 8
  * advertised seats (71 → 63). That is the right direction — a tool advertised
  * with an empty description occupies a budget seat while being unidentifiable,
@@ -229,7 +234,7 @@ export function partialGuidanceDescription(description: string | undefined): str
  * reachable through `tools:find`. Re-run the sweep after any catalog change
  * before editing this number by hand.
  */
-export const SUMMARY_LEAD_MAX_CHARS = 20;
+export const SUMMARY_LEAD_MAX_CHARS = 18;
 
 // WI-10006184: shortening selection prose must not shorten already-delivered
 // rules (notably tools:invoke's colon-name rule). Keep the previous rail cap.
