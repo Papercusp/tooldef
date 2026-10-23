@@ -161,7 +161,7 @@ describe('summaryGuidanceDescription', () => {
       'then ranks by affinity, and finally returns either the claimed item or a diagnosed miss.';
     // Partial keeps an unlabelled description WHOLE; summary is what cuts it.
     expect(partialGuidanceDescription(explicit)).toBe(explicit);
-    const summary = summaryGuidanceDescription(explicit);
+    const summary = summaryGuidanceDescription(explicit, 40);
     expect(summary.length).toBeLessThan(explicit.length);
     expect(summary).toContain('Claim the next eligible item.');
   });
