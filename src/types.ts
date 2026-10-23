@@ -1472,6 +1472,22 @@ export interface CardSpec<TSchema extends StandardSchemaV1 = StandardSchemaV1> {
   idempotencyKey?: string;
   /** When false, the renderer hides any decline affordance. Default true. */
   allowDecline?: boolean;
+  /** Await the host's durable registration before exposing this identity on
+   * the state channel. Failure aborts the card flow; unlike onCard this is
+   * mandatory persistence, never a best-effort notification. No callback is
+   * run for an already completed idempotency-cache hit. */
+  beforeCard?: (info: Readonly<{ correlationId: string; runId: string; workspaceId: string }>,
+    signal: AbortSignal) => Promise<void>;
+  /** Durable hosts commit before a response, timeout or abort settles the
+   * local waiter. Return the committed winner, including when this proposal
+   * lost a race. accepted:false delivers that winner locally but refuses the
+   * losing response at ingress. Throw on an unknown/uncommitted outcome.
+   * The host must recheck current authority and exact identity in storage. */
+  commitResponse?: (response: CardResponse<TSchema>,
+    info: Readonly<{ correlationId: string; runId: string; workspaceId: string }>,
+    origin: 'response' | 'timeout' | 'abort' | 'run-end' | 'workspace-switch') => Promise<{
+      accepted: boolean; response: CardResponse<TSchema>;
+    }>;
   /**
    * Fired synchronously once the card is registered, with the freshly-minted
    * `correlationId` (and the run/workspace it's scoped to). Lets a caller link
