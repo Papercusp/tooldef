@@ -13,25 +13,10 @@
  * Everything a caller needs to construct an accepted argument object survives —
  * property names, the required set, enum members, numeric and length bounds,
  * oneOf/anyOf/allOf discriminators, nested object/array shape, and $defs/$ref
- * structure. A `type` keyword is omitted only when a sibling `enum` or `const`
- * already permits exactly values of that type, a `pattern` only when it is
- * zod's OWN regex for a sibling `format` that names the same contract (see
- * FORMAT_IMPLIED_PATTERNS), and a `propertyNames` only when every possible key
- * satisfies it (see isVacuousPropertyNames). What else is dropped is PROSE ONLY:
- * `description`, `title`, `examples`/`example`, and `default`.
- *
- * ⚠ A FORMAT-IMPLIED `pattern` IS DROPPED, AND THAT IS THE SECOND NARROW BET.
- * zod emits its implementation regex beside every string format it knows, so a
- * single uuid costs ~180 bytes and an offset date-time ~320 — on every floor
- * tool, every launch — to restate what the `format` keyword already names. Only
- * EXACT zod-canonical pairs are dropped, and only for variants whose regex
- * accepts what the format name promises; a variant that NARROWS the format
- * (Z-only or local-only date-time, a fixed precision, a uuid VERSION) keeps its
- * pattern, as does any hand-written pattern. The residue is deliberate: zod's
- * uuid regex also checks the version/variant nibbles of what are, here,
- * server-minted identifiers a caller copies from an earlier result, and its
- * email regex rejects quoted local parts. The server still enforces the full
- * pattern, so the worst case is a typed refusal, never an accepted bad value.
+ * structure. Exactly five schema keywords are removed: `description`, `title`,
+ * `examples`, `example`, and `default`. Explicit `type`, `pattern` and
+ * `propertyNames` survive even when a sibling seems to imply them. Literal
+ * values under enum/const and unknown keywords are data, not subschemas.
  *
  * ⚠ `$defs`/`$ref` STRUCTURE IS PRESERVED, NOT INLINED. `$defs` is precisely
  * what keeps a duplicated sub-schema from being paid for once per use site, so
@@ -62,11 +47,11 @@ const UTF8_ENCODER = new TextEncoder();
  * constrains whether an argument object validates.
  *
  * Deliberately NOT here, because each one does constrain validity: `required`,
- * `enum`, `const`, `type` (unless implied by `enum`/`const`), `properties`,
+ * `enum`, `const`, `type`, `properties`,
  * `items`, `prefixItems`,
  * `additionalProperties`, `minimum`, `maximum`, `exclusiveMinimum`,
- * `exclusiveMaximum`, `multipleOf`, `minLength`, `maxLength`, `pattern`
- * (unless implied by `format` — FORMAT_IMPLIED_PATTERNS), `format`, `minItems`, `maxItems`, `uniqueItems`, `minProperties`,
+ * `exclusiveMaximum`, `multipleOf`, `minLength`, `maxLength`, `pattern`,
+ * `format`, `minItems`, `maxItems`, `uniqueItems`, `minProperties`,
  * `maxProperties`, `oneOf`, `anyOf`, `allOf`, `not`, `if`/`then`/`else`,
  * `discriminator`, `$ref`, `$defs`, `definitions`, `nullable`.
  */
@@ -94,46 +79,6 @@ const NAME_KEYED_CONTAINERS = new Set<string>([
   'definitions',
   'dependentSchemas',
 ]);
-
-/** Whether a JSON value belongs to a JSON Schema primitive type. */
-function matchesType(value: unknown, type: unknown): boolean {
-  switch (type) {
-    case 'null':
-      return value === null;
-    case 'object':
-      return value !== null && typeof value === 'object' && !Array.isArray(value);
-    case 'array':
-      return Array.isArray(value);
-    case 'string':
-      return typeof value === 'string';
-    case 'boolean':
-      return typeof value === 'boolean';
-    case 'integer':
-      return typeof value === 'number' && Number.isInteger(value);
-    case 'number':
-      return typeof value === 'number';
-    default:
-      return false;
-  }
-}
-
-/**
- * `enum` and `const` already restrict the instance to an exact finite set. A
- * sibling `type` adds no constraint when every allowed value already matches
- * one of its types. Keep it when even one enum value conflicts: removing it
- * would then make an otherwise-invalid value valid.
- */
-function typeIsImplied(schema: Record<string, unknown>): boolean {
-  if (!Object.hasOwn(schema, 'type')) return false;
-  const types = Array.isArray(schema.type) ? schema.type : [schema.type];
-  if (Object.hasOwn(schema, 'const')) {
-    return types.some((type) => matchesType(schema.const, type));
-  }
-  return (
-    Array.isArray(schema.enum) &&
-    schema.enum.every((value) => types.some((type) => matchesType(value, type)))
-  );
-}
 
 /**
  * `format` + `pattern` pairs whose pattern is zod's OWN implementation of the
@@ -173,8 +118,8 @@ const FORMAT_IMPLIED_PATTERNS: ReadonlySet<string> = (() => {
 
 /**
  * Whether `pattern` is exactly zod's regex for the sibling `format` (see above).
- * Exported so a consumer that compares contracts (compact-schema-catalog.test.ts)
- * applies THIS rule instead of re-deriving the zod regex set and drifting from it.
+ * Retained as a diagnostic classifier for existing consumers. Its result does
+ * not authorize compactInputSchema to remove a pattern.
  */
 export function isFormatImpliedPattern(schema: Record<string, unknown>): boolean {
   return (
@@ -194,8 +139,8 @@ export function isFormatImpliedPattern(schema: Record<string, unknown>): boolean
  * This is NOT a denylist entry: `propertyNames` stays out of COMPACT_DROPPED_KEYS
  * because a real one (`pattern`, `enum`, a length bound, a non-string `type`)
  * DOES constrain which keys validate, and every such one is kept verbatim.
- * Exported for the same reason as isFormatImpliedPattern: a contract comparison
- * (compact-schema-catalog.test.ts) applies THIS rule instead of re-deriving it.
+ * Retained as a diagnostic classifier; compactInputSchema keeps this keyword
+ * regardless of whether the classifier considers its constraint vacuous.
  */
 export function isVacuousPropertyNames(value: unknown): boolean {
   if (value === true) return true;
@@ -213,8 +158,6 @@ function compactNode(node: unknown, inNameKeyedMap: boolean): unknown {
 
   const out: Record<string, unknown> = {};
   const schema = node as Record<string, unknown>;
-  const omitType = !inNameKeyedMap && typeIsImplied(schema);
-  const omitPattern = !inNameKeyedMap && isFormatImpliedPattern(schema);
   for (const [key, value] of Object.entries(schema)) {
     // Inside `properties` (etc.) every key is an author-chosen NAME. Keep it
     // verbatim and compact its subschema; never test it against DROPPED.
@@ -223,10 +166,11 @@ function compactNode(node: unknown, inNameKeyedMap: boolean): unknown {
       continue;
     }
     if (DROPPED.has(key)) continue;
-    if (key === 'type' && omitType) continue;
-    if (key === 'pattern' && omitPattern) continue;
-    if (key === 'propertyNames' && isVacuousPropertyNames(value)) continue;
-    out[key] = compactNode(value, NAME_KEYED_CONTAINERS.has(key));
+    // Walk schema positions only. An enum/const or future keyword can contain
+    // an object with a literal `description` key that must remain unchanged.
+    out[key] = NAME_KEYED_CONTAINERS.has(key) ? compactNode(value, true)
+      : SUBSCHEMA_KEYS.has(key) || SUBSCHEMA_LIST_KEYS.has(key) ? compactNode(value, false)
+        : value;
   }
   return out;
 }

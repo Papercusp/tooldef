@@ -151,7 +151,28 @@ describe('compactInputSchema', () => {
     }
   });
 
-  it('omits only type constraints already implied by enum or const', () => {
+  it('preserves every non-denylisted keyword even when a sibling appears to imply it', () => {
+    const schema = {
+      type: 'object',
+      description: 'prose',
+      properties: {
+        mode: { type: 'string', enum: ['fixed'], description: 'prose' },
+        id: z.toJSONSchema(z.uuid()),
+        map: { type: 'object', propertyNames: { type: 'string' } },
+        literal: { const: { description: 'literal data', default: 17 } },
+        future: { 'x-future': { description: 'opaque future data', type: 'integer' } },
+      },
+    };
+    const result = compactInputSchema(schema) as typeof schema;
+    expect(result.properties.mode).toEqual({ type: 'string', enum: ['fixed'] });
+    expect(result.properties.id).toEqual(schema.properties.id);
+    expect(result.properties.map).toEqual(schema.properties.map);
+    expect(result.properties.literal).toEqual(schema.properties.literal);
+    expect(result.properties.future).toEqual(schema.properties.future);
+    expect(result).not.toHaveProperty('description');
+  });
+
+  it('retains type constraints beside enum or const', () => {
     const compacted = compactInputSchema({
       type: 'object',
       properties: {
@@ -166,7 +187,7 @@ describe('compactInputSchema', () => {
     }) as { properties: Record<string, Record<string, unknown>> };
 
     for (const name of ['text', 'nullable', 'integer', 'literal']) {
-      expect(compacted.properties[name], `${name} keeps its exact enum/const contract`).not.toHaveProperty('type');
+      expect(compacted.properties[name], `${name} keeps its explicit type`).toHaveProperty('type');
     }
     for (const name of ['mismatchedEnum', 'mismatchedConst', 'impossibleConst']) {
       expect(compacted.properties[name], `${name} still needs its non-redundant type`).toHaveProperty('type');
@@ -184,7 +205,7 @@ describe('compactInputSchema', () => {
 
     expect(compacted.properties).toHaveProperty('enum');
     expect(compacted.properties).toHaveProperty('type');
-    expect(compacted.properties.enum).toEqual({ enum: ['value'] });
+    expect(compacted.properties.enum).toEqual({ type: 'string', enum: ['value'] });
     expect(compacted.properties.type).toEqual({ type: 'string' });
   });
 
@@ -330,7 +351,7 @@ describe('format-implied patterns', () => {
   /** What zod itself emits for a field, so these tests track the real pairs. */
   const emitted = (schema: z.ZodType) => z.toJSONSchema(schema) as Record<string, unknown>;
 
-  it('drops zod\'s own regex beside a format that names the same contract, keeping the format', () => {
+  it('retains zod\'s regex beside its format as an explicit contract element', () => {
     for (const schema of [
       z.uuid(),
       z.guid(),
@@ -343,7 +364,7 @@ describe('format-implied patterns', () => {
       // Non-vacuity: without an emitted pattern there is nothing to drop.
       expect(typeof full.pattern, `${String(full.format)} must emit a pattern`).toBe('string');
       const compact = compactInputSchema(full) as Record<string, unknown>;
-      expect(compact, `${String(full.format)} pattern should be implied`).not.toHaveProperty('pattern');
+      expect(compact.pattern, `${String(full.format)} pattern must survive`).toBe(full.pattern);
       expect(compact.format).toBe(full.format);
     }
   });
@@ -387,21 +408,27 @@ describe('format-implied patterns', () => {
     const once = compactInputSchema(full) as {
       properties: Record<string, Record<string, unknown>>;
     };
-    expect(once.properties.id).not.toHaveProperty('pattern');
-    expect(once.properties.at).not.toHaveProperty('pattern');
-    expect((once.properties.list.items as Record<string, unknown>)).not.toHaveProperty('pattern');
+    const defs = (once as unknown as { $defs?: Record<string, Record<string, unknown>> }).$defs ?? {};
+    const pattern = (node: Record<string, unknown>) => typeof node.$ref === 'string'
+      ? defs[node.$ref.split('/').at(-1)!]?.pattern : node.pattern;
+    const original = full.properties as Record<string, Record<string, unknown>>;
+    expect(pattern(once.properties.id)).toBe(original.id.pattern);
+    expect(pattern(once.properties.at)).toBe(original.at.pattern);
+    expect(pattern(once.properties.list.items as Record<string, unknown>)).toBe(
+      (original.list.items as Record<string, unknown>).pattern,
+    );
     // A property literally named `pattern` is an argument, and its own regex is not
     // format-implied, so both survive.
     expect(once.properties.pattern.pattern).toBe('^[a-z]+$');
     expect(compactInputSchema(once)).toEqual(once);
   });
 
-  it('MEASURES the bytes a uuid field returns rather than asserting a magic number', () => {
+  it('does not count a retained uuid pattern as compact savings', () => {
     const tool = { inputSchema: emitted(z.object({ id: z.uuid() })) };
     const withPattern = compactWireBytes('x:y', tool);
-    const pattern = String((tool.inputSchema.properties as Record<string, Record<string, unknown>>).id.pattern);
-    // Removing `,"pattern":"<regex>"` must account for at least the regex itself.
-    expect(withPattern.saved).toBeGreaterThanOrEqual(JSON.stringify(pattern).length);
+    const compact = compactInputSchema(tool.inputSchema) as typeof tool.inputSchema;
+    expect(compact.properties).toEqual(tool.inputSchema.properties);
+    expect(withPattern.saved).toBe(withPattern.full - withPattern.compact);
   });
 });
 
@@ -564,16 +591,16 @@ describe('vacuous propertyNames', () => {
       z.object({ env: z.record(z.string(), z.string()), tags: z.record(z.string(), z.number()) }),
     ) as Record<string, any>;
 
-  it('drops the propertyNames zod emits beside a z.record, keeping the value schema', () => {
+  it('retains the propertyNames zod emits beside a z.record and its value schema', () => {
     const full = recordArgs();
     // The precondition this rule exists for: zod really does emit it.
     expect(full.properties.env.propertyNames).toEqual({ type: 'string' });
     const out = compactInputSchema(full) as Record<string, any>;
-    expect(out.properties.env.propertyNames).toBeUndefined();
+    expect(out.properties.env.propertyNames).toEqual({ type: 'string' });
     expect(out.properties.env.additionalProperties).toEqual({ type: 'string' });
-    expect(out.properties.tags.propertyNames).toBeUndefined();
+    expect(out.properties.tags.propertyNames).toEqual({ type: 'string' });
     expect(out.properties.tags.additionalProperties).toEqual({ type: 'number' });
-    expect(JSON.stringify(out)).not.toContain('propertyNames');
+    expect(JSON.stringify(out)).toContain('propertyNames');
   });
 
   it.each([
@@ -586,7 +613,7 @@ describe('vacuous propertyNames', () => {
   ])('treats %s as vacuous', (_label, names) => {
     expect(isVacuousPropertyNames(names)).toBe(true);
     const out = compactInputSchema({ type: 'object', propertyNames: names }) as Record<string, unknown>;
-    expect(out).not.toHaveProperty('propertyNames');
+    expect(out).toHaveProperty('propertyNames');
   });
 
   it.each([
