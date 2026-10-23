@@ -109,11 +109,13 @@ describe('registered schema factoring', () => {
     }).describe('The complete report, including the evidence references.');
     const args = z.object({ left: report(), right: report() });
     const name = `test:factored_${requirePrincipal}`;
-    defineTool({
-      name, capability: 'test:read', requirePrincipal, args,
+    const definition = {
+      name, capability: 'test:read', args,
       agentRoles: ['operator'],
       handler: async () => ({ content: [{ type: 'text' as const, text: 'ok' }] }),
-    });
+    };
+    if (requirePrincipal) defineTool(definition);
+    else defineTool({ ...definition, requirePrincipal: false });
     const tool = listAllProjectedTools().find((t) => t.expose.mcp?.name === name)!;
     const raw = toArgsJsonSchema(name, args);
     delete raw.$schema;
