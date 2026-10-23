@@ -1293,16 +1293,17 @@ describe('EI-19301148486657755: reading a field the tool result does not have', 
 
   it('retains the latest explicit state when a later synchronous loop times out', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const started = Promise.withResolvers<void>();
+    let resolveStarted!: () => void;
+    const started = new Promise<void>((resolve) => { resolveStarted = resolve; });
     const pending = runOrchestrationScript(
       `store('cursor', 4); void tools.probe.ready(); while (true) {}`,
-      facade({ probe: { ready: () => { started.resolve(); } } }),
+      facade({ probe: { ready: () => { resolveStarted(); } } }),
       { inputs: { cursor: 3 }, timeoutMs: 100 },
     );
     try {
       // Worker startup is outside the behavior under test. Its state message
       // precedes ready on the same port; only then fire the real kill switch.
-      await Promise.race([started.promise, pending.then((result) => {
+      await Promise.race([started, pending.then((result) => {
         throw new Error(`worker stopped before its state checkpoint: ${JSON.stringify(result)}`);
       })]);
       await vi.advanceTimersByTimeAsync(100);
