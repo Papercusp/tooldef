@@ -30,6 +30,7 @@ export {
   COMPACT_DROPPED_KEYS,
   compactInputSchema,
   compactWireBytes,
+  factorInputSchema,
   isFormatImpliedPattern,
   isVacuousPropertyNames,
 } from './compact-schema';

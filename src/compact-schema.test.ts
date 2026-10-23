@@ -5,6 +5,7 @@ import {
   COMPACT_DROPPED_KEYS,
   compactInputSchema,
   compactWireBytes,
+  factorInputSchema,
   isVacuousPropertyNames,
 } from './compact-schema';
 
@@ -472,6 +473,35 @@ describe('verbatim-repeated subschemas are hoisted into $defs', () => {
     expect(out.$defs).toEqual({ 0: report });
     expect(resolve(out)).toEqual(inline);
     expect(JSON.stringify(out).length).toBeLessThan(JSON.stringify(inline).length);
+  });
+
+  it('factors full schemas with metadata, validation and literal data intact', () => {
+    const leaf = {
+      ...big(), title: 'Report', description: 'An authored report with bounded references.',
+      examples: [{ description: 'literal example' }], default: { kind: 'alpha' },
+    };
+    const input = {
+      type: 'object', title: 'Full envelope',
+      properties: { left: leaf, right: structuredClone(leaf) },
+      const: { description: 'literal data', title: 'literal title' },
+      'x-future': { description: 'opaque metadata' },
+    };
+    const before = structuredClone(input);
+    const out = factorInputSchema(input) as any;
+    expect(resolve(out)).toEqual(input);
+    expect(input).toEqual(before);
+    expect(out.$defs['0']).toEqual(leaf);
+    expect(Buffer.byteLength(JSON.stringify(out))).toBeLessThan(Buffer.byteLength(JSON.stringify(input)));
+    expect(factorInputSchema(out)).toEqual(out);
+  });
+
+  it('retains small full schemas and refuses location-sensitive factoring', () => {
+    const leaf = { type: 'string', description: 'short' };
+    const small = { type: 'object', properties: { left: leaf, right: leaf } };
+    expect(factorInputSchema(small)).toEqual(small);
+    const scoped = { ...big(), $id: 'relative', description: 'Keep the original resolution scope.' };
+    const input = { type: 'object', properties: { left: scoped, right: scoped } };
+    expect(factorInputSchema(input)).toEqual(input);
   });
 
   it('leaves a small repeated leaf inline, so a short field never costs a reader a ref', () => {

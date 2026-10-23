@@ -17,6 +17,7 @@
 
 import { type ZodTypeAny } from 'zod';
 import { tierFor } from './capability-tiers';
+import { factorInputSchema } from './compact-schema';
 import { toJsonSchema } from './schema-adapter';
 import {
   standardValidate,
@@ -3331,7 +3332,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
   // schemas (empty input schemas) — the built-in path fixed that.
   const rawSchema = toArgsJsonSchema(def.name, def.args);
   delete (rawSchema as Record<string, unknown>).$schema;
-  const inputSchema = flattenForOpenAi(rawSchema);
+  const inputSchema = factorInputSchema(flattenForOpenAi(rawSchema)) as Record<string, unknown>;
   const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
   const readColumns = projectReadColumns(outputJsonSchema);
   const projectedFn: ToolFn = async (input, ctx) => {
@@ -3514,7 +3515,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     inputSchema,
     // Keep the complete branch requirements for discovery/introspection while
     // retaining the flattened schema above for strict OpenAI/MCP callers.
-    discoveryInputSchema: rawSchema,
+    discoveryInputSchema: factorInputSchema(rawSchema) as Record<string, unknown>,
     capabilities: [def.capability as never],
     effect: def.effect,
     effectForCall: def.effectForCall as ((args: unknown) => 'read' | 'write') | undefined,
@@ -3589,7 +3590,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
   const httpPath = `/api/agent-tools/${def.name.replaceAll(':', '/')}`;
   const rawSchema = toArgsJsonSchema(def.name, def.args);
   delete (rawSchema as Record<string, unknown>).$schema;
-  const inputSchema = flattenForOpenAi(rawSchema);
+  const inputSchema = factorInputSchema(flattenForOpenAi(rawSchema)) as Record<string, unknown>;
   const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
   const readColumns = projectReadColumns(outputJsonSchema);
   const projectedFn: ToolFn = async (input, ctx) => {
@@ -3734,7 +3735,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     inputSchema,
     // Keep the complete branch requirements for discovery/introspection while
     // retaining the flattened schema above for strict OpenAI/MCP callers.
-    discoveryInputSchema: rawSchema,
+    discoveryInputSchema: factorInputSchema(rawSchema) as Record<string, unknown>,
     capabilities: [def.capability as never],
     effect: def.effect,
     effectForCall: def.effectForCall as ((args: unknown) => 'read' | 'write') | undefined,

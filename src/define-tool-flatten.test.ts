@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import { dataConditionSchema } from '@papercusp/rules';
-import { flattenForOpenAi, toArgsJsonSchema } from './define-tool';
+import { defineTool, flattenForOpenAi, toArgsJsonSchema } from './define-tool';
+import { listAllProjectedTools, _resetProjectionRegistryForTests } from './tool-projection';
 
 describe('flattenForOpenAi', () => {
   it('does not let a never branch mask the valid resume/successor fields', () => {
@@ -95,5 +96,35 @@ describe('flattenForOpenAi', () => {
     expect(payloadFilter?.$ref).toMatch(/^#\/\$defs\//);
     expect(definitions).toBeDefined();
     expect(definitions?.[String(payloadFilter?.$ref).slice('#/$defs/'.length)]).toBeDefined();
+  });
+});
+
+describe('registered schema factoring', () => {
+  afterEach(() => _resetProjectionRegistryForTests());
+
+  it.each([false, true])('factors after flattening and retains full discovery metadata (principal=%s)', (requirePrincipal) => {
+    const report = () => z.object({
+      title: z.string().min(1).max(200).describe('Human-readable report title.'),
+      refs: z.array(z.string().min(1)).max(20).describe('Bounded source references.'),
+    }).describe('The complete report, including the evidence references.');
+    const args = z.object({ left: report(), right: report() });
+    const name = `test:factored_${requirePrincipal}`;
+    defineTool({
+      name, capability: 'test:read', requirePrincipal, args,
+      agentRoles: ['operator'],
+      handler: async () => ({ content: [{ type: 'text' as const, text: 'ok' }] }),
+    });
+    const tool = listAllProjectedTools().find((t) => t.expose.mcp?.name === name)!;
+    const raw = toArgsJsonSchema(name, args);
+    delete raw.$schema;
+    for (const schema of [tool.inputSchema, tool.discoveryInputSchema!]) {
+      expect(schema.$defs).toBeDefined();
+      expect(schema.required).toEqual(['left', 'right']);
+      expect((schema.properties as any).left).toEqual((schema.properties as any).right);
+      expect(JSON.stringify(schema)).toContain('The complete report, including the evidence references.');
+      expect(Buffer.byteLength(JSON.stringify(schema))).toBeLessThan(Buffer.byteLength(JSON.stringify(raw)));
+    }
+    expect(args.safeParse({ left: { title: 'L', refs: [] }, right: { title: 'R', refs: [] } }).success).toBe(true);
+    expect(args.safeParse({ left: { title: '', refs: [] }, right: { title: 'R', refs: [] } }).success).toBe(false);
   });
 });

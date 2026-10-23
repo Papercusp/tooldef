@@ -152,9 +152,9 @@ export function isVacuousPropertyNames(value: unknown): boolean {
   return type === 'string' || (Array.isArray(type) && type.includes('string'));
 }
 
-function compactNode(node: unknown, inNameKeyedMap: boolean): unknown {
+function compactNode(node: unknown, inNameKeyedMap: boolean, dropMetadata = true): unknown {
   if (node === null || typeof node !== 'object') return node;
-  if (Array.isArray(node)) return node.map((entry) => compactNode(entry, false));
+  if (Array.isArray(node)) return node.map((entry) => compactNode(entry, false, dropMetadata));
 
   const out: Record<string, unknown> = {};
   const schema = node as Record<string, unknown>;
@@ -162,14 +162,14 @@ function compactNode(node: unknown, inNameKeyedMap: boolean): unknown {
     // Inside `properties` (etc.) every key is an author-chosen NAME. Keep it
     // verbatim and compact its subschema; never test it against DROPPED.
     if (inNameKeyedMap) {
-      out[key] = compactNode(value, false);
+      out[key] = compactNode(value, false, dropMetadata);
       continue;
     }
-    if (DROPPED.has(key)) continue;
+    if (dropMetadata && DROPPED.has(key)) continue;
     // Walk schema positions only. An enum/const or future keyword can contain
     // an object with a literal `description` key that must remain unchanged.
-    out[key] = NAME_KEYED_CONTAINERS.has(key) ? compactNode(value, true)
-      : SUBSCHEMA_KEYS.has(key) || SUBSCHEMA_LIST_KEYS.has(key) ? compactNode(value, false)
+    out[key] = NAME_KEYED_CONTAINERS.has(key) ? compactNode(value, true, dropMetadata)
+      : SUBSCHEMA_KEYS.has(key) || SUBSCHEMA_LIST_KEYS.has(key) ? compactNode(value, false, dropMetadata)
         : value;
   }
   return out;
@@ -340,6 +340,14 @@ function hoistRepeatedSubschemas(root: unknown): unknown {
  */
 export function compactInputSchema(schema: unknown): unknown {
   return hoistRepeatedSubschemas(compactNode(schema, false));
+}
+
+/** Factor identical full subschemas without removing metadata or constraints.
+ * References are introduced only when their complete UTF-8 cost is smaller.
+ * Like compaction, this owns a fresh copy of every schema position it rewrites.
+ */
+export function factorInputSchema(schema: unknown): unknown {
+  return hoistRepeatedSubschemas(compactNode(schema, false, false));
 }
 
 /** Exact UTF-8 byte length of a value's JSON serialization (0 when undefined). */
