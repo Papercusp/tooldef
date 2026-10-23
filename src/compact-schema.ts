@@ -224,8 +224,10 @@ function collectSites(node: JsonObject, nameHint: string, sites: SubschemaSite[]
       for (const [name, child] of Object.entries(value)) {
         if (!isJsonObject(child)) continue;
         const hint = key === 'properties' || isDefinitions ? name : nameHint;
-        // A definition body is what refs POINT AT: walked, never replaced.
-        if (!isDefinitions) sites.push({ holder: value, slot: name, node: child, nameHint: hint });
+        // Keep authored definition NAMES, but allow identical bodies to alias
+        // one another. Candidate selection excludes the target's own body,
+        // otherwise reusing a definition would replace it with a self-ref.
+        sites.push({ holder: value, slot: name, node: child, nameHint: hint });
         if (!collectSites(child, hint, sites)) return false;
       }
     } else if (SUBSCHEMA_KEYS.has(key) && isJsonObject(value)) {
@@ -274,19 +276,46 @@ function definitionRef(definitionsKey: string, name: string): string {
   return `#/${definitionsKey}/${name.replace(/~/g, '~0').replace(/\//g, '~1')}`;
 }
 
+/** Follow only pure root-definition aliases; cycles retain their original ref. */
+function canonicalAliasRef(root: JsonObject, original: string): string {
+  const seen = new Set<string>();
+  let ref = original;
+  while (!seen.has(ref)) {
+    seen.add(ref);
+    const match = /^#\/(\$defs|definitions)\/([^/]+)$/.exec(ref);
+    if (!match) return ref;
+    const definitions = root[match[1]!];
+    const name = match[2]!.replace(/~1/g, '/').replace(/~0/g, '~');
+    const body = isJsonObject(definitions) ? definitions[name] : undefined;
+    if (!isJsonObject(body) || Object.keys(body).length !== 1 || typeof body.$ref !== 'string') return ref;
+    ref = body.$ref;
+  }
+  return original;
+}
+
 /**
  * Move every subschema repeated VERBATIM into one definition plus `$ref`s —
  * greedily, largest saving first, so an enclosing repeat is taken before the
  * repeats inside it. Mutates `root`, which must be compaction's own fresh copy.
  */
-function hoistRepeatedSubschemas(root: unknown): unknown {
+function hoistRepeatedSubschemas(root: unknown, preserveCompactBudget = false): unknown {
   if (!isJsonObject(root) || Object.hasOwn(root, '$ref')) return root;
   const definitionsKey =
     !Object.hasOwn(root, '$defs') && isJsonObject(root.definitions) ? 'definitions' : '$defs';
+  let compactCeiling = preserveCompactBudget ? jsonBytes(compactInputSchema(root)) : 0;
+  const rejected = new Set<string>();
   for (let round = 0; round < HOIST_MAX_ROUNDS; round++) {
     const sites: SubschemaSite[] = [];
     // Only the untouched input can refuse: every ref this pass writes is movable.
     if (!collectSites(root, 'schema', sites)) return root;
+    // Full-schema factoring can leave different refs whose bodies become equal
+    // after metadata removal. Normalize aliases before comparing their parents,
+    // charging each rewritten ref and preserving every authored definition key.
+    for (const { node } of sites) {
+      if (typeof node.$ref !== 'string') continue;
+      const ref = canonicalAliasRef(root, node.$ref);
+      if (utf8Bytes(ref) <= utf8Bytes(node.$ref)) node.$ref = ref;
+    }
     const memo = new Map<object, string>();
     const groups = new Map<string, SubschemaSite[]>();
     for (const site of sites) {
@@ -297,7 +326,7 @@ function hoistRepeatedSubschemas(root: unknown): unknown {
     }
     const existing = root[definitionsKey];
     const definitions = isJsonObject(existing) ? existing : undefined;
-    let best: { sites: SubschemaSite[]; name: string; saved: number; reuse: boolean } | undefined;
+    let best: { sites: SubschemaSite[]; name: string; saved: number; reuse: boolean; key: string } | undefined;
     for (const [text, group] of groups) {
       const bytes = utf8Bytes(text);
       const candidates = [
@@ -307,12 +336,17 @@ function hoistRepeatedSubschemas(root: unknown): unknown {
           .map(([name]) => ({ name, reuse: true })),
       ];
       for (const { name, reuse } of candidates) {
+        const key = `${text}\u0000${name}\u0000${reuse}`;
+        if (rejected.has(key)) continue;
+        const replaceable = reuse
+          ? group.filter((site) => site.holder !== definitions || site.slot !== name)
+          : group;
         const refBytes = utf8Bytes(JSON.stringify({ $ref: definitionRef(definitionsKey, name) }));
         const entryBytes = reuse ? 0 : utf8Bytes(JSON.stringify(name)) + bytes + 2 +
           (definitions === undefined ? utf8Bytes(`"${definitionsKey}":{}`) : 0);
-        const saved = group.length * (bytes - refBytes) - entryBytes;
+        const saved = replaceable.length * (bytes - refBytes) - entryBytes;
         if (saved >= HOIST_MIN_SAVED_BYTES && (best === undefined || saved > best.saved)) {
-          best = { sites: group, name, saved, reuse };
+          best = { sites: replaceable, name, saved, reuse, key };
         }
       }
     }
@@ -324,6 +358,20 @@ function hoistRepeatedSubschemas(root: unknown): unknown {
       (site.holder as Record<string | number, unknown>)[site.slot] = {
         $ref: definitionRef(definitionsKey, best.name),
       };
+    }
+    if (preserveCompactBudget) {
+      const compactBytes = jsonBytes(compactInputSchema(root));
+      if (compactBytes > compactCeiling) {
+        // Metadata can make two FULL repeats profitable while the extra
+        // definition survives as overhead after compaction. Try another
+        // choice; this root is our private copy, never the caller's input.
+        for (const site of best.sites) {
+          (site.holder as Record<string | number, unknown>)[site.slot] = site.node;
+        }
+        if (!best.reuse) delete target[best.name];
+        if (definitions === undefined) delete root[definitionsKey];
+        rejected.add(best.key);
+      } else compactCeiling = compactBytes;
     }
   }
   return root;
@@ -347,7 +395,7 @@ export function compactInputSchema(schema: unknown): unknown {
  * Like compaction, this owns a fresh copy of every schema position it rewrites.
  */
 export function factorInputSchema(schema: unknown): unknown {
-  return hoistRepeatedSubschemas(compactNode(schema, false, false));
+  return hoistRepeatedSubschemas(compactNode(schema, false, false), true);
 }
 
 /** Exact UTF-8 byte length of a value's JSON serialization (0 when undefined). */

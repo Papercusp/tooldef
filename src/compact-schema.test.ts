@@ -504,6 +504,59 @@ describe('verbatim-repeated subschemas are hoisted into $defs', () => {
     expect(factorInputSchema(input)).toEqual(input);
   });
 
+  it('aliases repeated definition bodies after metadata removal without losing names or creating self refs', () => {
+    const input = {
+      type: 'object',
+      properties: { left: { $ref: '#/$defs/Alpha' }, right: { $ref: '#/$defs/Beta' } },
+      $defs: {
+        Alpha: { ...big(), description: 'First authored explanation.' },
+        Beta: { ...big(), description: 'Different explanation, same constraints.' },
+      },
+    };
+    const before = structuredClone(input);
+    const out = compactInputSchema(factorInputSchema(input)) as any;
+    expect(Object.keys(out.$defs)).toEqual(expect.arrayContaining(['Alpha', 'Beta']));
+    expect([out.$defs.Alpha.$ref, out.$defs.Beta.$ref].filter(Boolean)).toHaveLength(1);
+    expect(out.$defs.Alpha.$ref).not.toBe('#/$defs/Alpha');
+    expect(out.$defs.Beta.$ref).not.toBe('#/$defs/Beta');
+    expect(resolve(out)).toEqual({
+      type: 'object', properties: { left: big(), right: big() },
+    });
+    expect(input).toEqual(before);
+    expect(compactInputSchema(out)).toEqual(out);
+  });
+
+  it('normalizes cheaper alias references before comparing parents and leaves cyclic aliases intact', () => {
+    const input = {
+      type: 'object',
+      properties: { left: { $ref: '#/$defs/AliasLong' }, right: { $ref: '#/$defs/k' } },
+      $defs: { AliasLong: { $ref: '#/$defs/MiddleLong' }, MiddleLong: { $ref: '#/$defs/k' }, k: big() },
+      const: { $ref: '#/$defs/AliasLong' },
+    };
+    const out = factorInputSchema(input) as any;
+    expect(out.properties.left).toEqual(out.properties.right);
+    expect(Object.keys(out.$defs)).toEqual(expect.arrayContaining(Object.keys(input.$defs)));
+    expect(resolve(out)).toEqual(resolve(input));
+    expect(out.const).toEqual(input.const);
+    expect(Buffer.byteLength(JSON.stringify(out))).toBeLessThan(Buffer.byteLength(JSON.stringify(input)));
+    const cycle = { type: 'object', properties: { x: { $ref: '#/$defs/a' } },
+      $defs: { a: { $ref: '#/$defs/b' }, b: { $ref: '#/$defs/a' } } };
+    expect(factorInputSchema(cycle)).toEqual(cycle);
+  });
+
+  it('never spends the compact wire budget to factor repeated full annotations', () => {
+    const left = { ...big(), description: 'Left full explanation, intentionally distinct.' };
+    const right = { ...big(), description: 'Right full explanation, intentionally distinct.' };
+    const input = { type: 'object', properties: { left, leftAgain: structuredClone(left),
+      right, rightAgain: structuredClone(right) } };
+    const full = factorInputSchema(input);
+    expect(resolve(full)).toEqual(input);
+    expect(Buffer.byteLength(JSON.stringify(full))).toBeLessThan(Buffer.byteLength(JSON.stringify(input)));
+    expect(Buffer.byteLength(JSON.stringify(compactInputSchema(full))))
+      .toBeLessThanOrEqual(Buffer.byteLength(JSON.stringify(compactInputSchema(input))));
+    expect(factorInputSchema(full)).toEqual(full);
+  });
+
   it('leaves a small repeated leaf inline, so a short field never costs a reader a ref', () => {
     const leaf = { type: 'string', minLength: 1 };
     const out = compactInputSchema({ type: 'object', properties: { a: leaf, b: { ...leaf }, c: { ...leaf } } }) as any;
