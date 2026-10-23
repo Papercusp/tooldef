@@ -460,16 +460,16 @@ describe('verbatim-repeated subschemas are hoisted into $defs', () => {
     );
   };
 
-  it('pays for a repeated sub-object ONCE, named for the property its sites share, with the contract intact', () => {
+  it('pays for a repeated sub-object ONCE with the contract intact', () => {
     const out = compactInputSchema(batch()) as any;
     const report = compactInputSchema(big());
     const inline = {
       type: 'object',
       properties: { report, items: { type: 'array', items: { type: 'object', properties: { report } } } },
     };
-    expect(out.properties.report).toEqual({ $ref: '#/$defs/report' });
-    expect(out.properties.items.items.properties.report).toEqual({ $ref: '#/$defs/report' });
-    expect(out.$defs).toEqual({ report });
+    expect(out.properties.report).toEqual({ $ref: '#/$defs/0' });
+    expect(out.properties.items.items.properties.report).toEqual({ $ref: '#/$defs/0' });
+    expect(out.$defs).toEqual({ 0: report });
     expect(resolve(out)).toEqual(inline);
     expect(JSON.stringify(out).length).toBeLessThan(JSON.stringify(inline).length);
   });
@@ -488,8 +488,8 @@ describe('verbatim-repeated subschemas are hoisted into $defs', () => {
       properties: Object.fromEntries(Array.from({ length: 8 }, (_, index) => [`field${index}`, { ...leaf }])),
     };
     const out = compactInputSchema(input) as any;
-    expect(out.$defs).toEqual({ string: leaf });
-    expect(Object.values(out.properties)).toEqual(Array.from({ length: 8 }, () => ({ $ref: '#/$defs/string' })));
+    expect(out.$defs).toEqual({ 0: leaf });
+    expect(Object.values(out.properties)).toEqual(Array.from({ length: 8 }, () => ({ $ref: '#/$defs/0' })));
     expect(resolve(out)).toEqual(input);
     expect(JSON.stringify(input).length - JSON.stringify(out).length).toBeGreaterThanOrEqual(16);
   });
@@ -507,23 +507,23 @@ describe('verbatim-repeated subschemas are hoisted into $defs', () => {
       properties: Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`field${i}`, { ...leaf }])),
     };
     const out = compactInputSchema(input) as any;
-    expect(out.$defs).toEqual({ string: leaf });
+    expect(out.$defs).toEqual({ 0: leaf });
     expect(resolve(out)).toEqual(input);
     expect(JSON.stringify(out).length).toBeLessThan(JSON.stringify(input).length - 32);
     expect(compactInputSchema(out)).toEqual(out);
     expect(input.properties.field0).toEqual(leaf);
   });
 
-  it('names a def by its SHAPE when sites disagree, without clobbering an existing def', () => {
+  it('does not clobber an authored definition or its references', () => {
     const list = () => ({ type: 'array', items: { type: 'string', minLength: 1, maxLength: 200 }, minItems: 1, maxItems: 50 });
     const out = compactInputSchema({
       type: 'object',
-      properties: { left: list(), middle: list(), right: list(), other: { $ref: '#/$defs/array' } },
-      $defs: { array: { type: 'number' } },
+      properties: { left: list(), middle: list(), right: list(), other: { $ref: '#/$defs/0' } },
+      $defs: { 0: { type: 'number' } },
     }) as any;
-    for (const key of ['left', 'middle', 'right']) expect(out.properties[key]).toEqual({ $ref: '#/$defs/array_2' });
-    expect(out.$defs).toEqual({ array: { type: 'number' }, array_2: list() });
-    expect(out.properties.other).toEqual({ $ref: '#/$defs/array' });
+    for (const key of ['left', 'middle', 'right']) expect(out.properties[key]).toEqual({ $ref: '#/$defs/1' });
+    expect(out.$defs).toEqual({ 0: { type: 'number' }, 1: list() });
+    expect(out.properties.other).toEqual({ $ref: '#/$defs/0' });
   });
 
   it('names a def in URI-safe characters, so its $ref fragment needs no escaping', () => {
@@ -538,9 +538,9 @@ describe('verbatim-repeated subschemas are hoisted into $defs', () => {
       },
     }) as any;
     const report = compactInputSchema(big());
-    expect(Object.keys(out.$defs)).toEqual(['my_key_']);
-    expect(out.properties.a.properties[odd]).toEqual({ $ref: '#/$defs/my_key_' });
-    expect(out.properties.b.properties[odd]).toEqual({ $ref: '#/$defs/my_key_' });
+    expect(Object.keys(out.$defs)).toEqual(['0']);
+    expect(out.properties.a.properties[odd]).toEqual({ $ref: '#/$defs/0' });
+    expect(out.properties.b.properties[odd]).toEqual({ $ref: '#/$defs/0' });
     expect(resolve(out)).toEqual({
       type: 'object',
       properties: {
@@ -579,6 +579,27 @@ describe('verbatim-repeated subschemas are hoisted into $defs', () => {
     const once = compactInputSchema(input);
     expect(JSON.stringify(input)).toBe(snapshot);
     expect(compactInputSchema(once)).toEqual(once);
+  });
+
+  it('reuses an authored definition for even one matching inline schema', () => {
+    const leaf = { type: 'string', minLength: 1, maxLength: 200, pattern: '^[a-z]+$' };
+    const input = { type: 'object', properties: { value: leaf }, $defs: { known: { ...leaf } } };
+    const out = compactInputSchema(input) as any;
+    expect(out.$defs).toEqual(input.$defs);
+    expect(out.properties.value).toEqual({ $ref: '#/$defs/known' });
+    expect(resolve(out)).toEqual(resolve(input));
+    expect(compactInputSchema(out)).toEqual(out);
+  });
+
+  it('factors object-key order differences while preserving array and literal data order', () => {
+    const left = { type: 'string', minLength: 1, maxLength: 200, pattern: '^[a-z]+$' };
+    const right = { pattern: '^[a-z]+$', maxLength: 200, minLength: 1, type: 'string' };
+    const input = { type: 'object', properties: { left, right }, 'x-data': { right, left } };
+    const out = compactInputSchema(input) as any;
+    expect(out.properties.left).toEqual(out.properties.right);
+    expect(out.properties.left).toHaveProperty('$ref');
+    expect(resolve(out)).toEqual(input);
+    expect(out['x-data']).toEqual(input['x-data']);
   });
 });
 
