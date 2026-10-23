@@ -722,6 +722,20 @@ export interface UnifiedToolContext {
   featureId?: string | null;
   chunkId?: string | null;
   runId?: string;
+  /** Verified host link to a parent chat turn. Child runId remains independent.
+   * Association only: storage must still recheck the current parent authority. */
+  chatParent?: Readonly<{
+    workspaceId: string;
+    conversationId: string;
+    turnId: string;
+    runId: string;
+    credentialSha256: string;
+    authority: Readonly<{
+      kind: 'system' | 'pi';
+      principalId: string;
+      credentialSha256: string;
+    }>;
+  }>;
   /**
    * Explicit proof that this caller has an interactive card responder.
    * Workspace/run identity alone is not sufficient: headless, MCP, and
