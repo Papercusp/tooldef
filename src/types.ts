@@ -1426,7 +1426,7 @@ export type { UIResourceContent as UIResource };
  * for `radio` with `voiceAnswerable === true`, the option set for spoken
  * answering). All other kinds stay announce-only for voice.
  */
-export type CardPresentation = { link?: string } & (
+export type CardPresentation = { link?: string; allowEmpty?: boolean } & (
   | { kind: 'radio'; options: CardOption[]; voiceAnswerable?: boolean }
   | { kind: 'checkbox'; options: CardOption[] }
   /**
