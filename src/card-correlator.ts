@@ -110,9 +110,10 @@ function pendingToOpenCard(card: PendingCard): OpenCardSnapshot {
 }
 
 /** Private redirect target. Settlement, expiry and run-end remove access. */
-export function readPrivateCardLink(correlationId: string, workspaceId: string): string | null {
+export function readPrivateCardLink(correlationId: string, workspaceId: string, expectedRunId?: string): string | null {
   const card = registry().pending.get(correlationId);
-  return card?.workspaceId === workspaceId ? card.spec.privateLink ?? null : null;
+  return card?.workspaceId === workspaceId && (!expectedRunId || card.runId === expectedRunId)
+    ? card.spec.privateLink ?? null : null;
 }
 
 function republishRunSnapshot(runId: string): void {
@@ -271,6 +272,7 @@ export async function registerPreparedCard<TSchema extends StandardSchemaV1>(opt
 type ResponseOptions = {
   correlationId: string; action: 'submit' | 'decline' | 'cancel'; payload?: unknown;
   reason?: string; expectedWorkspaceId?: string;
+  expectedRunId?: string;
   /** A host that missed scoped durable lookup may use only legacy cards. */
   legacyOnly?: boolean;
 };
@@ -344,7 +346,8 @@ function cancelCard(card: PendingCard, origin: Origin): void {
 export async function resolveCardResponseAsync(opts: ResponseOptions,
   origin: Origin = 'response'): Promise<ResponseResult> {
   const card = registry().pending.get(opts.correlationId);
-  if (!card || (opts.expectedWorkspaceId && card.workspaceId !== opts.expectedWorkspaceId)) {
+  if (!card || (opts.expectedWorkspaceId && card.workspaceId !== opts.expectedWorkspaceId)
+      || (opts.expectedRunId && card.runId !== opts.expectedRunId)) {
     return { ok: false, status: 404, error: 'card not found' };
   }
   if (opts.legacyOnly && card.spec.commitResponse) {
