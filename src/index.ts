@@ -395,6 +395,10 @@ export {
 /* ─── Projected-tool registry (the function-as-truth core) ───────────── */
 export {
   registerProjectedTool,
+  setBuiltinToolProvider,
+  builtinToolProvider,
+  projectedToolProviderVersion,
+  type BuiltinToolProvider,
   unregisterProjectedToolsForPlugin,
   toolDeclaresGate,
   listUngatedProjectedTools,

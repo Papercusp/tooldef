@@ -353,6 +353,7 @@ describe('listMcpProjections', () => {
       _meta: {
         'papercusp/toolRegistryRevision': projectedToolRegistryRevision(),
         'papercusp/toolRegistrySource': 'projected-tool-registry',
+        'papercusp/provider': { pluginName: 'fixture', packageName: 'fixture', version: null, kind: 'unmeasured' },
       },
     });
     // capabilities, roles, etc. NOT exposed in listing — agents see only the contract.
@@ -376,9 +377,22 @@ describe('listMcpProjections', () => {
       { ...a, guidance: { ...a.guidance, when: 'Use rev:a for voice.' } },
       { ...a, guidance: { ...a.guidance, returns: '{ stale_result }' } },
       { ...a, guidance: { ...a.guidance, seeAlso: ['rev:b'] } },
+      { ...a, pluginName: 'other-owner' },
+      { ...a, builtinProvider: { pluginName: a.pluginName, packageName: '@fixture/provider', version: '1.0.0' } },
+      { ...a, pluginInstallation: { version: '1.0.0', path: '/fixture/provider', source: 'global' as const } },
     ]) {
       expect(projectedToolRegistryRevision([a, b])).not.toBe(projectedToolRegistryRevision([changed, b]));
     }
+  });
+
+  it('changes the registry revision for builtin and installed provider version drift', () => {
+    const builtin = baseTool({ builtinProvider: { pluginName: 'fixture', packageName: '@fixture/provider', version: '1.0.0' } });
+    const changed = { ...builtin, builtinProvider: { ...builtin.builtinProvider!, version: '1.0.1' } };
+    expect(projectedToolRegistryRevision([builtin])).not.toBe(projectedToolRegistryRevision([changed]));
+    const installed = baseTool({ pluginInstallation: { version: '2.0.0', path: '/fixture', source: 'global' } });
+    expect(projectedToolRegistryRevision([installed])).not.toBe(projectedToolRegistryRevision([
+      { ...installed, pluginInstallation: { ...installed.pluginInstallation!, version: '2.0.1' } },
+    ]));
   });
 
   it('surfaces events schemas as JSON-Schema when the tool declares them', () => {

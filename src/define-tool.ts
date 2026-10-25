@@ -42,6 +42,7 @@ import {
   projectedToolRegistryRevision,
   renderProjectedToolCall,
   registerProjectedTool,
+  builtinToolProvider,
   resolveMcpName,
   recordToolShapers,
   isProjectedToolDrop,
@@ -3505,6 +3506,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
 
   registerProjectedTool({
     pluginName: 'agent-mcp',
+    builtinProvider: builtinToolProvider(),
     description: def.description,
     // Where this tool was defined (absolute, captured from the call stack).
     // Null when the stack was unreadable — never guessed.
@@ -3725,6 +3727,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
 
   registerProjectedTool({
     pluginName: 'agent-mcp',
+    builtinProvider: builtinToolProvider(),
     description: def.description,
     // Where this tool was defined (absolute, captured from the call stack).
     // Null when the stack was unreadable — never guessed.

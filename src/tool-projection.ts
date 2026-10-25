@@ -1055,9 +1055,19 @@ export type AbortCompletionReceiptResolver<TArgs = unknown> = (
  * One entry in the projection registry. Combines the function (truth)
  * with manifest metadata (gates + exposure).
  */
+export interface BuiltinToolProvider {
+  /** Logical owner used by the projection registry. */
+  pluginName: string;
+  /** Actual loaded package metadata, imported by the host before registration. */
+  packageName: string;
+  version: string;
+}
+
 export interface ProjectedTool {
   /** Owning plugin name. Built-in tools use 'agent-mcp' or similar. */
   pluginName: string;
+  /** Host-bound builtin package metadata; never an installed-plugin entitlement. */
+  builtinProvider?: Readonly<BuiltinToolProvider>;
   /**
    * The exact provider installation loaded by the host. Tool aliases do not
    * identify a release, and a project plugin can shadow the global plugin of
@@ -1501,6 +1511,7 @@ interface RegistryStore {
   /** Mutation epoch + cached executable-contract revision (shared across module instances). */
   CONTRACT_EPOCH?: number;
   CONTRACT_REVISION_CACHE?: { epoch: number; revision: string };
+  BUILTIN_PROVIDER?: Readonly<BuiltinToolProvider>;
 }
 const __PAPERCUSP_PROJECTED_TOOL_REGISTRY = '__papercuspProjectedToolRegistry';
 const REGISTRY_STORE = pinModuleState<RegistryStore>(
@@ -1528,6 +1539,27 @@ const SHAPERS = (REGISTRY_STORE.SHAPERS ??= new Map<
 function invalidateProjectedToolContract(): void {
   REGISTRY_STORE.CONTRACT_EPOCH = (REGISTRY_STORE.CONTRACT_EPOCH ?? 0) + 1;
   REGISTRY_STORE.CONTRACT_REVISION_CACHE = undefined;
+}
+
+/** Host bootstrap seam. Existing registrations retain their immutable snapshot. */
+export function setBuiltinToolProvider(provider: BuiltinToolProvider | undefined): void {
+  if (provider && Object.values(provider).some(value => typeof value !== 'string' || !value.trim())) {
+    throw new ToolRegistrationError('builtin provider requires loaded package identity and version');
+  }
+  REGISTRY_STORE.BUILTIN_PROVIDER = provider ? Object.freeze({ ...provider }) : undefined;
+}
+
+export function builtinToolProvider(): Readonly<BuiltinToolProvider> | undefined {
+  return REGISTRY_STORE.BUILTIN_PROVIDER;
+}
+
+/** Missing, mixed or foreign metadata is unknown, never a caller-chosen version. */
+export function projectedToolProviderVersion(tool: Pick<ProjectedTool, 'pluginName' | 'builtinProvider' | 'pluginInstallation'>): string | null {
+  if (tool.builtinProvider && tool.pluginInstallation) return null;
+  if (tool.pluginInstallation) return tool.pluginInstallation.version?.trim() ? tool.pluginInstallation.version : null;
+  const provider = tool.builtinProvider;
+  return provider && provider.pluginName === tool.pluginName && provider.packageName?.trim() && provider.version?.trim()
+    ? provider.version : null;
 }
 
 /**
@@ -1973,6 +2005,9 @@ export function projectedToolRegistryRevision(
     | 'profile'
     | 'modality'
     | 'guidance'
+    | 'pluginName'
+    | 'builtinProvider'
+    | 'pluginInstallation'
   >[],
 ): string {
   if (!tools) {
@@ -1998,6 +2033,9 @@ export function projectedToolRegistryRevision(
       if (!name) return [];
       return [{
         name,
+        pluginName: tool.pluginName,
+        builtinProvider: tool.builtinProvider ?? null,
+        installedProviderVersion: tool.pluginInstallation?.version ?? null,
         description: tool.description,
         inputSchema: tool.discoveryInputSchema ?? tool.inputSchema,
         outputJsonSchema: tool.outputJsonSchema ?? null,
@@ -2493,6 +2531,13 @@ export function listMcpProjections(role?: AgentRole, profile?: 'engineer' | 'pow
       _meta: {
         'papercusp/toolRegistryRevision': registryRevision,
         'papercusp/toolRegistrySource': PROJECTED_TOOL_REGISTRY_SOURCE,
+        'papercusp/provider': {
+          pluginName: tool.pluginName,
+          packageName: tool.builtinProvider?.packageName ?? tool.pluginName,
+          version: projectedToolProviderVersion(tool),
+          kind: tool.builtinProvider && !tool.pluginInstallation ? 'builtin'
+            : tool.pluginInstallation && !tool.builtinProvider ? 'installed-plugin' : 'unmeasured',
+        },
       },
     };
     // Advertise the output schema + negotiable formats when the tool declared
