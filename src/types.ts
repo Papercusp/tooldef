@@ -1426,7 +1426,7 @@ export type { UIResourceContent as UIResource };
  * for `radio` with `voiceAnswerable === true`, the option set for spoken
  * answering). All other kinds stay announce-only for voice.
  */
-export type CardPresentation =
+export type CardPresentation = { link?: string } & (
   | { kind: 'radio'; options: CardOption[]; voiceAnswerable?: boolean }
   | { kind: 'checkbox'; options: CardOption[] }
   /**
@@ -1445,9 +1445,9 @@ export type CardPresentation =
    * `placeholder` is the trigger's resting text before a choice is made.
    */
   | { kind: 'select'; options: CardOption[]; placeholder?: string }
-  | { kind: 'text'; placeholder?: string; multiline?: boolean }
+  | { kind: 'text'; placeholder?: string; multiline?: boolean; sensitive?: boolean }
   | { kind: 'date'; min?: string; max?: string }
-  | { kind: 'slider'; min: number; max: number; step?: number };
+  | { kind: 'slider'; min: number; max: number; step?: number });
 
 export interface CardOption {
   id: string;
@@ -1464,6 +1464,8 @@ export interface CardSpec<TSchema extends StandardSchemaV1 = StandardSchemaV1> {
   dataSchema: TSchema;
   /** Optional visual presentation hint. Voice surfaces ignore. */
   presentation?: CardPresentation;
+  /** Held only in the pending correlator entry, never in wire snapshots. */
+  privateLink?: string;
   /** Plain-text fallback for voice / MCP elicitation bridge. */
   fallbackText?: string;
   /** Wall-clock timeout. Rejects with `{action:'cancel'}` if user does not respond. */

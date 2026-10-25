@@ -329,6 +329,7 @@ export type { RowsDeltaResult } from './rows-delta';
 /* ─── Card correlator (ctx.askUser) ──────────────────────────────────── */
 export {
   registerCard,
+  readPrivateCardLink,
   resolveCardResponse,
   resolveCardResponseAsync,
   deliverCommittedCardResponse,

@@ -109,6 +109,12 @@ function pendingToOpenCard(card: PendingCard): OpenCardSnapshot {
   };
 }
 
+/** Private redirect target. Settlement, expiry and run-end remove access. */
+export function readPrivateCardLink(correlationId: string, workspaceId: string): string | null {
+  const card = registry().pending.get(correlationId);
+  return card?.workspaceId === workspaceId ? card.spec.privateLink ?? null : null;
+}
+
 function republishRunSnapshot(runId: string): void {
   const r = registry();
   const ids = r.byRun.get(runId);
@@ -192,6 +198,12 @@ export function registerCard<TSchema extends StandardSchemaV1>(opts: {
   }
 
   const correlationId = opts.correlationId ?? crypto.randomUUID();
+  if (opts.spec.privateLink) {
+    opts = { ...opts, spec: { ...opts.spec, presentation: {
+      ...(opts.spec.presentation ?? { kind: 'radio', options: [] }),
+      link: `/api/ui/cards/${encodeURIComponent(correlationId)}/link`,
+    } } };
+  }
   if (r.pending.has(correlationId)) throw new Error('card-identity-conflict');
   const deferred = makeDeferred<CardResponse<TSchema>>();
 
