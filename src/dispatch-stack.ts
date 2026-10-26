@@ -1990,6 +1990,7 @@ async function recordTelemetry(
         args: input,
         eventCount,
         metadataJson: metaWithFormat,
+        resultSnapshot: r,
         ...kernelFields,
       });
     } else {

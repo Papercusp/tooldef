@@ -55,6 +55,15 @@ const makeTool = (over: Partial<ProjectedTool> = {}): ProjectedTool => ({
 afterEach(() => _resetProjectionRegistryForTests());
 
 describe('host invocation admission and settlement', () => {
+  it('hands the telemetry sink the settled result exactly once', async () => {
+    const recordInvocation = vi.fn(async () => {});
+    const snapshot = { content: [{ type: 'text' as const, text: '{"sites":[],"error":null}' }] };
+    await runDispatchStack(makeTool({ fn: async () => snapshot }), 'fix.tool', {}, MAKE_CTX(), {
+      recordInvocation, readQuotaState: async () => ({ usedCount: 0, windowKey: 'test-window' }),
+    });
+    expect(recordInvocation).toHaveBeenCalledOnce();
+    expect(recordInvocation.mock.calls[0]?.[0]).toMatchObject({ resultSnapshot: snapshot });
+  });
   it('refuses before the target handler or override executes', async () => {
     const handler = vi.fn();
     const override = vi.fn();

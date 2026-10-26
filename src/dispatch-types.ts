@@ -478,6 +478,8 @@ export interface DispatchProjectedDeps {
     callId?: string;
     outputRef?: string | null;
     outputSize?: number | null;
+    /** Settled result for host-owned outcome classification; never persisted wholesale. */
+    resultSnapshot?: unknown;
     errorMessage?: string | null;
     /**
      * The dispatcher's error CLASS code (e.g. 'unauthorized', 'handler_error',
