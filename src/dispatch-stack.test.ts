@@ -56,10 +56,10 @@ afterEach(() => _resetProjectionRegistryForTests());
 
 describe('host invocation admission and settlement', () => {
   it('hands the telemetry sink the settled result exactly once', async () => {
-    const recordInvocation = vi.fn(async () => {});
+    const recordInvocation = vi.fn(async (_input: unknown) => {});
     const snapshot = { content: [{ type: 'text' as const, text: '{"sites":[],"error":null}' }] };
     await runDispatchStack(makeTool({ fn: async () => snapshot }), 'fix.tool', {}, MAKE_CTX(), {
-      recordInvocation, readQuotaState: async () => ({ usedCount: 0, windowKey: 'test-window' }),
+      recordInvocation, readQuotaState: async () => ({ count: 0 }),
     });
     expect(recordInvocation).toHaveBeenCalledOnce();
     expect(recordInvocation.mock.calls[0]?.[0]).toMatchObject({ resultSnapshot: snapshot });
