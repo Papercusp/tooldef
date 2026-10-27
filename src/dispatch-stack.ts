@@ -1878,7 +1878,8 @@ async function recordTelemetry(
   // Declared premises and irreversible calls need evidence even when this
   // transport has no quota window (HTTP/IPC and unscoped internal calls).
   if (!isGateDenial && !isKernelDenial && !windowKey &&
-      !exec.premises.provided && !exec.premises.irreversible) return;
+      !exec.premises.provided && !exec.premises.irreversible &&
+      !deps.recordWithoutWindow?.(toolName)) return;
 
   // Keep the original context byte-for-byte on the legacy/no-port path. Once
   // a kernel decision exists, hand sinks the enriched context as well as the

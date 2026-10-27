@@ -418,6 +418,13 @@ export interface DispatchProjectedDeps {
     callId: string;
     invoke(): Promise<ToolResult>;
   }): Promise<ToolResult>;
+  /**
+   * Host policy: record this tool's invocation even when the call has no quota window. By default
+   * a success or handler error without a window key is not recorded (only gate/kernel denials and
+   * premise-bearing calls are); a host whose own measurement needs every call of a tool, whatever
+   * the transport, returns true for it.
+   */
+  recordWithoutWindow?(toolName: string): boolean;
   /** Persist a tool-invocation record. Best-effort. */
   recordInvocation?(input: {
     toolName: string;
