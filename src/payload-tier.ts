@@ -1974,6 +1974,13 @@ export interface ApplyPayloadTierOpts {
   rawDispatchTemplate?: string;
 }
 
+/** Extract host-selected paths for the generic bounded fallback. */
+function sourceProjectionPreservePaths(sourceProjection: unknown): string[] {
+  if (!sourceProjection || typeof sourceProjection !== 'object' || Array.isArray(sourceProjection)) return [];
+  const picks = (sourceProjection as { pick?: unknown }).pick;
+  return Array.isArray(picks) ? picks.filter((pick): pick is string => typeof pick === 'string') : [];
+}
+
 /**
  * Apply the resolved tier's shaper to a `{ data }` response.
  * Resolution: trimmed → shape.trimmed ?? shape.standard ?? unshaped;
@@ -1989,12 +1996,6 @@ export interface ApplyPayloadTierOpts {
  * hatch every shaper hint documents, and the contract the UI's in-process
  * dispatch relies on (WI-5078).
  */
-function sourceProjectionPreservePaths(sourceProjection: unknown): string[] {
-  if (!sourceProjection || typeof sourceProjection !== 'object' || Array.isArray(sourceProjection)) return [];
-  const picks = (sourceProjection as { pick?: unknown }).pick;
-  return Array.isArray(picks) ? picks.filter((pick): pick is string => typeof pick === 'string') : [];
-}
-
 export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
   const { toolName, shape, response, tier, explicitFullRequest, args, log } = opts;
   const preservePaths = sourceProjectionPreservePaths(opts.sourceProjection);

@@ -104,6 +104,32 @@ describe('applyPayloadTier', () => {
     expect(applyPayloadTier({ toolName: 't', shape: undefined, response, tier: 'full', args: {} })).toBe(response);
   });
 
+  it('preserves caller-selected paths through the generic bounded fallback', () => {
+    const log = vi.fn();
+    const responseWithUnselectedBulk: ToolResponse = {
+      data: {
+        results: [{ id: 'WI-1', checkpointAgeMs: 74, details: 'x'.repeat(12_000) }],
+      },
+    };
+    const out = applyPayloadTier({
+      toolName: 'work_items:get',
+      shape: undefined,
+      response: responseWithUnselectedBulk,
+      tier: 'trimmed',
+      args: {},
+      log,
+      sourceProjection: { pick: ['results[].checkpointAgeMs'] },
+    });
+    const projected = out.data as {
+      _projection?: { truncated?: boolean };
+      results?: Array<{ checkpointAgeMs?: number }>;
+    };
+
+    expect(projected._projection?.truncated).toBe(true);
+    expect(projected.results?.[0]?.checkpointAgeMs).toBe(74);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('bounded a 12061-char unshaped payload'));
+  });
+
   it('hard ceiling: a full payload over the ceiling force-applies the trimmed shaper (WI-2859)', () => {
     const log = vi.fn();
     const fat: ToolResponse = { data: { rows: [1, 2, 3], blob: 'x'.repeat(PAYLOAD_TIER_HARD_CEILING_CHARS + 500) } };
