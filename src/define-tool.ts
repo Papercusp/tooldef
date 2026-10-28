@@ -3493,6 +3493,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       // shared PAYLOAD_TIER_HARD_CEILING_CHARS, unchanged for every other tool.
       ceilingChars: def.payloadTierCeilingChars,
       args: parsed.value,
+      sourceProjection: ctx.sourceProjection,
       log: (m) => ctx.log(m),
       // EI-20720054720826414: the host's executable raw-dispatch spelling for
       // the recovery `next` — absent ⇒ the generic host-neutral wording.
@@ -3713,6 +3714,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
       // shared PAYLOAD_TIER_HARD_CEILING_CHARS, unchanged for every other tool.
       ceilingChars: def.payloadTierCeilingChars,
       args: parsed.value,
+      sourceProjection: handlerCtx.sourceProjection,
       log: (m) => handlerCtx.log(m),
       // EI-20720054720826414: the host's executable raw-dispatch spelling for
       // the recovery `next` — absent ⇒ the generic host-neutral wording.

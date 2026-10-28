@@ -112,6 +112,36 @@ describe('registerLegacyAsProjected — role/uiClientId threading (EI-10358)', (
     expect(received?.sourceProjection).toEqual(sourceProjection);
   });
 
+  it('threads the host source projection into the payload shaper context', async () => {
+    const sourceProjection = { pick: ['results[].workItem.state'] };
+    let shapedProjection: unknown;
+    defineTool({
+      name: 'test:legacy-ctx-shaped-source-projection',
+      capability: 'test:read',
+      description: 'fixture',
+      args: z.object({}),
+      shape: {
+        trimmed: (data, shaperCtx) => {
+          shapedProjection = shaperCtx.sourceProjection;
+          return data;
+        },
+      },
+      async handler() {
+        return { data: { results: [{ workItem: { state: 'open' } }] } };
+      },
+    });
+
+    await dispatchProjectedTool(
+      lookupByMcpName('test:legacy-ctx-shaped-source-projection')!,
+      'test:legacy-ctx-shaped-source-projection',
+      {},
+      ctx({ sourceProjection, contextTier: 'trimmed' }),
+      DEPS,
+    );
+
+    expect(shapedProjection).toEqual(sourceProjection);
+  });
+
   it('omits role/uiClientId (not undefined-valued keys) when the outer ctx carries neither', async () => {
     let received: (ToolContext & { role?: string; uiClientId?: string | null }) | undefined;
     defineTool({

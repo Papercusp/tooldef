@@ -34,6 +34,8 @@ export const PAYLOAD_TIERS: readonly PayloadTier[] = ['trimmed', 'standard', 'fu
 export interface PayloadShaperCtx {
   args: unknown;
   tier: 'trimmed' | 'standard';
+  /** Opaque host projection metadata; it is never part of validated tool args. */
+  sourceProjection?: unknown;
 }
 
 /**
@@ -1950,6 +1952,8 @@ export interface ApplyPayloadTierOpts {
    */
   deferHardCeilingToResultDoor?: boolean;
   args: unknown;
+  /** Host-provided projection used by shapers and generic preservePaths. */
+  sourceProjection?: unknown;
   log?: (msg: string) => void;
   /**
    * WI-37843: per-tool override of `PAYLOAD_TIER_HARD_CEILING_CHARS` for THIS
@@ -1985,8 +1989,15 @@ export interface ApplyPayloadTierOpts {
  * hatch every shaper hint documents, and the contract the UI's in-process
  * dispatch relies on (WI-5078).
  */
+function sourceProjectionPreservePaths(sourceProjection: unknown): string[] {
+  if (!sourceProjection || typeof sourceProjection !== 'object' || Array.isArray(sourceProjection)) return [];
+  const picks = (sourceProjection as { pick?: unknown }).pick;
+  return Array.isArray(picks) ? picks.filter((pick): pick is string => typeof pick === 'string') : [];
+}
+
 export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
   const { toolName, shape, response, tier, explicitFullRequest, args, log } = opts;
+  const preservePaths = sourceProjectionPreservePaths(opts.sourceProjection);
   if (!response || typeof response !== 'object' || response.data === undefined) return response;
   // WI-37843: a tool may raise its OWN hard ceiling. Validate rather than trust —
   // a NaN/0/negative override must fall back to the shared ceiling, never disable
@@ -2010,7 +2021,14 @@ export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
       // site rather than widening PayloadShaperCtx.tier to include 'full'
       // (a shaper is never invoked for 'full', so it should never need to
       // handle it).
-      out = { ...response, data: tierShaper(response.data, { args, tier: tier as 'trimmed' | 'standard' }) };
+      out = {
+        ...response,
+        data: tierShaper(response.data, {
+          args,
+          tier: tier as 'trimmed' | 'standard',
+          sourceProjection: opts.sourceProjection,
+        }),
+      };
       customShapeApplied = true;
     } catch (err) {
       (log ?? console.warn)(
@@ -2032,7 +2050,7 @@ export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
         );
       }
       const projected = projectBoundedPayload(response.data, {
-        toolName, tier, originalChars: size, args, rawDispatchTemplate: opts.rawDispatchTemplate,
+        toolName, tier, originalChars: size, args, rawDispatchTemplate: opts.rawDispatchTemplate, preservePaths,
       });
       out = {
         ...response,
@@ -2070,7 +2088,11 @@ export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
     const smallest = shape?.trimmed ?? shape?.standard;
     if (smallest) {
       try {
-        const forced = smallest(response.data, { args, tier: 'trimmed' });
+        const forced = smallest(response.data, {
+          args,
+          tier: 'trimmed',
+          sourceProjection: opts.sourceProjection,
+        });
         const forcedSize = jsonLen(forced);
         // Only swap if it genuinely shrank (a trimmed tier already at this size
         // gains nothing — that shaper still needs to bound a growing field).
@@ -2120,7 +2142,13 @@ export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
     );
     {
       const projected = projectBoundedPayload(out.data, {
-        toolName, tier, forced: true, originalChars: size, args, rawDispatchTemplate: opts.rawDispatchTemplate,
+        toolName,
+        tier,
+        forced: true,
+        originalChars: size,
+        args,
+        rawDispatchTemplate: opts.rawDispatchTemplate,
+        preservePaths,
       });
       return {
         ...response,
