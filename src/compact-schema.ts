@@ -36,7 +36,7 @@
  * nothing below knows what a Papercusp tool, workspace or role is.
  */
 
-import { z } from 'zod';
+import { z } from 'zod/v4';
 
 import { summaryGuidanceDescription } from './partial-guidance';
 
