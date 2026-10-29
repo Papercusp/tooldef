@@ -330,8 +330,8 @@ function validateJsonInputs(inputs: unknown): string | null {
  *   host  → worker: { t:'result', id, ok, value? , error? }         a tool-call reply
  */
 const WORKER_SRC = `(async () => {
-  const [{ parentPort: workerPort, workerData }, vm] = await Promise.all([
-    import('node:worker_threads'), import('node:vm'),
+  const [{ parentPort: workerPort, workerData }, vm, { webcrypto }] = await Promise.all([
+    import('node:worker_threads'), import('node:vm'), import('node:crypto'),
   ]);
   const STALE_TOOLS_PROXY_ERROR = ${JSON.stringify(STALE_TOOLS_PROXY_ERROR)};
   const kernelContext = workerData.persistent ? vm.createContext({}) : null;
@@ -360,6 +360,17 @@ const WORKER_SRC = `(async () => {
   const stringify = (v) => {
     if (typeof v === 'string') return v;
     try { return JSON.stringify(v); } catch { return String(v); }
+  };
+
+  // Keep the Node Web Crypto object in the worker. The VM receives only this one-shot digest
+  // bridge, captured by a VM-local wrapper and deleted from its global object before user code.
+  const digestSha256 = async (bytes) => {
+    const input = new Uint8Array(bytes.byteLength);
+    for (let i = 0; i < input.length; i++) input[i] = bytes[i];
+    const digest = await webcrypto.subtle.digest('SHA-256', input);
+    let hex = '';
+    for (const byte of new Uint8Array(digest)) hex += byte.toString(16).padStart(2, '0');
+    return hex;
   };
 
   // --- console capture (bounded; stop posting past the cap to keep message volume sane) ---
@@ -861,6 +872,29 @@ const WORKER_SRC = `(async () => {
     '  };\\n' +
     '  return TextEncoder;\\n' +
     '})();\\n' +
+    // Exact-byte verification needs SHA-256, but the restricted VM must not receive the worker's
+    // Crypto object or random APIs. Keep the host bridge private and create the result in this realm.
+    'globalThis.crypto = (() => {\\n' +
+    '  const digestSha256 = globalThis.__papercuspDigestSha256;\\n' +
+    '  delete globalThis.__papercuspDigestSha256;\\n' +
+    '  const subtle = Object.freeze({\\n' +
+    '    digest: async (algorithm, data) => {\\n' +
+    '      const algorithmName = typeof algorithm === \"string\" ? algorithm : (algorithm && typeof algorithm.name === \"string\" ? algorithm.name : \"\");\\n' +
+    '      if (algorithmName.toUpperCase() !== \"SHA-256\") throw new TypeError(\"code:run supports crypto.subtle.digest with SHA-256 only\");\\n' +
+    '      const bytes = data instanceof ArrayBuffer\\n' +
+    '        ? new Uint8Array(data)\\n' +
+    '        : ArrayBuffer.isView(data)\\n' +
+    '          ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)\\n' +
+    '          : null;\\n' +
+    '      if (!bytes) throw new TypeError(\"crypto.subtle.digest data must be an ArrayBuffer or ArrayBufferView\");\\n' +
+    '      const hex = await digestSha256(bytes);\\n' +
+    '      const result = new Uint8Array(hex.length / 2);\\n' +
+    '      for (let i = 0; i < result.length; i++) result[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);\\n' +
+    '      return result.buffer;\\n' +
+    '    },\\n' +
+    '  });\\n' +
+    '  return Object.freeze({ subtle });\\n' +
+    '})();\\n' +
     body +
     '\\n});\\n' +
     '})()';
@@ -875,6 +909,7 @@ const WORKER_SRC = `(async () => {
         generatedImage,
         store,
         load,
+        __papercuspDigestSha256: digestSha256,
         __papercuspInputsJson: JSON.stringify(workerInputs),
     };
     if (kernelContext) {
