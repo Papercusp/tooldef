@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { runOrchestrationScript } from './run-script';
+import { closeOrchestrationKernel, openOrchestrationKernel, runOrchestrationScript } from './run-script';
 import type { ToolFacade } from './tool-facade';
 
 // A plain object suffices as the facade for the executor's purposes.
@@ -238,6 +238,69 @@ describe('runOrchestrationScript (B-CX-1A)', () => {
     const r = await runOrchestrationScript(`return typeof require + ',' + typeof process;`, facade({}));
     expect(r.ok).toBe(true);
     expect(r.result).toBe('undefined,undefined');
+  });
+
+  it('supports only SHA-256 through a VM-local crypto.subtle.digest adapter', async () => {
+    const script = [
+      'const bytes = new TextEncoder().encode(\"abc\");',
+      'const digest = await crypto.subtle.digest(\"SHA-256\", bytes);',
+      'const exactBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);',
+      'const bufferDigest = await crypto.subtle.digest({ name: \"SHA-256\" }, exactBuffer);',
+      'return {',
+      '  hex: Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, \"0\")).join(\"\"),',
+      '  bufferHex: Array.from(new Uint8Array(bufferDigest), (byte) => byte.toString(16).padStart(2, \"0\")).join(\"\"),',
+      '  cryptoType: typeof crypto,',
+      '  randomType: typeof crypto.getRandomValues,',
+      '  randomUUIDType: typeof crypto.randomUUID,',
+      '  requireType: typeof require,',
+      '  processType: typeof process,',
+      '  bufferType: typeof Buffer,',
+      '};',
+    ].join('\n');
+    const r = await runOrchestrationScript(script, facade({}));
+    expect(r).toMatchObject({
+      ok: true,
+      result: {
+        hex: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+        bufferHex: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+        cryptoType: 'object',
+        randomType: 'undefined',
+        randomUUIDType: 'undefined',
+        requireType: 'undefined',
+        processType: 'undefined',
+        bufferType: 'undefined',
+      },
+    });
+  });
+
+  it('rejects digest algorithms outside the supported SHA-256 surface', async () => {
+    const r = await runOrchestrationScript(
+      'await crypto.subtle.digest(\"SHA-1\", new Uint8Array([1])); return true;',
+      facade({}),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('code:run supports crypto.subtle.digest with SHA-256 only');
+  });
+
+  it('supports SHA-256 in the persistent code:run kernel VM', async () => {
+    const scope = 'run-script-sha256-kernel:' + Date.now() + ':' + Math.random();
+    const kernel = await openOrchestrationKernel(scope);
+    try {
+      const r = await runOrchestrationScript(
+        [
+          'const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("abc"));',
+          'return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");',
+        ].join('\n'),
+        facade({}),
+        { kernel: { id: kernel.id, scope } },
+      );
+      expect(r).toMatchObject({
+        ok: true,
+        result: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+      });
+    } finally {
+      closeOrchestrationKernel(kernel.id, scope);
+    }
   });
 
   it('decodes a capability:read byte page with VM-local atob without exposing Buffer', async () => {
