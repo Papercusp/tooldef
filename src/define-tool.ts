@@ -3560,7 +3560,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     resultEligibility: eligibility,
     delta: def.delta,
     expose: {
-      mcp: { name: def.name },
+      mcp: { ...expose?.mcp, name: def.name },
       http: { path: httpPath, methods: ['POST'] },
       // IPC-eligibility (the typed endpoint_invoke / sys:http allowlist) is
       // opt-in per tool via `expose: { ipc: true }` in defineTool — read off
@@ -3780,7 +3780,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     events: def.events,
     state: def.state,
     expose: {
-      mcp: { name: def.name },
+      mcp: { ...expose?.mcp, name: def.name },
       http: { path: httpPath, methods: ['POST'] },
       // IPC-eligibility (the typed endpoint_invoke / sys:http allowlist) is
       // opt-in per tool via `expose: { ipc: true }` in defineTool — read off
