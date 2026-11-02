@@ -557,6 +557,8 @@ export interface DispatchProjectedDeps {
     capabilities: readonly string[];
     ctx: UnifiedToolContext;
     args: unknown;
+    /** Shared dispatch phase tracker for best-effort subphase attribution. */
+    phases?: UnifiedToolContext['phases'];
   }): Promise<CapabilityEnvelopeVerdict | null> | (CapabilityEnvelopeVerdict | null);
   /**
    * The PRECONDITION FIRE PORT (autoloop-pot-operator-rebuild D-006). When a

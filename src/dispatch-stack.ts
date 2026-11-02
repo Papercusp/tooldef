@@ -74,7 +74,7 @@ import {
 import { evaluateDataCondition } from '@papercusp/rules';
 import type { ToolPreInvokeEvent, ToolRequireSpec } from './requires';
 import { applyWorkspaceTxContract } from './workspace-tx';
-import { createPhaseTracker, type PhaseTracker } from './phase-tracker';
+import { createPhaseTracker, type PhaseInterval, type PhaseTracker } from './phase-tracker';
 import { prepareDispatchPremises } from './dispatch-premises';
 
 /* ─── Step names ─────────────────────────────────────────────────────── */
@@ -157,6 +157,8 @@ export interface DispatchExecution {
   // ─── written by 'capability-envelope' step ──────────────────────────
   /** The capability-envelope verdict (B-06), threaded into the postInvoke event. Null until set. */
   envelopeVerdict: CapabilityEnvelopeVerdict | null;
+  /** Best-effort nested timings for the capability-envelope gate, persisted on every outcome. */
+  capabilityEnvelopeSubphases: PhaseInterval[] | null;
 
   // ─── written by the P-041 kernel steps ──────────────────────────────
   /** Host decision observed before any dispatch decorators/side effects. */
@@ -237,6 +239,7 @@ function initExecution(
     handlerCtx: contractCtx,
     handlerResult: null,
     envelopeVerdict: null,
+    capabilityEnvelopeSubphases: null,
     kernelPreflight: null,
     kernelEnforcement: null,
     executionRevision: null,
@@ -474,8 +477,10 @@ const capabilityEnvelopeStep: DispatchStep = {
     const port = deps.checkCapabilityEnvelope;
     if (!port) return null; // no policy wired ⇒ no-op (behavior-neutral)
     let verdict: CapabilityEnvelopeVerdict | null;
+    const phaseStartIndex = exec.phaseTracker?.intervals().length ?? 0;
     try {
-      verdict = await port({ toolName, capabilities: tool.capabilities, ctx, args: input });
+      verdict = await port({ toolName, capabilities: tool.capabilities, ctx, args: input,
+        phases: exec.phaseTracker ?? undefined });
     } catch (err) {
       try {
         deps.observeFallback?.('capability-envelope', {
@@ -489,6 +494,11 @@ const capabilityEnvelopeStep: DispatchStep = {
         `[capability-envelope] evaluator threw for "${toolName}" (failing open): ${err instanceof Error ? err.message : String(err)}`,
       );
       return null;
+    } finally {
+      // Keep these framework-owned timings even when a gate refuses before the
+      // handler. A refused dispatch intentionally has no handlerPhases record.
+      exec.capabilityEnvelopeSubphases = (exec.phaseTracker?.intervals().slice(phaseStartIndex) ?? [])
+        .filter((interval) => interval.phase.startsWith('capability-envelope.'));
     }
     if (!verdict) return null;
     if (verdict.applied) {
@@ -2148,7 +2158,11 @@ export async function runDispatchStack(
       // holding only `dispatch:` phases; that call ran no handler and records none.
       const reachedHandler = dispatchSteps.some((step) => step.name === 'invoke');
       const handlerPhases = reachedHandler ? (exec.phaseTracker?.toMetadata() ?? null) : null;
-      const { handlerPhases: _spoofedPhases, ...handlerMetadata } = exec.metadataJson ?? {};
+      const {
+        handlerPhases: _spoofedPhases,
+        capabilityEnvelopeSubphases: _spoofedCapabilityEnvelopeSubphases,
+        ...handlerMetadata
+      } = exec.metadataJson ?? {};
       exec.metadataJson = {
         ...handlerMetadata,
         dispatchStages: {
@@ -2159,6 +2173,14 @@ export async function runDispatchStack(
           steps: dispatchSteps,
         },
         ...(handlerPhases ? { handlerPhases } : {}),
+        ...(exec.capabilityEnvelopeSubphases?.length ? {
+          capabilityEnvelopeSubphases: {
+            schemaVersion: 'capability-envelope-subphases-v1',
+            unit: 'ms',
+            timing: 'wall-time-possibly-concurrent',
+            phases: exec.capabilityEnvelopeSubphases,
+          },
+        } : {}),
       };
     }
     await recordTelemetry(exec, settled);

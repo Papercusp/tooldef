@@ -239,6 +239,27 @@ describe('dispatch stage attribution', () => {
     });
   });
 
+  it('persists capability-envelope subphases even when the gate denies before the handler', async () => {
+    let clock = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const record = vi.fn(), handler = vi.fn();
+    const result = await runDispatchStack(makeTool({ fn: handler }), 'fix.tool', {}, MAKE_CTX(), {
+      recordInvocation: record,
+      checkCapabilityEnvelope: async ({ phases }) => {
+        await phases!.track('capability-envelope.session-confinement.resolver', async () => { clock += 37; });
+        return { decision: 'deny', posture: 'rejected', applied: true, reason: 'unreadable policy' };
+      },
+    });
+    expect(result.ok).toBe(false);
+    expect(handler).not.toHaveBeenCalled();
+    expect(record.mock.calls[0][0].metadataJson).not.toHaveProperty('handlerPhases');
+    expect(record.mock.calls[0][0].metadataJson.capabilityEnvelopeSubphases).toMatchObject({
+      schemaVersion: 'capability-envelope-subphases-v1',
+      unit: 'ms',
+      phases: [{ phase: 'capability-envelope.session-confinement.resolver', startMs: 0, durationMs: 37 }],
+    });
+  });
+
   it('persists handler phases on a completed call, merged with ctx.metadata and immune to a spoof', async () => {
     let clock = 0;
     vi.spyOn(Date, 'now').mockImplementation(() => clock);
