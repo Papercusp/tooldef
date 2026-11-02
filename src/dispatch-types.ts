@@ -13,7 +13,7 @@
 
 import type { RolesQuota, ToolResult } from './wire';
 import type { ProjectedTool, UnifiedToolContext } from './tool-projection';
-import type { AuthAuditEvent } from './authz';
+import type { AuthAuditEvent, AuthDecision } from './authz';
 import type { PreconditionFireRequest } from './requires';
 import type {
   KernelEnforcementPort,
@@ -339,6 +339,19 @@ export interface DispatchStartEvent {
   callId?: string;
 }
 
+/** Dispatcher-owned provenance, never read from input or handler context.
+ * Hosts must separately establish whether they trust this authorizer to grant
+ * implementation effects; a plugin's own allow is not host approval.
+ */
+export type DispatchAuthorization =
+  | Readonly<{ status: 'absent' | 'bypassed' }>
+  | Readonly<{
+      status: 'allowed';
+      authorizer: NonNullable<ProjectedTool['authorize']>;
+      /** Detached data snapshot, independent of the author's retained object. */
+      decision: Readonly<AuthDecision>;
+    }>;
+
 export interface DispatchProjectedDeps {
   /** Resolve declared fact premises in the caller's workspace. Never a model call. */
   resolvePremises?(refs: readonly string[], ctx: UnifiedToolContext): Promise<Array<{
@@ -416,6 +429,8 @@ export interface DispatchProjectedDeps {
     input: unknown;
     ctx: UnifiedToolContext;
     callId: string;
+    /** Older dispatchers may omit this. Absent/bypassed is never approval. */
+    authorization?: DispatchAuthorization;
     invoke(): Promise<ToolResult>;
   }): Promise<ToolResult>;
   /**

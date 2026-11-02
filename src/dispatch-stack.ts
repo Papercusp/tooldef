@@ -57,6 +57,7 @@ import {
   UnauthorizedToolError,
   defaultComputeQuotaWindow,
   type CapabilityEnvelopeVerdict,
+  type DispatchAuthorization,
   type DispatchProjectedDeps,
   type DispatchProjectedErrorCode,
   type DispatchProjectedResult,
@@ -160,6 +161,9 @@ export interface DispatchExecution {
   /** Best-effort nested timings for the capability-envelope gate, persisted on every outcome. */
   capabilityEnvelopeSubphases: PhaseInterval[] | null;
 
+  // ─── written by 'authorize', read only at the host invocation seam ────
+  authorization: DispatchAuthorization;
+
   // ─── written by the P-041 kernel steps ──────────────────────────────
   /** Host decision observed before any dispatch decorators/side effects. */
   kernelPreflight: KernelEnforcementResult | null;
@@ -240,6 +244,7 @@ function initExecution(
     handlerResult: null,
     envelopeVerdict: null,
     capabilityEnvelopeSubphases: null,
+    authorization: Object.freeze({ status: 'absent' }),
     kernelPreflight: null,
     kernelEnforcement: null,
     executionRevision: null,
@@ -917,7 +922,8 @@ const invokeStep: DispatchStep = {
         return tool.fn(input, handlerCtx);
       });
       let result = deps.aroundInvoke
-        ? await deps.aroundInvoke({ tool, toolName, input, ctx: handlerCtx, callId: exec.callId, invoke })
+        ? await deps.aroundInvoke({ tool, toolName, input, ctx: handlerCtx, callId: exec.callId,
+          authorization: exec.authorization, invoke })
         : await invoke();
       // guidance.seeAlso — result-aware cross-link pointers rendered uniformly
       // into the envelope (_meta._seeAlso + a one-line "See also:" text block).
@@ -1261,6 +1267,7 @@ const authorizeStep: DispatchStep = {
 
     // Audited break-glass: skip the hook, but record the bypass.
     if (ctx.gateBypass?.policy) {
+      exec.authorization = Object.freeze({ status: 'bypassed' });
       audit('allow', 'gateBypass.policy');
       return null;
     }
@@ -1268,14 +1275,24 @@ const authorizeStep: DispatchStep = {
     let decision;
     try {
       decision = await authorize({ principal: ctx.principal, input, ctx });
+      if (decision?.allow === true && deps.aroundInvoke) {
+        // Keep provenance outside caller/handler context and detach obligations
+        // before any later step can mutate the author's original return value.
+        // Hosts using this seam require data obligations; a failed snapshot is
+        // an authorization denial. Hosts without the seam retain legacy values.
+        const retained = structuredClone({ allow: true,
+          reason: decision.reason, obligations: decision.obligations });
+        exec.authorization = Object.freeze({ status: 'allowed', authorizer: authorize,
+          decision: Object.freeze(retained) });
+      }
     } catch (err) {
       const reason = `authorize threw: ${err instanceof Error ? err.message : String(err)}`;
       audit('deny', reason);
       return deny(reason);
     }
-    if (!decision.allow) {
-      audit('deny', decision.reason);
-      return deny(decision.reason);
+    if (decision?.allow !== true) {
+      audit('deny', decision?.reason);
+      return deny(decision?.reason);
     }
     audit('allow', decision.reason);
     return null;
