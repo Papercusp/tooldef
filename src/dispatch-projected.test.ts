@@ -1142,6 +1142,9 @@ describe('dispatchProjectedTool', () => {
     const result = await dispatchProjectedTool(tool, 'scorecards:emit', {}, MAKE_CTX(), MAKE_DEPS());
 
     expect(result.ok).toBe(false);
+    expect(result.error?.message).toContain('outcome is unknown');
+    expect(result.error?.message).toContain('effect may have committed');
+    expect(result.error?.message).toContain("Check the operation's current state before retrying.");
     expect(result.error).toMatchObject({
       code: 'timeout',
       meta: {

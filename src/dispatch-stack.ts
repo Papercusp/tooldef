@@ -1023,7 +1023,7 @@ const invokeStep: DispatchStep = {
             ok: false,
             error: {
               code: 'timeout',
-              message: `tool "${toolName}" exceeded timeout of ${exec.timeoutSec}s (handler returned but signal had aborted)`,
+              message: `tool "${toolName}" exceeded timeout of ${exec.timeoutSec}s (handler returned but signal had aborted); outcome is unknown and the effect may have committed. Check the operation's current state before retrying.`,
               meta: {
                 abortCompletionReceipt: {
                   ...receipt,
