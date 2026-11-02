@@ -35,6 +35,38 @@ const ctx = (over: Partial<UnifiedToolContext> = {}): UnifiedToolContext => ({
 
 afterEach(() => _resetProjectionRegistryForTests());
 
+describe('MCP streaming exposure', () => {
+  it('preserves explicit streaming metadata for legacy and role-gated defineTool calls', () => {
+    defineTool({
+      name: 'test:legacy-streaming-exposure',
+      capability: 'test:read',
+      description: 'fixture',
+      args: z.object({}),
+      expose: { mcp: { name: 'test:legacy-streaming-exposure', streaming: true } },
+      async handler() {
+        return { content: [{ type: 'text', text: 'ok' }] };
+      },
+    });
+    defineTool({
+      name: 'test:role-streaming-exposure',
+      capability: 'test:read',
+      requirePrincipal: false,
+      agentRoles: ['operator'],
+      description: 'fixture',
+      args: z.object({}),
+      expose: { mcp: { name: 'test:role-streaming-exposure', streaming: true } },
+      async handler() {
+        return { content: [{ type: 'text', text: 'ok' }] };
+      },
+    });
+
+    expect(lookupByMcpName('test:legacy-streaming-exposure')?.expose.mcp)
+      .toMatchObject({ name: 'test:legacy-streaming-exposure', streaming: true });
+    expect(lookupByMcpName('test:role-streaming-exposure')?.expose.mcp)
+      .toMatchObject({ name: 'test:role-streaming-exposure', streaming: true });
+  });
+});
+
 describe('registerLegacyAsProjected — role/uiClientId threading (EI-10358)', () => {
   it('forwards scope and verified caller metadata through the real dispatch path', async () => {
     let received: ToolContext | undefined;
