@@ -1000,6 +1000,18 @@ function arrayTruncationValue(
   return note;
 }
 
+function shouldAppendArrayTruncationMarker(
+  projectedRows: unknown[],
+  partialTarget: Record<string, unknown> | undefined,
+  mode: ProjectionState['arrayTruncation'],
+): boolean {
+  if (!partialTarget || mode === 'marker') return true;
+  // Envelope mode leaves object-row arrays domain-only and discloses their
+  // omission on the parent. String arrays can carry the same-type note inline,
+  // so a key list read by itself cannot masquerade as complete.
+  return projectedRows.length > 0 && projectedRows.every((row) => typeof row === 'string');
+}
+
 function takePrimitive(state: ProjectionState, value: unknown, path: string): unknown {
   if (typeof value !== 'string') {
     const size = jsonLen(value);
@@ -1240,7 +1252,7 @@ function projectIdentityPreview(
         if (partialTarget) markPartial(partialTarget, state);
         // Standalone arrays need their own completeness signal. Hosts retaining
         // the enclosing envelope can instead keep the array's domain contract.
-        if (!partialTarget || state.arrayTruncation === 'marker') {
+        if (shouldAppendArrayTruncationMarker(projected, partialTarget, state.arrayTruncation)) {
           projected.push(arrayTruncationValue(projected, droppedCount, projected.length, value.length));
         }
       }
@@ -1439,7 +1451,7 @@ function projectValue(
         );
         recordArrayTruncation(state, path, droppedCount, projected.length, value.length);
         if (partialTarget) markPartial(partialTarget, state);
-        if (!partialTarget || state.arrayTruncation === 'marker') {
+        if (shouldAppendArrayTruncationMarker(projected, partialTarget, state.arrayTruncation)) {
           projected.push(arrayTruncationValue(projected, droppedCount, projected.length, value.length));
         }
       }

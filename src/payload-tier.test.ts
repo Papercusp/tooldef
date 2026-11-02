@@ -1822,6 +1822,31 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     });
   });
 
+  it('EI-27226397520024220: envelope truncation marks string key lists in-band on both projection paths', () => {
+    const liveKeys = Object.keys(Object.fromEntries(
+      Array.from({ length: 21 }, (_, index) => [`validationField${index}`, index]),
+    ));
+    const project = (data: unknown, preservePaths: string[] = []) =>
+      projectBoundedPayload(data, {
+        toolName: 'code:run',
+        tier: 'trimmed',
+        arrayTruncation: 'envelope',
+        preservePaths,
+      });
+    const normal = project({ summary: { liveKeys } }, ['summary.liveKeys']);
+    const identity = project({ key: liveKeys });
+
+    for (const keys of [
+      (normal.summary as Record<string, unknown>).liveKeys,
+      identity.key,
+    ] as unknown[][]) {
+      expect(keys.slice(0, 12)).toEqual(liveKeys.slice(0, 12));
+      expect(keys).toHaveLength(13);
+      expect(keys.at(-1)).toEqual(expect.stringContaining('TRUNCATED +9 more'));
+      expect(keys.at(-1)).toEqual(expect.stringContaining('showing 12 of 21 rendered input entries'));
+    }
+  });
+
   it('REGRESSION (EI-25931837571490305): envelope arrays retain path/count metadata when omission samples are shed', () => {
     const evidence = Array.from({ length: 17 }, (_, index) => ({
       id: 'evidence-' + index,
