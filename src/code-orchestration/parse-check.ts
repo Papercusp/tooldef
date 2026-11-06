@@ -761,6 +761,52 @@ export function checkScript(
       // Only the positive branch is safe; the negative branch proves the opposite.
       return resolved.path.map((_, index) => resolved.path.slice(0, index + 1));
     };
+    const optionalPathsGuardedByThrowingIf = (
+      statement: import('typescript').IfStatement,
+      call: StaticToolCall,
+    ): string[][] => {
+      const throwsOnTrue = ts.isThrowStatement(statement.thenStatement)
+        || (ts.isBlock(statement.thenStatement)
+          && statement.thenStatement.statements.length === 1
+          && ts.isThrowStatement(statement.thenStatement.statements[0]));
+      if (!throwsOnTrue || statement.elseStatement) return [];
+
+      const safePaths: string[][] = [];
+      const addSafePath = (path: string[]): void => {
+        if (path.length > 0 && !safePaths.some((other) => samePath(other, path))) safePaths.push(path);
+      };
+      const visitDisjunction = (condition: Expression): void => {
+        if (
+          ts.isBinaryExpression(condition)
+          && condition.operatorToken.kind === ts.SyntaxKind.BarBarToken
+        ) {
+          visitDisjunction(condition.left);
+          visitDisjunction(condition.right);
+          return;
+        }
+
+        let guardedExpression: Expression | undefined;
+        if (
+          ts.isPrefixUnaryExpression(condition)
+          && condition.operator === ts.SyntaxKind.ExclamationToken
+        ) {
+          guardedExpression = condition.operand;
+        } else if (
+          ts.isBinaryExpression(condition)
+          && condition.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken
+          && ts.isStringLiteralLike(condition.right)
+        ) {
+          guardedExpression = condition.left;
+        }
+
+        const resolved = guardedExpression ? boundPath(guardedExpression) : undefined;
+        if (resolved?.call !== call || resolved.path.length === 0) return;
+        resolved.path.forEach((_, index) => addSafePath(resolved.path.slice(0, index + 1)));
+      };
+
+      visitDisjunction(statement.expression);
+      return safePaths;
+    };
     const safeOptionalPathsForRead = (
       node: Node,
       call: StaticToolCall,
@@ -771,8 +817,35 @@ export function checkScript(
         if (path.length > 0 && !safePaths.some((other) => samePath(other, path))) safePaths.push(path);
       };
 
+      let readStatement: Node = node;
+      while (
+        readStatement.parent
+        && !ts.isBlock(readStatement.parent)
+        && !ts.isSourceFile(readStatement.parent)
+      ) {
+        readStatement = readStatement.parent;
+      }
+      const statementContainer = readStatement.parent;
+      if (statementContainer && (ts.isBlock(statementContainer) || ts.isSourceFile(statementContainer))) {
+        const statementIndex = statementContainer.statements.indexOf(
+          readStatement as import('typescript').Statement,
+        );
+        for (const previous of statementContainer.statements.slice(0, statementIndex)) {
+          if (!ts.isIfStatement(previous)) continue;
+          for (const path of optionalPathsGuardedByThrowingIf(previous, call)) {
+            if (isPathPrefix(path, resolvedPath)) addSafePath(path);
+          }
+        }
+      }
+
       let current: Node | undefined = node;
       while (current) {
+        if (ts.isIfStatement(current) && isWithin(node, current.expression)) {
+          for (const path of optionalPathsGuardedByThrowingIf(current, call)) {
+            if (isPathPrefix(path, resolvedPath)) addSafePath(path);
+          }
+        }
+
         if (ts.isPropertyAccessExpression(current) && current.questionDotToken) {
           const base = boundPath(current.expression);
           if (base?.call === call && isPathPrefix(base.path, resolvedPath)) addSafePath(base.path);
