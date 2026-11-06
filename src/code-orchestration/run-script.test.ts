@@ -974,6 +974,22 @@ describe('EI-19301148486657755: reading a field the tool result does not have', 
     expect(guarded.fieldMisses).toBeUndefined();
   });
 
+  it('accepts a capability:read data access after a disjunctive guard throws', async () => {
+    const read = vi.fn(async () => ({ ok: true, encoding: 'base64' }));
+    const guarded = await runOrchestrationScript(
+      `const page = await tools.capability.read({ file_path: 'page', byte_offset: 0, byte_limit: 10 });
+       if (!page.ok || page.encoding !== 'base64' || !page.data) throw new Error('invalid byte page');
+       const bytes = Uint8Array.from(atob(page.data), (value) => value.charCodeAt(0));
+       return bytes.byteLength;`,
+      facade({ capability: { read } }),
+    );
+
+    expect(guarded.ok).toBe(false);
+    expect(guarded.error).toContain('invalid byte page');
+    expect(guarded.fieldMisses).toBeUndefined();
+    expect(read).toHaveBeenCalledOnce();
+  });
+
   // CONTROL: the classifier must actually DISCRIMINATE. If both keys ever land in the same class,
   // the split is decorative and the noise it was built to remove is back.
   it('CONTROL: a typo and an optional probe do not land in the same class', async () => {
