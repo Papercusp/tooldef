@@ -189,6 +189,30 @@ describe('checkScript (B-CX-PARSE — AST: computed / aliased / destructured)', 
     ]);
   });
 
+  it('recognizes an optional result path after a throwing disjunction guard', () => {
+    const guarded = checkScript(
+      `const page = await tools.capability.read({ file_path: '/tmp/page', byte_offset: 0, byte_limit: 10 });
+       if (!page.ok || page.encoding !== 'base64' || !page.data) throw new Error('invalid byte page');
+       return page.data;`,
+      [mkTool('capability:read')],
+    );
+    const guardedRead = guarded.calls[0]?.resultReads?.find(
+      (read) => read.path[0] === 'data' && read.position.line === 3,
+    );
+
+    expect(guardedRead).toMatchObject({
+      path: ['data'],
+      safeOptionalPaths: [['data']],
+    });
+
+    const unguarded = checkScript(
+      `const page = await tools.capability.read({ file_path: '/tmp/page', byte_offset: 0, byte_limit: 10 });
+       return page.data;`,
+      [mkTool('capability:read')],
+    );
+    expect(unguarded.calls[0]?.resultReads?.[0]?.safeOptionalPaths).toBeUndefined();
+  });
+
   it('binds Promise.all array results to their destructured identifiers', () => {
     const r = checkScript(
       `const [work, status] = await Promise.all([
