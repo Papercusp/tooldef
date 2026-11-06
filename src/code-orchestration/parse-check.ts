@@ -67,6 +67,78 @@ function tsc(): TsModule {
   return _ts;
 }
 
+export interface StaticPropertyStringComparison {
+  property: string;
+  value: string;
+}
+
+/**
+ * Find literal string comparisons against an object's property, including predicates over
+ * tool results (`rows.filter(row => row.planSlug === 'fixed-plan')`). Call-argument analysis
+ * cannot see these post-query identity filters, so authority consumers can use this AST view
+ * to retain the fixed entity reference. Comments and TypeScript's recovered parse trees are
+ * excluded to avoid manufacturing authority from non-code or malformed source.
+ */
+export function collectStaticPropertyStringComparisons(script: string): StaticPropertyStringComparison[] {
+  const ts = tsc();
+  let source: SourceFile;
+  try {
+    source = ts.createSourceFile('script.ts', script, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  } catch {
+    return [];
+  }
+  const parseDiagnostics = (source as SourceFile & { parseDiagnostics?: readonly unknown[] }).parseDiagnostics;
+  if ((parseDiagnostics?.length ?? 0) > 0) return [];
+
+  const unwrap = (expression: Expression): Expression => {
+    let current = expression;
+    while (
+      ts.isParenthesizedExpression(current) ||
+      ts.isNonNullExpression(current) ||
+      ts.isAsExpression(current) ||
+      ts.isTypeAssertionExpression(current) ||
+      ts.isSatisfiesExpression(current)
+    ) {
+      current = current.expression;
+    }
+    return current;
+  };
+  const stringValue = (expression: Expression): string | null => {
+    const current = unwrap(expression);
+    return ts.isStringLiteralLike(current) ? current.text : null;
+  };
+  const propertyName = (expression: Expression): string | null => {
+    const current = unwrap(expression);
+    if (ts.isPropertyAccessExpression(current)) return current.name.text;
+    if (ts.isElementAccessExpression(current) && current.argumentExpression) {
+      return stringValue(current.argumentExpression);
+    }
+    return null;
+  };
+
+  const equalityOperators = new Set([
+    ts.SyntaxKind.EqualsEqualsToken,
+    ts.SyntaxKind.EqualsEqualsEqualsToken,
+    ts.SyntaxKind.ExclamationEqualsToken,
+    ts.SyntaxKind.ExclamationEqualsEqualsToken,
+  ]);
+  const comparisons: StaticPropertyStringComparison[] = [];
+  const visit = (node: Node): void => {
+    if (ts.isBinaryExpression(node) && equalityOperators.has(node.operatorToken.kind)) {
+      const leftProperty = propertyName(node.left);
+      const rightValue = stringValue(node.right);
+      if (leftProperty && rightValue !== null) comparisons.push({ property: leftProperty, value: rightValue });
+
+      const rightProperty = propertyName(node.right);
+      const leftValue = stringValue(node.left);
+      if (rightProperty && leftValue !== null) comparisons.push({ property: rightProperty, value: leftValue });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return comparisons;
+}
+
 export interface ParseCheckResult {
   ok: boolean;
   /** Tool references found in the script that are NOT in the allowed facade. */

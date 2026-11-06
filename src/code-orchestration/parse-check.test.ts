@@ -1,9 +1,26 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import { checkScript, ensureParseCheckReady } from './parse-check';
+import { checkScript, collectStaticPropertyStringComparisons, ensureParseCheckReady } from './parse-check';
 
 // checkScript is sync but the TS compiler it uses is lazy-loaded (kept out of the
 // eager client bundle) — warm it once before the suite.
 beforeAll(async () => { await ensureParseCheckReady(); });
+
+describe('static property string comparisons', () => {
+  it('captures entity filter literals from the AST while ignoring comments and type guards', () => {
+    const comparisons = collectStaticPropertyStringComparisons(`
+      // report.planSlug === 'comment-only-plan'
+      const report = await tools.plans.conformance({ op: 'report', harness: 'papercusp' });
+      return report.plans
+        ?.filter((plan) => plan.planSlug === 'fixed-plan')
+        ?.filter((plan) => 'excluded-plan' !== plan['plan_slug'])
+        ?.filter((plan) => typeof plan.planSlug === 'string');
+    `);
+    expect(comparisons).toEqual([
+      { property: 'planSlug', value: 'fixed-plan' },
+      { property: 'plan_slug', value: 'excluded-plan' },
+    ]);
+  });
+});
 
 const mkTool = (name: string) => ({ expose: { mcp: { name } } }) as never;
 const tools = [mkTool('work_items:list'), mkTool('work_items:get'), mkTool('coord:wake-queue'), mkTool('plans:set-status')];
