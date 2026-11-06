@@ -173,6 +173,8 @@ export type RouteMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'OPTIONS
  */
 export interface RouteDiagnostics {
   measure<T>(phase: string, work: () => T | PromiseLike<T>): Promise<T>;
+  /** Record an already-measured, bounded numeric phase without rerunning work. */
+  record?(phase: string, durationMs: number): void;
   snapshot(): Readonly<Record<string, number>>;
 }
 
