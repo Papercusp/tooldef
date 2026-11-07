@@ -246,7 +246,12 @@ export function checkScript(
         : node.argumentExpression && ts.isStringLiteralLike(node.argumentExpression) ? node.argumentExpression.text : null;
       if (key !== null) {
         const property = Object.getOwnPropertyDescriptor(staticInputs!, key);
-        if (!property || 'value' in property) return { value: property?.value, complete: true };
+        // Object/array values can escape through an alias and mutate later.
+        // Primitive scope identifiers are immutable; do not infer more than that.
+        if (!property || ('value' in property && (property.value === null ||
+          (typeof property.value !== 'object' && typeof property.value !== 'function')))) {
+          return { value: property?.value, complete: true };
+        }
       }
       return { value: undefined, complete: false };
     }

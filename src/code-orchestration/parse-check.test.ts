@@ -276,6 +276,11 @@ describe('checkScript (B-CX-PARSE — AST: computed / aliased / destructured)', 
     expect(checkScript('await tools.call("plans:get",{slug:inputs.plan});', [mkTool('plans:get')], undefined, values)
       .calls[0].dynamicArgs).toBe(true);
   });
+  it('does not project mutable array inputs that can escape through a property alias', () => {
+    const script = 'const ids=inputs.ids; ids.push("WI-other"); await tools.call("work_items:get",{ids:inputs.ids});';
+    expect(checkScript(script, [mkTool('work_items:get')], undefined, { ids: ['WI-bound'] })
+      .calls[0].dynamicArgs).toBe(true);
+  });
   it('marks parser recovery errors so consumers do not validate recovered pseudo-properties', () => {
     const r = checkScript(
       String.raw`const r = await tools.capability.bash({
