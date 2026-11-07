@@ -192,6 +192,8 @@ export function checkScript(
   script: string,
   tools: readonly ProjectedTool[],
   allowed?: ReadonlySet<string>,
+  /** Validated invocation inputs, for inspection only; never executes script expressions. */
+  staticInputs?: Readonly<Record<string, unknown>>,
 ): ParseCheckResult {
   const ts = tsc(); // lazy-loaded TS compiler (see ensureParseCheckReady)
   const memberToName = new Map<string, string>(); // "ns.camelVerb" → full name
@@ -233,10 +235,21 @@ export function checkScript(
   };
 
   type StaticValue = { value: unknown; complete: boolean };
+  let inputBindingsUsable = staticInputs !== undefined;
 
   /** Preserve every literal leaf we can prove while marking the aggregate
    * incomplete when a computed/spread/runtime value appears. */
   const readStaticValue = (node: Expression): StaticValue => {
+    if (inputBindingsUsable && (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
+        ts.isIdentifier(node.expression) && node.expression.text === 'inputs') {
+      const key = ts.isPropertyAccessExpression(node) ? node.name.text
+        : node.argumentExpression && ts.isStringLiteralLike(node.argumentExpression) ? node.argumentExpression.text : null;
+      if (key !== null) {
+        const property = Object.getOwnPropertyDescriptor(staticInputs!, key);
+        if (!property || 'value' in property) return { value: property?.value, complete: true };
+      }
+      return { value: undefined, complete: false };
+    }
     if (ts.isParenthesizedExpression(node) || ts.isNonNullExpression(node)) {
       return readStaticValue(node.expression);
     }
@@ -322,6 +335,29 @@ export function checkScript(
     const { line, character } = source.getLineAndCharacterOfPosition(offset);
     return { line: line + 1, column: character + 1, offset };
   };
+
+  // A supplied value proves only direct reads of the injected inputs object.
+  // Any shadowing, escape, mutation, or reassignment makes that proof unusable.
+  // Keep the whole script conservative, including nested function scopes.
+  if (inputBindingsUsable) {
+    const inspectInputs = (node: Node): void => {
+      if (ts.isIdentifier(node) && node.text === 'inputs') {
+        let access: Node = node;
+        while (access.parent && (ts.isPropertyAccessExpression(access.parent) || ts.isElementAccessExpression(access.parent)) &&
+          access.parent.expression === access) access = access.parent;
+        if (access === node) inputBindingsUsable = false;
+        const parent = access.parent;
+        if (parent && ((ts.isBinaryExpression(parent) && parent.left === access &&
+            parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment) ||
+            ts.isDeleteExpression(parent) || ((ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent)) &&
+              (parent.operator === ts.SyntaxKind.PlusPlusToken || parent.operator === ts.SyntaxKind.MinusMinusToken)))) {
+          inputBindingsUsable = false;
+        }
+      }
+      ts.forEachChild(node, inspectInputs);
+    };
+    inspectInputs(source);
+  }
 
   // Binding maps, populated in source order during the walk. Straight-line scripts declare an
   // alias (`const t = tools`) before they use it, and chained bindings (`const w = tools.x; const

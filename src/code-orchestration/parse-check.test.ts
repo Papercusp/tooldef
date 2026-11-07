@@ -259,6 +259,23 @@ describe('checkScript (B-CX-PARSE — AST: computed / aliased / destructured)', 
     expect(Array.isArray(r.refs)).toBe(true);
   });
 
+  it('projects direct validated invocation input reads without evaluating expressions', () => {
+    const script = 'await tools.call("plans:get", {slug:inputs.plan,harness:inputs["harness"], optional:inputs.missing});';
+    expect(checkScript(script, [mkTool('plans:get')], undefined, { plan: 'p', harness: 'h' }).calls[0])
+      .toMatchObject({ args: { slug: 'p', harness: 'h' }, dynamicArgs: false });
+    expect(checkScript(script, [mkTool('plans:get')]).calls[0].dynamicArgs).toBe(true);
+  });
+  it.each(['const inputs={plan:"other"};', 'inputs.plan="other";', 'delete inputs.plan;',
+    'const alias=inputs;', 'Object.assign(inputs,{plan:"other"});', 'function f(inputs) {}']) (
+    'does not trust invocation inputs after shadowing, mutation or escape: %s', prefix => {
+      const script = prefix + 'await tools.call("plans:get",{slug:inputs.plan});';
+      expect(checkScript(script, [mkTool('plans:get')], undefined, { plan: 'p' }).calls[0].dynamicArgs).toBe(true);
+    });
+  it('never calls an input getter while projecting scope', () => {
+    const values = Object.defineProperty({}, 'plan', { get() { throw new Error('must not execute'); } });
+    expect(checkScript('await tools.call("plans:get",{slug:inputs.plan});', [mkTool('plans:get')], undefined, values)
+      .calls[0].dynamicArgs).toBe(true);
+  });
   it('marks parser recovery errors so consumers do not validate recovered pseudo-properties', () => {
     const r = checkScript(
       String.raw`const r = await tools.capability.bash({
