@@ -3427,6 +3427,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     // unrepresentable rather than leaving six sites each needing an `await` remembered.
     const disclose = async (result: ToolResult | Promise<ToolResult>): Promise<ToolResult> =>
       attachCorrectedDisclosure(await result, corrections);
+    const callEffect = def.effectForCall?.(parsed.value) ?? def.effect;
     const response = await def.handler(parsed.value, legacyCtx);
     const explicitFullRequest = isExplicitFullPayloadRequest(callTier, ctx);
     // A raw ToolResult (MCP content shape) normally passes through untouched —
@@ -3466,6 +3467,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     // pass through byte-identical.
     const shaped = applyPayloadTier({
       toolName: def.name,
+      effect: callEffect,
       shape: def.shape,
       response: tierInput,
       // WI-37843: a tool may opt OUT of routine per-session shaping, in which
@@ -3649,6 +3651,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
       callTier !== undefined
         ? { ...ctx, contextTier: callTier, payloadTierOverride: callTier }
         : ctx;
+    const callEffect = def.effectForCall?.(parsed.value) ?? def.effect;
     const out = await def.handler(parsed.value, handlerCtx);
     const explicitFullRequest = isExplicitFullPayloadRequest(callTier, handlerCtx);
 
@@ -3687,6 +3690,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     // pass through byte-identical.
     const shaped = applyPayloadTier({
       toolName: def.name,
+      effect: callEffect,
       shape: def.shape,
       response: tierInput,
       // WI-37843: a tool may opt OUT of routine per-session shaping, in which

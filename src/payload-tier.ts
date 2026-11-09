@@ -1936,6 +1936,8 @@ function markForced(data: unknown): unknown {
 
 export interface ApplyPayloadTierOpts {
   toolName: string;
+  /** Effective per-call effect from the tool's existing authority metadata. */
+  effect?: 'read' | 'write';
   shape: PayloadShapers | undefined;
   response: ToolResponse;
   tier: PayloadTier;
@@ -2052,6 +2054,11 @@ export function applyPayloadTier(opts: ApplyPayloadTierOpts): ToolResponse {
   }
 
   if (tier !== 'full' && !customShapeApplied) {
+    // A generic projection cannot recover a committed write by replaying it.
+    // Keep the original receipt for the MCP door, which persists its bytes and
+    // returns a read-only page cursor. Projecting here would discard evidence
+    // before that door can retain it (EI-28302802132274974).
+    if (opts.effect === 'write' && opts.deferHardCeilingToResultDoor) return response;
     // Ratchet + safe default: name fat unshaped payloads and bound them now.
     const size = jsonLen(response.data);
     const key = `${toolName} ${tier}`;

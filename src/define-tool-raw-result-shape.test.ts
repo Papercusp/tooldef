@@ -95,6 +95,40 @@ for (const wrapper of ['principal-gated (legacy)', 'role-gated'] as const) {
   const call = async (name: string, over: Partial<UnifiedToolContext> = {}) =>
     textOf(await callResult(name, over));
 
+  it.each([
+    ['static-write', 'write', undefined, true],
+    ['dynamic-write', 'read', 'write', true],
+    ['static-read', 'read', undefined, false],
+    ['dynamic-read', 'write', 'read', false],
+  ] as const)('preserves the original %s receipt for the lossless MCP door through the ' + wrapper + ' wrapper',
+    async (label, effect, callEffect, preserved) => {
+      const name = `test:receipt-${slug}-${label}`;
+      const evidence = 'original-close-evidence-'.repeat(900);
+      const handler = vi.fn(async () => ({ data: {
+        ok: true, state: 'closed_answered', post_id: 1221669, review: { evidence },
+      } }));
+      defineTool({
+        name, capability: 'test:read', effect,
+        ...(callEffect ? { effectForCall: () => callEffect } : {}),
+        ...(wrapper === 'role-gated' ? { requirePrincipal: false as const } : {}),
+        args: z.object({}), handler,
+      });
+
+      const result = await callResult(name, { contextTier: 'trimmed' });
+
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(textOf(result)).toContain('closed_answered');
+      expect(textOf(result)).toContain('1221669');
+      expect(textOf(result).includes(evidence)).toBe(preserved);
+      if (preserved) {
+        expect(textOf(result)).not.toContain('full-detail');
+        expect(textOf(result)).not.toContain(`Call ${name} again`);
+        expect(result._meta?.payloadProjection).toBeUndefined();
+      } else {
+        expect(textOf(result)).toContain('bounded-payload');
+      }
+    });
+
   it.each([false, true])(
     'preserves handler _meta through MCP raw-JSON re-encoding with shape=%s',
     async (withShape) => {
