@@ -110,6 +110,19 @@ describe('serializeToolResponse — format selection', () => {
 });
 
 describe('serializeToolResponse — envelope routing', () => {
+  it.each([true, false, undefined])('preserves canonical response isError=%s outside the data', (isError) => {
+    const data = { message: 'fixture', rows: flatRows };
+    for (const requestedFormat of ['json', 'compact'] as const) {
+      const response: ToolResponse = { data, ...(isError === undefined ? {} : { isError }) };
+      const r = serializeToolResponse(response, formatOptsFromCtx({
+        transport: 'mcp', requestedFormat, requestedStructured: true,
+      }, undefined));
+      if (isError === undefined) expect(r).not.toHaveProperty('isError');
+      else expect(r.isError).toBe(isError);
+      expect(r.structuredContent).toEqual(data);
+    }
+  });
+
   it('routes nextCursor/degraded into _meta, out of the body', () => {
     const ctx = { transport: 'mcp' } as UnifiedToolContext;
     const response: ToolResponse = {

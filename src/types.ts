@@ -327,6 +327,8 @@ export interface UIResourceContent {
 /** Standard envelope for any tool response. */
 export interface ToolResponse<T = unknown> {
   data: T;
+  /** Explicit protocol failure flag, preserved independently of the data format. */
+  isError?: boolean;
   /** True when one or more sources were unavailable; partial result still useful. */
   degraded?: boolean;
   degradedReasons?: string[];

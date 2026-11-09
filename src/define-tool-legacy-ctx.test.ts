@@ -35,6 +35,33 @@ const ctx = (over: Partial<UnifiedToolContext> = {}): UnifiedToolContext => ({
 
 afterEach(() => _resetProjectionRegistryForTests());
 
+describe.each(['legacy', 'role'] as const)('canonical data error metadata — %s wrapper', (wrapper) => {
+  it.each([true, false, undefined])('preserves isError=%s through dispatch and invocation recording', async (isError) => {
+    const data = { message: 'fixture' };
+    const definition = {
+      name: `test:canonical-error-${wrapper}`,
+      capability: 'test:read', description: 'fixture', args: z.object({}),
+      async handler() { return { data, ...(isError === undefined ? {} : { isError }) }; },
+    };
+    if (wrapper === 'legacy') defineTool(definition);
+    else defineTool({ ...definition, requirePrincipal: false, agentRoles: ['operator'] });
+    const recordInvocation = vi.fn();
+    const result = await dispatchProjectedTool(
+      lookupByMcpName(definition.name)!, definition.name, {},
+      ctx({ role: 'operator', requestedFormat: 'json', requestedStructured: true,
+        gateBypass: { role: true, capability: true, quota: true } }),
+      { recordInvocation },
+    );
+    expect(result.ok).toBe(true);
+    expect(result.result?.structuredContent).toEqual(data);
+    if (isError === undefined) expect(result.result).not.toHaveProperty('isError');
+    else expect(result.result?.isError).toBe(isError);
+    expect(recordInvocation).toHaveBeenCalledWith(expect.objectContaining({
+      status: isError === true ? 'refused' : 'ok',
+    }));
+  });
+});
+
 describe('MCP streaming exposure', () => {
   it('preserves explicit streaming metadata for legacy and role-gated defineTool calls', () => {
     defineTool({

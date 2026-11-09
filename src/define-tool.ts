@@ -515,6 +515,7 @@ async function serializeProjectedResult(
     ...(delta ? { delta } : {}),
   });
   const result: ToolResult = { content: serialized.content as never };
+  if (serialized.isError !== undefined) result.isError = serialized.isError;
   if (Object.keys(serialized._meta).length > 0) result._meta = serialized._meta;
   if (serialized.structuredContent !== undefined) result.structuredContent = serialized.structuredContent;
   return result;

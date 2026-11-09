@@ -97,6 +97,8 @@ function deltaMeta(delta: DeltaNegotiation): Record<string, unknown> {
 
 export interface SerializedToolResult {
   content: Array<Record<string, unknown>>;
+  /** Preserve the handler's explicit protocol flag, including false. */
+  isError?: boolean;
   _meta: Record<string, unknown>;
   format: ResultFormat;
   /** True when the served format differs from the requested/ideal one (graceful downgrade). */
@@ -233,6 +235,7 @@ export function serializeToolResponse(
   opts: SerializeFormatOpts,
 ): SerializedToolResult {
   const out = serializeToolResponseBody(response, opts);
+  if (response.isError !== undefined) out.isError = response.isError;
   // D-041: a handler-computed base-rate stamp rides the SAME rendering as
   // guidance.denominator, on every body path (full, delta, not_modified).
   const d = response.data !== undefined && response.data !== null
