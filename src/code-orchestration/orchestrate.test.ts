@@ -10,6 +10,7 @@ import type { StaticToolCall } from './parse-check';
 import type { ProjectedTool, UnifiedToolContext } from '../tool-projection';
 import type { DispatchProjectedDeps } from '../dispatch-types';
 import type { ToolResult } from '../wire';
+import { dispatchProjectedTool } from '../dispatch-projected';
 
 const MAKE_CTX = (over: Partial<UnifiedToolContext> = {}): UnifiedToolContext =>
   ({
@@ -190,6 +191,43 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     );
     expect(r.ok).toBe(true);
     expect(r.summary).toEqual({ scanned: 3, bad: [2] }); // 4 tool calls collapsed into ONE code:run
+  });
+
+  it('keeps a spill handle from a large nested tools:invoke result through code-mode dispatch', async () => {
+    const body = 'x'.repeat(30_000);
+    const structuredPayload = {
+      ok: true,
+      truncated: true,
+      log_path: '/tmp/deep-swe-tree.json',
+      body,
+    };
+    // The rendered large-result text is the lossy path observed in the incident;
+    // structuredContent carries the complete machine result for the code caller.
+    const renderedPayload = { ok: true, truncated: true, body };
+    let childCodeMode: boolean | undefined;
+    const fetch = mkTool('capability:fetch', 'read', async (_args, childCtx) => {
+      childCodeMode = childCtx.codeMode;
+      return {
+        content: [{ type: 'text', text: JSON.stringify(renderedPayload) }],
+        ...(childCtx.codeMode ? { structuredContent: structuredPayload } : {}),
+      };
+    });
+    const invoke = mkTool('tools:invoke', 'read', async (args, childCtx) => {
+      const request = args as { name: string; args?: unknown };
+      const nested = await dispatchProjectedTool(fetch, request.name, request.args ?? {}, childCtx, DEPS);
+      if (!nested.ok) throw new Error(nested.error?.message ?? 'nested fetch dispatch failed');
+      return nested.result;
+    });
+
+    const r = await runToolOrchestration(
+      `const response = await tools.tools.invoke({ name: 'capability:fetch', args: {} });
+       return { log_path: response.log_path, truncated: response.truncated, bodyLength: response.body.length };`,
+      { ctx: MAKE_CTX(), deps: DEPS, tools: [fetch, invoke], timeoutMs: 3_000 },
+    );
+
+    expect(r.ok).toBe(true);
+    expect(childCodeMode).toBe(true);
+    expect(r.summary).toEqual({ log_path: structuredPayload.log_path, truncated: true, bodyLength: 30_000 });
   });
 
   it('returns bounded settled read results when one slow Promise.all sibling reaches the script timeout', async () => {

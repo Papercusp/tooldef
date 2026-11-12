@@ -1005,7 +1005,15 @@ export async function runToolOrchestration(
   const deadlineAtMs = typeof inheritedDeadlineAtMs === 'number' && Number.isFinite(inheritedDeadlineAtMs)
     ? Math.min(workerDeadlineAtMs, inheritedDeadlineAtMs)
     : workerDeadlineAtMs;
-  const dispatchCtx: UnifiedToolContext = { ...ctx, signal: orchestrationAbort.signal, deadlineAtMs };
+  // Every child reached through this facade is a code-mode call. Handlers use
+  // this marker to return machine-readable structuredContent, and tools:invoke
+  // uses it to request the full nested payload instead of the model-facing tier.
+  const dispatchCtx: UnifiedToolContext = {
+    ...ctx,
+    codeMode: true,
+    signal: orchestrationAbort.signal,
+    deadlineAtMs,
+  };
   const plannedMutations: PlannedMutation[] = [];
   const writeAttempts: WriteAttempt[] = [];
   const okFalseMutations: FailedMutation[] = [];
