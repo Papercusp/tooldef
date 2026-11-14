@@ -526,6 +526,19 @@ describe('verbatim-repeated subschemas are hoisted into $defs', () => {
     expect(compactInputSchema(out)).toEqual(out);
   });
 
+  it('preserves authored alias targets when compacting an advertised schema', () => {
+    const input = {
+      type: 'object',
+      properties: { value: { $ref: '#/$defs/AuthoredAlias' } },
+      $defs: { AuthoredAlias: { $ref: '#/$defs/k' }, k: big() },
+    };
+    const out = compactInputSchema(input) as any;
+    expect(out.properties.value).toEqual(input.properties.value);
+    expect(out.$defs.AuthoredAlias).toEqual(input.$defs.AuthoredAlias);
+    expect(resolve(out)).toEqual(resolve(input));
+    expect(compactInputSchema(out)).toEqual(out);
+  });
+
   it('normalizes cheaper alias references before comparing parents and leaves cyclic aliases intact', () => {
     const input = {
       type: 'object',

@@ -277,13 +277,14 @@ function definitionRef(definitionsKey: string, name: string): string {
 }
 
 /** Follow only pure root-definition aliases; cycles retain their original ref. */
-function canonicalAliasRef(root: JsonObject, original: string): string {
+function canonicalAliasRef(root: JsonObject, original: string, generatedDefinitions?: ReadonlySet<string>): string {
   const seen = new Set<string>();
   let ref = original;
   while (!seen.has(ref)) {
     seen.add(ref);
     const match = /^#\/(\$defs|definitions)\/([^/]+)$/.exec(ref);
     if (!match) return ref;
+    if (generatedDefinitions && !generatedDefinitions.has(ref)) return ref;
     const definitions = root[match[1]!];
     const name = match[2]!.replace(/~1/g, '/').replace(/~0/g, '~');
     const body = isJsonObject(definitions) ? definitions[name] : undefined;
@@ -304,6 +305,7 @@ function hoistRepeatedSubschemas(root: unknown, preserveCompactBudget = false): 
     !Object.hasOwn(root, '$defs') && isJsonObject(root.definitions) ? 'definitions' : '$defs';
   let compactCeiling = preserveCompactBudget ? jsonBytes(compactInputSchema(root)) : 0;
   const rejected = new Set<string>();
+  const generatedDefinitions = new Set<string>();
   for (let round = 0; round < HOIST_MAX_ROUNDS; round++) {
     const sites: SubschemaSite[] = [];
     // Only the untouched input can refuse: every ref this pass writes is movable.
@@ -313,7 +315,9 @@ function hoistRepeatedSubschemas(root: unknown, preserveCompactBudget = false): 
     // charging each rewritten ref and preserving every authored definition key.
     for (const { node } of sites) {
       if (typeof node.$ref !== 'string') continue;
-      const ref = canonicalAliasRef(root, node.$ref);
+      // Full factoring precedes advertisement; compaction must retain its input
+      // refs and may normalize only aliases created by this invocation.
+      const ref = canonicalAliasRef(root, node.$ref, preserveCompactBudget ? undefined : generatedDefinitions);
       if (utf8Bytes(ref) <= utf8Bytes(node.$ref)) node.$ref = ref;
     }
     const memo = new Map<object, string>();
@@ -353,7 +357,10 @@ function hoistRepeatedSubschemas(root: unknown, preserveCompactBudget = false): 
     if (best === undefined) break;
     const target: JsonObject = definitions ?? {};
     root[definitionsKey] = target;
-    if (!best.reuse) target[best.name] = best.sites[0].node;
+    if (!best.reuse) {
+      target[best.name] = best.sites[0].node;
+      generatedDefinitions.add(definitionRef(definitionsKey, best.name));
+    }
     for (const site of best.sites) {
       (site.holder as Record<string | number, unknown>)[site.slot] = {
         $ref: definitionRef(definitionsKey, best.name),
@@ -368,7 +375,10 @@ function hoistRepeatedSubschemas(root: unknown, preserveCompactBudget = false): 
         for (const site of best.sites) {
           (site.holder as Record<string | number, unknown>)[site.slot] = site.node;
         }
-        if (!best.reuse) delete target[best.name];
+        if (!best.reuse) {
+          delete target[best.name];
+          generatedDefinitions.delete(definitionRef(definitionsKey, best.name));
+        }
         if (definitions === undefined) delete root[definitionsKey];
         rejected.add(best.key);
       } else compactCeiling = compactBytes;
