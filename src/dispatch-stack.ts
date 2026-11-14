@@ -141,6 +141,7 @@ export interface DispatchExecution {
   lastEmitMs: number;
   idleTimer: ReturnType<typeof setInterval> | null;
   timeoutTimer: ReturnType<typeof setTimeout> | null;
+  removeParentAbortListener: (() => void) | null;
 
   // ─── written by 'replay-buffer' step ────────────────────────────────
   bufferWriter: ReplayBufferWriter | null;
@@ -236,6 +237,7 @@ function initExecution(
     lastEmitMs: 0,
     idleTimer: null,
     timeoutTimer: null,
+    removeParentAbortListener: null,
     bufferWriter: null,
     eventCount: 0,
     metadataJson: null,
@@ -302,7 +304,10 @@ function kernelRequest(
     toolName: exec.toolName,
     capabilities: exec.tool.capabilities,
     args: exec.input,
-    ctx,
+    ctx: exec.timeoutSec === 0 || ctx.signal === exec.abort.signal ? ctx : applyWorkspaceTxContract(exec.tool, exec.toolName, {
+      ...ctx,
+      signal: exec.abort.signal,
+    }),
     callId: exec.callId,
     appliedRevision: kernelAppliedRevision(ctx),
     requestedRevision: kernelRequestedRevision(ctx),
@@ -348,6 +353,7 @@ const kernelPreflightStep: DispatchStep = {
     const port = kernelPort(exec);
     if (!port) return null;
     const decision = await evaluateKernelEnforcement(port, kernelRequest(exec, 'preflight'));
+    if (exec.abort.signal.aborted) return admissionAbortResult(exec, 'kernel-preflight');
     exec.kernelPreflight = decision;
     if (isKernelDenied(decision)) return kernelDenial(exec, 'preflight', decision);
     return null;
@@ -649,25 +655,73 @@ const quotaStep: DispatchStep = {
 const timeoutStep: DispatchStep = {
   name: 'timeout',
   async run(exec) {
-    exec.timeoutSec = exec.tool.timeoutSec ?? 60;
-    const timer = setTimeout(() => abortExecution(exec, 'dispatcher-timeout'), exec.timeoutSec * 1000);
-    if (typeof timer.unref === 'function') timer.unref();
-    exec.timeoutTimer = timer;
-    // Compose any caller-supplied signal — caller-side aborts must still
-    // propagate to the dispatcher's controller.
-    if (exec.ctx.signal) {
-      const abortFromParent = () => abortExecution(exec, 'parent-signal');
-      if (exec.ctx.signal.aborted) abortFromParent();
-      else exec.ctx.signal.addEventListener('abort', abortFromParent, { once: true });
-    }
+    armDispatchDeadline(exec);
     return null;
   },
 };
+
+function armDispatchDeadline(exec: DispatchExecution): void {
+  // Admission and execution share ONE wall-clock budget. In particular, an
+  // awaited kernel decision must not reset the clock or enter a handler after
+  // the request expired (EI-28793480247033779).
+  if (exec.timeoutTimer || exec.abort.signal.aborted) return;
+  exec.timeoutSec = exec.tool.timeoutSec ?? 60;
+  const deadlineAtMs = Math.min(
+    exec.startedAt + exec.timeoutSec * 1000,
+    exec.ctx.deadlineAtMs ?? Infinity,
+  );
+  const remainingMs = deadlineAtMs - Date.now();
+  if (remainingMs <= 0) {
+    abortExecution(exec, 'dispatcher-timeout');
+    return;
+  }
+  const timer = setTimeout(() => abortExecution(exec, 'dispatcher-timeout'), remainingMs);
+  if (typeof timer.unref === 'function') timer.unref();
+  exec.timeoutTimer = timer;
+  const abortFromParent = () => abortExecution(exec, 'parent-signal');
+  if (exec.ctx.signal.aborted) abortFromParent();
+  else {
+    exec.ctx.signal.addEventListener('abort', abortFromParent, { once: true });
+    exec.removeParentAbortListener = () => exec.ctx.signal.removeEventListener('abort', abortFromParent);
+  }
+}
 
 function abortExecution(exec: DispatchExecution, source: NonNullable<DispatchExecution['abortSource']>): void {
   if (exec.abort.signal.aborted) return;
   exec.abortSource = source;
   exec.abort.abort();
+}
+
+function admissionAbortResult(exec: DispatchExecution, stage: DispatchStepName): DispatchProjectedResult {
+  const cancelled = exec.abortSource === 'parent-signal';
+  return {
+    ok: false,
+    error: {
+      code: cancelled ? 'aborted' : 'timeout',
+      message: `tool "${exec.toolName}" ${cancelled ? 'was cancelled' : 'exhausted its dispatch deadline'} ` +
+        `during admission (${stage}); the target handler was not entered.`,
+      meta: { phase: 'admission', stage, handlerEntered: false, abortSource: exec.abortSource },
+    },
+  };
+}
+
+async function runAdmissionStep(exec: DispatchExecution, step: DispatchStep): Promise<DispatchProjectedResult | null> {
+  if (exec.abort.signal.aborted) return admissionAbortResult(exec, step.name);
+  let onAbort!: () => void;
+  const aborted = new Promise<DispatchProjectedResult>(resolve => {
+    onAbort = () => resolve(admissionAbortResult(exec, step.name));
+    exec.abort.signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    // A late authorization resolution/rejection is observed by the race, but
+    // can never resume the stack and enter the target handler after refusal.
+    const pending = Promise.resolve().then(() => exec.abort.signal.aborted
+      ? admissionAbortResult(exec, step.name) : step.run(exec));
+    const result = await Promise.race([pending, aborted]);
+    return exec.abort.signal.aborted ? admissionAbortResult(exec, step.name) : result;
+  } finally {
+    exec.abort.signal.removeEventListener('abort', onAbort);
+  }
 }
 
 const idleWatchdogStep: DispatchStep = {
@@ -847,6 +901,7 @@ const kernelEnforceStep: DispatchStep = {
       port,
       kernelRequest(exec, 'enforce', exec.handlerCtx),
     );
+    if (exec.abort.signal.aborted) return admissionAbortResult(exec, 'kernel-enforce');
     exec.kernelEnforcement = decision;
     if (isKernelDenied(decision)) return kernelDenial(exec, 'enforce', decision);
 
@@ -918,6 +973,7 @@ async function settleThrownValue(value: unknown, signal: AbortSignal): Promise<S
 const invokeStep: DispatchStep = {
   name: 'invoke',
   async run(exec) {
+    if (exec.abort.signal.aborted) return admissionAbortResult(exec, 'invoke');
     const { tool, toolName, input, handlerCtx, deps } = exec;
     try {
       let invocation: Promise<ToolResult> | undefined;
@@ -1529,8 +1585,9 @@ const entityCheckStep: DispatchStep = {
  *   - `kernel-preflight` is first so ownership/activation/revocation can be
  *     checked before any other gate, decorator, or handler side effect.
  *   - All gates (role / capability / harness / quota / authorize /
- *     preconditions) come first so denials are cheap (no timer arming, no
- *     buffer allocation, no ctx wrappers). `authorize` runs last among the
+ *     preconditions) come first so denials avoid buffer allocation and ctx
+ *     wrappers. The orchestrator arms the shared deadline before admission.
+ *     `authorize` runs last among the
  *     AUTH gates — it is the finest-grained and may touch the resource.
  *   - `preconditions` (declarative `requires:` — D-006) runs after
  *     `authorize` and before `timeout`: a corrective auto-fire must only
@@ -1541,8 +1598,8 @@ const entityCheckStep: DispatchStep = {
  *     name near-matches and the valid set, so it must never run for an
  *     unauthorized caller (that would leak the entity namespace), and it must
  *     run before `invoke` so a bad reference never reaches a handler.
- *   - `timeout` arms the AbortController; every subsequent step that
- *     races against it depends on this having run.
+ *   - `timeout` preserves the already-armed dispatch deadline; it must never
+ *     grant a fresh execution budget after admission consumed part of it.
  *   - `idle-watchdog` runs after `timeout` so it composes with the same
  *     controller. It also runs before `ctx-bindings` because the wrapped
  *     emit refreshes `lastEmitMs`.
@@ -2105,6 +2162,7 @@ export async function runDispatchStack(
   stack: ReadonlyArray<DispatchStep> = DEFAULT_DISPATCH_STACK,
 ): Promise<DispatchProjectedResult> {
   const exec = initExecution(tool, toolName, input, ctx, deps);
+  armDispatchDeadline(exec);
   // The per-call phase tracker starts HERE, at dispatch entry, so `handlerPhases.elapsedMs`
   // is the call's dispatch wall time and pre-handler steps land in it as `dispatch:<step>`
   // phases. Created inside ctx-bindings it began after kernel-preflight and
@@ -2139,7 +2197,9 @@ export async function runDispatchStack(
       const stepStarted = dispatchStarted === null ? null : performance.now();
       const stepStartedAt = Date.now();
       try {
-        result = await step.run(exec);
+        result = step.name === 'invoke'
+          ? (exec.abort.signal.aborted ? admissionAbortResult(exec, 'invoke') : await step.run(exec))
+          : await runAdmissionStep(exec, step);
       } finally {
         if (stepStarted !== null) {
           dispatchSteps.push({
@@ -2242,6 +2302,7 @@ export async function runDispatchStack(
       }
     }
     if (exec.timeoutTimer) clearTimeout(exec.timeoutTimer);
+    exec.removeParentAbortListener?.();
     if (exec.idleTimer) clearInterval(exec.idleTimer);
     if (ctx.runId) {
       cancelPendingCardsForRun(ctx.runId);

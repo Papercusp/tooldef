@@ -1174,6 +1174,100 @@ describe('runDispatchStack — custom stack', () => {
 describe('P-041 kernel enforcement seats', () => {
   const applied = { specificationRevision: 'spec-applied', stateRevision: 'state-7' };
 
+  describe('admission shares the dispatch deadline', () => {
+    afterEach(() => vi.useRealTimers());
+
+    it.each(['preflight', 'enforce'] as const)('bounds a stalled %s decision and never invokes on its late allow', async phase => {
+      vi.useFakeTimers();
+      let release!: (value: { decision: 'allow' }) => void;
+      const held = new Promise<{ decision: 'allow' }>(resolve => { release = resolve; });
+      let authoritySignal: AbortSignal | undefined;
+      const handler = vi.fn(async () => ({ content: [{ type: 'text' as const, text: 'must-not-run' }] }));
+      const record = vi.fn(async (_input: unknown) => {});
+      const pending = runDispatchStack(makeTool({ fn: handler, timeoutSec: 0.05 }), 'fixture:write', {}, MAKE_CTX(), {
+        kernelEnforcement: request => {
+          if (request.phase !== phase) return { decision: 'allow' };
+          authoritySignal = request.ctx.signal;
+          return held;
+        },
+        recordInvocation: record,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(authoritySignal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(await pending).toMatchObject({ ok: false, error: { code: 'timeout', meta: {
+        phase: 'admission', stage: `kernel-${phase}`, handlerEntered: false,
+      } } });
+      expect(authoritySignal?.aborted).toBe(true);
+      expect(record).toHaveBeenCalledOnce();
+      expect(handler).not.toHaveBeenCalled();
+      release({ decision: 'allow' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(handler).not.toHaveBeenCalled();
+      expect(record).toHaveBeenCalledOnce();
+    });
+
+    it('does not reset the budget after early admission consumed it', async () => {
+      vi.useFakeTimers();
+      const handler = vi.fn();
+      const phases: string[] = [];
+      const pending = runDispatchStack(makeTool({ fn: handler, timeoutSec: 0.05 }), 'fixture:write', {}, MAKE_CTX(), {
+        kernelEnforcement: async request => {
+          phases.push(request.phase);
+          if (request.phase === 'preflight') {
+            await new Promise(resolve => setTimeout(resolve, 30));
+            return { decision: 'allow' };
+          }
+          return new Promise<never>(() => {});
+        },
+      });
+      await vi.advanceTimersByTimeAsync(30);
+      expect(phases).toEqual(['preflight', 'enforce']);
+      await vi.advanceTimersByTimeAsync(20);
+      expect(await pending).toMatchObject({ ok: false, error: { code: 'timeout', meta: { stage: 'kernel-enforce' } } });
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it('answers parent cancellation while authority is still pending', async () => {
+      vi.useFakeTimers();
+      const parent = new AbortController();
+      const handler = vi.fn();
+      const pending = runDispatchStack(makeTool({ fn: handler }), 'fixture:write', {}, MAKE_CTX({ signal: parent.signal }), {
+        kernelEnforcement: () => new Promise<never>(() => {}),
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      parent.abort();
+      expect(await pending).toMatchObject({ ok: false, error: { code: 'aborted', meta: { handlerEntered: false } } });
+      expect(handler).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('honors the earlier host deadline before starting authority or the target', async () => {
+      vi.useFakeTimers();
+      const authority = vi.fn();
+      const handler = vi.fn();
+      const result = await runDispatchStack(makeTool({ fn: handler }), 'fixture:write', {},
+        MAKE_CTX({ deadlineAtMs: Date.now() - 1 }), { kernelEnforcement: authority });
+      expect(result).toMatchObject({ ok: false, error: { code: 'timeout', meta: { handlerEntered: false } } });
+      expect(authority).not.toHaveBeenCalled();
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it('preserves parent cancellation for preflight-only observations without arming a dispatch', async () => {
+      vi.useFakeTimers();
+      const parent = new AbortController();
+      parent.abort();
+      const authority = vi.fn((request: Parameters<NonNullable<DispatchProjectedDeps['kernelEnforcement']>>[0]) => ({
+        decision: request.ctx.signal.aborted ? 'deny' as const : 'allow' as const,
+      }));
+      const result = await preflightDispatchStack(makeTool(), 'fixture:write', {},
+        MAKE_CTX({ signal: parent.signal }), { kernelEnforcement: authority });
+      expect(result.allowed).toBe(false);
+      expect(authority.mock.calls[0]?.[0].ctx.signal).toBe(parent.signal);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+  });
+
   it('runs preflight before decorators and refuses before the handler on an explicit deny', async () => {
     const order: string[] = [];
     const handler = vi.fn(async () => ({ content: [{ type: 'text' as const, text: 'should-not-run' }] }));
