@@ -1061,6 +1061,11 @@ function takePrimitive(state: ProjectionState, value: unknown, path: string): un
 const IDENTITY_FIELDS = new Set([
   'id', 'title', 'name', 'slug', 'ref', 'kind', 'state', 'status', 'ok', 'error',
   'item', 'itemId', 'key', 'plan', 'planSlug', 'rubricRef', 'workItemId',
+  // EI-25996766760389976: a depth preview of a failure must retain its repair
+  // contract. Keeping only `error` can turn a specific refusal into a generic
+  // one by dropping the sub-code, missing inputs, issues, source, or next-step
+  // hint — even when the complete response is far below the byte budget.
+  'harnessSlug', 'code', 'message', 'missing', 'issues', 'source', 'hint',
   // A bounded object may already be passing through a second projection seam
   // (payload tier -> result door). Its honesty markers and array-count receipt
   // are identity too: dropping them recreates a complete-looking partial row.
