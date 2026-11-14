@@ -389,6 +389,13 @@ const roleAllowlistStep: DispatchStep = {
     const { tool, ctx, toolName, deps } = exec;
     if (!tool.agentRoles || !ctx.role || ctx.gateBypass?.role) return null;
     if (tool.agentRoles.includes(ctx.role as AgentRole)) return null;
+    try {
+      const baseRole = await deps.resolveRoleForAllowlist?.(ctx);
+      if (baseRole && tool.agentRoles.includes(baseRole as AgentRole)) return null;
+    } catch {
+      // An unavailable declaration is not permission. Keep the actual caller's
+      // role and its normal denial; all other gates still use the original ctx.
+    }
     // The allowed-roles list says what WOULD be permitted, never where to get it —
     // so the caller is left to guess which surface carries one of those roles. Let
     // the host name the remedy, on the same seam the capability denial already uses.

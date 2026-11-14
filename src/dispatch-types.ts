@@ -380,6 +380,14 @@ export interface DispatchProjectedDeps {
    */
   authorizationFailureHint?: AuthorizationFailureHintFn;
   /**
+   * Host-validated base role of an installed custom role. Consulted only when
+   * agentRoles does not contain the caller's actual role. Never changes ctx.role,
+   * principal capabilities, capability envelopes, or any other authorization gate.
+   * Missing declarations and resolution failures keep the original role denial.
+   */
+  resolveRoleForAllowlist?(ctx: UnifiedToolContext):
+    string | null | undefined | Promise<string | null | undefined>;
+  /**
    * Best-effort observation point for the beginning of every projected dispatch.
    * The dispatcher does not await this hook and swallows failures so a host's
    * liveness/telemetry marker can never change the tool result.

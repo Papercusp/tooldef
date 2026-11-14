@@ -776,6 +776,46 @@ describe('runDispatchStack — custom stack', () => {
     expect(invoked).toBe(false);
   });
 
+  it('uses a host-resolved base role only for allowlist membership', async () => {
+    const actualRole = 'app-analyst';
+    const ctx = MAKE_CTX({ role: actualRole });
+    const handler = vi.fn(async (_input, handlerCtx) => {
+      expect(handlerCtx.role).toBe(actualRole);
+      return { content: [{ type: 'text' as const, text: 'ok' }] };
+    });
+    const resolveRoleForAllowlist = vi.fn(async () => 'worker');
+    const result = await runDispatchStack(makeTool({ agentRoles: ['worker'], fn: handler }),
+      'fix.tool', {}, ctx, { resolveRoleForAllowlist });
+    expect(result.ok).toBe(true);
+    expect(resolveRoleForAllowlist).toHaveBeenCalledWith(ctx);
+    expect(handler).toHaveBeenCalledOnce();
+    expect(ctx.role).toBe(actualRole);
+  });
+
+  it.each(['absent', 'wrong-base', 'unavailable'])('fails closed on %s base role', async kind => {
+    const handler = vi.fn();
+    const result = await runDispatchStack(makeTool({ agentRoles: ['worker'], fn: handler }),
+      'fix.tool', {}, MAKE_CTX({ role: 'app-analyst' }), {
+        resolveRoleForAllowlist: async () => {
+          if (kind === 'unavailable') throw new Error('installed declaration unavailable');
+          return kind === 'absent' ? null : 'reviewer';
+        },
+      });
+    expect(result.error?.code).toBe('role_not_allowed');
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('does not give a resolved role its base role capabilities', async () => {
+    const handler = vi.fn();
+    const result = await runDispatchStack(makeTool({ agentRoles: ['worker'],
+      capabilities: ['plans:write'], fn: handler }), 'fix.tool', {}, MAKE_CTX({
+      role: 'app-analyst', principal: { slug: 'app-analyst', workspaceId: 'default',
+        capabilities: new Set(['coord:read']) },
+    }), { resolveRoleForAllowlist: () => 'worker' });
+    expect(result.error?.code).toBe('missing_capability');
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   // R-7 / P-012 (acceptance-machinery-seam-fixes-2026-09-16). The host can only name
   // the remedy for a role denial if the step actually ASKS it. Without this, a hint
   // implementation can handle role denials perfectly and still never be consulted —
