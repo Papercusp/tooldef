@@ -2039,6 +2039,45 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
   // tell a withheld field from an empty one. That misread produced a false major
   // bug filing and wrong findings delivered to two rubric authors before a peer
   // falsified it, so the object must now announce its own partialness.
+  it('preserves machine-actionable refusal diagnostics at a depth preview boundary', () => {
+    const refusal = {
+      ok: false,
+      slug: 'quick-access-search-launcher-2026-10-26',
+      harnessSlug: 'papercusp',
+      error: 'plan_inputs_not_ready',
+      code: 'acceptance_bar_contract_not_ready',
+      missing: ['acceptance_bar_method_missing'],
+      issues: ['P-001: acceptance method is missing'],
+      source: 'acceptance-bar-contract',
+      hint: 'Repair the acceptance BAR contract before starting this plan.',
+      verboseDiagnostic: { detail: 'A non-actionable detail that remains outside the compact preview.' },
+    };
+    // The trimmed normal-walk boundary is five levels; this non-flat refusal
+    // row reaches it just as the result door's results[0] refusal does.
+    const payload = { a: { b: { c: { d: [refusal] } } } };
+
+    const out = projectBoundedPayload(payload, { toolName: 'plans:start', tier: 'trimmed' }) as
+      typeof payload & { _projection: { truncated: boolean } };
+    const projected = out.a.b.c.d[0] as typeof refusal & { _partial?: boolean; _omitted?: string };
+
+    // Prove this exercises the depth preview rather than the unchanged full path.
+    expect(out._projection.truncated).toBe(true);
+    expect(projected._omitted).toContain('non-identity field(s) at projection depth limit');
+    expect(projected._omitted).toContain('verboseDiagnostic');
+    expect(projected._omitted).not.toContain('code');
+    expect(projected._omitted).not.toContain('issues');
+    expect(projected._omitted).not.toContain('hint');
+    expect(projected._partial).toBe(true);
+    expect(projected).toMatchObject({
+      harnessSlug: refusal.harnessSlug,
+      code: refusal.code,
+      missing: refusal.missing,
+      issues: refusal.issues,
+      source: refusal.source,
+      hint: refusal.hint,
+    });
+  });
+
   it('a depth-compacted object announces ON ITSELF which non-identity fields were withheld', () => {
     const criterion = (key: string) => ({
       key,
