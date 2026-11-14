@@ -338,6 +338,20 @@ describe('listMcpProjections', () => {
     expect(workerView).toEqual(['a.worker', 'c.any']);
   });
 
+  it('uses an installed base role only for listing and contract membership', () => {
+    registerProjectedTool(baseTool({ expose: { mcp: { name: 'a.worker' } }, agentRoles: ['worker'] }));
+    registerProjectedTool(baseTool({ expose: { mcp: { name: 'b.operator' } }, agentRoles: ['operator'] }));
+    registerProjectedTool(baseTool({ expose: { mcp: { name: 'c.empty' } }, agentRoles: [] }));
+    const role = 'app-analyst';
+    expect(listMcpProjections(role).map(tool => tool.name)).toEqual([]);
+    expect(listMcpProjections(role, 'engineer', 'worker').map(tool => tool.name)).toEqual(['a.worker']);
+    expect(projectedToolAdmitted('a.worker', { role, roleForAllowlist: 'worker' })).toBe(true);
+    expect(projectedToolCallContract('a.worker', { role, roleForAllowlist: 'worker' }).name).toBe('a.worker');
+    expect(projectedToolAdmitted('b.operator', { role, roleForAllowlist: 'worker' })).toBe(false);
+    expect(projectedToolAdmitted('c.empty', { role, roleForAllowlist: 'worker' })).toBe(false);
+    expect(listMcpProjections(role, 'engineer', null)).toEqual([]);
+  });
+
   it('exposes the executable contract plus shared registry provenance when events is absent', () => {
     registerProjectedTool(baseTool({
       description: 'desc x',

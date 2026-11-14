@@ -2069,6 +2069,8 @@ export function projectedToolRegistryRevision(
 
 export interface ProjectedToolAvailability {
   role?: AgentRole;
+  /** Host-validated installed base role; affects membership only. */
+  roleForAllowlist?: string | null;
   profile?: 'engineer' | 'power';
   modality?: 'text' | 'voice';
 }
@@ -2091,7 +2093,8 @@ export class ProjectedToolContractError extends Error {
 }
 
 function availabilityProblem(tool: ProjectedTool, context: ProjectedToolAvailability): string | null {
-  if (context.role && tool.agentRoles && !tool.agentRoles.includes(context.role)) {
+  if (context.role && tool.agentRoles && !tool.agentRoles.includes(context.role) &&
+      !tool.agentRoles.some(role => role === context.roleForAllowlist)) {
     return `role ${context.role} is not admitted`;
   }
   if (context.profile === 'power' && tool.profile === 'engineer') return 'power profile is not admitted';
@@ -2513,12 +2516,17 @@ export function mcpObjectInputSchema(
   return undefined;
 }
 
-export function listMcpProjections(role?: AgentRole, profile?: 'engineer' | 'power'): McpToolListing[] {
+export function listMcpProjections(
+  role?: AgentRole,
+  profile?: 'engineer' | 'power',
+  roleForAllowlist?: string | null,
+): McpToolListing[] {
   const out: McpToolListing[] = [];
   const registryRevision = projectedToolRegistryRevision();
   for (const tool of REGISTRY.values()) {
     if (!tool.expose.mcp) continue;
-    if (role && tool.agentRoles && !tool.agentRoles.includes(role)) continue;
+    if (role && tool.agentRoles && !tool.agentRoles.includes(role) &&
+        !tool.agentRoles.some(allowed => allowed === roleForAllowlist)) continue;
     // Profile gate: tools tagged `profile: 'engineer'` are hidden from
     // power-profile callers. Untagged tools (undefined / 'all') are visible
     // to everyone — backward-compatible for tools not yet tagged.
