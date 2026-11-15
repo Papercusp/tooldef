@@ -368,7 +368,7 @@ const kernelPreflightStep: DispatchStep = {
 };
 
 /**
- * Default-deny gate (RFC tooldef-auth Phase 3, decision D1). Runs first.
+ * Default-deny gate (RFC tooldef-auth Phase 3, decision D1). Runs after kernel preflight.
  *
  * Opt-in via `deps.defaultDeny` (off = the legacy allow-by-omission posture, no behavior
  * change). When on, a tool that declares NO gate — no capabilities, no agent `roles`, no
