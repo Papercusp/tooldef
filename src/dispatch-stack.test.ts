@@ -7,8 +7,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_DISPATCH_STACK,
+  DISPATCH_ERROR_META_KEYS_MAX,
+  DISPATCH_ERROR_META_MAX_BYTES,
+  DISPATCH_ERROR_META_SCHEMA,
   SOFT_FAILURE_REASON_MAX,
   extractSoftFailureOutcome,
+  persistableDispatchErrorMeta,
+  type DispatchStep,
   withReplacedStep,
   runDispatchStack,
   preflightDispatchStack,
@@ -1541,5 +1546,121 @@ describe('entity-check step — referential integrity for entityRef args', () =>
     const r = await runDispatchStack(tool, 'fix.tool', { n: 1 }, MAKE_CTX(), {});
     expect(r.ok).toBe(true);
     expect(fn).not.toHaveBeenCalled();
+  });
+});
+
+// EI-28853337421761023: a refusal's error.meta reaches invocation telemetry, bounded
+// without slicing. The bound is inclusive; past it the meta is withheld as a whole.
+describe('persisted dispatch error meta', () => {
+  const EMPTY_PAD_JSON = '{"pad":""}';
+  const padOfBytes = (bytes: number) => ({ pad: 'x'.repeat(bytes - EMPTY_PAD_JSON.length) });
+
+  const refusingStack = (meta: Record<string, unknown>): ReadonlyArray<DispatchStep> => [{
+    name: 'authorize',
+    run: async () => ({ ok: false, error: { code: 'authorization_denied', message: 'refused', meta } }),
+  }];
+
+  async function recordedMetadata(meta: Record<string, unknown>) {
+    let metadataJson: Record<string, unknown> | null | undefined;
+    const result = await runDispatchStack(makeTool(), 'fix.tool', {}, MAKE_CTX(), {
+      recordInvocation: vi.fn(async (input: { metadataJson?: Record<string, unknown> | null }) => {
+        metadataJson = input.metadataJson;
+      }),
+    }, refusingStack(meta));
+    return { result, metadataJson };
+  }
+
+  it.each([
+    ['N-1', DISPATCH_ERROR_META_MAX_BYTES - 1],
+    ['N', DISPATCH_ERROR_META_MAX_BYTES],
+  ])('persists a meta of %s bytes whole', (_label, bytes) => {
+    const meta = padOfBytes(bytes);
+    expect(JSON.stringify(meta).length).toBe(bytes);
+    expect(persistableDispatchErrorMeta(meta)).toEqual({ schema: DISPATCH_ERROR_META_SCHEMA, value: meta });
+  });
+
+  it('withholds a meta of N+1 bytes as a whole and names its size and keys', () => {
+    const meta = padOfBytes(DISPATCH_ERROR_META_MAX_BYTES + 1);
+    expect(persistableDispatchErrorMeta(meta)).toEqual({
+      schema: DISPATCH_ERROR_META_SCHEMA,
+      omitted: {
+        reason: 'oversize',
+        bytes: DISPATCH_ERROR_META_MAX_BYTES + 1,
+        maxBytes: DISPATCH_ERROR_META_MAX_BYTES,
+        keyCount: 1,
+        keys: ['pad'],
+      },
+    });
+  });
+
+  it('measures UTF-8 bytes, not UTF-16 code units', () => {
+    // Each é is one code unit but two UTF-8 bytes, so N/2 + 1 of them cross the bound.
+    const half = (DISPATCH_ERROR_META_MAX_BYTES - EMPTY_PAD_JSON.length) / 2;
+    const fits = { pad: 'é'.repeat(Math.floor(half)) };
+    const over = { pad: 'é'.repeat(Math.floor(half) + 1) };
+    expect(persistableDispatchErrorMeta(fits)).toHaveProperty('value', fits);
+    expect(persistableDispatchErrorMeta(over)).toHaveProperty('omitted.reason', 'oversize');
+  });
+
+  it.each([
+    [DISPATCH_ERROR_META_KEYS_MAX - 1, true],
+    [DISPATCH_ERROR_META_KEYS_MAX, true],
+    [DISPATCH_ERROR_META_KEYS_MAX + 1, false],
+  ])('lists the keys of an oversize %i-key meta only within the key bound (listed=%s)', (keyCount, listed) => {
+    const filler = 'y'.repeat(Math.ceil(DISPATCH_ERROR_META_MAX_BYTES / keyCount) + 8);
+    const meta = Object.fromEntries(Array.from({ length: keyCount }, (_, i) => [`k${i}`, filler]));
+    const persisted = persistableDispatchErrorMeta(meta);
+    expect(persisted).toHaveProperty('omitted.keyCount', keyCount);
+    if (listed) expect(persisted).toHaveProperty('omitted.keys', Object.keys(meta));
+    else expect(persisted).not.toHaveProperty('omitted.keys');
+  });
+
+  it('marks an unserializable meta instead of dropping it silently', () => {
+    expect(persistableDispatchErrorMeta({ count: BigInt(1) })).toEqual({
+      schema: DISPATCH_ERROR_META_SCHEMA,
+      omitted: { reason: 'unserializable', maxBytes: DISPATCH_ERROR_META_MAX_BYTES, keyCount: 1, keys: ['count'] },
+    });
+  });
+
+  it('skips keys already persisted at top level and returns nothing when none remain', () => {
+    expect(persistableDispatchErrorMeta({ postgres: { sqlState: '23505' } }, ['postgres'])).toBeUndefined();
+    expect(persistableDispatchErrorMeta({ gone: undefined })).toBeUndefined();
+    expect(persistableDispatchErrorMeta({ postgres: { sqlState: '23505' }, tool: 't' }, ['postgres']))
+      .toEqual({ schema: DISPATCH_ERROR_META_SCHEMA, value: { tool: 't' } });
+  });
+
+  it('records a refusal meta on the invocation row beside its top-level slots', async () => {
+    const meta = { tool: 'fix.tool', reason: 'tool_not_in_allowlist', postgres: { sqlState: '42501' } };
+    const { result, metadataJson } = await recordedMetadata(meta);
+    expect(result.ok).toBe(false);
+    expect(metadataJson).toMatchObject({
+      postgres: { sqlState: '42501' },
+      errorMeta: {
+        schema: DISPATCH_ERROR_META_SCHEMA,
+        value: { tool: 'fix.tool', reason: 'tool_not_in_allowlist' },
+      },
+    });
+  });
+
+  it('keeps the full meta in the response when the persisted copy is withheld', async () => {
+    const meta = padOfBytes(DISPATCH_ERROR_META_MAX_BYTES + 1);
+    const { result, metadataJson } = await recordedMetadata(meta);
+    expect(result.error?.meta).toEqual(meta);
+    expect(metadataJson).toHaveProperty('errorMeta.omitted.bytes', DISPATCH_ERROR_META_MAX_BYTES + 1);
+    expect(metadataJson).not.toHaveProperty('errorMeta.value');
+  });
+
+  it('records the meta of a real authorize denial from the default stack', async () => {
+    let metadataJson: Record<string, unknown> | null | undefined;
+    const result = await runDispatchStack(
+      makeTool({ authorize: () => ({ allow: false, reason: 'not yours' }) }),
+      'fix.tool', {}, MAKE_CTX(), {
+        recordInvocation: vi.fn(async (input: { metadataJson?: Record<string, unknown> | null }) => {
+          metadataJson = input.metadataJson;
+        }),
+      },
+    );
+    expect(result.ok).toBe(false);
+    expect(metadataJson).toHaveProperty('errorMeta.value.tool', 'fix.tool');
   });
 });

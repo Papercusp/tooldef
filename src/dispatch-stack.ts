@@ -2179,20 +2179,114 @@ function finalizeMetadata(exec: DispatchExecution): Record<string, unknown> | nu
   return exec.metadataJson;
 }
 
+/**
+ * A refusal's structured `error.meta` is the only machine-readable record of WHY a
+ * step refused (which tool and principal, the missing capability, the quota window,
+ * an abort-completion receipt, ...). The caller receives it in the response, but only
+ * the `postgres` and `invalidInput` shapes used to reach the invocation telemetry, so
+ * every other refusal's reason was unrecoverable once delivered (EI-28853337421761023).
+ *
+ * The remaining keys are persisted under `errorMeta`, tagged with a schema id. The copy
+ * is bounded by its serialized UTF-8 size. A meta past the bound is never sliced: it is
+ * replaced as a whole by an explicit omission marker that names its size and keys,
+ * because a truncated reason reads as a complete one. The full meta still reaches the
+ * caller in the response; only the persisted copy is withheld.
+ */
+export const DISPATCH_ERROR_META_SCHEMA = 'dispatch-error-meta-v1';
+/** Serialized UTF-8 byte bound for the persisted `errorMeta.value`, inclusive. */
+export const DISPATCH_ERROR_META_MAX_BYTES = 4096;
+/** An omission marker lists the meta's keys only up to this many, inclusive. */
+export const DISPATCH_ERROR_META_KEYS_MAX = 32;
+
+export type PersistedDispatchErrorMeta =
+  | { schema: typeof DISPATCH_ERROR_META_SCHEMA; value: Record<string, unknown> }
+  | {
+      schema: typeof DISPATCH_ERROR_META_SCHEMA;
+      omitted: {
+        reason: 'oversize' | 'unserializable';
+        /** Serialized UTF-8 size; absent when the meta could not be serialized. */
+        bytes?: number;
+        maxBytes: number;
+        keyCount: number;
+        /** Every key, present only when `keyCount <= DISPATCH_ERROR_META_KEYS_MAX`. */
+        keys?: string[];
+      };
+    };
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * Build the persisted copy of an error meta. `persistedAtTopLevel` names the keys the
+ * caller already persists in their own top-level slot, so they are not stored twice.
+ * Returns `undefined` when nothing remains to persist.
+ */
+export function persistableDispatchErrorMeta(
+  meta: Record<string, unknown>,
+  persistedAtTopLevel: ReadonlyArray<string> = [],
+): PersistedDispatchErrorMeta | undefined {
+  const rest: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(meta)) {
+    if (value === undefined || persistedAtTopLevel.includes(key)) continue;
+    rest[key] = value;
+  }
+  const keys = Object.keys(rest);
+  if (keys.length === 0) return undefined;
+  const keyListing = keys.length <= DISPATCH_ERROR_META_KEYS_MAX ? { keys } : {};
+  let serialized: string | undefined;
+  try {
+    serialized = JSON.stringify(rest);
+  } catch {
+    serialized = undefined;
+  }
+  if (serialized === undefined) {
+    return {
+      schema: DISPATCH_ERROR_META_SCHEMA,
+      omitted: {
+        reason: 'unserializable',
+        maxBytes: DISPATCH_ERROR_META_MAX_BYTES,
+        keyCount: keys.length,
+        ...keyListing,
+      },
+    };
+  }
+  const bytes = new TextEncoder().encode(serialized).byteLength;
+  if (bytes > DISPATCH_ERROR_META_MAX_BYTES) {
+    return {
+      schema: DISPATCH_ERROR_META_SCHEMA,
+      omitted: {
+        reason: 'oversize',
+        bytes,
+        maxBytes: DISPATCH_ERROR_META_MAX_BYTES,
+        keyCount: keys.length,
+        ...keyListing,
+      },
+    };
+  }
+  // Persist exactly what was measured: the serialized form, not live references.
+  return { schema: DISPATCH_ERROR_META_SCHEMA, value: JSON.parse(serialized) as Record<string, unknown> };
+}
+
 function mergeDispatchErrorMetadata(
   metadataJson: Record<string, unknown> | null,
   result: DispatchProjectedResult,
 ): Record<string, unknown> | null {
   const errorMeta = !result.ok ? result.error?.meta : undefined;
-  const postgres = errorMeta?.postgres;
-  const invalidInput = errorMeta?.invalidInput;
-  const hasPostgres = !!postgres && typeof postgres === 'object' && !Array.isArray(postgres);
-  const hasInvalidInput = !!invalidInput && typeof invalidInput === 'object' && !Array.isArray(invalidInput);
-  if (!hasPostgres && !hasInvalidInput) return metadataJson;
+  if (!isPlainRecord(errorMeta)) return metadataJson;
+  const postgres = isPlainRecord(errorMeta.postgres) ? errorMeta.postgres : undefined;
+  const invalidInput = isPlainRecord(errorMeta.invalidInput) ? errorMeta.invalidInput : undefined;
+  const persistedAtTopLevel = [
+    ...(postgres ? ['postgres'] : []),
+    ...(invalidInput ? ['invalidInput'] : []),
+  ];
+  const persisted = persistableDispatchErrorMeta(errorMeta, persistedAtTopLevel);
+  if (!postgres && !invalidInput && !persisted) return metadataJson;
   return {
     ...(metadataJson ?? {}),
-    ...(hasPostgres ? { postgres } : {}),
-    ...(hasInvalidInput ? { invalidInput } : {}),
+    ...(postgres ? { postgres } : {}),
+    ...(invalidInput ? { invalidInput } : {}),
+    ...(persisted ? { errorMeta: persisted } : {}),
   };
 }
 
