@@ -191,8 +191,8 @@ describe('shared execution projection', () => {
   });
 });
 
-describe('unified execution >', () => {
-  describe('R-23 > P-003 >', () => {
+describe('unified execution', () => {
+  describe('R-23 > P-003', () => {
     it('D013 default window control', () => {
       for (const ceiling of [600000, 4000, null]) {
         expect(selectToolExecution(independent, {}, { ...budgets, transportResponseBudgetMs: ceiling }))
@@ -270,7 +270,7 @@ describe('unified execution >', () => {
 
   // Each selector is conserved from rubric revision 10. This unit layer consumes
   // the host's budget; registered transport tests cover how that budget is loaded.
-  for (const requirement of ['R-23', 'R-26']) describe(requirement + ' > P-003 >', () => {
+  for (const requirement of ['R-23', 'R-26']) describe(requirement + ' > P-003', () => {
     const safe = async (ceiling: number | null, requested: number, originalRemaining = 600000) => {
       const handler = vi.fn(async () => 'business result');
       const result = await dispatchWithToolExecution(undefined, { mode: 'sync', responseWindowMs: requested }, {
@@ -312,7 +312,7 @@ describe('unified execution >', () => {
     });
   });
 
-  describe('R-26 > P-003 >', () => {
+  describe('R-26 > P-003', () => {
     for (const title of ['control', 'D013 safe ceiling control', 'D013 loaded cap derivation control']) it(title, async () => {
       for (const ceiling of [50000, 145000, 600000]) {
         for (const delta of [-1, 0]) {
@@ -335,7 +335,7 @@ describe('unified execution >', () => {
     });
   });
 
-  describe('R-20 > P-003 >', () => {
+  describe('R-20 > P-003', () => {
     it('control', async () => {
       const handler = vi.fn(async () => ({ value: 7 }));
       const result = await dispatchWithToolExecution(undefined, { mode: 'sync' }, budgets, { inline: handler });
@@ -351,7 +351,7 @@ describe('unified execution >', () => {
     });
   });
 
-  describe('R-21 > P-003 >', () => {
+  describe('R-21 > P-003', () => {
     it('control', async () => {
       const handler = vi.fn(async () => ({ value: 7 }));
       const result = await dispatchWithToolExecution(undefined, {}, budgets, { inline: handler });
