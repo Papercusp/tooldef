@@ -15,6 +15,7 @@ import type { RolesQuota, ToolResult } from './wire';
 import type { ProjectedTool, UnifiedToolContext } from './tool-projection';
 import type { AuthAuditEvent, AuthDecision } from './authz';
 import type { PreconditionFireRequest } from './requires';
+import type { ToolExecutionDispatch, ToolExecutionRefusal } from './execution-contract';
 import type {
   KernelEnforcementPort,
   KernelEnforcementResult,
@@ -68,6 +69,7 @@ export function defaultComputeQuotaWindow(
 /* ─── Dispatcher result ──────────────────────────────────────────────── */
 
 export type DispatchProjectedErrorCode =
+  | ToolExecutionRefusal['error']
   | 'unknown_tool'
   | 'unauthorized'
   | 'role_not_allowed'
@@ -425,6 +427,15 @@ export interface DispatchProjectedDeps {
    * scenario testing. Optional; pass-through is the default.
    */
   overrideTool?: ToolDispatchOverrideFn;
+  /** Bind an audited EXISTING runtime. Resolution itself must not admit work. */
+  executionAdapter?(request: {
+    tool: ProjectedTool;
+    toolName: string;
+    input: unknown;
+    ctx: UnifiedToolContext;
+    /** Includes the host's admission gates and is memoized for this invocation. */
+    invoke(): Promise<ToolResult>;
+  }): ToolExecutionDispatch<ToolResult>['adapter'];
   /**
    * Host admission and settlement around the authorized target invocation.
    * Runs after context binding and kernel enforcement, across every transport.

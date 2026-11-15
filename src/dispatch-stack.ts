@@ -77,6 +77,7 @@ import type { ToolPreInvokeEvent, ToolRequireSpec } from './requires';
 import { applyWorkspaceTxContract } from './workspace-tx';
 import { createPhaseTracker, type PhaseInterval, type PhaseTracker } from './phase-tracker';
 import { prepareDispatchPremises } from './dispatch-premises';
+import { dispatchWithToolExecution, selectToolExecution, type ToolExecutionReceipt, type ToolExecutionRefusal } from './execution-contract';
 
 /* ─── Step names ─────────────────────────────────────────────────────── */
 
@@ -675,6 +676,7 @@ function armDispatchDeadline(exec: DispatchExecution): void {
   const deadlineAtMs = Math.min(
     exec.startedAt + exec.timeoutSec * 1000,
     exec.ctx.deadlineAtMs ?? Infinity,
+    exec.ctx.executionDeadlineAtMs ?? Infinity,
   );
   const remainingMs = deadlineAtMs - Date.now();
   if (remainingMs <= 0) {
@@ -725,6 +727,7 @@ function admissionAbortAudit(exec: DispatchExecution, stage: DispatchStepName): 
   const budgetMs = Math.min(
     exec.timeoutSec > 0 ? exec.timeoutSec * 1000 : Infinity,
     typeof exec.ctx.deadlineAtMs === 'number' ? Math.max(0, exec.ctx.deadlineAtMs - exec.startedAt) : Infinity,
+    typeof exec.ctx.executionDeadlineAtMs === 'number' ? Math.max(0, exec.ctx.executionDeadlineAtMs - exec.startedAt) : Infinity,
   );
   const audit: Record<string, unknown> = {
     schemaVersion: 'admission-abort-v1',
@@ -1035,10 +1038,52 @@ const invokeStep: DispatchStep = {
         }
         return tool.fn(input, handlerCtx);
       });
+      const nowMs = Date.now();
+      const transportDeadline = handlerCtx.transportResponseDeadlineAtMs === undefined
+        ? handlerCtx.deadlineAtMs : handlerCtx.transportResponseDeadlineAtMs;
+      const budgets = {
+        nowMs,
+        executionDeadlineMs: Math.min(exec.startedAt + (tool.timeoutSec ?? 60) * 1000,
+          handlerCtx.executionDeadlineAtMs ?? Infinity),
+        transportResponseBudgetMs: transportDeadline == null ? null : Math.max(0, transportDeadline - nowMs),
+        requestAborted: exec.abort.signal.aborted,
+      };
+      const request = handlerCtx.toolExecution ?? {};
+      const selection = selectToolExecution(tool.execution, request, budgets);
+      const refusalResult = (refusal: ToolExecutionRefusal): DispatchProjectedResult => ({ ok: false, error: {
+        code: refusal.error, message: refusal.reason, meta: { supportedModes: refusal.supportedModes },
+      } });
+      if (!selection.ok) return refusalResult(selection);
+      let executionRefusal: ToolExecutionRefusal | undefined;
+      let receipt: ToolExecutionReceipt | undefined;
+      let execution: Promise<ToolResult> | undefined;
+      // Runtime admission is INSIDE the host-authorized invocation. A host refusal
+      // must not call the adapter, even when that adapter admits before invoking fn.
+      const execute = (): Promise<ToolResult> => execution ??= Promise.resolve().then(async () => {
+        const dispatched = await dispatchWithToolExecution(tool.execution, request, {
+          ...budgets, requestAborted: exec.abort.signal.aborted,
+        }, {
+          ownerId: handlerCtx.uiClientId ?? handlerCtx.principal?.slug ?? handlerCtx.spawnId ?? handlerCtx.runId,
+          inline: invoke,
+          adapter: deps.executionAdapter?.({ tool, toolName, input, ctx: handlerCtx, invoke }),
+        });
+        if (!dispatched.ok) {
+          executionRefusal = dispatched;
+          return { isError: true, content: [{ type: 'text', text: dispatched.reason }] };
+        }
+        receipt = dispatched.receipt;
+        return receipt ? { ...dispatched.result, _meta: { ...dispatched.result._meta, toolExecution: receipt } }
+          : dispatched.result;
+      });
       let result = deps.aroundInvoke
         ? await deps.aroundInvoke({ tool, toolName, input, ctx: handlerCtx, callId: exec.callId,
-          authorization: exec.authorization, invoke })
-        : await invoke();
+          authorization: exec.authorization, invoke: execute })
+        : await execute();
+      if (executionRefusal) return refusalResult(executionRefusal);
+      if (selection.lifecycle === 'independent' && !receipt && !result.isError) return refusalResult({
+        ok: false, error: 'execution_receipt_invalid', reason: 'The host returned without an independently owned admission receipt',
+        supportedModes: ['sync', 'async', 'auto'],
+      });
       // guidance.seeAlso — result-aware cross-link pointers rendered uniformly
       // into the envelope (_meta._seeAlso + a one-line "See also:" text block).
       // Self-gates (unchanged result) when the tool declares none / emits none /
@@ -1069,7 +1114,7 @@ const invokeStep: DispatchStep = {
       //     the safety line: per the capability table it's an idempotent read /
       //     low-stakes call, never a governed mutation — so a completed one is safe
       //     to surface even past the deadline.
-      if (exec.abort.signal.aborted) {
+      if (exec.abort.signal.aborted && !(receipt && !receipt.terminal)) {
         // A handler may have cooperatively completed with an explicit failure after the
         // dispatcher was aborted. Preserve that result: capability:bash uses structuredContent
         // to report a child that was killed/timed out, and replacing it with the dispatcher's

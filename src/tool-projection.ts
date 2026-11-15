@@ -479,6 +479,12 @@ export interface UnifiedToolContext {
    * This supplements cancellation; it never extends the caller's execution budget.
    */
   deadlineAtMs?: number;
+  /** Transport-independent execution selection; hosts extract this outside tool args. */
+  toolExecution?: import('./execution-contract').ToolExecutionRequest;
+  /** Absolute original execution deadline, independent of the response window. */
+  executionDeadlineAtMs?: number | null;
+  /** Loaded per-invocation transport deadline minus its serialization buffer. */
+  transportResponseDeadlineAtMs?: number | null;
 
   /**
    * Optional host-selected execution seat for the P-041 kernel port.  A

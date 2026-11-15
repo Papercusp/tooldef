@@ -129,6 +129,29 @@ export interface ToolExecutionRequest {
   readonly mode?: ToolExecutionMode;
   /** Response scheduling only; never changes the original execution deadline. */
   readonly responseWindowMs?: number;
+  /** An original runtime handle for reattachment; never a request to admit replacement work. */
+  readonly handle?: string;
+}
+
+/** Shared wire parser. Execution preferences are metadata, never business arguments or authority. */
+export function parseToolExecutionRequest(value: unknown): ToolExecutionRequest {
+  if (value === undefined) return Object.freeze({});
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError('Invalid execution metadata: expected an object');
+  }
+  const request = value as Record<string, unknown>;
+  if (Object.keys(request).some(key => !['mode', 'responseWindowMs', 'handle'].includes(key)) ||
+      (request.mode !== undefined && !['sync', 'async', 'auto'].includes(request.mode as string)) ||
+      (request.responseWindowMs !== undefined && (typeof request.responseWindowMs !== 'number' ||
+        !Number.isFinite(request.responseWindowMs) || request.responseWindowMs <= 0)) ||
+      (request.handle !== undefined && (typeof request.handle !== 'string' || !request.handle.trim()))) {
+    throw new TypeError('Invalid execution metadata: mode, responseWindowMs or handle');
+  }
+  return Object.freeze({
+    ...(request.mode !== undefined ? { mode: request.mode as ToolExecutionMode } : {}),
+    ...(request.responseWindowMs !== undefined ? { responseWindowMs: request.responseWindowMs as number } : {}),
+    ...(request.handle !== undefined ? { handle: request.handle as string } : {}),
+  });
 }
 
 export interface ToolExecutionBudgets {
@@ -152,7 +175,7 @@ export interface ToolExecutionSelection {
 
 export interface ToolExecutionRefusal {
   readonly ok: false;
-  readonly error: 'unsupported_execution_mode' | 'execution_budget_exceeded' | 'request_expired' | 'execution_adapter_unavailable';
+  readonly error: 'unsupported_execution_mode' | 'execution_budget_exceeded' | 'request_expired' | 'execution_adapter_unavailable' | 'execution_receipt_invalid';
   readonly reason: string;
   readonly supportedModes: readonly ToolExecutionMode[];
 }
@@ -188,19 +211,38 @@ export function selectToolExecution(
     return refuse('execution_budget_exceeded', 'Strict sync exceeds the original execution or derived transport response budget');
   }
   const responseWindowMs = requested === undefined ? ceiling : ceiling === null ? requested : Math.min(requested, ceiling);
-  return {
+  return Object.freeze({
     ok: true, mode, lifecycle: contract.lifecycle, responseWindowMs,
     executionDeadlineMs: budgets.executionDeadlineMs,
     autoYieldAfterMs: mode === 'auto' && contract.lifecycle === 'independent'
       ? Math.min(5000, responseWindowMs ?? Infinity) : null,
-  };
+  });
+}
+
+/** An admission acknowledged by the independently owning runtime, not a launcher id. */
+export interface ToolExecutionAdmission {
+  readonly handle: string;
+  readonly ownerId: string;
+  readonly state: 'accepted' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+}
+
+export interface ToolExecutionReceipt extends ToolExecutionAdmission {
+  readonly schemaVersion: 'tool-execution-receipt-v1';
+  readonly terminal: boolean;
+  readonly mode: ToolExecutionMode;
+  readonly responseWindowMs: number | null;
+  readonly executionDeadlineMs: number | null;
 }
 
 export interface ToolExecutionDispatch<T> {
+  /** Identity resolved from the original authenticated context, never tool arguments. */
+  readonly ownerId?: string;
   readonly inline: (selection: ToolExecutionSelection) => Promise<T>;
   readonly adapter?: {
     readonly id: string;
-    readonly dispatch: (selection: ToolExecutionSelection) => Promise<T>;
+    readonly dispatch: (selection: ToolExecutionSelection) => Promise<{ result: T; admission: ToolExecutionAdmission }>;
+    /** Read the owning runtime's admission; an arbitrary nonempty id is not evidence. */
+    readonly verifyAdmission: (admission: ToolExecutionAdmission) => Promise<boolean>;
   };
 }
 
@@ -213,16 +255,33 @@ export async function dispatchWithToolExecution<T>(
   request: ToolExecutionRequest,
   budgets: ToolExecutionBudgets,
   dispatch: ToolExecutionDispatch<T>,
-): Promise<ToolExecutionRefusal | { ok: true; selection: ToolExecutionSelection; result: T }> {
+): Promise<ToolExecutionRefusal | { ok: true; selection: ToolExecutionSelection; result: T; receipt?: ToolExecutionReceipt }> {
   const selection = selectToolExecution(declaration, request, budgets);
   if (!selection.ok) return selection;
   const contract = resolveToolExecutionContract(declaration);
   let result: T;
   if (selection.lifecycle === 'independent') {
-    if (!dispatch.adapter || dispatch.adapter.id !== contract.adapter?.id) {
+    if (!dispatch.ownerId?.trim() || !dispatch.adapter || dispatch.adapter.id !== contract.adapter?.id ||
+        typeof dispatch.adapter.verifyAdmission !== 'function') {
       return { ok: false, error: 'execution_adapter_unavailable', reason: 'The audited adapter is not bound to this dispatch', supportedModes: contract.supportedModes };
     }
-    result = await dispatch.adapter.dispatch(selection);
+    const admitted = await dispatch.adapter.dispatch(selection);
+    const admission = admitted?.admission && Object.freeze({ ...admitted.admission });
+    const state = admission?.state;
+    const terminal = state === 'succeeded' || state === 'failed' || state === 'cancelled';
+    if (!admission || typeof admission.handle !== 'string' || !admission.handle.trim() ||
+        admission.ownerId !== dispatch.ownerId ||
+        (!terminal && state !== 'accepted' && state !== 'running') ||
+        (selection.mode === 'sync' && !terminal) ||
+        !await dispatch.adapter.verifyAdmission(admission)) {
+      return { ok: false, error: 'execution_receipt_invalid', reason: 'The owning runtime did not confirm this handle, owner and execution outcome', supportedModes: contract.supportedModes };
+    }
+    const receipt: ToolExecutionReceipt = Object.freeze({
+      schemaVersion: 'tool-execution-receipt-v1', handle: admission.handle,
+      ownerId: admission.ownerId, state, terminal, mode: selection.mode,
+      responseWindowMs: selection.responseWindowMs, executionDeadlineMs: selection.executionDeadlineMs,
+    });
+    return { ok: true, selection, result: admitted.result, receipt };
   } else {
     result = await dispatch.inline(selection);
   }

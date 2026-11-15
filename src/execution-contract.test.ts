@@ -121,8 +121,11 @@ describe('original execution and derived transport budgets', () => {
 
   it('binds an independently owned adapter and never substitutes the inline handler', async () => {
     const inline = vi.fn(async () => ({ executionId: 'wrong' }));
-    const dispatch = vi.fn(async () => ({ executionId: 'original' }));
-    const result = await dispatchWithToolExecution(independent, { mode: 'async' }, budgets, { inline, adapter: { id: adapter.id, dispatch } });
+    const admission = { handle: 'original', ownerId: 'caller', state: 'accepted' as const };
+    const dispatch = vi.fn(async () => ({ result: { executionId: 'original' }, admission }));
+    const result = await dispatchWithToolExecution(independent, { mode: 'async' }, budgets, {
+      ownerId: 'caller', inline, adapter: { id: adapter.id, dispatch, verifyAdmission: async a => a.handle === admission.handle && a.ownerId === admission.ownerId },
+    });
     expect(result).toMatchObject({ ok: true, result: { executionId: 'original' }, selection: { executionDeadlineMs: 601000 } });
     expect(dispatch).toHaveBeenCalledTimes(1);
     expect(inline).not.toHaveBeenCalled();
@@ -130,6 +133,46 @@ describe('original execution and derived transport budgets', () => {
     expect(await dispatchWithToolExecution(independent, { mode: 'async' }, budgets, { inline }))
       .toMatchObject({ ok: false, error: 'execution_adapter_unavailable' });
     expect(inline).not.toHaveBeenCalled();
+  });
+
+  it.each(['missing', 'unaccepted', 'foreign-owner', 'wrapper-state'])('rejects a %s admission instead of treating an id as acceptance', async kind => {
+    const admission = { handle: kind === 'missing' ? '' : 'original',
+      ownerId: kind === 'foreign-owner' ? 'other' : 'caller',
+      state: kind === 'wrapper-state' ? 'timed_out' : 'accepted' };
+    const dispatch = vi.fn(async () => ({ result: 'receipt', admission: admission as never }));
+    const result = await dispatchWithToolExecution(independent, { mode: 'async' }, budgets, {
+      ownerId: 'caller', inline: vi.fn(), adapter: { id: adapter.id, dispatch,
+        verifyAdmission: async () => kind !== 'unaccepted' },
+    });
+    expect(result).toMatchObject({ ok: false, error: 'execution_receipt_invalid' });
+    expect(dispatch).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a confirmed continuation nonterminal and records separate original budgets', async () => {
+    const admission = { handle: 'original', ownerId: 'caller', state: 'running' as const };
+    const result = await dispatchWithToolExecution(independent, { responseWindowMs: 5000 }, budgets, {
+      ownerId: 'caller', inline: vi.fn(), adapter: { id: adapter.id,
+        dispatch: async () => ({ result: 'still running', admission }), verifyAdmission: async () => true },
+    });
+    expect(result).toMatchObject({ ok: true, receipt: { handle: 'original', ownerId: 'caller',
+      state: 'running', terminal: false, responseWindowMs: 5000, executionDeadlineMs: 601000 } });
+  });
+
+  it('detaches and freezes the verified admission and original budget snapshots', async () => {
+    const admission = { handle: 'original', ownerId: 'caller', state: 'accepted' as const };
+    const result = await dispatchWithToolExecution(independent, {}, budgets, {
+      ownerId: 'caller', inline: vi.fn(), adapter: { id: adapter.id,
+        dispatch: async selection => {
+          expect(Object.isFrozen(selection)).toBe(true);
+          return { result: 'accepted', admission };
+        }, verifyAdmission: async snapshot => {
+          expect(Object.isFrozen(snapshot)).toBe(true);
+          admission.handle = 'substituted';
+          admission.ownerId = 'foreign';
+          return snapshot.handle === 'original' && snapshot.ownerId === 'caller';
+        } },
+    });
+    expect(result).toMatchObject({ ok: true, receipt: { handle: 'original', ownerId: 'caller', executionDeadlineMs: 601000 } });
   });
 });
 
