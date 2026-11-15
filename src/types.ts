@@ -642,6 +642,8 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
    * sandbox's dry-run/confirm gate (a read-only tool needs no gate).
    */
   effect?: 'read' | 'write';
+  /** Shared execution declaration; omission resolves to request-bound auto. */
+  execution?: import('./execution-contract').ToolExecutionDeclaration | import('./execution-contract').ToolExecutionContract;
   /**
    * Optional argument-sensitive effect classifier for union-shaped tools. The
    * static effect remains the safe fallback when this classifier is absent or
@@ -770,6 +772,8 @@ export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSc
   capability: string;
   /** Read/write effect (B-CX-PRE); inferred from the capability suffix when omitted. See ToolDefinition.effect. */
   effect?: 'read' | 'write';
+  /** Shared execution declaration; omission resolves to request-bound auto. */
+  execution?: import('./execution-contract').ToolExecutionDeclaration | import('./execution-contract').ToolExecutionContract;
   /** Optional argument-sensitive effect classifier; see ToolDefinition.effectForCall. */
   effectForCall?: (args: StandardSchemaV1.InferOutput<TArgs>) => 'read' | 'write';
   irreversible?: boolean | ((args: StandardSchemaV1.InferOutput<TArgs>) => boolean);
@@ -928,6 +932,8 @@ export interface RoleToolDefinition<
   capability: string;
   /** Read/write effect (B-CX-PRE); inferred from the capability suffix when omitted. See ToolDefinition.effect. */
   effect?: 'read' | 'write';
+  /** Shared execution declaration; omission resolves to request-bound auto. */
+  execution?: import('./execution-contract').ToolExecutionDeclaration | import('./execution-contract').ToolExecutionContract;
   /** Optional argument-sensitive effect classifier; see ToolDefinition.effectForCall. */
   effectForCall?: (args: StandardSchemaV1.InferOutput<TArgs>) => 'read' | 'write';
   irreversible?: boolean | ((args: StandardSchemaV1.InferOutput<TArgs>) => boolean);
@@ -1196,6 +1202,8 @@ export interface RoleToolDefinitionInput<
   capability: string;
   /** Read/write effect (B-CX-PRE); inferred from the capability suffix when omitted. See ToolDefinition.effect. */
   effect?: 'read' | 'write';
+  /** Shared execution declaration; omission resolves to request-bound auto. */
+  execution?: import('./execution-contract').ToolExecutionDeclaration | import('./execution-contract').ToolExecutionContract;
   /** Optional argument-sensitive effect classifier; see RoleToolDefinition.effectForCall. */
   effectForCall?: (args: StandardSchemaV1.InferOutput<TArgs>) => 'read' | 'write';
   irreversible?: boolean | ((args: StandardSchemaV1.InferOutput<TArgs>) => boolean);

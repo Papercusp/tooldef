@@ -6,6 +6,8 @@ import {
   toolToOpenApiFragment,
 } from './openapi-fragments';
 import type { ProjectedTool } from './tool-projection';
+import { REQUEST_BOUND_EXECUTION } from './execution-contract';
+import { assembleOpenApiDocument } from './openapi-assemble';
 
 const makeTool = (over: Partial<ProjectedTool> = {}): ProjectedTool => ({
   pluginName: 'fixture',
@@ -252,5 +254,44 @@ describe("toolToOpenApiFragment — ':' in tool names (component-key sanitizatio
     for (const r of sse.oneOf) expect(r.$ref.startsWith('#/components/schemas/a_b.')).toBe(true);
     expect(sse.discriminator.mapping.tick).toBe('#/components/schemas/a_b.Event.tick');
     expect(sse.discriminator.mapping.done).toBe('#/components/schemas/a_b.Event.done');
+  });
+});
+
+
+describe('execution discovery metadata', () => {
+  it('publishes restrictive defaults in fragments and assembled HTTP discovery', () => {
+    const tool = makeTool({ expose: {
+      mcp: { name: 'execution.default' }, http: { path: '/api/execution/default', methods: ['POST'] },
+    } });
+    const fragment = toolToOpenApiFragment('execution.default', tool);
+    expect(fragment.operation['x-papercusp-execution']).toEqual(REQUEST_BOUND_EXECUTION);
+    expect(assembleOpenApiDocument([tool])).toMatchObject({ paths: {
+      '/api/execution/default': { post: { 'x-papercusp-execution': REQUEST_BOUND_EXECUTION } },
+    } });
+  });
+
+  it('publishes owned adapter capabilities without private fields or shortened identities', () => {
+    const adapter = {
+      id: 'owned-' + 'x'.repeat(10000), auditRef: 'fixture:audit:owned-http',
+      ownsExecution: true, transactionScope: 'independent', outcome: 'business',
+      durability: 'session', cancellation: 'owner-managed', progress: 'measured',
+      privateToken: 'private-http-adapter-token',
+    } as const;
+    const tool = makeTool({
+      execution: { lifecycle: 'independent', adapter },
+      expose: { mcp: { name: 'execution.owned' }, http: { path: '/api/execution/owned', methods: ['POST'] } },
+    });
+    const expected = {
+      defaultMode: 'auto', supportedModes: ['sync', 'async', 'auto'], lifecycle: 'independent',
+      durability: 'session', cancellation: 'owner-managed', progress: 'measured', liveInteraction: false,
+      adapter: { id: adapter.id, auditRef: adapter.auditRef },
+    };
+    const fragment = toolToOpenApiFragment('execution.owned', tool);
+    expect(fragment.operation['x-papercusp-execution']).toMatchObject(expected);
+    const document = assembleOpenApiDocument([tool]);
+    expect(document).toMatchObject({ paths: {
+      '/api/execution/owned': { post: { 'x-papercusp-execution': expected } },
+    } });
+    expect(JSON.stringify(document)).not.toContain(adapter.privateToken);
   });
 });

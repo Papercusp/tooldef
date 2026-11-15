@@ -365,6 +365,11 @@ describe('listMcpProjections', () => {
       description: 'desc x',
       inputSchema: { type: 'object', properties: { foo: { type: 'string' } } },
       _meta: {
+        'papercusp/execution': {
+          defaultMode: 'auto', supportedModes: ['sync', 'auto'],
+          lifecycle: 'request-bound', durability: 'none',
+          cancellation: 'cooperative', progress: 'none', liveInteraction: false,
+        },
         'papercusp/toolRegistryRevision': projectedToolRegistryRevision(),
         'papercusp/toolRegistrySource': 'projected-tool-registry',
         'papercusp/provider': { pluginName: 'fixture', packageName: 'fixture', version: null, kind: 'unmeasured' },
@@ -384,7 +389,10 @@ describe('listMcpProjections', () => {
     });
     const b = baseTool({ expose: { mcp: { name: 'rev:b' } } });
     expect(projectedToolRegistryRevision([a, b])).toBe(projectedToolRegistryRevision([b, a]));
+    expect(projectedToolRegistryRevision([{ ...a, execution: { lifecycle: 'request-bound' } }, b]))
+      .toBe(projectedToolRegistryRevision([a, b]));
     for (const changed of [
+      { ...a, execution: { lifecycle: 'request-bound', liveInteraction: true } as const },
       { ...a, description: 'changed description' },
       { ...a, inputSchema: { type: 'object', properties: { x: { type: 'number' } }, required: ['x'] } },
       { ...a, outputJsonSchema: { type: 'object', properties: { result: { type: 'number' } } } },

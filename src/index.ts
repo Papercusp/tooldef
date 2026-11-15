@@ -611,3 +611,5 @@ export {
   type BundleModuleMarkers,
   type BundledDefiningModule,
 } from './bundle-definition-site';
+
+export * from './execution-contract';

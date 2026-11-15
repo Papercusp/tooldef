@@ -19,6 +19,7 @@
  */
 
 import { type ZodTypeAny } from 'zod';
+import { resolveToolExecutionContract } from './execution-contract';
 import type {
   EmitCallback,
   ProgressCallback,
@@ -1064,6 +1065,8 @@ export interface BuiltinToolProvider {
 }
 
 export interface ProjectedTool {
+  /** Normalized at registration; legacy/plugin omission uses request-bound auto. */
+  execution?: import('./execution-contract').ToolExecutionDeclaration | import('./execution-contract').ToolExecutionContract;
   /** Owning plugin name. Built-in tools use 'agent-mcp' or similar. */
   pluginName: string;
   /** Host-bound builtin package metadata; never an installed-plugin entitlement. */
@@ -1657,6 +1660,7 @@ function assertNotShadowingCollision(
  *   - `expose.http.path` must be unique across the registry.
  */
 export function registerProjectedTool(tool: ProjectedTool): void {
+  tool.execution = resolveToolExecutionContract(tool.execution);
   if (!tool.expose.http && !tool.expose.mcp) {
     throw new ToolRegistrationError(
       `tool from plugin "${tool.pluginName}" must declare at least one of expose.http / expose.mcp`,
@@ -2008,6 +2012,7 @@ export function projectedToolRegistryRevision(
     | 'pluginName'
     | 'builtinProvider'
     | 'pluginInstallation'
+    | 'execution'
   >[],
 ): string {
   if (!tools) {
@@ -2037,6 +2042,7 @@ export function projectedToolRegistryRevision(
         builtinProvider: tool.builtinProvider ?? null,
         installedProviderVersion: tool.pluginInstallation?.version ?? null,
         description: tool.description,
+        execution: resolveToolExecutionContract(tool.execution),
         inputSchema: tool.discoveryInputSchema ?? tool.inputSchema,
         outputJsonSchema: tool.outputJsonSchema ?? null,
         agentRoles: [...(tool.agentRoles ?? [])].sort(),
@@ -2537,6 +2543,7 @@ export function listMcpProjections(
       description: tool.description,
       inputSchema: mcpObjectInputSchema(tool.discoveryInputSchema) ?? tool.inputSchema,
       _meta: {
+        'papercusp/execution': resolveToolExecutionContract(tool.execution),
         'papercusp/toolRegistryRevision': registryRevision,
         'papercusp/toolRegistrySource': PROJECTED_TOOL_REGISTRY_SOURCE,
         'papercusp/provider': {

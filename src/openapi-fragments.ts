@@ -23,6 +23,7 @@
 
 import type { ProjectedTool } from './tool-projection';
 import { toJsonSchema } from './schema-adapter';
+import { resolveToolExecutionContract } from './execution-contract';
 
 // componentKey: sanitize tool names for OpenAPI 3.1 component-schema map keys
 // (regex ^[A-Za-z0-9._-]+$). Tool names use ":" as namespace separator (legal
@@ -177,6 +178,7 @@ export function toolToOpenApiFragment(
   };
 
   /* Vendor extensions — x-papercusp-* per Q5 */
+  operation['x-papercusp-execution'] = resolveToolExecutionContract(tool.execution);
   if (tool.agentRoles && tool.agentRoles.length > 0) {
     operation['x-papercusp-roles'] = [...tool.agentRoles];
   }

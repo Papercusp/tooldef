@@ -16,6 +16,7 @@
  */
 
 import { type ZodTypeAny } from 'zod';
+import { resolveToolExecutionContract } from './execution-contract';
 import { tierFor } from './capability-tiers';
 import { factorInputSchema } from './compact-schema';
 import { toJsonSchema } from './schema-adapter';
@@ -1204,6 +1205,7 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
     tier,
     effect: inferCapabilityEffect(input.capability, input.effect),
     effectForCall: input.effectForCall,
+    execution: resolveToolExecutionContract(input.execution),
     irreversible: input.irreversible,
     idempotent: input.idempotent,
     abortCompletionReceipt: input.abortCompletionReceipt,
@@ -1320,6 +1322,7 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
     tier,
     effect: inferCapabilityEffect(input.capability, input.effect),
     effectForCall: input.effectForCall,
+    execution: resolveToolExecutionContract(input.execution),
     irreversible: input.irreversible,
     idempotent: input.idempotent,
     abortCompletionReceipt: input.abortCompletionReceipt,
@@ -3525,6 +3528,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     capabilities: [def.capability as never],
     effect: def.effect,
     effectForCall: def.effectForCall as ((args: unknown) => 'read' | 'write') | undefined,
+    execution: resolveToolExecutionContract(def.execution),
     irreversible: def.irreversible as boolean | ((args: unknown) => boolean) | undefined,
     idempotent: def.idempotent,
     abortCompletionReceipt: def.abortCompletionReceipt as ProjectedTool['abortCompletionReceipt'],
@@ -3749,6 +3753,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     capabilities: [def.capability as never],
     effect: def.effect,
     effectForCall: def.effectForCall as ((args: unknown) => 'read' | 'write') | undefined,
+    execution: resolveToolExecutionContract(def.execution),
     irreversible: def.irreversible as boolean | ((args: unknown) => boolean) | undefined,
     idempotent: def.idempotent,
     abortCompletionReceipt: def.abortCompletionReceipt as ProjectedTool['abortCompletionReceipt'],
