@@ -1327,6 +1327,20 @@ describe('P-041 kernel enforcement seats', () => {
       expect(handler).not.toHaveBeenCalled();
     });
 
+    it('enforces the original execution deadline while authority is pending with transport disabled', async () => {
+      vi.useFakeTimers();
+      const handler = vi.fn();
+      const pending = runDispatchStack(makeTool({ fn: handler }), 'fixture:write', {}, MAKE_CTX({
+        executionDeadlineAtMs: Date.now() + 25, transportResponseDeadlineAtMs: null,
+      }), { kernelEnforcement: () => new Promise<never>(() => {}) });
+      await vi.advanceTimersByTimeAsync(25);
+      expect(await pending).toMatchObject({ ok: false, error: { code: 'timeout', meta: {
+        handlerEntered: false, budgetMs: 25,
+      } } });
+      expect(handler).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
     it('preserves parent cancellation for preflight-only observations without arming a dispatch', async () => {
       vi.useFakeTimers();
       const parent = new AbortController();
