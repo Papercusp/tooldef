@@ -2056,7 +2056,7 @@ describe('projectBoundedPayload — a value dropped WHOLE says how much and how 
     // row reaches it just as the result door's results[0] refusal does.
     const payload = { a: { b: { c: { d: [refusal] } } } };
 
-    const out = projectBoundedPayload(payload, { toolName: 'plans:start', tier: 'trimmed' }) as
+    const out = projectBoundedPayload(payload, { toolName: 'plans:start', tier: 'trimmed' }) as unknown as
       typeof payload & { _projection: { truncated: boolean } };
     const projected = out.a.b.c.d[0] as typeof refusal & { _partial?: boolean; _omitted?: string };
 

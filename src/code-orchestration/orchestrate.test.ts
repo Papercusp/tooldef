@@ -215,7 +215,7 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     const invoke = mkTool('tools:invoke', 'read', async (args, childCtx) => {
       const request = args as { name: string; args?: unknown };
       const nested = await dispatchProjectedTool(fetch, request.name, request.args ?? {}, childCtx, DEPS);
-      if (!nested.ok) throw new Error(nested.error?.message ?? 'nested fetch dispatch failed');
+      if (!nested.ok || nested.result === undefined) throw new Error(nested.error?.message ?? 'nested fetch dispatch failed');
       return nested.result;
     });
 
