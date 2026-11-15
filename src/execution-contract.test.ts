@@ -193,6 +193,21 @@ describe('shared execution projection', () => {
 
 describe('unified execution >', () => {
   describe('R-23 > P-003 >', () => {
+    it('D013 default window control', () => {
+      for (const ceiling of [600000, 4000, null]) {
+        expect(selectToolExecution(independent, {}, { ...budgets, transportResponseBudgetMs: ceiling }))
+          .toMatchObject({ ok: true, responseWindowMs: ceiling === null ? 5000 : Math.min(5000, ceiling),
+            autoYieldAfterMs: ceiling === null ? 5000 : Math.min(5000, ceiling), executionDeadlineMs: 601000 });
+      }
+    });
+
+    it('D013 default window drift counterexample', () => {
+      const original = selectToolExecution(independent, {}, budgets);
+      if (!original.ok) throw new Error('Original selection refused');
+      const mutated = { ...original, responseWindowMs: 5001, autoYieldAfterMs: 5001 };
+      expect(() => expect(mutated).toMatchObject({ responseWindowMs: 5000, autoYieldAfterMs: 5000 })).toThrow();
+    });
+
     for (const [title, duration] of [
       ['request-bound 4999 inline control', 4999],
       ['request-bound 5001 inline control', 5001],

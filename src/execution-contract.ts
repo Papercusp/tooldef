@@ -210,7 +210,9 @@ export function selectToolExecution(
   if (mode === 'sync' && requested !== undefined && ceiling !== null && requested > ceiling) {
     return refuse('execution_budget_exceeded', 'Strict sync exceeds the original execution or derived transport response budget');
   }
-  const responseWindowMs = requested === undefined ? ceiling : ceiling === null ? requested : Math.min(requested, ceiling);
+  const defaultWindowMs = mode === 'auto' && contract.lifecycle === 'independent'
+    ? (ceiling === null ? 5000 : Math.min(5000, ceiling)) : ceiling;
+  const responseWindowMs = requested === undefined ? defaultWindowMs : ceiling === null ? requested : Math.min(requested, ceiling);
   return Object.freeze({
     ok: true, mode, lifecycle: contract.lifecycle, responseWindowMs,
     executionDeadlineMs: budgets.executionDeadlineMs,
