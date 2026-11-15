@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   dispatchWithToolExecution, resolveToolExecutionContract, selectToolExecution,
   REQUEST_BOUND_EXECUTION,
-  type AuditedToolExecutionAdapter, type ToolExecutionDeclaration, type ToolExecutionContract,
+  type AuditedToolExecutionAdapter, type ToolExecutionDeclaration, type ToolExecutionContract, type ToolExecutionSelection,
 } from './execution-contract';
 import {
   registerProjectedTool, lookupByMcpName, lookupByHttpPath, listMcpProjections,
@@ -16,7 +16,7 @@ const adapter: AuditedToolExecutionAdapter = {
   cancellation: 'owner-managed', progress: 'measured',
 };
 const independent: ToolExecutionDeclaration = { lifecycle: 'independent', adapter };
-afterEach(() => _resetProjectionRegistryForTests());
+afterEach(() => { vi.useRealTimers(); _resetProjectionRegistryForTests(); });
 
 it('EXEC-P003 control', async () => {
   const handler = vi.fn(async () => 'terminal');
@@ -192,6 +192,134 @@ describe('shared execution projection', () => {
 });
 
 describe('unified execution >', () => {
+  describe('R-23 > P-003 >', () => {
+    for (const [title, duration] of [
+      ['request-bound 4999 inline control', 4999],
+      ['request-bound 5001 inline control', 5001],
+    ] as const) it(title, async () => {
+      vi.useFakeTimers();
+      const handler = vi.fn(() => new Promise<string>(resolve => setTimeout(() => resolve('original result'), duration)));
+      let settled = false;
+      const pending = dispatchWithToolExecution(undefined, {}, budgets, { inline: handler })
+        .then(result => { settled = true; return result; });
+      await vi.advanceTimersByTimeAsync(duration - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await pending).toMatchObject({ ok: true, result: 'original result',
+        selection: { lifecycle: 'request-bound', autoYieldAfterMs: null, executionDeadlineMs: 601000 } });
+      expect(handler).toHaveBeenCalledOnce();
+    });
+
+    it('request-bound unsafe yield counterexample', async () => {
+      const handler = vi.fn();
+      const detached = vi.fn();
+      expect(await dispatchWithToolExecution(undefined, { mode: 'async' }, budgets, {
+        inline: handler, ownerId: 'caller', adapter: { id: adapter.id, dispatch: detached, verifyAdmission: async () => true },
+      })).toMatchObject({ ok: false, error: 'unsupported_execution_mode' });
+      expect(handler).not.toHaveBeenCalled();
+      expect(detached).not.toHaveBeenCalled();
+    });
+
+    it('D013 original deadline control', async () => {
+      const handler = vi.fn(async () => 'original result');
+      const result = await dispatchWithToolExecution(undefined, { responseWindowMs: 5000 }, budgets, { inline: handler });
+      expect(result).toMatchObject({ ok: true, selection: { responseWindowMs: 5000, executionDeadlineMs: 601000 } });
+      expect(handler).toHaveBeenCalledOnce();
+    });
+
+    it('D013 changed deadline counterexample', async () => {
+      const dispatch = vi.fn(async (selection: ToolExecutionSelection) => {
+        expect(() => { (selection as { executionDeadlineMs: number }).executionDeadlineMs = 999999; }).toThrow(TypeError);
+        return { result: 'original result', admission: { handle: 'original', ownerId: 'caller', state: 'running' as const } };
+      });
+      const result = await dispatchWithToolExecution(independent, {}, budgets, { ownerId: 'caller', inline: vi.fn(),
+        adapter: { id: adapter.id, dispatch, verifyAdmission: async () => true } });
+      expect(result).toMatchObject({ ok: true, receipt: { executionDeadlineMs: 601000 } });
+      expect(dispatch).toHaveBeenCalledOnce();
+    });
+
+    it('live interaction inline control', async () => {
+      const handler = vi.fn(async () => 'interactive result');
+      expect(await dispatchWithToolExecution({ liveInteraction: true }, {}, budgets, { inline: handler }))
+        .toMatchObject({ ok: true, result: 'interactive result', selection: { autoYieldAfterMs: null } });
+      expect(handler).toHaveBeenCalledOnce();
+    });
+
+    it('live interaction detach refusal counterexample', async () => {
+      const handler = vi.fn();
+      expect(await dispatchWithToolExecution({ liveInteraction: true }, { mode: 'async' }, budgets, { inline: handler }))
+        .toMatchObject({ ok: false, error: 'unsupported_execution_mode' });
+      expect(handler).not.toHaveBeenCalled();
+    });
+  });
+
+  // Each selector is conserved from rubric revision 10. This unit layer consumes
+  // the host's budget; registered transport tests cover how that budget is loaded.
+  for (const requirement of ['R-23', 'R-26']) describe(requirement + ' > P-003 >', () => {
+    const safe = async (ceiling: number | null, requested: number, originalRemaining = 600000) => {
+      const handler = vi.fn(async () => 'business result');
+      const result = await dispatchWithToolExecution(undefined, { mode: 'sync', responseWindowMs: requested }, {
+        nowMs: 1000, executionDeadlineMs: originalRemaining + 1000, transportResponseBudgetMs: ceiling,
+      }, { inline: handler });
+      return { result, handler };
+    };
+    for (const title of ['D013 long declared timeout control', 'D013 strict sync supported budget control']) {
+      it(title, async () => {
+        const { result, handler } = await safe(600000, 590000);
+        expect(result).toMatchObject({ ok: true, result: 'business result',
+          selection: { responseWindowMs: 590000, executionDeadlineMs: 601000 } });
+        expect(handler).toHaveBeenCalledOnce();
+      });
+    }
+    it('D013 fixed ceiling counterexample', async () => {
+      const { result, handler } = await safe(45000, 590000);
+      expect(result).toMatchObject({ ok: false, error: 'execution_budget_exceeded' });
+      expect(handler).not.toHaveBeenCalled();
+    });
+    it('D013 strict sync over-budget counterexample', async () => {
+      const { result, handler } = await safe(600000, 600001);
+      expect(result).toMatchObject({ ok: false, error: 'execution_budget_exceeded' });
+      expect(handler).not.toHaveBeenCalled();
+    });
+    it('D013 disabled transport deadline control', async () => {
+      const { result, handler } = await safe(null, 590000);
+      expect(result).toMatchObject({ ok: true, selection: { responseWindowMs: 590000 } });
+      expect(handler).toHaveBeenCalledOnce();
+      // Disabling transport never disables the original execution deadline.
+      const beyond = await safe(null, 600001);
+      expect(beyond.result).toMatchObject({ ok: false, error: 'execution_budget_exceeded' });
+      expect(beyond.handler).not.toHaveBeenCalled();
+    });
+    it('D013 disabled cap counterexample', async () => {
+      const { result, handler } = await safe(45000, 590000);
+      expect(result).toMatchObject({ ok: false, error: 'execution_budget_exceeded' });
+      expect(handler).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('R-26 > P-003 >', () => {
+    for (const title of ['control', 'D013 safe ceiling control', 'D013 loaded cap derivation control']) it(title, async () => {
+      for (const ceiling of [50000, 145000, 600000]) {
+        for (const delta of [-1, 0]) {
+          const handler = vi.fn(async () => 'original result');
+          expect(await dispatchWithToolExecution(undefined, { mode: 'sync', responseWindowMs: ceiling + delta }, {
+            nowMs: 1000, executionDeadlineMs: ceiling + 11000, transportResponseBudgetMs: ceiling,
+          }, { inline: handler })).toMatchObject({ ok: true, result: 'original result' });
+          expect(handler).toHaveBeenCalledOnce();
+        }
+      }
+    });
+    for (const title of ['counterexample', 'D013 above ceiling counterexample', 'D013 stale ceiling counterexample']) it(title, async () => {
+      for (const ceiling of [50000, 145000, 600000]) {
+        const handler = vi.fn();
+        expect(await dispatchWithToolExecution(undefined, { mode: 'sync', responseWindowMs: ceiling + 1 }, {
+          nowMs: 1000, executionDeadlineMs: ceiling + 11000, transportResponseBudgetMs: ceiling,
+        }, { inline: handler })).toMatchObject({ ok: false, error: 'execution_budget_exceeded' });
+        expect(handler).not.toHaveBeenCalled();
+      }
+    });
+  });
+
   describe('R-20 > P-003 >', () => {
     it('control', async () => {
       const handler = vi.fn(async () => ({ value: 7 }));
