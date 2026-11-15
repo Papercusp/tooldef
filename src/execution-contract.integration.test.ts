@@ -31,8 +31,8 @@ function fixture(declaration?: ToolExecutionDeclaration) {
   return { tool, handler, inline };
 }
 
-describe('unified execution >', () => {
-  describe('R-20 > P-003 >', () => {
+describe('unified execution', () => {
+  describe('R-20 > P-003', () => {
     it('control', async () => {
       const { tool, handler, inline } = fixture();
       const result = await inline({ mode: 'sync' });
@@ -51,7 +51,7 @@ describe('unified execution >', () => {
     });
   });
 
-  describe('R-21 > P-003 >', () => {
+  describe('R-21 > P-003', () => {
     it('control', async () => {
       const { tool, handler, inline } = fixture();
       const result = await inline();
@@ -71,7 +71,7 @@ describe('unified execution >', () => {
     });
   });
 
-  describe('R-22 > P-003 >', () => {
+  describe('R-22 > P-003', () => {
     const adapter = { id: 'existing-runtime-fixture', auditRef: 'D-031:fixture', ownsExecution: true as const,
       transactionScope: 'independent' as const, outcome: 'business' as const, durability: 'session' as const,
       cancellation: 'owner-managed' as const, progress: 'reported' as const };
