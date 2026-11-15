@@ -678,11 +678,17 @@ function armDispatchDeadline(exec: DispatchExecution): void {
   const timer = setTimeout(() => abortExecution(exec, 'dispatcher-timeout'), remainingMs);
   if (typeof timer.unref === 'function') timer.unref();
   exec.timeoutTimer = timer;
+  // Compose a caller-supplied signal only when one exists. Reaction runners,
+  // projected-tool fixtures and other in-process callers dispatch without one
+  // (the seat before 6c55b92 guarded `if (exec.ctx.signal)`); a missing parent
+  // signal must never turn deadline arming into a TypeError before admission.
+  const parentSignal: AbortSignal | undefined = exec.ctx.signal;
+  if (!parentSignal) return;
   const abortFromParent = () => abortExecution(exec, 'parent-signal');
-  if (exec.ctx.signal.aborted) abortFromParent();
+  if (parentSignal.aborted) abortFromParent();
   else {
-    exec.ctx.signal.addEventListener('abort', abortFromParent, { once: true });
-    exec.removeParentAbortListener = () => exec.ctx.signal.removeEventListener('abort', abortFromParent);
+    parentSignal.addEventListener('abort', abortFromParent, { once: true });
+    exec.removeParentAbortListener = () => parentSignal.removeEventListener('abort', abortFromParent);
   }
 }
 

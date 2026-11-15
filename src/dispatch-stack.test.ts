@@ -1177,6 +1177,18 @@ describe('P-041 kernel enforcement seats', () => {
   describe('admission shares the dispatch deadline', () => {
     afterEach(() => vi.useRealTimers());
 
+    it('arms the deadline and invokes the handler when the caller supplies no signal', async () => {
+      // Regression (6c55b92): deadline arming dereferenced ctx.signal unconditionally,
+      // so every dispatch without a caller signal threw "Cannot read properties of
+      // undefined (reading 'aborted')" before admission.
+      const ctx = MAKE_CTX();
+      delete (ctx as { signal?: AbortSignal }).signal;
+      const handler = vi.fn(async () => ({ content: [{ type: 'text' as const, text: 'ran' }] }));
+      const result = await runDispatchStack(makeTool({ fn: handler }), 'fixture:read', {}, ctx, {});
+      expect(handler).toHaveBeenCalledOnce();
+      expect('result' in result, JSON.stringify(result)).toBe(true);
+    });
+
     it.each(['preflight', 'enforce'] as const)('bounds a stalled %s decision and never invokes on its late allow', async phase => {
       vi.useFakeTimers();
       let release!: (value: { decision: 'allow' }) => void;
