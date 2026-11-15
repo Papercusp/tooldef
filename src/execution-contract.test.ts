@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   dispatchWithToolExecution, resolveToolExecutionContract, selectToolExecution,
   REQUEST_BOUND_EXECUTION,
-  type AuditedToolExecutionAdapter, type ToolExecutionDeclaration,
+  type AuditedToolExecutionAdapter, type ToolExecutionDeclaration, type ToolExecutionContract,
 } from './execution-contract';
 import {
   registerProjectedTool, lookupByMcpName, lookupByHttpPath, listMcpProjections,
@@ -145,5 +145,40 @@ describe('shared execution projection', () => {
     expect(lookupByMcpName('execution.fixture')?.execution).toEqual(expected);
     expect(lookupByHttpPath('/execution-fixture')?.execution).toEqual(expected);
     expect(listMcpProjections().find(tool => tool.name === 'execution.fixture')?._meta?.['papercusp/execution']).toEqual(expected);
+  });
+});
+
+describe('unified execution >', () => {
+  describe('R-20 > P-003 >', () => {
+    it('control', async () => {
+      const handler = vi.fn(async () => ({ value: 7 }));
+      const result = await dispatchWithToolExecution(undefined, { mode: 'sync' }, budgets, { inline: handler });
+      expect(result).toMatchObject({ ok: true, result: { value: 7 } });
+      expect(handler).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ mode: 'sync' }));
+    });
+
+    it('counterexample', async () => {
+      const handler = vi.fn(async () => ({ value: 7 }));
+      const result = await dispatchWithToolExecution(undefined, { mode: 'async' }, budgets, { inline: handler });
+      expect(result).toMatchObject({ ok: false, error: 'unsupported_execution_mode', supportedModes: ['sync', 'auto'] });
+      expect(handler).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('R-21 > P-003 >', () => {
+    it('control', async () => {
+      const handler = vi.fn(async () => ({ value: 7 }));
+      const result = await dispatchWithToolExecution(undefined, {}, budgets, { inline: handler });
+      expect(result).toMatchObject({ ok: true, result: { value: 7 }, selection: { mode: 'auto' } });
+      expect(handler).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ mode: 'auto' }));
+    });
+
+    it('counterexample', async () => {
+      const handler = vi.fn(async () => ({ value: 7 }));
+      const changedDefault = { ...REQUEST_BOUND_EXECUTION, defaultMode: 'sync' } as unknown as ToolExecutionContract;
+      await expect(dispatchWithToolExecution(changedDefault, {}, budgets, { inline: handler }))
+        .rejects.toThrow('default mode must be auto');
+      expect(handler).not.toHaveBeenCalled();
+    });
   });
 });
