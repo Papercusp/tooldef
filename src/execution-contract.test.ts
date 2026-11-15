@@ -268,8 +268,8 @@ describe('unified execution', () => {
     });
   });
 
-  // Each selector is conserved from rubric revision 10. This unit layer consumes
-  // the host's budget; registered transport tests cover how that budget is loaded.
+  // Unit-level host simulation: only the host-provided response ceiling changes
+  // in a mutation. The native integration pair uses the real MCP deadline race.
   for (const requirement of ['R-23', 'R-26']) describe(requirement + ' > P-003', () => {
     const safe = async (ceiling: number | null, requested: number, originalRemaining = 600000) => {
       const handler = vi.fn(async () => 'business result');
@@ -278,37 +278,71 @@ describe('unified execution', () => {
       }, { inline: handler });
       return { result, handler };
     };
-    for (const title of ['D013 long declared timeout control', 'D013 strict sync supported budget control']) {
-      it(title, async () => {
-        const { result, handler } = await safe(600000, 590000);
-        expect(result).toMatchObject({ ok: true, result: 'business result',
-          selection: { responseWindowMs: 590000, executionDeadlineMs: 601000 } });
-        expect(handler).toHaveBeenCalledOnce();
+    const longRequest = async (disabled: boolean, corrupt: boolean) => {
+      vi.useFakeTimers(); vi.setSystemTime(1000);
+      let selection: ToolExecutionSelection | undefined;
+      let responseExpired = false;
+      let handlerSettled = false;
+      const ceiling = corrupt ? 45000 : disabled ? null : 120000;
+      const handler = vi.fn(async (selected: ToolExecutionSelection) => {
+        selection = selected;
+        // Model the request owner's response race; this never detaches the handler.
+        if (selected.responseWindowMs !== null) setTimeout(() => { responseExpired = true; }, selected.responseWindowMs);
+        await new Promise(resolve => setTimeout(resolve, 80000));
+        handlerSettled = true;
+        return 'original result';
       });
-    }
+      const pending = dispatchWithToolExecution(undefined, {}, {
+        nowMs: 1000, executionDeadlineMs: 121000, transportResponseBudgetMs: ceiling,
+      }, { inline: handler });
+      await vi.advanceTimersByTimeAsync(45001);
+      const assertRequestLive = () => {
+        expect(responseExpired).toBe(false);
+        expect(handlerSettled).toBe(false);
+        expect(selection).toMatchObject({ mode: 'auto', lifecycle: 'request-bound', autoYieldAfterMs: null,
+          responseWindowMs: 120000, executionDeadlineMs: 121000 });
+        expect(handler).toHaveBeenCalledOnce();
+      };
+      if (corrupt) expect(assertRequestLive).toThrow(); else assertRequestLive();
+      await vi.advanceTimersByTimeAsync(34999);
+      expect(await pending).toMatchObject({ ok: true, result: 'original result' });
+      expect(handler).toHaveBeenCalledOnce();
+    };
+    it('D013 long declared timeout control', async () => { await longRequest(false, false); });
     it('D013 fixed ceiling counterexample', async () => {
-      const { result, handler } = await safe(45000, 590000);
-      expect(result).toMatchObject({ ok: false, error: 'execution_budget_exceeded' });
-      expect(handler).not.toHaveBeenCalled();
+      await longRequest(false, true);
+      await longRequest(false, false); // repair the same boundary, fixture and clock
+    });
+    it('D013 strict sync supported budget control', async () => {
+      for (const requested of [119999, 120000]) {
+        const { result, handler } = await safe(120000, requested, 120000);
+        expect(result).toMatchObject({ ok: true, result: 'business result',
+          selection: { responseWindowMs: requested, executionDeadlineMs: 121000 } });
+        expect(handler).toHaveBeenCalledOnce();
+      }
     });
     it('D013 strict sync over-budget counterexample', async () => {
-      const { result, handler } = await safe(600000, 600001);
-      expect(result).toMatchObject({ ok: false, error: 'execution_budget_exceeded' });
-      expect(handler).not.toHaveBeenCalled();
+      // Cross each bound independently: transport, then original execution.
+      for (const [ceiling, requested, remaining] of [[120000, 120001, 130000], [130000, 120001, 120000]]) {
+        const { result, handler } = await safe(ceiling!, requested!, remaining!);
+        expect(result).toMatchObject({ ok: false, error: 'execution_budget_exceeded' });
+        expect(handler).not.toHaveBeenCalled();
+      }
     });
     it('D013 disabled transport deadline control', async () => {
-      const { result, handler } = await safe(null, 590000);
-      expect(result).toMatchObject({ ok: true, selection: { responseWindowMs: 590000 } });
-      expect(handler).toHaveBeenCalledOnce();
+      await longRequest(true, false);
       // Disabling transport never disables the original execution deadline.
-      const beyond = await safe(null, 600001);
+      const beyond = await safe(null, 120001, 120000);
       expect(beyond.result).toMatchObject({ ok: false, error: 'execution_budget_exceeded' });
       expect(beyond.handler).not.toHaveBeenCalled();
+      const handler = vi.fn();
+      expect(await dispatchWithToolExecution(undefined, {}, { ...budgets, transportResponseBudgetMs: null,
+        requestAborted: true }, { inline: handler })).toMatchObject({ ok: false, error: 'request_expired' });
+      expect(handler).not.toHaveBeenCalled();
     });
     it('D013 disabled cap counterexample', async () => {
-      const { result, handler } = await safe(45000, 590000);
-      expect(result).toMatchObject({ ok: false, error: 'execution_budget_exceeded' });
-      expect(handler).not.toHaveBeenCalled();
+      await longRequest(true, true);
+      await longRequest(true, false);
     });
   });
 
