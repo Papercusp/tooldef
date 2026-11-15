@@ -104,6 +104,14 @@ export interface KernelEnforcementRequest {
   ctx: UnifiedToolContext;
   /** Stable per-dispatch correlation id, when this is a dispatcher call. */
   callId?: string;
+  /**
+   * Optional live-audit registration (WI-6554700010049383). A host resolver MAY
+   * register a snapshot of its in-progress measurements. The dispatcher reads it
+   * only when the shared dispatch deadline aborts admission while this request is
+   * outstanding, so the aborted invocation row names which authority stage
+   * consumed the budget. A snapshot is telemetry only and never authorizes a call.
+   */
+  registerPartialAudit?: (snapshot: () => Readonly<Record<string, unknown>> | null) => void;
   /** The revision the host says is currently applied, if known. */
   appliedRevision?: KernelExecutionRevision | null;
   /** The revision a caller is asking to use, if the boundary has one. */

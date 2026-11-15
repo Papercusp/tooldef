@@ -1189,6 +1189,63 @@ describe('P-041 kernel enforcement seats', () => {
       expect('result' in result, JSON.stringify(result)).toBe(true);
     });
 
+    it('persists the enforce resolver partial audit and spent budget on a deadline abort (WI-6554700010049383)', async () => {
+      vi.useFakeTimers();
+      try {
+        const handler = vi.fn(async () => ({ content: [{ type: 'text' as const, text: 'must-not-run' }] }));
+        const record = vi.fn(async (_input: unknown) => {});
+        let guardElapsedMs = 0;
+        const pending = runDispatchStack(makeTool({ fn: handler, timeoutSec: 0.05 }), 'fixture:write', {}, MAKE_CTX(), {
+          kernelEnforcement: request => {
+            if (request.phase !== 'enforce') return { decision: 'allow' };
+            request.registerPartialAudit?.(() => ({
+              authorityTimings: { schemaVersion: 1, inFlight: { planExecutionGuard: { elapsedMs: guardElapsedMs } } },
+            }));
+            guardElapsedMs = 42;
+            return new Promise<never>(() => {});
+          },
+          recordInvocation: record,
+        });
+        await vi.advanceTimersByTimeAsync(50);
+        const result = await pending;
+        const partial = { authorityTimings: { schemaVersion: 1, inFlight: { planExecutionGuard: { elapsedMs: 42 } } } };
+        expect(result).toMatchObject({ ok: false, error: { code: 'timeout', meta: {
+          stage: 'kernel-enforce', handlerEntered: false, kernelEnforcePartialAudit: partial,
+        } } });
+        expect(handler).not.toHaveBeenCalled();
+        expect(record).toHaveBeenCalledOnce();
+        const row = record.mock.calls[0]?.[0] as { metadataJson?: Record<string, unknown> };
+        const audit = row.metadataJson?.admissionAbort as Record<string, unknown> | undefined;
+        expect(audit).toMatchObject({
+          schemaVersion: 'admission-abort-v1', stage: 'kernel-enforce', abortSource: 'dispatcher-timeout',
+          kernelEnforcePartialAudit: partial,
+        });
+        expect(audit?.budgetMs as number).toBeCloseTo(50);
+        expect(audit?.elapsedMs as number).toBeGreaterThanOrEqual(50);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('records the spent budget without a partial audit when a non-kernel admission step aborts', async () => {
+      vi.useFakeTimers();
+      try {
+        const record = vi.fn(async (_input: unknown) => {});
+        const pending = runDispatchStack(makeTool({ fn: vi.fn(), timeoutSec: 0.05 }), 'fixture:write', {}, MAKE_CTX(), {
+          kernelEnforcement: request => request.phase === 'preflight' ? new Promise<never>(() => {}) : { decision: 'allow' },
+          recordInvocation: record,
+        });
+        await vi.advanceTimersByTimeAsync(50);
+        await pending;
+        const row = record.mock.calls[0]?.[0] as { metadataJson?: Record<string, unknown> };
+        const audit = row.metadataJson?.admissionAbort as Record<string, unknown> | undefined;
+        expect(audit).toMatchObject({ schemaVersion: 'admission-abort-v1', stage: 'kernel-preflight' });
+        expect(audit).not.toHaveProperty('kernelEnforcePartialAudit');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it.each(['preflight', 'enforce'] as const)('bounds a stalled %s decision and never invokes on its late allow', async phase => {
       vi.useFakeTimers();
       let release!: (value: { decision: 'allow' }) => void;

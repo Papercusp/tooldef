@@ -170,6 +170,12 @@ export interface DispatchExecution {
   kernelPreflight: KernelEnforcementResult | null;
   /** Host decision observed immediately before invoke crosses the boundary. */
   kernelEnforcement: KernelEnforcementResult | null;
+  /**
+   * Snapshot of the in-flight enforce resolver's measurements, registered through
+   * `KernelEnforcementRequest.registerPartialAudit` (WI-6554700010049383). Read only
+   * when the deadline aborts admission before the resolver returns.
+   */
+  kernelEnforcePartialAudit?: (() => Readonly<Record<string, unknown>> | null) | null;
   /** Actual applied revision, suitable for handler/event/telemetry attribution. */
   executionRevision: KernelExecutionRevision | null;
 
@@ -698,15 +704,54 @@ function abortExecution(exec: DispatchExecution, source: NonNullable<DispatchExe
   exec.abort.abort();
 }
 
+/**
+ * WI-6554700010049383: an aborted admission must say how much of the shared budget
+ * was spent and, for kernel-enforce, which authority stage was still running. The
+ * first capture wins: it describes the moment of abort, while the abandoned resolver
+ * may keep mutating its live measurements afterwards. Persisted via `metadataJson`.
+ */
+function admissionAbortAudit(exec: DispatchExecution, stage: DispatchStepName): Record<string, unknown> {
+  const existing = exec.metadataJson?.admissionAbort;
+  if (existing && typeof existing === 'object' && !Array.isArray(existing)) return existing as Record<string, unknown>;
+  let partialAudit: Readonly<Record<string, unknown>> | null = null;
+  if (stage === 'kernel-enforce' && exec.kernelEnforcePartialAudit) {
+    try {
+      partialAudit = exec.kernelEnforcePartialAudit();
+    } catch {
+      // A diagnostic snapshot must never replace the abort verdict.
+    }
+  }
+  // Same budget armDispatchDeadline enforces: the tool timeout capped by a caller deadline.
+  const budgetMs = Math.min(
+    exec.timeoutSec > 0 ? exec.timeoutSec * 1000 : Infinity,
+    typeof exec.ctx.deadlineAtMs === 'number' ? Math.max(0, exec.ctx.deadlineAtMs - exec.startedAt) : Infinity,
+  );
+  const audit: Record<string, unknown> = {
+    schemaVersion: 'admission-abort-v1',
+    stage,
+    abortSource: exec.abortSource,
+    elapsedMs: Math.max(0, Date.now() - exec.startedAt),
+    budgetMs: Number.isFinite(budgetMs) ? budgetMs : null,
+    ...(partialAudit ? { kernelEnforcePartialAudit: partialAudit } : {}),
+  };
+  exec.metadataJson = { ...(exec.metadataJson ?? {}), admissionAbort: audit };
+  return audit;
+}
+
 function admissionAbortResult(exec: DispatchExecution, stage: DispatchStepName): DispatchProjectedResult {
   const cancelled = exec.abortSource === 'parent-signal';
+  const audit = admissionAbortAudit(exec, stage);
   return {
     ok: false,
     error: {
       code: cancelled ? 'aborted' : 'timeout',
       message: `tool "${exec.toolName}" ${cancelled ? 'was cancelled' : 'exhausted its dispatch deadline'} ` +
         `during admission (${stage}); the target handler was not entered.`,
-      meta: { phase: 'admission', stage, handlerEntered: false, abortSource: exec.abortSource },
+      meta: {
+        phase: 'admission', stage, handlerEntered: false, abortSource: exec.abortSource,
+        elapsedMs: audit.elapsedMs, budgetMs: audit.budgetMs,
+        ...(audit.kernelEnforcePartialAudit ? { kernelEnforcePartialAudit: audit.kernelEnforcePartialAudit } : {}),
+      },
     },
   };
 }
@@ -903,10 +948,10 @@ const kernelEnforceStep: DispatchStep = {
   async run(exec) {
     const port = kernelPort(exec);
     if (!port) return null;
-    const decision = await evaluateKernelEnforcement(
-      port,
-      kernelRequest(exec, 'enforce', exec.handlerCtx),
-    );
+    const decision = await evaluateKernelEnforcement(port, {
+      ...kernelRequest(exec, 'enforce', exec.handlerCtx),
+      registerPartialAudit: (snapshot) => { exec.kernelEnforcePartialAudit = snapshot; },
+    });
     if (exec.abort.signal.aborted) return admissionAbortResult(exec, 'kernel-enforce');
     exec.kernelEnforcement = decision;
     if (isKernelDenied(decision)) return kernelDenial(exec, 'enforce', decision);
