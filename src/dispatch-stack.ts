@@ -1029,6 +1029,7 @@ const invokeStep: DispatchStep = {
   async run(exec) {
     if (exec.abort.signal.aborted) return admissionAbortResult(exec, 'invoke');
     const { tool, toolName, input, handlerCtx, deps } = exec;
+    let observationFailure: DispatchProjectedResult | undefined;
     try {
       let invocation: Promise<ToolResult> | undefined;
       const invoke = (): Promise<ToolResult> => invocation ??= Promise.resolve().then(async () => {
@@ -1057,28 +1058,66 @@ const invokeStep: DispatchStep = {
       let executionRefusal: ToolExecutionRefusal | undefined;
       let receipt: ToolExecutionReceipt | undefined;
       let execution: Promise<ToolResult> | undefined;
+      let invocationRef: string | undefined;
+      const observationUnavailable = (): ToolResult => {
+        observationFailure = { ok: false, error: {
+          code: 'execution_observation_unavailable',
+          message: invocationRef
+            ? 'Invocation settlement could not be persisted; inspect the original invocation before retrying'
+            : 'Original invocation could not be persisted; execution was not admitted',
+          meta: invocationRef ? { invocationRef, outcome: 'unknown', retrySafe: false }
+            : { outcome: 'not-admitted', retrySafe: true },
+        } };
+        return { isError: true, content: [] };
+      };
       // Runtime admission is INSIDE the host-authorized invocation. A host refusal
       // must not call the adapter, even when that adapter admits before invoking fn.
       const execute = (): Promise<ToolResult> => execution ??= Promise.resolve().then(async () => {
-        const dispatched = await dispatchWithToolExecution(tool.execution, request, {
-          ...budgets, requestAborted: exec.abort.signal.aborted,
-        }, {
-          ownerId: handlerCtx.uiClientId ?? handlerCtx.principal?.slug ?? handlerCtx.spawnId ?? handlerCtx.runId,
-          inline: invoke,
-          adapter: deps.executionAdapter?.({ tool, toolName, input, ctx: handlerCtx, invoke }),
-        });
-        if (!dispatched.ok) {
-          executionRefusal = dispatched;
-          return { isError: true, content: [{ type: 'text', text: dispatched.reason }] };
+        const original = { toolName, pluginName: tool.pluginName, ctx: handlerCtx,
+          callId: exec.callId, selection };
+        const observer = deps.invocationObserver;
+        if (observer) {
+          try {
+            const ref = await observer.begin(original);
+            if (typeof ref !== 'string' || !ref.trim()) return observationUnavailable();
+            invocationRef = ref;
+          } catch { return observationUnavailable(); }
         }
-        receipt = dispatched.receipt;
-        return receipt ? { ...dispatched.result, _meta: { ...dispatched.result._meta, toolExecution: receipt } }
-          : dispatched.result;
+        let observedResult: ToolResult | null = null;
+        let observedError: unknown = null;
+        try {
+          const dispatched = await dispatchWithToolExecution(tool.execution, request, {
+            ...budgets, requestAborted: exec.abort.signal.aborted,
+          }, {
+            ownerId: handlerCtx.uiClientId ?? handlerCtx.principal?.slug ?? handlerCtx.spawnId ?? handlerCtx.runId,
+            inline: invoke,
+            adapter: deps.executionAdapter?.({ tool, toolName, input, ctx: handlerCtx, invoke }),
+          });
+          if (!dispatched.ok) {
+            executionRefusal = dispatched;
+            return { isError: true, content: [{ type: 'text', text: dispatched.reason }] };
+          }
+          receipt = dispatched.receipt;
+          observedResult = receipt ? { ...dispatched.result,
+            _meta: { ...dispatched.result._meta, toolExecution: receipt } } : dispatched.result;
+          return invocationRef ? { ...observedResult,
+            _meta: { ...observedResult._meta, toolInvocationRef: invocationRef } } : observedResult;
+        } catch (error) {
+          observedError = error;
+          throw error;
+        } finally {
+          if (invocationRef && observer) {
+            try { await observer.settle({ ...original, invocationRef,
+              result: observedResult, error: observedError, refusal: executionRefusal ?? null }); }
+            catch { observationUnavailable(); }
+          }
+        }
       });
       let result = deps.aroundInvoke
         ? await deps.aroundInvoke({ tool, toolName, input, ctx: handlerCtx, callId: exec.callId,
           authorization: exec.authorization, invoke: execute })
         : await execute();
+      if (observationFailure) return observationFailure;
       if (executionRefusal) return refusalResult(executionRefusal);
       if (selection.lifecycle === 'independent' && !receipt && !result.isError) return refusalResult({
         ok: false, error: 'execution_receipt_invalid', reason: 'The host returned without an independently owned admission receipt',
@@ -1238,6 +1277,7 @@ const invokeStep: DispatchStep = {
       exec.handlerResult = result;
       return { ok: true, result };
     } catch (err) {
+      if (observationFailure) return observationFailure;
       let diagnosticError = err;
       if (!exec.abort.signal.aborted) {
         const settled = await settleThrownValue(err, exec.abort.signal);

@@ -10,6 +10,127 @@ import { lookupByMcpName } from './tool-projection';
 const budgets = { nowMs: 1000, executionDeadlineMs: 61000, transportResponseBudgetMs: 60000 };
 afterEach(() => _resetCatalogForTests());
 
+describe('original invocation observation', () => {
+  function observer() {
+    return {
+      begin: vi.fn<NonNullable<DispatchProjectedDeps['invocationObserver']>['begin']>(async () => 'tool-invocation:original'),
+      settle: vi.fn<NonNullable<DispatchProjectedDeps['invocationObserver']>['settle']>(async () => {}),
+    };
+  }
+
+  it('persists begin before effects and settles the same original reference once', async () => {
+    const { inline, handler } = fixture();
+    const observation = observer();
+    let release!: () => void;
+    const pending = new Promise<string>(resolve => { release = () => resolve('tool-invocation:original'); });
+    observation.begin.mockReturnValue(pending);
+    const attempt = inline({}, { invocationObserver: observation });
+    await vi.waitFor(() => expect(observation.begin).toHaveBeenCalledOnce());
+    expect(handler).not.toHaveBeenCalled();
+    expect(observation.settle).not.toHaveBeenCalled();
+    release();
+    expect(await attempt).toMatchObject({ ok: true, result: { _meta: { toolInvocationRef: 'tool-invocation:original' } } });
+    expect(handler).toHaveBeenCalledOnce();
+    expect(observation.settle).toHaveBeenCalledOnce();
+    expect(observation.settle.mock.calls[0][0]).toMatchObject({
+      invocationRef: 'tool-invocation:original', callId: observation.begin.mock.calls[0][0].callId,
+      result: { content: [{ type: 'text', text: 'ok 7' }] }, error: null,
+    });
+  });
+
+  for (const invalid of [null, '', '   ']) it('refuses an invalid persisted reference before effects: ' + String(invalid), async () => {
+    const { inline, handler } = fixture();
+    const observation = observer();
+    observation.begin.mockResolvedValue(invalid as never);
+    expect(await inline({}, { invocationObserver: observation })).toMatchObject({
+      ok: false, error: { code: 'execution_observation_unavailable' },
+    });
+    expect(handler).not.toHaveBeenCalled();
+    expect(observation.settle).not.toHaveBeenCalled();
+  });
+
+  it('refuses a failed begin without admitting runtime or handler work', async () => {
+    const { inline, handler } = fixture();
+    const observation = observer();
+    observation.begin.mockRejectedValue(new Error('synthetic-private-db-detail'));
+    const adapter = vi.fn();
+    const result = await inline({}, { invocationObserver: observation, executionAdapter: adapter });
+    expect(result).toMatchObject({ ok: false, error: { code: 'execution_observation_unavailable' } });
+    expect(JSON.stringify(result)).not.toContain('synthetic-private-db-detail');
+    expect(handler).not.toHaveBeenCalled();
+    expect(adapter).not.toHaveBeenCalled();
+  });
+
+  it('reports failed settlement as unknown with the original reference and never repeats effects', async () => {
+    const { inline, handler } = fixture();
+    const observation = observer();
+    observation.settle.mockRejectedValue(new Error('synthetic-private-db-detail'));
+    const result = await inline({}, { invocationObserver: observation });
+    expect(result).toMatchObject({ ok: false, error: { code: 'execution_observation_unavailable', meta: {
+      invocationRef: 'tool-invocation:original', outcome: 'unknown', retrySafe: false,
+    } } });
+    expect(JSON.stringify(result)).not.toContain('synthetic-private-db-detail');
+    expect(handler).toHaveBeenCalledOnce();
+    expect(observation.begin).toHaveBeenCalledOnce();
+    expect(observation.settle).toHaveBeenCalledOnce();
+  });
+
+  it('does not create an admitted observation when the host refuses invocation', async () => {
+    const { inline, handler } = fixture();
+    const observation = observer();
+    expect(await inline({}, { invocationObserver: observation,
+      aroundInvoke: async () => ({ isError: true, content: [] }),
+    })).toMatchObject({ ok: true, result: { isError: true } });
+    expect(observation.begin).not.toHaveBeenCalled();
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('records a thrown execution once without interpreting the exception as termination', async () => {
+    const { inline, handler } = fixture();
+    const observation = observer();
+    const failure = new Error('handler failed');
+    handler.mockRejectedValue(failure);
+    expect(await inline({}, { invocationObserver: observation })).toMatchObject({ ok: false });
+    expect(observation.settle).toHaveBeenCalledOnce();
+    expect(observation.settle.mock.calls[0][0]).toMatchObject({
+      invocationRef: 'tool-invocation:original', result: null, error: failure,
+    });
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the original observer through a host replacement and preserves an intact long reference', async () => {
+    const { inline, handler } = fixture();
+    const original = observer();
+    const replacement = observer();
+    const ref = 'tool-invocation:' + 'x'.repeat(10000);
+    const deps: DispatchProjectedDeps = { invocationObserver: original };
+    original.begin.mockImplementation(async () => {
+      deps.invocationObserver = replacement;
+      return ref;
+    });
+    expect(await inline({}, deps)).toMatchObject({ ok: true, result: { _meta: { toolInvocationRef: ref } } });
+    expect(original.settle).toHaveBeenCalledOnce();
+    expect(original.settle.mock.calls[0][0].invocationRef).toBe(ref);
+    expect(replacement.begin).not.toHaveBeenCalled();
+    expect(replacement.settle).not.toHaveBeenCalled();
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
+  it('memoizes observation and effects when the host invokes its continuation twice', async () => {
+    const { inline, handler } = fixture();
+    const observation = observer();
+    const result = await inline({}, { invocationObserver: observation, aroundInvoke: async ({ invoke }) => {
+      const [first, second] = await Promise.all([invoke(), invoke()]);
+      expect(second).toBe(first);
+      return second;
+    } });
+    expect(result).toMatchObject({ ok: true });
+    expect(observation.begin).toHaveBeenCalledOnce();
+    expect(observation.settle).toHaveBeenCalledOnce();
+    expect(handler).toHaveBeenCalledOnce();
+  });
+});
+
 function fixture(declaration?: ToolExecutionDeclaration) {
   const handler = vi.fn(async (args: { value: number }) => ({
     content: [{ type: 'text' as const, text: 'ok ' + args.value }],

@@ -15,7 +15,7 @@ import type { RolesQuota, ToolResult } from './wire';
 import type { ProjectedTool, UnifiedToolContext } from './tool-projection';
 import type { AuthAuditEvent, AuthDecision } from './authz';
 import type { PreconditionFireRequest } from './requires';
-import type { ToolExecutionDispatch, ToolExecutionRefusal } from './execution-contract';
+import type { ToolExecutionDispatch, ToolExecutionRefusal, ToolExecutionSelection } from './execution-contract';
 import type {
   KernelEnforcementPort,
   KernelEnforcementResult,
@@ -70,6 +70,7 @@ export function defaultComputeQuotaWindow(
 
 export type DispatchProjectedErrorCode =
   | ToolExecutionRefusal['error']
+  | 'execution_observation_unavailable'
   | 'unknown_tool'
   | 'unauthorized'
   | 'role_not_allowed'
@@ -395,6 +396,33 @@ export interface DispatchProjectedDeps {
    * liveness/telemetry marker can never change the tool result.
    */
   onDispatchStart?(event: DispatchStartEvent): void;
+  /**
+   * Mandatory original-invocation evidence, independent of optional tracing and
+   * best-effort telemetry. Begin runs inside host authorization, before runtime
+   * admission or handler effects; settlement joins that persisted reference.
+   * A failed begin prevents effects. A failed settle reports an unknown outcome
+   * with the original reference and never retries the execution.
+   */
+  invocationObserver?: {
+    begin(request: {
+      toolName: string;
+      pluginName: string;
+      callId: string;
+      ctx: UnifiedToolContext;
+      selection: ToolExecutionSelection;
+    }): Promise<string>;
+    settle(request: {
+      toolName: string;
+      pluginName: string;
+      callId: string;
+      ctx: UnifiedToolContext;
+      selection: ToolExecutionSelection;
+      invocationRef: string;
+      result: ToolResult | null;
+      error: unknown;
+      refusal: ToolExecutionRefusal | null;
+    }): Promise<void>;
+  };
   /**
    * Resolve the quota window (telemetry grouping + quota scope) and ceiling
    * for a call. Defaults to `defaultComputeQuotaWindow` (run-scoped, `perRun`
