@@ -247,6 +247,38 @@ export interface ToolExecutionObservation {
   readonly evidenceRef: string | null;
 }
 
+/** Unknown timestamps carry neither an invented time nor evidence. */
+export interface ToolExecutionProgressTimestamp {
+  readonly atMs: number | null;
+  readonly sourceKind: string;
+  readonly evidenceRef: string | null;
+}
+
+export type ToolExecutionProgressMeasurement =
+  | { readonly kind: 'unknown'; readonly reason: string }
+  | { readonly kind: 'measured'; readonly quantity: number; readonly units: string;
+      readonly writer: string; readonly observedAtMs: number; readonly evidenceRef: string };
+
+/** Evidence from the actual child; wrapper settlement never changes its phase. */
+export interface ToolExecutionChildProgress {
+  readonly jobId: string;
+  readonly parentJobId: string;
+  readonly rootJobId: string;
+  readonly summary: {
+    readonly text: string;
+    readonly omittedChars: number;
+    /** Required when the text is a preview, preserved intact for authorized recovery. */
+    readonly fullRef?: string;
+  };
+  readonly phase: string;
+  readonly started: ToolExecutionProgressTimestamp;
+  readonly updated: ToolExecutionProgressTimestamp;
+  readonly lastActivity: ToolExecutionProgressTimestamp;
+  readonly resultRef: string | null;
+  readonly logRef: string | null;
+  readonly measurement: ToolExecutionProgressMeasurement;
+}
+
 interface ToolExecutionReceiptFields {
   readonly schemaVersion: 'tool-execution-receipt-v2';
   readonly invocationRef: string;
@@ -257,6 +289,7 @@ interface ToolExecutionReceiptFields {
   readonly authority: { readonly bindingRef: string; readonly fingerprint: string };
   readonly observation: ToolExecutionObservation;
   readonly terminal: boolean;
+  readonly progress?: ToolExecutionChildProgress;
   readonly resultRef?: string;
   readonly logRef?: string;
 }
@@ -298,6 +331,75 @@ function receiptBudget(value: unknown, field: string, positive: boolean): number
   return value;
 }
 
+function receiptTime(value: unknown, field: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return invalidReceipt(field);
+  return value;
+}
+
+function receiptProgressTimestamp(value: unknown, field: string): ToolExecutionProgressTimestamp {
+  const timestamp = receiptObject(value, ['atMs', 'sourceKind', 'evidenceRef'], field);
+  const sourceKind = receiptRef(timestamp.sourceKind, field);
+  if (sourceKind === 'unknown') {
+    if (timestamp.atMs !== null || timestamp.evidenceRef !== null) return invalidReceipt(field);
+    return Object.freeze({ atMs: null, sourceKind, evidenceRef: null });
+  }
+  return Object.freeze({
+    atMs: receiptTime(timestamp.atMs, field), sourceKind,
+    evidenceRef: receiptRef(timestamp.evidenceRef, field),
+  });
+}
+
+function receiptChildProgress(value: unknown): ToolExecutionChildProgress {
+  const child = receiptObject(value, [
+    'jobId', 'parentJobId', 'rootJobId', 'summary', 'phase', 'started', 'updated',
+    'lastActivity', 'resultRef', 'logRef', 'measurement',
+  ], 'progress');
+  const summary = receiptObject(child.summary, ['text', 'omittedChars', 'fullRef'], 'progress.summary');
+  if (typeof summary.text !== 'string' || !Number.isSafeInteger(summary.omittedChars) ||
+      (summary.omittedChars as number) < 0) return invalidReceipt('progress.summary');
+  const fullRef = summary.fullRef === undefined
+    ? undefined : receiptRef(summary.fullRef, 'progress.summary.fullRef');
+  if ((summary.omittedChars as number) > 0 && fullRef === undefined) return invalidReceipt('progress.summary.fullRef');
+
+  // Select the variant before validating its fields: an unknown instrument cannot
+  // smuggle a fabricated quantity, writer or timestamp into the snapshot.
+  const instrument = receiptObject(child.measurement,
+    ['kind', 'reason', 'quantity', 'units', 'writer', 'observedAtMs', 'evidenceRef'], 'progress.measurement');
+  let measurement: ToolExecutionProgressMeasurement;
+  if (instrument.kind === 'unknown') {
+    receiptObject(instrument, ['kind', 'reason'], 'progress.measurement');
+    measurement = Object.freeze({ kind: 'unknown', reason: receiptRef(instrument.reason, 'progress.measurement.reason') });
+  } else if (instrument.kind === 'measured') {
+    receiptObject(instrument, ['kind', 'quantity', 'units', 'writer', 'observedAtMs', 'evidenceRef'], 'progress.measurement');
+    if (typeof instrument.quantity !== 'number' || !Number.isFinite(instrument.quantity)) {
+      return invalidReceipt('progress.measurement.quantity');
+    }
+    measurement = Object.freeze({
+      kind: 'measured', quantity: instrument.quantity,
+      units: receiptRef(instrument.units, 'progress.measurement.units'),
+      writer: receiptRef(instrument.writer, 'progress.measurement.writer'),
+      observedAtMs: receiptTime(instrument.observedAtMs, 'progress.measurement.observedAtMs'),
+      evidenceRef: receiptRef(instrument.evidenceRef, 'progress.measurement.evidenceRef'),
+    });
+  } else {
+    return invalidReceipt('progress.measurement.kind');
+  }
+  return Object.freeze({
+    jobId: receiptRef(child.jobId, 'progress.jobId'),
+    parentJobId: receiptRef(child.parentJobId, 'progress.parentJobId'),
+    rootJobId: receiptRef(child.rootJobId, 'progress.rootJobId'),
+    summary: Object.freeze({ text: summary.text, omittedChars: summary.omittedChars as number,
+      ...(fullRef !== undefined ? { fullRef } : {}) }),
+    phase: receiptRef(child.phase, 'progress.phase'),
+    started: receiptProgressTimestamp(child.started, 'progress.started'),
+    updated: receiptProgressTimestamp(child.updated, 'progress.updated'),
+    lastActivity: receiptProgressTimestamp(child.lastActivity, 'progress.lastActivity'),
+    resultRef: child.resultRef === null ? null : receiptRef(child.resultRef, 'progress.resultRef'),
+    logRef: child.logRef === null ? null : receiptRef(child.logRef, 'progress.logRef'),
+    measurement,
+  });
+}
+
 /**
  * Decode a v2 wire observation into a detached immutable snapshot. This validates
  * the wire contract, not authority or runtime admission: consumers must resolve
@@ -308,7 +410,7 @@ export function parseToolExecutionReceipt(value: unknown): ToolExecutionReceiptV
   const receipt = receiptObject(value, [
     'schemaVersion', 'invocationRef', 'mode', 'responseWindowMs', 'executionDeadlineMs',
     'authority', 'observation', 'terminal', 'resultRef', 'logRef',
-    'lifecycle', 'durability', 'handle', 'ownerId', 'adapterId',
+    'lifecycle', 'durability', 'handle', 'ownerId', 'adapterId', 'progress',
   ], 'fields');
   if (receipt.schemaVersion !== 'tool-execution-receipt-v2') return invalidReceipt('schemaVersion');
   if (receipt.mode !== 'sync' && receipt.mode !== 'async' && receipt.mode !== 'auto') return invalidReceipt('mode');
@@ -342,6 +444,7 @@ export function parseToolExecutionReceipt(value: unknown): ToolExecutionReceiptV
     }),
     observation: Object.freeze({ response, outcome, observedAtMs: observation.observedAtMs, evidenceRef }),
     terminal,
+    ...(receipt.progress !== undefined ? { progress: receiptChildProgress(receipt.progress) } : {}),
     ...(receipt.resultRef !== undefined ? { resultRef: receiptRef(receipt.resultRef, 'resultRef') } : {}),
     ...(receipt.logRef !== undefined ? { logRef: receiptRef(receipt.logRef, 'logRef') } : {}),
   };
