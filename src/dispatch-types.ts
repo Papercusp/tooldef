@@ -419,6 +419,8 @@ export interface DispatchProjectedDeps {
       selection: ToolExecutionSelection;
       invocationRef: string;
       result: ToolResult | null;
+      /** Actual verified adapter receipt, separate from untrusted handler metadata. */
+      receipt: import('./execution-contract').ToolExecutionReceipt | null;
       error: unknown;
       refusal: ToolExecutionRefusal | null;
     }): Promise<void>;
@@ -545,6 +547,8 @@ export interface DispatchProjectedDeps {
      * has no start event to correlate with).
      */
     callId?: string;
+    /** Persisted original invocation from the mandatory observer, never a caller-supplied join. */
+    invocationRef?: string;
     outputRef?: string | null;
     outputSize?: number | null;
     /** Settled result for host-owned outcome classification; never persisted wholesale. */

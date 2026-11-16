@@ -126,6 +126,8 @@ export interface DispatchExecution {
    * existing ctx field can serve (they are all session-scoped).
    */
   readonly callId: string;
+  /** Set only after the mandatory observer has committed the original invocation. */
+  invocationRef?: string;
   readonly startedAt: number;
   /** Quota/telemetry window key, or null when ctx has no run/chunk to scope to. */
   readonly windowKey: string | null;
@@ -1081,6 +1083,7 @@ const invokeStep: DispatchStep = {
             const ref = await observer.begin(original);
             if (typeof ref !== 'string' || !ref.trim()) return observationUnavailable();
             invocationRef = ref;
+            exec.invocationRef = ref;
           } catch { return observationUnavailable(); }
         }
         let observedResult: ToolResult | null = null;
@@ -1108,7 +1111,8 @@ const invokeStep: DispatchStep = {
         } finally {
           if (invocationRef && observer) {
             try { await observer.settle({ ...original, invocationRef,
-              result: observedResult, error: observedError, refusal: executionRefusal ?? null }); }
+              result: observedResult, receipt: receipt ?? null,
+              error: observedError, refusal: executionRefusal ?? null }); }
             catch { observationUnavailable(); }
           }
         }
@@ -2104,7 +2108,7 @@ async function recordTelemetry(
   const isKernelDenial = kernelPreflight?.decision === 'deny' || kernelEnforcement?.decision === 'deny';
   // Declared premises and irreversible calls need evidence even when this
   // transport has no quota window (HTTP/IPC and unscoped internal calls).
-  if (!isGateDenial && !isKernelDenial && !windowKey &&
+  if (!exec.invocationRef && !isGateDenial && !isKernelDenial && !windowKey &&
       !exec.premises.provided && !exec.premises.irreversible &&
       !deps.recordWithoutWindow?.(toolName)) return;
 
@@ -2200,6 +2204,7 @@ async function recordTelemetry(
         ctx: attributedCtx,
         windowKey: windowKey ?? '',
         callId,
+        invocationRef: exec.invocationRef,
         durationMs: Date.now() - startedAt,
         status: selfReportedFailure ? 'refused' : 'ok',
         // Lift the refusal's OWN code/reason onto the first-class column so a
@@ -2228,6 +2233,7 @@ async function recordTelemetry(
         ctx: attributedCtx,
         windowKey: windowKey ?? '',
         callId,
+        invocationRef: exec.invocationRef,
         durationMs: Date.now() - startedAt,
         status,
         // Persist the dispatcher error CLASS (computed above, then historically

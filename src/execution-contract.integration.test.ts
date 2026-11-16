@@ -24,7 +24,8 @@ describe('original invocation observation', () => {
     let release!: () => void;
     const pending = new Promise<string>(resolve => { release = () => resolve('tool-invocation:original'); });
     observation.begin.mockReturnValue(pending);
-    const attempt = inline({}, { invocationObserver: observation });
+    const recordInvocation = vi.fn();
+    const attempt = inline({}, { invocationObserver: observation, recordInvocation });
     await vi.waitFor(() => expect(observation.begin).toHaveBeenCalledOnce());
     expect(handler).not.toHaveBeenCalled();
     expect(observation.settle).not.toHaveBeenCalled();
@@ -35,7 +36,11 @@ describe('original invocation observation', () => {
     expect(observation.settle.mock.calls[0][0]).toMatchObject({
       invocationRef: 'tool-invocation:original', callId: observation.begin.mock.calls[0][0].callId,
       result: { content: [{ type: 'text', text: 'ok 7' }] }, error: null,
+      receipt: null,
     });
+    expect(recordInvocation).toHaveBeenCalledWith(expect.objectContaining({
+      invocationRef: 'tool-invocation:original', callId: observation.begin.mock.calls[0][0].callId,
+    }));
   });
 
   for (const invalid of [null, '', '   ']) it('refuses an invalid persisted reference before effects: ' + String(invalid), async () => {
@@ -212,11 +217,13 @@ describe('unified execution', () => {
       const { inline, handler } = fixture({ lifecycle: 'independent', adapter });
       const admission: ToolExecutionAdmission = { handle: 'runtime-original-handle', ownerId: 'original-owner', state: 'accepted' };
       const verifyAdmission = vi.fn(async () => accepted);
+      const settle = vi.fn<NonNullable<DispatchProjectedDeps['invocationObserver']>['settle']>(async () => {});
       const aroundInvoke = vi.fn(async ({ invoke }: Parameters<NonNullable<DispatchProjectedDeps['aroundInvoke']>>[0]) => {
         await invoke();
         return invoke();
       });
       const result = await inline({ mode: 'async', responseWindowMs: 5000 }, { aroundInvoke,
+        invocationObserver: { begin: async () => 'invocation:original', settle },
         executionAdapter: ({ invoke, ctx }) => ({ id: adapter.id, verifyAdmission,
           dispatch: async () => {
             expect(ctx.uiClientId).toBe(admission.ownerId);
@@ -226,6 +233,9 @@ describe('unified execution', () => {
       expect(handler).toHaveBeenCalledOnce();
       expect(aroundInvoke).toHaveBeenCalledOnce();
       expect(verifyAdmission).toHaveBeenCalledOnce();
+      expect(settle).toHaveBeenCalledOnce();
+      expect(settle.mock.calls[0][0].receipt).toEqual(accepted
+        ? expect.objectContaining({ handle: admission.handle, state: 'accepted' }) : null);
       if (accepted) expect(result).toMatchObject({ ok: true, result: { _meta: { toolExecution: {
         handle: admission.handle, ownerId: admission.ownerId, terminal: false,
         state: 'accepted', responseWindowMs: 5000, executionDeadlineMs: expect.any(Number),
