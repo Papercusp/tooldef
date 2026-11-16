@@ -28,6 +28,87 @@ describe('execution receipt codec', () => {
     terminal: false,
   });
 
+  const child = () => ({
+    jobId: 'child:original', parentJobId: 'parent:original', rootJobId: 'root:original',
+    summary: { text: 'Processed the first batch', omittedChars: 20, fullRef: 'child:original:summary' },
+    phase: 'processing',
+    started: { atMs: 1000, sourceKind: 'child-runtime', evidenceRef: 'child:original:start' },
+    updated: { atMs: 2000, sourceKind: 'child-runtime', evidenceRef: 'child:original:update' },
+    lastActivity: { atMs: 1900, sourceKind: 'child-runtime', evidenceRef: 'child:original:activity' },
+    resultRef: null, logRef: 'child:original:log',
+    measurement: { kind: 'measured', quantity: 12, units: 'records', writer: 'child:original:counter',
+      observedAtMs: 2000, evidenceRef: 'child:original:counter:revision:12' },
+  });
+
+  it('round trips child evidence while wrapper settlement leaves the child phase unchanged', () => {
+    const input = { ...original(), observation: { response: 'returned', outcome: 'succeeded',
+      observedAtMs: 2100, evidenceRef: 'wrapper:settlement' }, terminal: true, progress: child() };
+    const receipt = parseToolExecutionReceipt(JSON.parse(JSON.stringify(input)));
+    expect(receipt).toEqual(input);
+    expect(receipt.progress).toMatchObject({ jobId: 'child:original', phase: 'processing',
+      resultRef: null, measurement: { quantity: 12, units: 'records' } });
+    expect(Object.isFrozen(receipt.progress)).toBe(true);
+    expect(Object.isFrozen(receipt.progress?.measurement)).toBe(true);
+    input.progress.measurement.quantity = 99;
+    input.progress.summary.text = 'changed later';
+    expect(receipt.progress?.measurement).toMatchObject({ quantity: 12 });
+    expect(receipt.progress?.summary.text).toBe('Processed the first batch');
+    expect(parseToolExecutionReceipt(JSON.parse(JSON.stringify(receipt)))).toEqual(receipt);
+  });
+
+  it.each(['jobId', 'parentJobId', 'rootJobId', 'phase', 'started', 'updated', 'lastActivity', 'measurement'])(
+    'rejects missing child %s even when the wrapper succeeded', field => {
+      const progress = { ...child() } as Record<string, unknown>;
+      delete progress[field];
+      expect(() => parseToolExecutionReceipt({ ...original(), progress,
+        observation: { response: 'returned', outcome: 'succeeded', observedAtMs: 2100,
+          evidenceRef: 'wrapper:settlement' }, terminal: true })).toThrow('Invalid tool execution receipt');
+      expect(parseToolExecutionReceipt({ ...original(), progress: child() }).progress).toEqual(child());
+    });
+
+  it.each(['quantity', 'units', 'writer', 'observedAtMs', 'evidenceRef'])(
+    'rejects missing instrumented %s without inventing zero progress', field => {
+      const progress = child();
+      delete (progress.measurement as Record<string, unknown>)[field];
+      expect(() => parseToolExecutionReceipt({ ...original(), progress })).toThrow('Invalid tool execution receipt');
+    });
+
+  it('keeps unknown measurement and activity explicit without treating liveness as quantity', () => {
+    const progress = { ...child(),
+      measurement: { kind: 'unknown', reason: 'This child has no quantity instrument' },
+      lastActivity: { atMs: null, sourceKind: 'unknown', evidenceRef: null } };
+    expect(parseToolExecutionReceipt({ ...original(), progress }).progress).toEqual(progress);
+    expect(() => parseToolExecutionReceipt({ ...original(), progress: { ...progress,
+      measurement: { ...progress.measurement, quantity: 0 } } })).toThrow('Invalid tool execution receipt');
+    expect(() => parseToolExecutionReceipt({ ...original(), progress: { ...progress,
+      lastActivity: { atMs: 1900, sourceKind: 'unknown', evidenceRef: null } } }))
+      .toThrow('Invalid tool execution receipt');
+  });
+
+  it.each([1999, 2000, 2001])('preserves complete child identity and recovery references at length %i', length => {
+    const progress = { ...child(), jobId: 'j'.repeat(length),
+      summary: { text: 'Preview', omittedChars: length, fullRef: 'source:' + 's'.repeat(length) } };
+    expect(parseToolExecutionReceipt(JSON.parse(JSON.stringify({ ...original(), progress }))).progress)
+      .toEqual(progress);
+  });
+
+  it.each([NaN, Infinity, -Infinity])('rejects a nonfinite measured quantity %s', quantity => {
+    const progress = child();
+    progress.measurement.quantity = quantity;
+    expect(() => parseToolExecutionReceipt({ ...original(), progress })).toThrow('Invalid tool execution receipt');
+  });
+
+  it('requires explicit recoverable summary omissions and timestamp provenance', () => {
+    for (const summary of [{ text: 'Preview', omittedChars: 1 }, { text: 'Preview', omittedChars: -1, fullRef: 'source' },
+      { text: 'Preview', omittedChars: 0.5, fullRef: 'source' }]) {
+      expect(() => parseToolExecutionReceipt({ ...original(), progress: { ...child(), summary } }))
+        .toThrow('Invalid tool execution receipt');
+    }
+    expect(() => parseToolExecutionReceipt({ ...original(), progress: { ...child(),
+      updated: { atMs: 2000, sourceKind: 'child-runtime', evidenceRef: null } } }))
+      .toThrow('Invalid tool execution receipt');
+  });
+
   it('round trips an expired request without inventing a handle or business outcome', () => {
     const receipt = parseToolExecutionReceipt(JSON.parse(JSON.stringify(original())));
     expect(receipt).toEqual(original());
