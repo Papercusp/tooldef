@@ -228,12 +228,140 @@ export interface ToolExecutionAdmission {
   readonly state: 'accepted' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 }
 
-export interface ToolExecutionReceipt extends ToolExecutionAdmission {
+/** Legacy receipts retain their original audited-runtime verification path. */
+export interface ToolExecutionLegacyReceipt extends ToolExecutionAdmission {
   readonly schemaVersion: 'tool-execution-receipt-v1';
   readonly terminal: boolean;
   readonly mode: ToolExecutionMode;
   readonly responseWindowMs: number | null;
   readonly executionDeadlineMs: number | null;
+}
+
+export type ToolExecutionResponseState = 'open' | 'returned' | 'request-expired' | 'response-lost';
+export type ToolExecutionOutcome = 'unknown' | ToolExecutionAdmission['state'];
+
+export interface ToolExecutionObservation {
+  readonly response: ToolExecutionResponseState;
+  readonly outcome: ToolExecutionOutcome;
+  readonly observedAtMs: number;
+  readonly evidenceRef: string | null;
+}
+
+interface ToolExecutionReceiptFields {
+  readonly schemaVersion: 'tool-execution-receipt-v2';
+  readonly invocationRef: string;
+  readonly mode: ToolExecutionMode;
+  readonly responseWindowMs: number | null;
+  readonly executionDeadlineMs: number | null;
+  /** References the persisted ORIGINAL authority; it is not current delivery custody. */
+  readonly authority: { readonly bindingRef: string; readonly fingerprint: string };
+  readonly observation: ToolExecutionObservation;
+  readonly terminal: boolean;
+  readonly resultRef?: string;
+  readonly logRef?: string;
+}
+
+/** An observation cannot confer the independent runtime capabilities it describes. */
+export type ToolExecutionReceiptV2 = ToolExecutionReceiptFields & (
+  | { readonly lifecycle: 'request-bound'; readonly durability: 'none';
+      readonly handle?: never; readonly ownerId?: never; readonly adapterId?: never }
+  | { readonly lifecycle: 'independent'; readonly durability: 'session' | 'restart';
+      readonly handle: string; readonly ownerId: string; readonly adapterId: string }
+);
+
+export type ToolExecutionReceipt = ToolExecutionLegacyReceipt | ToolExecutionReceiptV2;
+
+function invalidReceipt(field: string): never {
+  // Field names here are codec constants. Never echo a rejected payload or its values.
+  throw new TypeError('Invalid tool execution receipt: ' + field);
+}
+
+function receiptObject(value: unknown, fields: readonly string[], field: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) {
+    return invalidReceipt(field);
+  }
+  if (Object.keys(value).some(key => !fields.includes(key))) return invalidReceipt(field);
+  return value as Record<string, unknown>;
+}
+
+function receiptRef(value: unknown, field: string): string {
+  if (typeof value !== 'string' || !value.trim()) return invalidReceipt(field);
+  return value;
+}
+
+function receiptBudget(value: unknown, field: string, positive: boolean): number | null {
+  if (value === null) return null;
+  if (typeof value !== 'number' || !Number.isFinite(value) || (positive && value <= 0)) {
+    return invalidReceipt(field);
+  }
+  return value;
+}
+
+/**
+ * Decode a v2 wire observation into a detached immutable snapshot. This validates
+ * the wire contract, not authority or runtime admission: consumers must resolve
+ * the original binding and evidence before using protected data or delivering.
+ * Legacy v1 has no scoped binding and is never implicitly upgraded by this codec.
+ */
+export function parseToolExecutionReceipt(value: unknown): ToolExecutionReceiptV2 {
+  const receipt = receiptObject(value, [
+    'schemaVersion', 'invocationRef', 'mode', 'responseWindowMs', 'executionDeadlineMs',
+    'authority', 'observation', 'terminal', 'resultRef', 'logRef',
+    'lifecycle', 'durability', 'handle', 'ownerId', 'adapterId',
+  ], 'fields');
+  if (receipt.schemaVersion !== 'tool-execution-receipt-v2') return invalidReceipt('schemaVersion');
+  if (receipt.mode !== 'sync' && receipt.mode !== 'async' && receipt.mode !== 'auto') return invalidReceipt('mode');
+  const authority = receiptObject(receipt.authority, ['bindingRef', 'fingerprint'], 'authority');
+  const observation = receiptObject(receipt.observation,
+    ['response', 'outcome', 'observedAtMs', 'evidenceRef'], 'observation');
+  const response = observation.response;
+  if (response !== 'open' && response !== 'returned' &&
+      response !== 'request-expired' && response !== 'response-lost') return invalidReceipt('observation.response');
+  const outcome = observation.outcome;
+  if (outcome !== 'unknown' && outcome !== 'accepted' && outcome !== 'running' &&
+      outcome !== 'succeeded' && outcome !== 'failed' && outcome !== 'cancelled') {
+    return invalidReceipt('observation.outcome');
+  }
+  if (typeof observation.observedAtMs !== 'number' || !Number.isFinite(observation.observedAtMs) ||
+      observation.observedAtMs < 0) return invalidReceipt('observation.observedAtMs');
+  const evidenceRef = observation.evidenceRef === null
+    ? null : receiptRef(observation.evidenceRef, 'observation.evidenceRef');
+  if (outcome !== 'unknown' && evidenceRef === null) return invalidReceipt('observation.evidenceRef');
+  const terminal = outcome === 'succeeded' || outcome === 'failed' || outcome === 'cancelled';
+  if (receipt.terminal !== terminal) return invalidReceipt('terminal');
+  const common: ToolExecutionReceiptFields = {
+    schemaVersion: 'tool-execution-receipt-v2',
+    invocationRef: receiptRef(receipt.invocationRef, 'invocationRef'),
+    mode: receipt.mode,
+    responseWindowMs: receiptBudget(receipt.responseWindowMs, 'responseWindowMs', true),
+    executionDeadlineMs: receiptBudget(receipt.executionDeadlineMs, 'executionDeadlineMs', false),
+    authority: Object.freeze({
+      bindingRef: receiptRef(authority.bindingRef, 'authority.bindingRef'),
+      fingerprint: receiptRef(authority.fingerprint, 'authority.fingerprint'),
+    }),
+    observation: Object.freeze({ response, outcome, observedAtMs: observation.observedAtMs, evidenceRef }),
+    terminal,
+    ...(receipt.resultRef !== undefined ? { resultRef: receiptRef(receipt.resultRef, 'resultRef') } : {}),
+    ...(receipt.logRef !== undefined ? { logRef: receiptRef(receipt.logRef, 'logRef') } : {}),
+  };
+  if (receipt.lifecycle === 'request-bound') {
+    if (receipt.durability !== 'none' || receipt.mode === 'async' ||
+        'handle' in receipt || 'ownerId' in receipt || 'adapterId' in receipt) {
+      return invalidReceipt('request-bound capabilities');
+    }
+    return Object.freeze({ ...common, lifecycle: 'request-bound', durability: 'none' });
+  }
+  if (receipt.lifecycle !== 'independent' ||
+      (receipt.durability !== 'session' && receipt.durability !== 'restart')) {
+    return invalidReceipt('independent capabilities');
+  }
+  return Object.freeze({
+    ...common, lifecycle: 'independent', durability: receipt.durability,
+    handle: receiptRef(receipt.handle, 'handle'),
+    ownerId: receiptRef(receipt.ownerId, 'ownerId'),
+    adapterId: receiptRef(receipt.adapterId, 'adapterId'),
+  });
 }
 
 export interface ToolExecutionDispatch<T> {

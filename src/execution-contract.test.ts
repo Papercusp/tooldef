@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  dispatchWithToolExecution, resolveToolExecutionContract, selectToolExecution,
+  dispatchWithToolExecution, parseToolExecutionReceipt, resolveToolExecutionContract, selectToolExecution,
   REQUEST_BOUND_EXECUTION,
   type AuditedToolExecutionAdapter, type ToolExecutionDeclaration, type ToolExecutionContract, type ToolExecutionSelection,
 } from './execution-contract';
@@ -17,6 +17,85 @@ const adapter: AuditedToolExecutionAdapter = {
 };
 const independent: ToolExecutionDeclaration = { lifecycle: 'independent', adapter };
 afterEach(() => { vi.useRealTimers(); _resetProjectionRegistryForTests(); });
+
+describe('execution receipt codec', () => {
+  const original = () => ({
+    schemaVersion: 'tool-execution-receipt-v2',
+    invocationRef: 'invocation:original', lifecycle: 'request-bound', durability: 'none',
+    mode: 'auto', responseWindowMs: 5000, executionDeadlineMs: 601000,
+    authority: { bindingRef: 'authority:original', fingerprint: 'original-fingerprint' },
+    observation: { response: 'request-expired', outcome: 'unknown', observedAtMs: 6001, evidenceRef: null },
+    terminal: false,
+  });
+
+  it('round trips an expired request without inventing a handle or business outcome', () => {
+    const receipt = parseToolExecutionReceipt(JSON.parse(JSON.stringify(original())));
+    expect(receipt).toEqual(original());
+    expect(receipt).not.toHaveProperty('handle');
+    expect(receipt).not.toHaveProperty('ownerId');
+    expect(Object.isFrozen(receipt)).toBe(true);
+    expect(Object.isFrozen(receipt.authority)).toBe(true);
+    expect(Object.isFrozen(receipt.observation)).toBe(true);
+  });
+
+  it('keeps response loss separate from a witnessed original business settlement', () => {
+    const receipt = parseToolExecutionReceipt({ ...original(), lifecycle: 'independent',
+      durability: 'restart', handle: 'runtime:original', ownerId: 'original-owner', adapterId: adapter.id,
+      observation: { response: 'response-lost', outcome: 'succeeded', observedAtMs: 7000,
+        evidenceRef: 'runtime:original:settlement' }, terminal: true,
+      resultRef: 'runtime:original:result', logRef: 'runtime:original:log' });
+    expect(receipt).toMatchObject({ lifecycle: 'independent', terminal: true, handle: 'runtime:original',
+      observation: { response: 'response-lost', outcome: 'succeeded' }, executionDeadlineMs: 601000 });
+    expect(parseToolExecutionReceipt(JSON.parse(JSON.stringify(receipt)))).toEqual(receipt);
+  });
+
+  it.each([
+    { handle: 'forged-handle' }, { ownerId: 'forged-owner' }, { adapterId: adapter.id },
+    { durability: 'restart' }, { mode: 'async' }, { terminal: true },
+    { authority: undefined }, { authority: { bindingRef: 'authority:original' } },
+    { authority: { bindingRef: '', fingerprint: 'original-fingerprint' } },
+    { responseWindowMs: 0 }, { executionDeadlineMs: Infinity },
+    { observation: { response: 'timed-out', outcome: 'unknown', observedAtMs: 6001, evidenceRef: null } },
+    { observation: { response: 'response-lost', outcome: 'succeeded', observedAtMs: 6001, evidenceRef: null }, terminal: true },
+  ])('rejects an unsafe single-boundary mutation: %j', mutation => {
+    expect(() => parseToolExecutionReceipt({ ...original(), ...mutation })).toThrow('Invalid tool execution receipt');
+    expect(parseToolExecutionReceipt(original())).toEqual(original());
+  });
+
+  it.each(['handle', 'ownerId', 'adapterId'])('requires the complete independent %s identity', field => {
+    const receipt: Record<string, unknown> = { ...original(), lifecycle: 'independent', durability: 'session',
+      handle: 'runtime:original', ownerId: 'original-owner', adapterId: adapter.id };
+    expect(parseToolExecutionReceipt(receipt)).toMatchObject({ handle: 'runtime:original', ownerId: 'original-owner' });
+    delete receipt[field];
+    expect(() => parseToolExecutionReceipt(receipt)).toThrow('Invalid tool execution receipt');
+  });
+
+  it('copies nested observations and preserves complete references without a size cap', () => {
+    const input = original();
+    input.invocationRef = 'invocation:' + 'x'.repeat(10000);
+    input.authority.bindingRef = 'authority:' + 'y'.repeat(10000);
+    const receipt = parseToolExecutionReceipt(input);
+    input.authority.bindingRef = 'substituted';
+    input.observation.outcome = 'succeeded';
+    expect(receipt.invocationRef).toBe(input.invocationRef);
+    expect(receipt.authority.bindingRef).toBe('authority:' + 'y'.repeat(10000));
+    expect(receipt.observation.outcome).toBe('unknown');
+    expect(receipt.terminal).toBe(false);
+  });
+
+  it('does not upgrade legacy receipts or expose rejected payload values', () => {
+    expect(() => parseToolExecutionReceipt({ schemaVersion: 'tool-execution-receipt-v1',
+      handle: 'old-handle', ownerId: 'old-owner', state: 'running', terminal: false,
+      mode: 'auto', responseWindowMs: 5000, executionDeadlineMs: 601000 })).toThrow('Invalid tool execution receipt');
+    for (const receipt of [{ ...original(), result: 'synthetic-private-value' },
+      { ...original(), authority: { ...original().authority, credential: 'synthetic-private-value' } }]) {
+      expect(() => parseToolExecutionReceipt(receipt)).toThrow('Invalid tool execution receipt');
+      try { parseToolExecutionReceipt(receipt); } catch (error) {
+        expect(String(error)).not.toContain('synthetic-private-value');
+      }
+    }
+  });
+});
 
 it('EXEC-P003 control', async () => {
   const handler = vi.fn(async () => 'terminal');
