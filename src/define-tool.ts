@@ -17,6 +17,7 @@
 
 import { type ZodTypeAny } from 'zod';
 import { resolveToolExecutionContract } from './execution-contract';
+import { createToolBatchContract, resolveToolBatchDeclaration, type ToolBatchDeclaration } from './batch';
 import { tierFor } from './capability-tiers';
 import { factorInputSchema } from './compact-schema';
 import { toJsonSchema } from './schema-adapter';
@@ -312,6 +313,25 @@ function computeOutputEligibility(
     return { jsonSchema: js, eligibility: analyzeSchema(js) };
   } catch {
     return {};
+  }
+}
+
+/** Keep both registration paths on one operation-derived batch projection. */
+function projectBatchContract(
+  name: string,
+  args: StandardSchemaV1,
+  rawSchema: Record<string, unknown>,
+  batch: ToolBatchDeclaration,
+) {
+  try {
+    return createToolBatchContract(
+      batch.operation ?? args,
+      batch.operation ? toArgsJsonSchema(name, batch.operation) : rawSchema,
+      batch,
+      batch.legacy ? toArgsJsonSchema(name, batch.legacy.schema) : undefined,
+    );
+  } catch (error) {
+    throw new Error('Tool "' + name + '" batch contract: ' + (error instanceof Error ? error.message : String(error)), { cause: error });
   }
 }
 
@@ -1199,6 +1219,7 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
   const tier = tierFor(input.capability);
 
   const def: ToolDefinition<TArgs> = {
+    batch: resolveToolBatchDeclaration(input.batch),
     name,
     description,
     capability: input.capability,
@@ -1316,6 +1337,7 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
   const tier = tierFor(input.capability);
 
   const def: RoleToolDefinition<TArgs> = {
+    batch: resolveToolBatchDeclaration(input.batch),
     name,
     description,
     capability: input.capability,
@@ -3337,6 +3359,8 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
   // schemas (empty input schemas) — the built-in path fixed that.
   const rawSchema = toArgsJsonSchema(def.name, def.args);
   delete (rawSchema as Record<string, unknown>).$schema;
+  const batch = def.batch as ToolBatchDeclaration;
+  const batchContract = projectBatchContract(def.name, def.args, rawSchema, batch);
   const inputSchema = factorInputSchema(flattenForOpenAi(rawSchema)) as Record<string, unknown>;
   const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
   const readColumns = projectReadColumns(outputJsonSchema);
@@ -3514,6 +3538,8 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
   registerProjectedTool({
     pluginName: 'agent-mcp',
     builtinProvider: builtinToolProvider(),
+    batch,
+    batchContract,
     description: def.description,
     // Where this tool was defined (absolute, captured from the call stack).
     // Null when the stack was unreadable — never guessed.
@@ -3600,6 +3626,8 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
   const httpPath = `/api/agent-tools/${def.name.replaceAll(':', '/')}`;
   const rawSchema = toArgsJsonSchema(def.name, def.args);
   delete (rawSchema as Record<string, unknown>).$schema;
+  const batch = def.batch as ToolBatchDeclaration;
+  const batchContract = projectBatchContract(def.name, def.args, rawSchema, batch);
   const inputSchema = factorInputSchema(flattenForOpenAi(rawSchema)) as Record<string, unknown>;
   const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
   const readColumns = projectReadColumns(outputJsonSchema);
@@ -3739,6 +3767,8 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
   registerProjectedTool({
     pluginName: 'agent-mcp',
     builtinProvider: builtinToolProvider(),
+    batch,
+    batchContract,
     description: def.description,
     // Where this tool was defined (absolute, captured from the call stack).
     // Null when the stack was unreadable — never guessed.

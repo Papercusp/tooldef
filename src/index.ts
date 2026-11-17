@@ -14,6 +14,29 @@
  */
 
 /* ─── Wire + host seams ──────────────────────────────────────────────── */
+export {
+  BATCH_MAX_ITEMS,
+  BATCH_ITEM_ID_MAX_LENGTH,
+  BatchEnvelopeError,
+  resolveToolBatchDeclaration,
+  normalizeBatchRequest,
+  createToolBatchContract,
+  batchResultJsonSchema,
+} from './batch';
+export type {
+  BatchRequestItem,
+  BatchRequest,
+  NormalizedBatchItem,
+  NormalizedBatchRequest,
+  BatchItemStatus,
+  BatchItemResult,
+  BatchResult,
+  AdmittedBatchItem,
+  NativeBatchResult,
+  ToolBatchDeclaration,
+  ResolvedToolBatchDeclaration,
+  ToolBatchContract,
+} from './batch';
 export type {
   ToolResult,
   RolesQuota,

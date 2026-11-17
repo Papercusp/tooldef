@@ -20,6 +20,7 @@
 
 import { type ZodTypeAny } from 'zod';
 import { resolveToolExecutionContract } from './execution-contract';
+import { assertBatchOperationSchema, resolveToolBatchDeclaration, type ToolBatchContract, type ToolBatchDeclaration } from './batch';
 import type {
   EmitCallback,
   ProgressCallback,
@@ -1071,6 +1072,10 @@ export interface BuiltinToolProvider {
 }
 
 export interface ProjectedTool {
+  /** Shared bounded policy, including typed native execution after admission. */
+  batch?: ToolBatchDeclaration;
+  /** Operation-derived wire schemas and the single normalizer for every transport. */
+  batchContract?: ToolBatchContract;
   /** Normalized at registration; legacy/plugin omission uses request-bound auto. */
   execution?: import('./execution-contract').ToolExecutionDeclaration | import('./execution-contract').ToolExecutionContract;
   /** Owning plugin name. Built-in tools use 'agent-mcp' or similar. */
@@ -1667,6 +1672,15 @@ function assertNotShadowingCollision(
  */
 export function registerProjectedTool(tool: ProjectedTool): void {
   tool.execution = resolveToolExecutionContract(tool.execution);
+  tool.batch = resolveToolBatchDeclaration(tool.batch);
+  if (!tool.batchContract) {
+    try {
+      assertBatchOperationSchema(tool.inputSchema);
+    } catch (error) {
+      throw new ToolRegistrationError('Tool "' + (tool.expose.mcp?.name ?? tool.expose.http?.path) + '": ' +
+        (error instanceof Error ? error.message : String(error)));
+    }
+  }
   if (!tool.expose.http && !tool.expose.mcp) {
     throw new ToolRegistrationError(
       `tool from plugin "${tool.pluginName}" must declare at least one of expose.http / expose.mcp`,

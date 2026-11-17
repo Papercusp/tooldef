@@ -7,6 +7,7 @@ import type { ArgReencoding } from './reencode-args';
 import type { AgentRole } from './host-types';
 import type { z, ZodTypeAny } from 'zod';
 import type { StandardSchemaV1 } from './standard-schema';
+import type { ToolBatchDeclaration } from './batch';
 import type {
   AbortCompletionReceiptResolver,
   EventsSchema,
@@ -622,6 +623,8 @@ export interface ToolEmitSpec {
 
 /** Tool definition produced by `defineTool`. */
 export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV1> {
+  /** Framework batch policy; singleton handlers remain the business operation. */
+  batch?: ToolBatchDeclaration<StandardSchemaV1.InferOutput<TArgs>>;
   /** Tool name, e.g. `"tasks:list"`. Defaults to file-path-derived. */
   name: string;
   /** Resource-authorization hook (RFC tooldef-auth Phase 1b) — see `Authorizer`. */
@@ -759,6 +762,8 @@ export interface ToolDefinition<TArgs extends StandardSchemaV1 = StandardSchemaV
 
 /** Input shape for `defineTool` — same as ToolDefinition minus derived fields. */
 export interface ToolDefinitionInput<TArgs extends StandardSchemaV1 = StandardSchemaV1> {
+  /** Omission selects bounded sequential execution; no scalar-only opt-out. */
+  batch?: ToolBatchDeclaration<StandardSchemaV1.InferOutput<TArgs>>;
   /** Optional explicit name; defaults to file-path-derived. */
   name?: string;
   /** Resource-authorization hook (RFC tooldef-auth Phase 1b) — see `Authorizer`. */
@@ -920,6 +925,7 @@ export interface RoleToolDefinition<
   TArgs extends StandardSchemaV1 = StandardSchemaV1,
   TEvents extends EventsSchema = EventsSchema,
 > {
+  batch?: ToolBatchDeclaration<StandardSchemaV1.InferOutput<TArgs>>;
   name: string;
   /** Resource-authorization hook (RFC tooldef-auth Phase 1b) — see `Authorizer`. */
   authorize?: Authorizer<StandardSchemaV1.InferOutput<TArgs>, UnifiedToolContext, UnifiedToolContext['principal']>;
@@ -1191,6 +1197,7 @@ export interface RoleToolDefinitionInput<
   TArgs extends StandardSchemaV1 = StandardSchemaV1,
   TEvents extends EventsSchema = EventsSchema,
 > {
+  batch?: ToolBatchDeclaration<StandardSchemaV1.InferOutput<TArgs>>;
   name?: string;
   /** Resource-authorization hook (RFC tooldef-auth Phase 1b) — see `Authorizer`. */
   authorize?: Authorizer<StandardSchemaV1.InferOutput<TArgs>, UnifiedToolContext, UnifiedToolContext['principal']>;
