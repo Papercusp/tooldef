@@ -44,7 +44,7 @@ describe('shared bulk executor', () => {
   it('derives a merged failure even when the first envelope succeeded', async () => {
     const good = await runBulk([1], async id => ({ ok: true, id }));
     const bad = await runBulk([2], async id => ({ ok: false, id }));
-    expect(mergeBulkEnvelopes([good, bad])).toEqual({
+    expect(mergeBulkEnvelopes<{ ok: boolean; id: number }>([good, bad])).toEqual({
       ok: false, results: [{ ok: true, id: 1 }, { ok: false, id: 2 }],
       counts: { ok: 1, failed: 1 },
     });

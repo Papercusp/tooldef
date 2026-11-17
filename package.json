@@ -50,7 +50,8 @@
   },
   "devDependencies": {
     "@papercusp/test-config": "*",
-    "@typescript/native": "npm:typescript@7.0.2"
+    "@typescript/native": "npm:typescript@7.0.2",
+    "ajv": "^8.18.0"
   },
   "peerDependencies": {
     "@papercusp/chat-protocol": "*",
