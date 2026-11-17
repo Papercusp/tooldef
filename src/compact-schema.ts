@@ -190,8 +190,8 @@ const SUBSCHEMA_LIST_KEYS = new Set<string>(['anyOf', 'oneOf', 'allOf', 'prefixI
 const LOCATION_SENSITIVE_KEYS = new Set<string>([
   '$id', '$anchor', '$dynamicAnchor', '$dynamicRef', '$recursiveAnchor', '$recursiveRef',
 ]);
-/** Only a root or root-level-definition ref still resolves after its holder moves. */
-const MOVABLE_REF = /^#(?:\/(?:\$defs|definitions)\/[^/]+)?$/;
+/** Definition refs may cross nested operation envelopes; their authored paths stay put. */
+const MOVABLE_REF = /^#(?:\/(?:\$defs|definitions)\/[^/]+)*$/;
 /** Charge the complete definition and every reference; only positive net savings qualify. */
 const HOIST_MIN_SAVED_BYTES = 1;
 const HOIST_MAX_ROUNDS = 64;
@@ -215,7 +215,13 @@ interface SubschemaSite {
 }
 
 /** Collect every replaceable subschema below `node`; false when moving one would be unsafe. */
-function collectSites(node: JsonObject, nameHint: string, sites: SubschemaSite[]): boolean {
+function collectSites(
+  node: JsonObject,
+  nameHint: string,
+  sites: SubschemaSite[],
+  definitionParents: Set<JsonObject>,
+): boolean {
+  let ownsDefinitionPaths = Object.hasOwn(node, '$defs') || Object.hasOwn(node, 'definitions');
   for (const [key, value] of Object.entries(node)) {
     if (LOCATION_SENSITIVE_KEYS.has(key)) return false;
     if (key === '$ref' && (typeof value !== 'string' || !MOVABLE_REF.test(value))) return false;
@@ -228,20 +234,26 @@ function collectSites(node: JsonObject, nameHint: string, sites: SubschemaSite[]
         // one another. Candidate selection excludes the target's own body,
         // otherwise reusing a definition would replace it with a self-ref.
         sites.push({ holder: value, slot: name, node: child, nameHint: hint });
-        if (!collectSites(child, hint, sites)) return false;
+        if (!collectSites(child, hint, sites, definitionParents)) return false;
+        if (definitionParents.has(child)) ownsDefinitionPaths = true;
       }
     } else if (SUBSCHEMA_KEYS.has(key) && isJsonObject(value)) {
       sites.push({ holder: node, slot: key, node: value, nameHint });
-      if (!collectSites(value, nameHint, sites)) return false;
+      if (!collectSites(value, nameHint, sites, definitionParents)) return false;
+      if (definitionParents.has(value)) ownsDefinitionPaths = true;
     } else if (SUBSCHEMA_LIST_KEYS.has(key) && Array.isArray(value)) {
       for (let index = 0; index < value.length; index++) {
         const child = value[index];
         if (!isJsonObject(child)) continue;
         sites.push({ holder: value, slot: index, node: child, nameHint });
-        if (!collectSites(child, nameHint, sites)) return false;
+        if (!collectSites(child, nameHint, sites, definitionParents)) return false;
+        if (definitionParents.has(child)) ownsDefinitionPaths = true;
       }
     }
   }
+  // Moving a definition owner would remove the JSON Pointer addresses used by
+  // nested refs. Its ordinary descendants can still factor.
+  if (ownsDefinitionPaths) definitionParents.add(node);
   return true;
 }
 
@@ -308,8 +320,9 @@ function hoistRepeatedSubschemas(root: unknown, preserveCompactBudget = false): 
   const generatedDefinitions = new Set<string>();
   for (let round = 0; round < HOIST_MAX_ROUNDS; round++) {
     const sites: SubschemaSite[] = [];
+    const definitionParents = new Set<JsonObject>();
     // Only the untouched input can refuse: every ref this pass writes is movable.
-    if (!collectSites(root, 'schema', sites)) return root;
+    if (!collectSites(root, 'schema', sites, definitionParents)) return root;
     // Full-schema factoring can leave different refs whose bodies become equal
     // after metadata removal. Normalize aliases before comparing their parents,
     // charging each rewritten ref and preserving every authored definition key.
@@ -323,6 +336,7 @@ function hoistRepeatedSubschemas(root: unknown, preserveCompactBudget = false): 
     const memo = new Map<object, string>();
     const groups = new Map<string, SubschemaSite[]>();
     for (const site of sites) {
+      if (definitionParents.has(site.node)) continue;
       const text = jsonText(site.node, memo);
       const group = groups.get(text);
       if (group) group.push(site);

@@ -455,9 +455,15 @@ describe('verbatim-repeated subschemas are hoisted into $defs', () => {
   const resolve = (schema: any, node: any = schema): any => {
     if (Array.isArray(node)) return node.map((entry) => resolve(schema, entry));
     if (node === null || typeof node !== 'object') return node;
-    if (typeof node.$ref === 'string') return resolve(schema, schema.$defs[node.$ref.slice('#/$defs/'.length)]);
+    if (typeof node.$ref === 'string') {
+      const target = node.$ref.slice(2).split('/').reduce(
+        (value: any, part: string) => value[part.replace(/~1/g, '/').replace(/~0/g, '~')], schema,
+      );
+      return resolve(schema, target);
+    }
     return Object.fromEntries(
-      Object.entries(node).filter(([key]) => key !== '$defs').map(([key, value]) => [key, resolve(schema, value)]),
+      Object.entries(node).filter(([key]) => key !== '$defs' && key !== 'definitions')
+        .map(([key, value]) => [key, resolve(schema, value)]),
     );
   };
 
@@ -502,6 +508,32 @@ describe('verbatim-repeated subschemas are hoisted into $defs', () => {
     const scoped = { ...big(), $id: 'relative', description: 'Keep the original resolution scope.' };
     const input = { type: 'object', properties: { left: scoped, right: scoped } };
     expect(factorInputSchema(input)).toEqual(input);
+  });
+
+  it.each([
+    ['compact', compactInputSchema],
+    ['full', factorInputSchema],
+  ] as const)('factors %s envelopes without moving nested definition addresses', (_tier, project) => {
+    const operation = {
+      type: 'object',
+      properties: {
+        left: big(), right: big(),
+        decision: { $ref: '#/$defs/operation/$defs/decision' },
+      },
+      $defs: { decision: { type: 'string', enum: ['accept', 'decline'] } },
+    };
+    const input = {
+      allOf: [{ $ref: '#/$defs/operation' }],
+      $defs: { operation, duplicate: structuredClone(operation) },
+    };
+    const before = structuredClone(input);
+    const out = project(input) as any;
+    expect(out.$defs.operation.$defs).toHaveProperty('decision');
+    expect(out.$defs.duplicate.$defs).toHaveProperty('decision');
+    expect(resolve(out)).toEqual(resolve(input));
+    expect(Buffer.byteLength(JSON.stringify(out))).toBeLessThan(Buffer.byteLength(JSON.stringify(input)));
+    expect(project(out)).toEqual(out);
+    expect(input).toEqual(before);
   });
 
   it('aliases repeated definition bodies after metadata removal without losing names or creating self refs', () => {
