@@ -119,13 +119,12 @@ describe('registered schema factoring', () => {
     const tool = listAllProjectedTools().find((t) => t.expose.mcp?.name === name)!;
     const raw = toArgsJsonSchema(name, args);
     delete raw.$schema;
-    for (const schema of [tool.inputSchema, tool.discoveryInputSchema!]) {
-      expect(schema.$defs).toBeDefined();
-      expect(schema.required).toEqual(['left', 'right']);
-      expect((schema.properties as any).left).toEqual((schema.properties as any).right);
-      expect(JSON.stringify(schema)).toContain('The complete report, including the evidence references.');
-      expect(Buffer.byteLength(JSON.stringify(schema))).toBeLessThan(Buffer.byteLength(JSON.stringify(raw)));
-    }
+    const schema = tool.operationInputSchema!;
+    expect(schema.$defs).toBeDefined();
+    expect(schema.required).toEqual(['left', 'right']);
+    expect((schema.properties as any).left).toEqual((schema.properties as any).right);
+    expect(JSON.stringify(schema)).toContain('The complete report, including the evidence references.');
+    expect(Buffer.byteLength(JSON.stringify(schema))).toBeLessThan(Buffer.byteLength(JSON.stringify(raw)));
     expect(args.safeParse({ left: { title: 'L', refs: [] }, right: { title: 'R', refs: [] } }).success).toBe(true);
     expect(args.safeParse({ left: { title: '', refs: [] }, right: { title: 'R', refs: [] } }).success).toBe(false);
   });

@@ -10,6 +10,7 @@
  */
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
+import Ajv2020 from 'ajv/dist/2020';
 import { defineTool } from './define-tool';
 import { dispatchProjectedTool, type DispatchProjectedDeps } from './dispatch-projected';
 import {
@@ -31,6 +32,9 @@ import {
 
 // These assertions inspect the negotiated operation payload, including its metadata.
 const DEPS: DispatchProjectedDeps = { batchResponseVersion: 'operation-v0' };
+
+const operationAdvertisement = (name: string) =>
+  advertisedArgsSchema(name, lookupByMcpName(name)!.operationInputSchema!);
 
 const ctx = (over: Partial<UnifiedToolContext> = {}): UnifiedToolContext => ({
   log: vi.fn(),
@@ -99,7 +103,7 @@ describe('positional write shim — end-to-end (P-008/P-009)', () => {
     // The transport handlers run the registered inputSchema through
     // advertisedArgsSchema before serving tools/list (post-manifest).
     const listing = listMcpProjections().find((l) => l.name === 'wi:set_state')!;
-    const advertised = advertisedArgsSchema('wi:set_state', listing.inputSchema as Record<string, unknown>);
+    const advertised = operationAdvertisement(listing.name);
     const props = (advertised as { properties?: Record<string, unknown> }).properties ?? {};
     expect(Object.keys(props)).toEqual(['row']);
     expect((props.row as { description?: string }).description).toContain('id, state, harness?');
@@ -225,7 +229,7 @@ describe('positional write shim — end-to-end (P-008/P-009)', () => {
     ]);
 
     const listing = listMcpProjections().find((l) => l.name === 'wi:bulk_set_state')!;
-    const advertised = advertisedArgsSchema('wi:bulk_set_state', listing.inputSchema as Record<string, unknown>);
+    const advertised = operationAdvertisement(listing.name);
     const oneOf = (advertised as { oneOf?: unknown[] }).oneOf;
     expect(oneOf).toHaveLength(2);
     expect(((oneOf![0] as { properties?: Record<string, unknown> }).properties?.row as { description?: string }).description).toContain(
@@ -257,7 +261,7 @@ describe('positional write shim — end-to-end (P-008/P-009)', () => {
   it('a non-registry tool keeps its keyed args schema', () => {
     defineSetState('wi:set_state5'); // not configured
     const listing = listMcpProjections().find((l) => l.name === 'wi:set_state5')!;
-    const props = (listing.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+    const props = (lookupByMcpName(listing.name)!.operationInputSchema?.properties as Record<string, unknown>) ?? {};
     expect(Object.keys(props).sort()).toEqual(['harness', 'id', 'state']);
   });
 
@@ -321,7 +325,7 @@ describe('anti-desync: legend columns === wire columns (P-011)', () => {
     const legend = renderWireSchemas(listPrePromptEntries(), (e) =>
       e.name === 'wi:rlist'
         ? { read: projectReadColumns(rTool.outputJsonSchema) }
-        : { write: projectWriteColumns(wTool.inputSchema as Record<string, unknown>) },
+        : { write: projectWriteColumns(wTool.operationInputSchema) },
     );
     expect(legend).toContain('read → id:id, state:todo|done');
     expect(legend).toContain('write ← id:id, state:todo|done');
@@ -333,7 +337,7 @@ describe('anti-desync: legend columns === wire columns (P-011)', () => {
     expect((rr.result!.content[0] as { text: string }).text).toBe('format: csv\n[1]\nWI-1,todo');
 
     // WRITE: the shim reconstructs by the SAME column order, end-to-end.
-    const writeCols = projectWriteColumns(wTool.inputSchema as Record<string, unknown>)!;
+    const writeCols = projectWriteColumns(wTool.operationInputSchema)!;
     expect(writeCols.map((c) => c.name)).toEqual(['id', 'state']);
     expect(reconstructArgs('WI-9,done', writeCols)).toEqual({ ok: true, args: { id: 'WI-9', state: 'done' } });
     const r = await dispatchProjectedTool(wTool, 'wi:wstate', { row: 'WI-9,done' }, ctx(), DEPS);
@@ -433,7 +437,8 @@ describe('robustness — no collateral damage + graceful failure', () => {
     // Advertise stays keyed (projectWriteColumns rejects the array arg).
     const listing = listMcpProjections().find((l) => l.name === 'rb:arrayarg')!;
     const advertised = advertisedArgsSchema('rb:arrayarg', listing.inputSchema as Record<string, unknown>);
-    expect((advertised as { properties?: Record<string, unknown> }).properties).toHaveProperty('to');
+    expect(advertised).toBe(listing.inputSchema);
+    expect(new Ajv2020({ strict: false }).compile(advertised)({ to: ['x'], note: 'hi' })).toBe(true);
     // And a keyed call still works (shim sees no derivable cols → passes through).
     const r = await dispatchProjectedTool(lookupByMcpName('rb:arrayarg')!, 'rb:arrayarg', { to: ['x'], note: 'hi' }, ctx(), DEPS);
     expect(r.ok).toBe(true);
@@ -446,7 +451,27 @@ describe('robustness — no collateral damage + graceful failure', () => {
     const listing = listMcpProjections().find((l) => l.name === 'rb:idem')!;
     const once = advertisedArgsSchema('rb:idem', listing.inputSchema as Record<string, unknown>);
     const twice = advertisedArgsSchema('rb:idem', once);
-    expect(Object.keys((twice as { properties?: Record<string, unknown> }).properties ?? {})).toEqual(['row']);
+    expect(twice).toBe(once);
+    expect(new Ajv2020({ strict: false }).compile(twice)({ row: 'WI-1,passed' })).toBe(true);
+  });
+
+  it('advertises and executes positional and keyed children within one canonical batch', async () => {
+    const tool = defineSetState('rb:batch-positional');
+    configurePrePromptRegistry([{ name: 'rb:batch-positional', write: 'positional' }]);
+    const listing = listMcpProjections().find(row => row.name === 'rb:batch-positional')!;
+    const schema = advertisedArgsSchema(listing.name, listing.inputSchema);
+    const input = { _batch: 1, items: [
+      { itemId: 'row', args: { row: 'WI-12,passed' } },
+      { itemId: 'keyed', args: { id: 'WI-13', state: 'failing' } },
+    ] };
+    const validate = new Ajv2020({ strict: false }).compile(schema);
+    expect(validate(input)).toBe(true);
+    expect(validate({ row: 'WI-12,passed' })).toBe(true);
+    expect(validate({ _batch: 1, items: [] })).toBe(false);
+    const result = await dispatchProjectedTool(lookupByMcpName(listing.name)!, listing.name, input, ctx(), {});
+    expect(result.result?.structuredContent).toMatchObject({ ok: true, counts: { ok: 2, failed: 0 },
+      results: [{ itemId: 'row', ok: true }, { itemId: 'keyed', ok: true }] });
+    expect(tool.received()).toEqual({ id: 'WI-13', state: 'failing' });
   });
 });
 

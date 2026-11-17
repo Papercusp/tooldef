@@ -271,9 +271,17 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     // must preserve that definitive result so the orchestration reports a semantic child
     // failure, rather than converting it into an uncertain dispatch timeout.
     let childStarted = false;
-    const bash = mkTool('capability:bash', 'write', async () => {
+    let childAborted = false;
+    const bash = mkTool('capability:bash', 'write', async (_args, childCtx) => {
       childStarted = true;
-      await new Promise((resolve) => setTimeout(resolve, 5_100));
+      // Settle in response to cancellation, as the real process handler does.
+      // A timer relative to child arrival can miss the parent's grace deadline
+      // by however long worker startup and RPC admission took.
+      await new Promise<void>((resolve) => {
+        const onAbort = () => { childAborted = true; resolve(); };
+        if (childCtx.signal.aborted) onAbort();
+        else childCtx.signal.addEventListener('abort', onAbort, { once: true });
+      });
       return {
         content: [{ type: 'text', text: 'command killed' }],
         structuredContent: { ok: false, status: 'killed', exit_code: null },
@@ -296,6 +304,7 @@ describe('runToolOrchestration (B-CX-2A — code:run core, real dispatcher)', ()
     expect(r.ok).toBe(false);
     expect(r.error).toContain('script_timeout');
     expect(childStarted).toBe(true);
+    expect(childAborted).toBe(true);
     expect(r.dispatchCount).toBe(1);
     expect(r.childFailures).toEqual([
       {

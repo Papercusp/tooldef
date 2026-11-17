@@ -109,7 +109,7 @@ describe('defineTool schema projections', () => {
     expect(projected?.inputSchema.anyOf).toBeUndefined();
     expect(projected?.inputSchema.required).toBeUndefined();
 
-    expect(projected?.discoveryInputSchema?.anyOf).toEqual(
+    expect(projected?.operationInputSchema?.anyOf).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ required: expect.arrayContaining(['path']) }),
         expect.objectContaining({ required: expect.arrayContaining(['sha']) }),

@@ -1135,6 +1135,8 @@ export interface ProjectedTool {
    * top-level `oneOf`/`anyOf`.
    */
   inputSchema: Record<string, unknown>;
+  /** Original handler input for operation-only adapters such as positional writes. */
+  operationInputSchema?: Record<string, unknown>;
   /**
    * Full JSON Schema for discovery/introspection surfaces. This preserves
    * branch-specific requirements that `inputSchema` must relax for strict
@@ -2599,7 +2601,7 @@ export function listMcpProjections(
     // arrays, so we only emit the spec-standard `outputSchema` for object-rooted
     // shapes; the array/list case advertises capability via the `resultFormats`
     // extension below (which the SDK tolerates as an unknown field).
-    const outputSchema = mcpObjectOutputSchema(tool.outputJsonSchema);
+    const outputSchema = mcpObjectOutputSchema(tool.batchContract?.resultJsonSchema ?? tool.outputJsonSchema);
     if (outputSchema) listing.outputSchema = outputSchema;
     if (tool.resultEligibility) {
       const formats = [...tool.resultEligibility.capabilities] as McpToolListing['resultFormats'];

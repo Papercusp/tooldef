@@ -11,7 +11,7 @@ import {
 import { defineTool } from './define-tool';
 import { toJsonSchema } from './schema-adapter';
 import { standardValidate, type StandardSchemaV1 } from './standard-schema';
-import { lookupByMcpName, registerProjectedTool } from './tool-projection';
+import { listMcpProjections, lookupByMcpName, registerProjectedTool } from './tool-projection';
 import { dispatchProjectedTool } from './dispatch-projected';
 import type { ProjectedTool, UnifiedToolContext } from './tool-projection';
 import type { BatchResult } from './batch';
@@ -581,6 +581,49 @@ describe('operation-derived batch schemas and registration', () => {
     registerProjectedTool(tool);
     expect(lookupByMcpName('batch-test:plugin')?.batch).toMatchObject({ maxItems: 100, maxConcurrency: 1 });
     expect(() => registerProjectedTool({ ...tool, batch: { maxConcurrency: 2 } })).toThrow(/independent/);
+  });
+
+  it.each([false, true])('publishes batch and permanent operation inputs with exact MCP limits (principal=%s)', (principal) => {
+    const name = 'batch-test:published-' + principal;
+    const args = z.strictObject({ key: z.string(), items: z.array(z.string()).optional() });
+    const definition = { name, capability: 'test:read', args, batch: { maxItems: 2 },
+      handler: async () => ({ data: { key: 'business-output' } }) };
+    if (principal) defineTool(definition);
+    else defineTool({ ...definition, requirePrincipal: false });
+    const tool = lookupByMcpName(name)!;
+    const listing = listMcpProjections().find(row => row.name === name)!;
+    const singleton = { key: 'a', items: ['business'] };
+    const item = { itemId: 'a', args: singleton };
+    for (const schema of [tool.inputSchema, tool.discoveryInputSchema!, listing.inputSchema]) {
+      const validate = ajv().compile(schema);
+      expect(validate(singleton)).toBe(true);
+      expect(validate({ _batch: 1, items: [item] })).toBe(true);
+      expect(validate({ _batch: 1, items: item })).toBe(true);
+    }
+    const exact = ajv().compile(listing.inputSchema);
+    for (const input of [{ _batch: 2, items: [item] }, { _batch: 1, items: [] },
+      { _batch: 1, items: [item, item, item] }, { _batch: 1, items: [item], extra: true }]) {
+      expect(exact(input)).toBe(false);
+    }
+    expect(listing.outputSchema).toEqual(tool.batchContract!.resultJsonSchema);
+    expect(tool.inputSchema.anyOf).toBeUndefined();
+    expect(tool.inputSchema.allOf).toBeUndefined();
+    expect((tool.inputSchema.properties as any).key).toBeDefined();
+  });
+
+  it('publishes nested recursive operation refs without losing singleton validation', () => {
+    const node: z.ZodType = z.lazy(() => z.strictObject({ key: z.string(), children: z.array(node).optional() }));
+    const args = z.strictObject({ tree: node });
+    defineTool({ name: 'batch-test:published-recursive', requirePrincipal: false, capability: 'test:read', args,
+      handler: async () => ({ content: [] }) });
+    const tool = lookupByMcpName('batch-test:published-recursive')!;
+    for (const schema of [tool.inputSchema, tool.discoveryInputSchema!]) {
+      const validate = ajv().compile(schema);
+      const value = { tree: { key: 'parent', children: [{ key: 'child' }] } };
+      expect(validate(value)).toBe(true);
+      expect(validate({ _batch: 1, items: [{ args: value }] })).toBe(true);
+      expect(validate({ _batch: 1, items: [{ args: { tree: { key: 3 } } }] })).toBe(false);
+    }
   });
 
   it('rejects scalar-only registration before polluting either catalog and names the tool', () => {

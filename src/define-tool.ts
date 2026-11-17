@@ -336,6 +336,37 @@ function projectBatchContract(
   }
 }
 
+/** Strict clients cannot accept a root union. Publish its property superset;
+ * discovery retains the exact union and child validation remains authoritative.
+ * The operation definitions already have their local references rebased. */
+function projectBatchInputSchema(contract: ReturnType<typeof projectBatchContract>): Record<string, unknown> {
+  const schema = contract.requestJsonSchema;
+  const definitions = schema.$defs as Record<string, Record<string, unknown>>;
+  const variants = [
+    (schema.anyOf as Record<string, unknown>[])[0],
+    flattenForOpenAi(definitions.operation),
+    ...(definitions.legacy ? [flattenForOpenAi(definitions.legacy)] : []),
+  ];
+  const flattened = flattenForOpenAi({ ...schema, anyOf: variants });
+  const properties = { ...(flattened.properties as Record<string, unknown>) };
+  // A business field called items is still a valid singleton field. Neither
+  // branch may hide the other's shape in the relaxed strict-client schema.
+  const byName = new Map<string, unknown[]>();
+  for (const variant of variants) {
+    for (const [name, property] of Object.entries((variant.properties ?? {}) as Record<string, unknown>)) {
+      const candidates = byName.get(name) ?? [];
+      if (!candidates.some(candidate => JSON.stringify(candidate) === JSON.stringify(property))) candidates.push(property);
+      byName.set(name, candidates);
+    }
+  }
+  for (const [name, candidates] of byName) {
+    if (candidates.length > 1) properties[name] = { anyOf: candidates };
+  }
+  return factorInputSchema({ ...flattened, properties,
+    ...(variants.some(variant => variant.additionalProperties !== false) ? { additionalProperties: true } : {}),
+  }) as Record<string, unknown>;
+}
+
 /**
  * Build the MCP `ToolResult` from a handler's `ToolResponse` using format-aware
  * serialization (P-005/P-006). The chosen format follows the request context
@@ -3362,7 +3393,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
   delete (rawSchema as Record<string, unknown>).$schema;
   const batch = def.batch as ToolBatchDeclaration;
   const batchContract = projectBatchContract(def.name, def.args, rawSchema, batch);
-  const inputSchema = factorInputSchema(flattenForOpenAi(rawSchema)) as Record<string, unknown>;
+  const inputSchema = projectBatchInputSchema(batchContract);
   const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
   const readColumns = projectReadColumns(outputJsonSchema);
   const prepareInvocation = async (input: unknown, ctx: UnifiedToolContext): Promise<PreparedToolInvocation> => {
@@ -3561,9 +3592,8 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     // the bundle (bundle-definition-site.ts). Absent everywhere else.
     ...(definitionSite.bundled ? { bundledDefinitionSite: definitionSite.bundled } : {}),
     inputSchema,
-    // Keep the complete branch requirements for discovery/introspection while
-    // retaining the flattened schema above for strict OpenAI/MCP callers.
-    discoveryInputSchema: factorInputSchema(rawSchema) as Record<string, unknown>,
+    operationInputSchema: factorInputSchema(rawSchema) as Record<string, unknown>,
+    discoveryInputSchema: factorInputSchema(batchContract.requestJsonSchema) as Record<string, unknown>,
     capabilities: [def.capability as never],
     effect: def.effect,
     effectForCall: def.effectForCall as ((args: unknown) => 'read' | 'write') | undefined,
@@ -3641,7 +3671,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
   delete (rawSchema as Record<string, unknown>).$schema;
   const batch = def.batch as ToolBatchDeclaration;
   const batchContract = projectBatchContract(def.name, def.args, rawSchema, batch);
-  const inputSchema = factorInputSchema(flattenForOpenAi(rawSchema)) as Record<string, unknown>;
+  const inputSchema = projectBatchInputSchema(batchContract);
   const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
   const readColumns = projectReadColumns(outputJsonSchema);
   const prepareInvocation = async (input: unknown, ctx: UnifiedToolContext): Promise<PreparedToolInvocation> => {
@@ -3804,7 +3834,8 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     inputSchema,
     // Keep the complete branch requirements for discovery/introspection while
     // retaining the flattened schema above for strict OpenAI/MCP callers.
-    discoveryInputSchema: factorInputSchema(rawSchema) as Record<string, unknown>,
+    operationInputSchema: factorInputSchema(rawSchema) as Record<string, unknown>,
+    discoveryInputSchema: factorInputSchema(batchContract.requestJsonSchema) as Record<string, unknown>,
     capabilities: [def.capability as never],
     effect: def.effect,
     effectForCall: def.effectForCall as ((args: unknown) => 'read' | 'write') | undefined,

@@ -138,10 +138,7 @@ describe('end-to-end format selection through defineTool', () => {
     expect([...(tool.resultEligibility?.capabilities ?? [])].sort()).toEqual(['csv', 'json', 'md', 'toon', 'tsv']);
   });
 
-  it('tools/list advertises resultFormats always but outputSchema ONLY for object-rooted shapes', () => {
-    // MCP `outputSchema` must be an object-typed JSON Schema (the SDK rejects a
-    // tools/list otherwise). A bare-array list tool must therefore advertise its
-    // capability via resultFormats but NOT emit an array-rooted outputSchema.
+  it('tools/list advertises the batch object while retaining operation resultFormats', () => {
     defineListTool('fmt:arrlist', { result: z.array(z.object({ id: z.number(), name: z.string() })) });
     defineTool({
       name: 'fmt:objtool',
@@ -154,8 +151,8 @@ describe('end-to-end format selection through defineTool', () => {
     const listings = listMcpProjections();
     const arr = listings.find((l) => l.name === 'fmt:arrlist')!;
     const obj = listings.find((l) => l.name === 'fmt:objtool')!;
-    // Array list tool: no outputSchema (would be array-rooted), but resultFormats present.
-    expect(arr.outputSchema).toBeUndefined();
+    expect(arr.outputSchema).toEqual(lookupByMcpName('fmt:arrlist')!.batchContract!.resultJsonSchema);
+    expect(mcpObjectOutputSchema(lookupByMcpName('fmt:arrlist')!.outputJsonSchema)).toBeUndefined();
     expect(arr.resultFormats).toEqual(['json', 'toon', 'csv', 'tsv', 'md']);
     // Mirrored onto _meta so it survives strict SDK validation.
     expect(arr._meta?.['papercusp/resultFormats']).toEqual(['json', 'toon', 'csv', 'tsv', 'md']);
@@ -164,7 +161,7 @@ describe('end-to-end format selection through defineTool', () => {
     expect(obj.resultFormats).toEqual(['json']);
   });
 
-  it('tools/list advertises a union-of-objects result (every branch kept) but never a union with a non-object branch', () => {
+  it('retains every business union branch underneath the canonical batch output', () => {
     // A state-discriminated union projects to a type-less root `anyOf`. Every
     // instance is still a JSON object, so it must reach MCP clients — before
     // WI-10002937 the `type === 'object'` gate silently dropped it.
@@ -190,10 +187,12 @@ describe('end-to-end format selection through defineTool', () => {
     const listings = listMcpProjections();
     const union = listings.find((l) => l.name === 'fmt:unionobj')!;
     expect(union.outputSchema?.type).toBe('object');
-    const branches = (union.outputSchema?.anyOf ?? union.outputSchema?.oneOf) as unknown[];
+    const operationSchema = mcpObjectOutputSchema(lookupByMcpName('fmt:unionobj')!.outputJsonSchema)!;
+    const branches = (operationSchema.anyOf ?? operationSchema.oneOf) as unknown[];
     expect(branches).toHaveLength(2);
-    expect(JSON.stringify(union.outputSchema)).toContain('"ready"');
-    expect(listings.find((l) => l.name === 'fmt:unionmixed')!.outputSchema).toBeUndefined();
+    expect(JSON.stringify(operationSchema)).toContain('"ready"');
+    expect(listings.find((l) => l.name === 'fmt:unionmixed')!.outputSchema?.type).toBe('object');
+    expect(mcpObjectOutputSchema(lookupByMcpName('fmt:unionmixed')!.outputJsonSchema)).toBeUndefined();
     expect(mcpObjectOutputSchema({ type: 'array', items: { type: 'object' } })).toBeUndefined();
   });
 
