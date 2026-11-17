@@ -34,6 +34,7 @@ describe('batch coordinator through ordinary child dispatch', () => {
   const invoke = async (tool: ProjectedTool, input: unknown, ctx = context()) => {
     const result = await dispatchProjectedTool(tool, 'batch-fixture:write', input, ctx, {});
     expect(result.ok).toBe(true);
+    expect(result.result?.structuredContent).toMatchObject({ results: expect.any(Array) });
     return result.result!.structuredContent as unknown as BatchResult;
   };
 
