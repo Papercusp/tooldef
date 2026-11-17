@@ -37,7 +37,7 @@ describe('batch coordinator through ordinary child dispatch', () => {
     return result.result!.structuredContent as unknown as BatchResult;
   };
 
-  it('preserves equivalent singleton and one-item outputs and effects', async () => {
+  it('UTB-singleton-parity preserves equivalent singleton and one-item outputs and effects', async () => {
     const effects: unknown[] = [];
     const tool = fixture(async args => {
       effects.push(args);
@@ -85,14 +85,20 @@ describe('batch coordinator through ordinary child dispatch', () => {
     expect(onDispatchStart).not.toHaveBeenCalled();
   });
 
-  it('preserves a valid business items array as one dispatched operation', async () => {
-    const schema = z.strictObject({ items: z.array(operation) });
+  it('UTB-business-array preserves an ambiguous business items array as one operation', async () => {
+    const schema = z.strictObject({
+      items: z.array(z.strictObject({ args: operation })),
+      args: z.string().optional(),
+    });
     const fn = vi.fn(async (_args: unknown) => ({ content: [] }));
-    const args = { items: [{ key: 'a' }, { key: 'b' }] };
-    const data = await invoke(fixture(fn, schema), args);
-    expect(data.results).toHaveLength(1);
-    expect(fn).toHaveBeenCalledOnce();
-    expect(fn.mock.calls[0]?.[0]).toEqual(args);
+    const args = { items: [{ args: { key: 'a' } }, { args: { key: 'b' } }], args: 'business metadata' };
+    const tool = fixture(fn, schema);
+    const flat = await invoke(tool, args);
+    const marked = await invoke(tool, { _batch: 1, items: [{ args }] });
+    expect(flat.results).toHaveLength(1);
+    expect(flat.results).toEqual(marked.results);
+    expect(fn).toHaveBeenCalledTimes(2);
+    expect(fn.mock.calls.map(([input]) => input)).toEqual([args, args]);
   });
 
   it('negotiates an exact operation result independently of singleton or envelope syntax', async () => {
