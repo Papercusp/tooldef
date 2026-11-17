@@ -46,7 +46,8 @@ describe('original invocation observation', () => {
   for (const invalid of [null, '', '   ']) it('refuses an invalid persisted reference before effects: ' + String(invalid), async () => {
     const { inline, handler } = fixture();
     const observation = observer();
-    observation.begin.mockResolvedValue(invalid as never);
+    // Deliberately invalid persisted references: the cast names the real resolved type.
+    observation.begin.mockResolvedValue(invalid as unknown as Awaited<ReturnType<NonNullable<DispatchProjectedDeps['invocationObserver']>['begin']>>);
     expect(await inline({}, { invocationObserver: observation })).toMatchObject({
       ok: false, error: { code: 'execution_observation_unavailable' },
     });
