@@ -77,7 +77,7 @@ import {
 import { evaluateDataCondition } from '@papercusp/rules';
 import type { ToolPreInvokeEvent, ToolRequireSpec } from './requires';
 import { applyWorkspaceTxContract } from './workspace-tx';
-import { createPhaseTracker, type PhaseInterval, type PhaseTracker } from './phase-tracker';
+import { createPhaseTracker, trackPhase, type PhaseInterval, type PhaseTracker } from './phase-tracker';
 import { prepareDispatchPremises } from './dispatch-premises';
 import { dispatchWithToolExecution, selectToolExecution, type ToolExecutionReceipt, type ToolExecutionRefusal } from './execution-contract';
 import { type BatchItemResult, type BatchResult, type NativeBatchResult } from './batch';
@@ -1091,7 +1091,7 @@ const invokeStep: DispatchStep = {
         const observer = deps.invocationObserver;
         if (observer) {
           try {
-            const ref = await observer.begin(original);
+            const ref = await trackPhase(handlerCtx.phases, 'invoke.observer-begin', () => observer.begin(original));
             if (typeof ref !== 'string' || !ref.trim()) return observationUnavailable();
             invocationRef = ref;
             exec.invocationRef = ref;
@@ -1100,13 +1100,19 @@ const invokeStep: DispatchStep = {
         let observedResult: ToolResult | null = null;
         let observedError: unknown = null;
         try {
-          const dispatched = await dispatchWithToolExecution(tool.execution, request, {
+          const dispatchExecution = () => dispatchWithToolExecution(tool.execution, request, {
             ...budgets, requestAborted: exec.abort.signal.aborted,
           }, {
             ownerId: handlerCtx.uiClientId ?? handlerCtx.principal?.slug ?? handlerCtx.spawnId ?? handlerCtx.runId,
             inline: invoke,
             adapter: deps.executionAdapter?.({ tool, toolName, input, ctx: handlerCtx, invoke }),
           });
+          // The host phase encloses observation, runtime admission and the handler.
+          // Retain their intervals on the existing tracker so overlapping wall time
+          // is unioned, and a slow observer cannot masquerade as handler latency.
+          const dispatched = observer || deps.aroundInvoke
+            ? await trackPhase(handlerCtx.phases, 'invoke.execution', dispatchExecution)
+            : await dispatchExecution();
           if (!dispatched.ok) {
             executionRefusal = dispatched;
             return { isError: true, content: [{ type: 'text', text: dispatched.reason }] };
@@ -1121,16 +1127,17 @@ const invokeStep: DispatchStep = {
           throw error;
         } finally {
           if (invocationRef && observer) {
-            try { await observer.settle({ ...original, invocationRef,
+            try { await trackPhase(handlerCtx.phases, 'invoke.observer-settle', () => observer.settle({ ...original, invocationRef,
               result: observedResult, receipt: receipt ?? null,
-              error: observedError, refusal: executionRefusal ?? null }); }
+              error: observedError, refusal: executionRefusal ?? null })); }
             catch { observationUnavailable(); }
           }
         }
       });
-      let result = deps.aroundInvoke
-        ? await deps.aroundInvoke({ tool, toolName, input, ctx: handlerCtx, callId: exec.callId,
-          authorization: exec.authorization, invoke: execute })
+      const aroundInvoke = deps.aroundInvoke;
+      let result = aroundInvoke
+        ? await trackPhase(handlerCtx.phases, 'invoke.host-wrapper', () => aroundInvoke({ tool, toolName, input, ctx: handlerCtx, callId: exec.callId,
+          authorization: exec.authorization, invoke: execute }))
         : await execute();
       if (observationFailure) return observationFailure;
       if (executionRefusal) return refusalResult(executionRefusal);
