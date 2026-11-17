@@ -51,6 +51,7 @@ import {
   type ProjectedToolCorrectiveCall,
   type ProjectedToolArgRedirect,
   type ProjectedTool,
+  type PreparedToolInvocation,
   type ToolFn,
   type ToolExposure,
   type UnifiedToolContext,
@@ -3364,7 +3365,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
   const inputSchema = factorInputSchema(flattenForOpenAi(rawSchema)) as Record<string, unknown>;
   const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
   const readColumns = projectReadColumns(outputJsonSchema);
-  const projectedFn: ToolFn = async (input, ctx) => {
+  const prepareInvocation = async (input: unknown, ctx: UnifiedToolContext): Promise<PreparedToolInvocation> => {
     // The dispatch stack may expose `tx` as a fail-loud getter for tools that
     // did not declare `needsWorkspaceTx`. Never probe that property directly:
     // the descriptor-aware helper returns only a real bound transaction.
@@ -3455,84 +3456,95 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     const disclose = async (result: ToolResult | Promise<ToolResult>): Promise<ToolResult> =>
       attachCorrectedDisclosure(await result, corrections);
     const callEffect = def.effectForCall?.(parsed.value) ?? def.effect;
-    const response = await def.handler(parsed.value, legacyCtx);
-    const explicitFullRequest = isExplicitFullPayloadRequest(callTier, ctx);
-    // A raw ToolResult (MCP content shape) normally passes through untouched —
-    // parity with the role-gated wrapper below. EXCEPT: on the agent-facing MCP
-    // transport, a single-text-item JSON body whose shape TOON shrinks is
-    // transparently re-encoded for the token win (P-002). The narrow guards in
-    // `reencodableJsonPayload` keep this off every NON-mcp transport, so the
-    // memory:* family + the TUI Memory tab (which read content[0].text as the
-    // handler's own JSON over a non-mcp transport) are byte-for-byte unchanged
-    // — preserving the contract a past blanket re-encode broke
-    // (memory-taxonomy-and-debt-followups P-006).
-    if (isHybridToolResponse(response)) {
-      const marked = markExplicitFullRawResult(response, explicitFullRequest);
-      return disclose(serializeHybridToolResponse(marked, ctx, eligibility, def, readColumns, parsed.value));
-    }
-    let tierInput = response as ToolResponse;
-    let reencodedRawResultMeta: Record<string, unknown> | undefined;
-    if (response && typeof response === 'object' && Array.isArray((response as ToolResult).content)) {
-      const marked = markExplicitFullRawResult(response as ToolResult, explicitFullRequest);
-      const reencodable = reencodableJsonPayload(marked, ctx, { acceptPlainObject: def.shape !== undefined });
-      if (reencodable === undefined) return disclose(attachRequestedStructuredContent(marked, ctx, def));
-      const reencoded = { data: reencodable, ...(explicitFullRequest ? { explicitFullRequest: true } : {}) };
-      if (def.shape === undefined) {
-        return disclose(
-          serializeProjectedResult(reencoded, ctx, eligibility, def, readColumns, parsed.value)
-            .then((serialized) => mergeReencodedRawResultMetadata(serialized, marked._meta)),
-        );
-      }
-      // A tool that DECLARES a shape gets it on its raw-content branches too: fall
-      // through into applyPayloadTier exactly like a `{ data }` result. Returning
-      // here (the old behavior) silently voided the shape (WI-6554700010008923).
-      reencodedRawResultMeta = marked._meta;
-      tierInput = reencoded;
-    }
-    // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
-    // the session/call tier before format-aware serialization. Unshaped tools
-    // pass through byte-identical.
-    const shaped = applyPayloadTier({
-      toolName: def.name,
-      effect: callEffect,
-      shape: def.shape,
-      response: tierInput,
-      // WI-37843: a tool may opt OUT of routine per-session shaping, in which
-      // case the session tier is discarded and an un-overridden call resolves
-      // to 'full'. An explicit per-call payloadTier still wins either way.
-      tier:
-        ctx.requestedStructured === true
-          ? 'full'
-          : resolvePayloadTier(callTier, ctx.contextTier, {
-              ignoreSessionTier: def.ignoreSessionPayloadTier,
-            }),
-      // A caller-selected full tier is the documented escape hatch out of
-      // shaping AND the hard ceiling (WI-5078): it can arrive as a per-call
-      // payloadTier:'full', an explicit ctx_tier=full choice, or a structured
-      // content request (which also requires schema-valid raw data).
-      // The latter must be stamped too, because the downstream result-door
-      // sees only serialized metadata and otherwise generically re-projects
-      // the raw body (EI-22586965566163070). A ctx-borne
-      // `transportCapExempt` consumer (code:run's inner dispatch — the result
-      // never reaches an agent's context) gets the same exemption
-      // (EI-18719561823587590).
-      explicitFullRequest,
-      deferHardCeilingToResultDoor: ctx.transport === 'mcp',
-      // WI-37843: a tool may raise its OWN hard ceiling (coord:orient, the
-      // session-bootstrap read, whose full payload IS the value). Absent ⇒ the
-      // shared PAYLOAD_TIER_HARD_CEILING_CHARS, unchanged for every other tool.
-      ceilingChars: def.payloadTierCeilingChars,
+    return {
       args: parsed.value,
-      sourceProjection: ctx.sourceProjection,
-      log: (m) => ctx.log(m),
-      // EI-20720054720826414: the host's executable raw-dispatch spelling for
-      // the recovery `next` — absent ⇒ the generic host-neutral wording.
-      rawDispatchTemplate: ctx.rawDispatchTemplate,
-    });
-    return disclose(
-      serializeProjectedResult(shaped, ctx, eligibility, def, readColumns, parsed.value)
-        .then((serialized) => mergeReencodedRawResultMetadata(serialized, reencodedRawResultMeta)),
-    );
+      ctx: legacyCtx as unknown as UnifiedToolContext,
+      invoke: () => def.handler(parsed.value, legacyCtx),
+      finalize: async rawResponse => {
+        const response = batch.result ? batch.result(rawResponse, parsed.value) : rawResponse;
+        const explicitFullRequest = isExplicitFullPayloadRequest(callTier, ctx);
+        // A raw ToolResult (MCP content shape) normally passes through untouched —
+        // parity with the role-gated wrapper below. EXCEPT: on the agent-facing MCP
+        // transport, a single-text-item JSON body whose shape TOON shrinks is
+        // transparently re-encoded for the token win (P-002). The narrow guards in
+        // `reencodableJsonPayload` keep this off every NON-mcp transport, so the
+        // memory:* family + the TUI Memory tab (which read content[0].text as the
+        // handler's own JSON over a non-mcp transport) are byte-for-byte unchanged
+        // — preserving the contract a past blanket re-encode broke
+        // (memory-taxonomy-and-debt-followups P-006).
+        if (isHybridToolResponse(response)) {
+          const marked = markExplicitFullRawResult(response, explicitFullRequest);
+          return disclose(serializeHybridToolResponse(marked, ctx, eligibility, def, readColumns, parsed.value));
+        }
+        let tierInput = response as ToolResponse;
+        let reencodedRawResultMeta: Record<string, unknown> | undefined;
+        if (response && typeof response === 'object' && Array.isArray((response as ToolResult).content)) {
+          const marked = markExplicitFullRawResult(response as ToolResult, explicitFullRequest);
+          const reencodable = reencodableJsonPayload(marked, ctx, { acceptPlainObject: def.shape !== undefined });
+          if (reencodable === undefined) return disclose(attachRequestedStructuredContent(marked, ctx, def));
+          const reencoded = { data: reencodable, ...(explicitFullRequest ? { explicitFullRequest: true } : {}) };
+          if (def.shape === undefined) {
+            return disclose(
+              serializeProjectedResult(reencoded, ctx, eligibility, def, readColumns, parsed.value)
+                .then((serialized) => mergeReencodedRawResultMetadata(serialized, marked._meta)),
+            );
+          }
+          // A tool that DECLARES a shape gets it on its raw-content branches too: fall
+          // through into applyPayloadTier exactly like a `{ data }` result. Returning
+          // here (the old behavior) silently voided the shape (WI-6554700010008923).
+          reencodedRawResultMeta = marked._meta;
+          tierInput = reencoded;
+        }
+        // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
+        // the session/call tier before format-aware serialization. Unshaped tools
+        // pass through byte-identical.
+        const shaped = applyPayloadTier({
+          toolName: def.name,
+          effect: callEffect,
+          shape: def.shape,
+          response: tierInput,
+          // WI-37843: a tool may opt OUT of routine per-session shaping, in which
+          // case the session tier is discarded and an un-overridden call resolves
+          // to 'full'. An explicit per-call payloadTier still wins either way.
+          tier:
+            ctx.requestedStructured === true
+              ? 'full'
+              : resolvePayloadTier(callTier, ctx.contextTier, {
+                  ignoreSessionTier: def.ignoreSessionPayloadTier,
+                }),
+          // A caller-selected full tier is the documented escape hatch out of
+          // shaping AND the hard ceiling (WI-5078): it can arrive as a per-call
+          // payloadTier:'full', an explicit ctx_tier=full choice, or a structured
+          // content request (which also requires schema-valid raw data).
+          // The latter must be stamped too, because the downstream result-door
+          // sees only serialized metadata and otherwise generically re-projects
+          // the raw body (EI-22586965566163070). A ctx-borne
+          // `transportCapExempt` consumer (code:run's inner dispatch — the result
+          // never reaches an agent's context) gets the same exemption
+          // (EI-18719561823587590).
+          explicitFullRequest,
+          deferHardCeilingToResultDoor: ctx.transport === 'mcp',
+          // WI-37843: a tool may raise its OWN hard ceiling (coord:orient, the
+          // session-bootstrap read, whose full payload IS the value). Absent ⇒ the
+          // shared PAYLOAD_TIER_HARD_CEILING_CHARS, unchanged for every other tool.
+          ceilingChars: def.payloadTierCeilingChars,
+          args: parsed.value,
+          sourceProjection: ctx.sourceProjection,
+          log: (m) => ctx.log(m),
+          // EI-20720054720826414: the host's executable raw-dispatch spelling for
+          // the recovery `next` — absent ⇒ the generic host-neutral wording.
+          rawDispatchTemplate: ctx.rawDispatchTemplate,
+        });
+        return disclose(
+          serializeProjectedResult(shaped, ctx, eligibility, def, readColumns, parsed.value)
+            .then((serialized) => mergeReencodedRawResultMetadata(serialized, reencodedRawResultMeta)),
+        );
+      },
+    };
+  };
+  const projectedFn: ToolFn = async (input, ctx) => {
+    const invocation = await prepareInvocation(input, ctx);
+    return invocation.finalize(await invocation.invoke());
   };
 
   registerProjectedTool({
@@ -3540,6 +3552,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     builtinProvider: builtinToolProvider(),
     batch,
     batchContract,
+    prepareInvocation,
     description: def.description,
     // Where this tool was defined (absolute, captured from the call stack).
     // Null when the stack was unreadable — never guessed.
@@ -3631,7 +3644,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
   const inputSchema = factorInputSchema(flattenForOpenAi(rawSchema)) as Record<string, unknown>;
   const { jsonSchema: outputJsonSchema, eligibility } = computeOutputEligibility(def.result);
   const readColumns = projectReadColumns(outputJsonSchema);
-  const projectedFn: ToolFn = async (input, ctx) => {
+  const prepareInvocation = async (input: unknown, ctx: UnifiedToolContext): Promise<PreparedToolInvocation> => {
     // EI-11621: recover a client `__unparsedToolInput` envelope FIRST, so the
     // per-call tier extraction + closed-shape validation see the intended args.
     // Framework-reserved per-call tier override is stripped next — BEFORE
@@ -3684,84 +3697,95 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
         ? { ...ctx, contextTier: callTier, payloadTierOverride: callTier }
         : ctx;
     const callEffect = def.effectForCall?.(parsed.value) ?? def.effect;
-    const out = await def.handler(parsed.value, handlerCtx);
-    const explicitFullRequest = isExplicitFullPayloadRequest(callTier, handlerCtx);
-
-    // Already a ToolResult? The handler self-serialized its content — pass it
-    // through untouched (format-aware serialization only applies to handlers
-    // that return a ToolResponse envelope with structured `data`). EXCEPT: on
-    // the MCP transport, a single-text JSON body whose shape TOON shrinks is
-    // re-encoded for the token win (P-002); see `reencodableJsonPayload` — it is
-    // a no-op on every non-mcp transport, so verbatim-content consumers are safe.
-    if (isHybridToolResponse(out)) {
-      const marked = markExplicitFullRawResult(out, explicitFullRequest);
-      return disclose(serializeHybridToolResponse(marked, handlerCtx, eligibility, def, readColumns, parsed.value));
-    }
-    let tierInput = out as ToolResponse;
-    let reencodedRawResultMeta: Record<string, unknown> | undefined;
-    if (out && typeof out === 'object' && Array.isArray((out as ToolResult).content)) {
-      const marked = markExplicitFullRawResult(out as ToolResult, explicitFullRequest);
-      const reencodable = reencodableJsonPayload(marked, handlerCtx, { acceptPlainObject: def.shape !== undefined });
-      if (reencodable === undefined) return disclose(attachRequestedStructuredContent(marked, handlerCtx, def));
-      const reencoded = { data: reencodable, ...(explicitFullRequest ? { explicitFullRequest: true } : {}) };
-      if (def.shape === undefined) {
-        return disclose(
-          serializeProjectedResult(reencoded, handlerCtx, eligibility, def, readColumns, parsed.value)
-            .then((serialized) => mergeReencodedRawResultMetadata(serialized, marked._meta)),
-        );
-      }
-      // Declared shape applies to raw-content branches too (WI-6554700010008923) —
-      // mirror of the principal-gated wrapper above; a fix at only one site is
-      // invisible from the other.
-      reencodedRawResultMeta = marked._meta;
-      tierInput = reencoded;
-    }
-
-    // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
-    // the session/call tier before format-aware serialization. Unshaped tools
-    // pass through byte-identical.
-    const shaped = applyPayloadTier({
-      toolName: def.name,
-      effect: callEffect,
-      shape: def.shape,
-      response: tierInput,
-      // WI-37843: a tool may opt OUT of routine per-session shaping, in which
-      // case the session tier is discarded and an un-overridden call resolves
-      // to 'full'. An explicit per-call payloadTier still wins either way.
-      tier:
-        handlerCtx.requestedStructured === true
-          ? 'full'
-          : resolvePayloadTier(callTier, handlerCtx.contextTier, {
-              ignoreSessionTier: def.ignoreSessionPayloadTier,
-            }),
-      // A caller-selected full tier is the documented escape hatch out of
-      // shaping AND the hard ceiling (WI-5078): it can arrive as a per-call
-      // payloadTier:'full', an explicit ctx_tier=full choice, or a structured
-      // content request (which also requires schema-valid raw data).
-      // The latter must be stamped too, because the downstream result-door
-      // sees only serialized metadata and otherwise generically re-projects
-      // the raw body (EI-22586965566163070). A ctx-borne
-      // `transportCapExempt` consumer (code:run's inner dispatch — the result
-      // never reaches an agent's context) gets the same exemption
-      // (EI-18719561823587590).
-      explicitFullRequest,
-      deferHardCeilingToResultDoor: handlerCtx.transport === 'mcp',
-      // WI-37843: a tool may raise its OWN hard ceiling (coord:orient, the
-      // session-bootstrap read, whose full payload IS the value). Absent ⇒ the
-      // shared PAYLOAD_TIER_HARD_CEILING_CHARS, unchanged for every other tool.
-      ceilingChars: def.payloadTierCeilingChars,
+    return {
       args: parsed.value,
-      sourceProjection: handlerCtx.sourceProjection,
-      log: (m) => handlerCtx.log(m),
-      // EI-20720054720826414: the host's executable raw-dispatch spelling for
-      // the recovery `next` — absent ⇒ the generic host-neutral wording.
-      rawDispatchTemplate: handlerCtx.rawDispatchTemplate,
-    });
-    // ToolResponse envelope → format-aware MCP content[] + _meta.
-    return disclose(
-      serializeProjectedResult(shaped, handlerCtx, eligibility, def, readColumns, parsed.value)
-        .then((serialized) => mergeReencodedRawResultMetadata(serialized, reencodedRawResultMeta)),
-    );
+      ctx: handlerCtx,
+      invoke: () => def.handler(parsed.value, handlerCtx),
+      finalize: async rawResponse => {
+        const out = batch.result ? batch.result(rawResponse, parsed.value) : rawResponse;
+        const explicitFullRequest = isExplicitFullPayloadRequest(callTier, handlerCtx);
+
+        // Already a ToolResult? The handler self-serialized its content — pass it
+        // through untouched (format-aware serialization only applies to handlers
+        // that return a ToolResponse envelope with structured `data`). EXCEPT: on
+        // the MCP transport, a single-text JSON body whose shape TOON shrinks is
+        // re-encoded for the token win (P-002); see `reencodableJsonPayload` — it is
+        // a no-op on every non-mcp transport, so verbatim-content consumers are safe.
+        if (isHybridToolResponse(out)) {
+          const marked = markExplicitFullRawResult(out, explicitFullRequest);
+          return disclose(serializeHybridToolResponse(marked, handlerCtx, eligibility, def, readColumns, parsed.value));
+        }
+        let tierInput = out as ToolResponse;
+        let reencodedRawResultMeta: Record<string, unknown> | undefined;
+        if (out && typeof out === 'object' && Array.isArray((out as ToolResult).content)) {
+          const marked = markExplicitFullRawResult(out as ToolResult, explicitFullRequest);
+          const reencodable = reencodableJsonPayload(marked, handlerCtx, { acceptPlainObject: def.shape !== undefined });
+          if (reencodable === undefined) return disclose(attachRequestedStructuredContent(marked, handlerCtx, def));
+          const reencoded = { data: reencodable, ...(explicitFullRequest ? { explicitFullRequest: true } : {}) };
+          if (def.shape === undefined) {
+            return disclose(
+              serializeProjectedResult(reencoded, handlerCtx, eligibility, def, readColumns, parsed.value)
+                .then((serialized) => mergeReencodedRawResultMetadata(serialized, marked._meta)),
+            );
+          }
+          // Declared shape applies to raw-content branches too (WI-6554700010008923) —
+          // mirror of the principal-gated wrapper above; a fix at only one site is
+          // invisible from the other.
+          reencodedRawResultMeta = marked._meta;
+          tierInput = reencoded;
+        }
+
+        // Payload-tier shaping (context-trimming-tiers D-004): shape the DATA per
+        // the session/call tier before format-aware serialization. Unshaped tools
+        // pass through byte-identical.
+        const shaped = applyPayloadTier({
+          toolName: def.name,
+          effect: callEffect,
+          shape: def.shape,
+          response: tierInput,
+          // WI-37843: a tool may opt OUT of routine per-session shaping, in which
+          // case the session tier is discarded and an un-overridden call resolves
+          // to 'full'. An explicit per-call payloadTier still wins either way.
+          tier:
+            handlerCtx.requestedStructured === true
+              ? 'full'
+              : resolvePayloadTier(callTier, handlerCtx.contextTier, {
+                  ignoreSessionTier: def.ignoreSessionPayloadTier,
+                }),
+          // A caller-selected full tier is the documented escape hatch out of
+          // shaping AND the hard ceiling (WI-5078): it can arrive as a per-call
+          // payloadTier:'full', an explicit ctx_tier=full choice, or a structured
+          // content request (which also requires schema-valid raw data).
+          // The latter must be stamped too, because the downstream result-door
+          // sees only serialized metadata and otherwise generically re-projects
+          // the raw body (EI-22586965566163070). A ctx-borne
+          // `transportCapExempt` consumer (code:run's inner dispatch — the result
+          // never reaches an agent's context) gets the same exemption
+          // (EI-18719561823587590).
+          explicitFullRequest,
+          deferHardCeilingToResultDoor: handlerCtx.transport === 'mcp',
+          // WI-37843: a tool may raise its OWN hard ceiling (coord:orient, the
+          // session-bootstrap read, whose full payload IS the value). Absent ⇒ the
+          // shared PAYLOAD_TIER_HARD_CEILING_CHARS, unchanged for every other tool.
+          ceilingChars: def.payloadTierCeilingChars,
+          args: parsed.value,
+          sourceProjection: handlerCtx.sourceProjection,
+          log: (m) => handlerCtx.log(m),
+          // EI-20720054720826414: the host's executable raw-dispatch spelling for
+          // the recovery `next` — absent ⇒ the generic host-neutral wording.
+          rawDispatchTemplate: handlerCtx.rawDispatchTemplate,
+        });
+        // ToolResponse envelope → format-aware MCP content[] + _meta.
+        return disclose(
+          serializeProjectedResult(shaped, handlerCtx, eligibility, def, readColumns, parsed.value)
+            .then((serialized) => mergeReencodedRawResultMetadata(serialized, reencodedRawResultMeta)),
+        );
+      },
+    };
+  };
+  const projectedFn: ToolFn = async (input, ctx) => {
+    const invocation = await prepareInvocation(input, ctx);
+    return invocation.finalize(await invocation.invoke());
   };
 
   registerProjectedTool({
@@ -3769,6 +3793,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     builtinProvider: builtinToolProvider(),
     batch,
     batchContract,
+    prepareInvocation,
     description: def.description,
     // Where this tool was defined (absolute, captured from the call stack).
     // Null when the stack was unreadable — never guessed.

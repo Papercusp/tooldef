@@ -154,7 +154,7 @@ function fixture(declaration?: ToolExecutionDeclaration) {
     uiClientId: 'original-owner', toolExecution: request,
     executionDeadlineAtMs: budgets.executionDeadlineMs + Date.now(),
     transportResponseDeadlineAtMs: Date.now() + budgets.transportResponseBudgetMs,
-  }, deps));
+  }, { batchResponseVersion: 'operation-v0', ...deps }));
   return { tool, handler, inline };
 }
 

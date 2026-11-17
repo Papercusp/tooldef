@@ -31,6 +31,7 @@ import {
   toolDeclaresGate,
   type AbortCompletionReceipt,
   type ProjectedTool,
+  type PreparedToolInvocation,
   type UnifiedToolContext,
 } from './tool-projection';
 import {
@@ -79,7 +80,7 @@ import { applyWorkspaceTxContract } from './workspace-tx';
 import { createPhaseTracker, type PhaseInterval, type PhaseTracker } from './phase-tracker';
 import { prepareDispatchPremises } from './dispatch-premises';
 import { dispatchWithToolExecution, selectToolExecution, type ToolExecutionReceipt, type ToolExecutionRefusal } from './execution-contract';
-import { type BatchItemResult, type BatchResult } from './batch';
+import { type BatchItemResult, type BatchResult, type NativeBatchResult } from './batch';
 import { standardValidate } from './standard-schema';
 
 /* ─── Step names ─────────────────────────────────────────────────────── */
@@ -187,6 +188,8 @@ export interface DispatchExecution {
 
   // ─── written by 'invoke' step ───────────────────────────────────────
   handlerResult: ToolResult | null;
+  /** Created by the parent coordinator, never accepted from caller context. */
+  nativeBatch?: { itemId: string; coordinator: NativeBatchCoordinator };
 }
 
 /**
@@ -1042,6 +1045,11 @@ const invokeStep: DispatchStep = {
           const ov = await deps.overrideTool(toolName, input, handlerCtx);
           if (ov !== PASS_THROUGH) return ov as ToolResult;
         }
+        if (exec.nativeBatch && tool.prepareInvocation) {
+          const prepared = await tool.prepareInvocation(input, handlerCtx);
+          const response = await exec.nativeBatch.coordinator.arrive(exec.nativeBatch.itemId, exec, prepared);
+          return prepared.finalize(response);
+        }
         return tool.fn(input, handlerCtx);
       });
       const nowMs = Date.now();
@@ -1285,6 +1293,7 @@ const invokeStep: DispatchStep = {
       return { ok: true, result };
     } catch (err) {
       if (observationFailure) return observationFailure;
+      if (err instanceof NativeBatchFailure) return err.result;
       let diagnosticError = err;
       if (!exec.abort.signal.aborted) {
         const settled = await settleThrownValue(err, exec.abort.signal);
@@ -2403,6 +2412,161 @@ export async function runDispatchStack(
     : runOperationDispatchStack(tool, toolName, input, ctx, deps, stack);
 }
 
+class NativeBatchFailure extends Error {
+  constructor(readonly result: DispatchProjectedResult) {
+    super(result.error?.message ?? 'Native batch item failed');
+  }
+}
+
+type NativeParticipant = {
+  exec: DispatchExecution;
+  prepared: PreparedToolInvocation;
+  resolve: (response: Awaited<ReturnType<PreparedToolInvocation['invoke']>>) => void;
+  reject: (error: unknown) => void;
+};
+
+/** Wait for the known participant set, including children refused before arrival.
+ * No raw handler or preflight token can enter this coordinator. */
+class NativeBatchCoordinator {
+  readonly protocolErrors: string[] = [];
+  private readonly accounted = new Set<string>();
+  private readonly waiting = new Map<string, NativeParticipant>();
+  private readonly abort = new AbortController();
+  private readonly timer: ReturnType<typeof setTimeout>;
+  private readonly onParentAbort = () => this.abort.abort();
+  private flushing = false;
+
+  constructor(private readonly tool: ProjectedTool, private readonly total: number,
+    private readonly ctx: UnifiedToolContext, deadlineAtMs: number) {
+    this.timer = setTimeout(() => this.abort.abort(), Math.max(0, deadlineAtMs - Date.now()));
+    ctx.signal?.addEventListener('abort', this.onParentAbort, { once: true });
+    if (ctx.signal?.aborted) this.abort.abort();
+  }
+
+  arrive(itemId: string, exec: DispatchExecution, prepared: PreparedToolInvocation) {
+    const pending = new Promise<Awaited<ReturnType<PreparedToolInvocation['invoke']>>>((resolve, reject) => {
+      const participant = { exec, prepared, resolve, reject };
+      this.waiting.set(itemId, participant);
+      this.accounted.add(itemId);
+    });
+    const onAbort = () => this.waiting.get(itemId)?.reject(new Error('Native batch admission cancelled'));
+    exec.abort.signal.addEventListener('abort', onAbort, { once: true });
+    this.abort.signal.addEventListener('abort', onAbort, { once: true });
+    if (exec.abort.signal.aborted || this.abort.signal.aborted) onAbort();
+    this.checkReady();
+    return pending.finally(() => {
+      exec.abort.signal.removeEventListener('abort', onAbort);
+      this.abort.signal.removeEventListener('abort', onAbort);
+    });
+  }
+
+  terminal(itemId: string) {
+    this.accounted.add(itemId);
+    this.checkReady();
+  }
+
+  dispose() {
+    clearTimeout(this.timer);
+    this.ctx.signal?.removeEventListener('abort', this.onParentAbort);
+  }
+
+  private checkReady() {
+    if (this.flushing || this.accounted.size !== this.total) return;
+    this.flushing = true;
+    void this.flush().catch(error => {
+      for (const participant of this.waiting.values()) participant.reject(error);
+    });
+  }
+
+  private async flush() {
+    const groups = new Map<string, Array<[string, NativeParticipant]>>();
+    for (const [itemId, participant] of this.waiting) {
+      const { exec, prepared } = participant;
+      if (this.abort.signal.aborted || exec.abort.signal.aborted) {
+        participant.reject(new Error('Native batch admission cancelled'));
+        continue;
+      }
+      // An admission may have waited behind a slow sibling. Re-evaluate the
+      // authoritative kernel at the actual native boundary, without a second
+      // quota charge or a second pass through host settlement wrappers.
+      const denial = await runAdmissionStep(exec, kernelEnforceStep);
+      if (denial) { participant.reject(new NativeBatchFailure(denial)); continue; }
+      const descriptors: Record<string, PropertyDescriptor> = Object.getOwnPropertyDescriptors(prepared.ctx);
+      for (const key of ['kernelPreflight', 'kernelEnforcement', 'executionRevision', 'appliedExecutionRevision'] as const) {
+        descriptors[key] = { value: exec.handlerCtx[key], enumerable: true, configurable: true, writable: true };
+      }
+      const ctx = Object.defineProperties(Object.create(Object.getPrototypeOf(prepared.ctx)), descriptors) as UnifiedToolContext;
+      participant.prepared = { ...prepared, ctx };
+      const principal = ctx.principal;
+      const key = JSON.stringify([principal?.kind, principal?.slug, principal?.workspaceId,
+        principal ? [...principal.capabilities].sort() : [],
+        ctx.workspaceId, ctx.harnessSlug, ctx.role, exec.executionRevision]);
+      const group = groups.get(key) ?? [];
+      group.push([itemId, participant]);
+      groups.set(key, group);
+    }
+    for (const group of groups.values()) {
+      const active = group.filter(([, { exec }]) => !exec.abort.signal.aborted);
+      if (this.abort.signal.aborted || active.length === 0) {
+        for (const [, participant] of group) participant.reject(new Error('Native batch admission cancelled'));
+        continue;
+      }
+      try {
+        const items = Object.freeze(active.map(([itemId, { exec, prepared }]) => Object.freeze({
+          itemId, args: prepared.args, ctx: prepared.ctx, callId: exec.callId, signal: exec.abort.signal,
+        })));
+        const outcomes = await this.tool.batch!.execute!(items, { signal: this.abort.signal });
+        if (!Array.isArray(outcomes)) throw new Error('Native batch must return an array of keyed outcomes');
+        const expected = new Set(items.map(item => item.itemId));
+        const keyed = new Map<string, NativeBatchResult[]>();
+        for (const outcome of outcomes) {
+          if (!outcome || typeof outcome !== 'object' || !expected.has(outcome.itemId)) {
+            this.protocolErrors.push('Native batch returned a foreign or invalid itemId');
+            continue;
+          }
+          const matches = keyed.get(outcome.itemId) ?? [];
+          matches.push(outcome);
+          keyed.set(outcome.itemId, matches);
+        }
+        for (const [itemId, participant] of active) {
+          const matches = keyed.get(itemId) ?? [];
+          const outcome = matches[0];
+          if (matches.length !== 1 || !outcome || ('response' in outcome) === ('error' in outcome)) {
+            const message = 'Native batch requires exactly one response or error for itemId ' + itemId;
+            this.protocolErrors.push(message);
+            participant.reject(new Error(message));
+          } else if ('response' in outcome) participant.resolve(outcome.response);
+          else participant.reject(new NativeBatchFailure({ ok: false, error: {
+            code: 'handler_error', message: 'Native batch item failed',
+            meta: { nativeBatch: { error: outcome.error, ...(outcome.receipt ? { receipt: outcome.receipt } : {}) } },
+          } }));
+        }
+      } catch (error) {
+        // A strategy that has started is never replayed through singleton fn.
+        for (const [, participant] of active) participant.reject(error);
+      }
+    }
+  }
+}
+
+/** Native quota reservation, conditional writes and stream correlation are
+ * separate contracts. Until provided, select the existing sequential path
+ * BEFORE starting any child in those groups. */
+function canUseNativeBatch(tool: ProjectedTool, toolName: string, items: readonly { args: unknown }[],
+  ctx: UnifiedToolContext, deps: DispatchProjectedDeps): boolean {
+  if (!tool.batch?.execute || !tool.prepareInvocation || tool.effect !== 'read' || tool.pluginInstallation ||
+    tool.events || tool.eventsJsonSchema || tool.state || tool.execution?.lifecycle === 'independent') return false;
+  return items.every(item => {
+    try {
+      const args = item.args;
+      if ((tool.effectForCall?.(args) ?? tool.effect) !== 'read') return false;
+      const roleQuota = ctx.role ? tool.rolesQuota?.[ctx.role] : undefined;
+      const window = (deps.computeQuotaWindow ?? defaultComputeQuotaWindow)(ctx, roleQuota, toolName, args);
+      return ctx.gateBypass?.quota === true || !window.key || window.limit == null || window.limit <= 0;
+    } catch { return false; }
+  });
+}
+
 /** Canonical coordinator; every child still traverses the full operation stack. */
 export async function runBatchDispatchStack(
   tool: ProjectedTool,
@@ -2429,13 +2593,32 @@ export async function runBatchDispatchStack(
     ctx.deadlineAtMs ?? Infinity,
     ctx.executionDeadlineAtMs ?? Infinity,
   );
-  const results: BatchItemResult[] = [];
-  for (const item of request.items) {
+  // Resolve explicit operation adapters once, before choosing an execution
+  // strategy. The quota selector and actual child gates must see the same input.
+  const preparedItems = await Promise.all(request.items.map(async item => {
+    try {
+      let args: unknown = item.args;
+      if (tool.batch?.operation) {
+        const parsed = await standardValidate(tool.batch.operation, args);
+        if (!parsed.ok) return { item, error: { ok: false as const, error: {
+          code: 'invalid_input' as const, message: JSON.stringify(parsed.issues) } } };
+        args = parsed.value;
+      }
+      if (tool.batch?.toHandlerArgs) args = tool.batch.toHandlerArgs(args);
+      return { item, args };
+    } catch (error) {
+      return { item, error: { ok: false as const, error: {
+        code: 'handler_error' as const, message: error instanceof Error ? error.message : String(error) } } };
+    }
+  }));
+  const coordinator = canUseNativeBatch(tool, toolName, preparedItems.filter(item => !item.error), ctx, deps)
+    ? new NativeBatchCoordinator(tool, request.items.length, ctx, deadlineAtMs) : undefined;
+  const invokeItem = async ({ item, args, error }: (typeof preparedItems)[number]): Promise<DispatchProjectedResult> => {
+    if (error) return error;
     if (ctx.signal?.aborted || Date.now() >= deadlineAtMs) {
-      if (legacyResponse) return { ok: false, error: {
-        code: ctx.signal?.aborted ? 'aborted' : 'timeout', message: 'Operation did not start before cancellation or deadline.' } };
-      results.push({ itemId: item.itemId, ok: false, status: 'not-started', error: { code: ctx.signal?.aborted ? 'aborted' : 'timeout' } });
-      continue;
+      return { ok: false, error: {
+        code: ctx.signal?.aborted ? 'aborted' : 'timeout', message: 'Operation did not start before cancellation or deadline.',
+        meta: { handlerEntered: false, notStarted: true } } };
     }
     // Preserve context getters (including the transaction contract) without sharing
     // a mutable context object between children. All children consume one budget.
@@ -2443,43 +2626,46 @@ export async function runBatchDispatchStack(
     descriptors.deadlineAtMs = { value: deadlineAtMs, enumerable: true, configurable: true, writable: true };
     const childCtx = Object.defineProperties(Object.create(Object.getPrototypeOf(ctx)), descriptors) as UnifiedToolContext;
     try {
-      let args: unknown = item.args;
-      if (tool.batch?.operation) {
-        const parsed = await standardValidate(tool.batch.operation, args);
-        if (!parsed.ok) {
-          if (legacyResponse) return { ok: false, error: { code: 'invalid_input', message: JSON.stringify(parsed.issues) } };
-          results.push({ itemId: item.itemId, ok: false, status: 'failed', error: { code: 'invalid_input', issues: parsed.issues } });
-          continue;
-        }
-        args = parsed.value;
-      }
-      if (tool.batch?.toHandlerArgs) args = tool.batch.toHandlerArgs(args);
-      const child = await runOperationDispatchStack(tool, toolName, args, childCtx, deps, stack);
-      // Version negotiation is independent of request syntax. Returning the
-      // original child preserves raw bytes, delta metadata and dispatch errors.
-      if (legacyResponse) return child;
+      return await runOperationDispatchStack(tool, toolName, args, childCtx, deps, stack,
+        coordinator ? { itemId: item.itemId, coordinator } : undefined);
+    } catch (error) {
+      return { ok: false, error: { code: 'handler_error', message: error instanceof Error ? error.message : String(error) } };
+    } finally {
+      coordinator?.terminal(item.itemId);
+    }
+  };
+  const results: BatchItemResult[] = [];
+  try {
+    const children: DispatchProjectedResult[] = [];
+    if (coordinator) children.push(...await Promise.all(preparedItems.map(item =>
+      invokeItem(item).finally(() => coordinator.terminal(item.item.itemId)))));
+    else for (const item of preparedItems) children.push(await invokeItem(item));
+    // Negotiation is independent of request syntax and preserves original bytes.
+    if (legacyResponse) return children[0];
+    for (let index = 0; index < children.length; index++) {
+      const item = request.items[index];
+      const child = children[index];
       if (child.ok && child.result) {
         const failed = child.result.isError === true || objectRecord(child.result.structuredContent)?.ok === false || hasExplicitFailurePayload(child.result);
         results.push({ itemId: item.itemId, ok: !failed, status: failed ? 'failed' : 'completed', output: child.result });
       } else {
         const receipt = objectRecord(child.error?.meta)?.abortCompletionReceipt;
         const uncertain = (child.error?.code === 'timeout' || child.error?.code === 'aborted') &&
-          (tool.effectForCall?.(args) ?? tool.effect) === 'write' &&
+          (tool.effectForCall?.(preparedItems[index].args) ?? tool.effect) === 'write' &&
           child.error?.meta?.handlerEntered !== false && objectRecord(receipt)?.status !== 'not-recorded';
         results.push({ itemId: item.itemId, ok: false,
-          status: uncertain ? 'unknown-effect' : child.error?.code === 'aborted' ? 'cancelled' : 'failed',
+          status: uncertain ? 'unknown-effect' : child.error?.meta?.notStarted === true
+            ? 'not-started' : child.error?.code === 'aborted' ? 'cancelled' : 'failed',
           error: child.error, ...(receipt ? { receipt } : {}) });
       }
-    } catch (error) {
-      if (legacyResponse) return { ok: false, error: { code: 'handler_error', message: error instanceof Error ? error.message : String(error) } };
-      results.push({ itemId: item.itemId, ok: false, status: 'failed', error: { code: 'handler_error', message: error instanceof Error ? error.message : String(error) } });
     }
-  }
+  } finally { coordinator?.dispose(); }
   const succeeded = results.filter(item => item.ok).length;
   const data: BatchResult = { ok: succeeded === results.length, batchId, results,
     counts: { ok: succeeded, failed: results.length - succeeded } };
   return { ok: true, result: { content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data,
-    ...(data.ok ? {} : { isError: true }) } };
+    ...(coordinator?.protocolErrors.length ? { _meta: { nativeBatch: { protocolErrors: [...coordinator.protocolErrors] } } } : {}),
+    ...(data.ok && !coordinator?.protocolErrors.length ? {} : { isError: true }) } };
 }
 
 async function runOperationDispatchStack(
@@ -2489,8 +2675,10 @@ async function runOperationDispatchStack(
   ctx: UnifiedToolContext,
   deps: DispatchProjectedDeps,
   stack: ReadonlyArray<DispatchStep>,
+  nativeBatch?: DispatchExecution['nativeBatch'],
 ): Promise<DispatchProjectedResult> {
   const exec = initExecution(tool, toolName, input, ctx, deps);
+  exec.nativeBatch = nativeBatch;
   armDispatchDeadline(exec);
   // The per-call phase tracker starts HERE, at dispatch entry, so `handlerPhases.elapsedMs`
   // is the call's dispatch wall time and pre-handler steps land in it as `dispatch:<step>`

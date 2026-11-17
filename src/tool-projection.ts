@@ -78,7 +78,7 @@ import type { StandardSchemaV1 } from './standard-schema';
 import type { Authorizer } from './authz';
 import type { EligibilityResult } from '@papercusp/result-encoding';
 import type { DeltaCapability } from './delta-protocol';
-import type { Principal } from './types';
+import type { Principal, ToolResponse } from './types';
 
 /* ─── Event schema types ─────────────────────────────────────────────── */
 
@@ -701,6 +701,9 @@ export interface UnifiedToolContext {
    */
   requestedFormat?: string;
 
+  /** Explicit transport response-version negotiation; inherited by nested calls. */
+  requestedBatchResponseVersion?: 'batch-v1' | 'operation-v0';
+
   /**
    * Opt-in for MCP `structuredContent` (P-010) — set by the transport from
    * `?structured=1` / `_meta.structured`. When true, a result with a declared
@@ -951,6 +954,15 @@ export type ToolFn<TInput = unknown> = (
   ctx: UnifiedToolContext,
 ) => Promise<ToolResult>;
 
+/** Validated business invocation and its existing result adapter. The dispatcher
+ * may substitute native execution only after the host invokes its continuation. */
+export interface PreparedToolInvocation {
+  readonly args: unknown;
+  readonly ctx: UnifiedToolContext;
+  invoke(): Promise<ToolResponse | ToolResult>;
+  finalize(response: ToolResponse | ToolResult): Promise<ToolResult>;
+}
+
 /* ─── Manifest declarations ──────────────────────────────────────────── */
 
 export interface ToolExposureHttp {
@@ -1076,6 +1088,8 @@ export interface ProjectedTool {
   batch?: ToolBatchDeclaration;
   /** Operation-derived wire schemas and the single normalizer for every transport. */
   batchContract?: ToolBatchContract;
+  /** Shares argument validation and result finalization with the ordinary fn. */
+  prepareInvocation?(input: unknown, ctx: UnifiedToolContext): Promise<PreparedToolInvocation>;
   /** Normalized at registration; legacy/plugin omission uses request-bound auto. */
   execution?: import('./execution-contract').ToolExecutionDeclaration | import('./execution-contract').ToolExecutionContract;
   /** Owning plugin name. Built-in tools use 'agent-mcp' or similar. */

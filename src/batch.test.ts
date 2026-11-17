@@ -175,6 +175,194 @@ describe('batch coordinator through ordinary child dispatch', () => {
   });
 });
 
+describe('native execution at the validated host continuation', () => {
+  const context = (): UnifiedToolContext => ({
+    log: vi.fn(), signal: new AbortController().signal, progress: vi.fn(), emit: vi.fn(),
+    workspaceId: 'default', harnessSlug: 'native-fixture', role: 'worker', runId: 'native-fixture',
+    requestedStructured: true,
+    principal: { kind: 'system', slug: 'native-fixture', workspaceId: 'default',
+      authMethod: 'process-internal', trust: 'trusted', capabilities: new Set(['test:read']) },
+  });
+  let ordinal = 0;
+  const register = (batch: ToolBatchDeclaration<{ key: string }>, principal = false) => {
+    const name = 'batch-fixture:native-' + ++ordinal;
+    const handler = vi.fn(async (args: { key: string }) => ({ data: { key: args.key } }));
+    const definition = { name, capability: 'test:read', effect: 'read' as const,
+      args: z.strictObject({ key: z.string().trim().min(1) }), batch, handler };
+    if (principal) defineTool(definition);
+    else defineTool({ ...definition, requirePrincipal: false });
+    return { name, handler, tool: lookupByMcpName(name)! };
+  };
+  const dispatch = async (tool: ProjectedTool, name: string, input: unknown,
+    deps: Parameters<typeof dispatchProjectedTool>[4] = {}, ctx = context()) => {
+    const result = await dispatchProjectedTool(tool, name, input, ctx, deps);
+    expect(result.ok).toBe(true);
+    return { wire: result.result!, data: result.result!.structuredContent as unknown as BatchResult };
+  };
+
+  it.each([false, true])('uses the same validation/result adapter for native and fallback (principal=%s)', async principal => {
+    const execute = vi.fn<NonNullable<ToolBatchDeclaration['execute']>>(async items => {
+      expect(Object.isFrozen(items)).toBe(true);
+      expect(items.every(item => Object.isFrozen(item) && item.callId && item.signal === item.ctx.signal)).toBe(true);
+      return [...items].reverse().map(item => ({ itemId: item.itemId, response: { data: { key: (item.args as { key: string }).key } } }));
+    });
+    const result = vi.fn((response, args) => ({ data: { ...response.data, adapted: args.key } }));
+    const { tool, name, handler } = register({ execute, result }, principal);
+    for (const input of [{ key: ' a ' }, { _batch: 1, items: [{ args: { key: ' a ' } }] }]) {
+      const { data } = await dispatch(tool, name, input);
+      expect(data.results[0].output?.structuredContent).toEqual({ key: 'a', adapted: 'a' });
+    }
+    const { data } = await dispatch(tool, name, { _batch: 1, items: [
+      { itemId: 'a', args: { key: ' a ' } }, { itemId: 'b', args: { key: 'b' } },
+    ] });
+    expect(data.results.map(item => item.output?.structuredContent)).toEqual([
+      { key: 'a', adapted: 'a' }, { key: 'b', adapted: 'b' },
+    ]);
+    expect(execute).toHaveBeenCalledTimes(3);
+    expect(execute.mock.calls[2][0]).toHaveLength(2);
+    expect(handler).not.toHaveBeenCalled();
+    const fallback = { ...tool, batch: { ...tool.batch, execute: undefined } };
+    const control = await dispatch(fallback, name, { key: ' a ' });
+    expect(control.data.results[0].output?.structuredContent).toEqual({ key: 'a', adapted: 'a' });
+    expect(handler).toHaveBeenCalledOnce();
+    expect(result).toHaveBeenCalledTimes(5);
+  });
+
+  it('waits for slow host continuations and excludes invalid and refused children', async () => {
+    const execute = vi.fn<NonNullable<ToolBatchDeclaration['execute']>>(async items => items.map(item => ({
+      itemId: item.itemId, response: { data: { key: (item.args as { key: string }).key } },
+    })));
+    const { tool, name, handler } = register({ execute });
+    let release!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    const entered: string[] = [];
+    const recordInvocation = vi.fn();
+    const pending = dispatch(tool, name, { _batch: 1, items: [
+      { itemId: 'a', args: { key: 'a' } }, { itemId: 'slow', args: { key: 'slow' } },
+      { itemId: 'denied', args: { key: 'denied' } }, { itemId: 'invalid', args: { key: 42 } },
+    ] }, { recordInvocation, aroundInvoke: async ({ input, invoke }) => {
+      const key = (input as { key: string }).key;
+      entered.push(key);
+      if (key === 'denied') return { isError: true, content: [] };
+      if (key === 'slow') await barrier;
+      const [first, repeated] = await Promise.all([invoke(), invoke()]);
+      expect(repeated).toBe(first);
+      return first;
+    } });
+    await vi.waitFor(() => expect(entered).toHaveLength(4));
+    expect(execute).not.toHaveBeenCalled();
+    release();
+    const { data } = await pending;
+    expect(execute.mock.calls[0][0].map(item => item.itemId)).toEqual(['a', 'slow']);
+    expect(data.results.map(item => [item.itemId, item.ok])).toEqual([
+      ['a', true], ['slow', true], ['denied', false], ['invalid', false],
+    ]);
+    expect(data.results[3].error).toMatchObject({ code: 'invalid_input' });
+    expect(recordInvocation).toHaveBeenCalledTimes(4);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('preserves known successes and reports missing, duplicate and foreign native IDs without replay', async () => {
+    const execute = vi.fn<NonNullable<ToolBatchDeclaration['execute']>>(async () => [
+      { itemId: 'a', response: { data: { key: 'a' } } },
+      { itemId: 'dup', response: { data: { key: 'dup' } } },
+      { itemId: 'dup', error: 'duplicate' }, { itemId: 'foreign', error: 'foreign' },
+    ]);
+    const { tool, name, handler } = register({ execute });
+    const { wire, data } = await dispatch(tool, name, { _batch: 1, items:
+      ['a', 'dup', 'missing'].map(itemId => ({ itemId, args: { key: itemId } })) });
+    expect(data.results.map(item => item.ok)).toEqual([true, false, false]);
+    expect(data.results[0].output?.structuredContent).toEqual({ key: 'a' });
+    expect(wire._meta).toMatchObject({ nativeBatch: { protocolErrors: expect.any(Array) } });
+    expect(wire.isError).toBe(true);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('chooses sequential fallback before admission for a two-child one-slot quota', async () => {
+    const execute = vi.fn<NonNullable<ToolBatchDeclaration['execute']>>(async () => []);
+    const { tool, name, handler } = register({ execute });
+    tool.rolesQuota = { worker: { perRun: 1 } };
+    let used = 0;
+    handler.mockImplementation(async args => { used++; return { data: { key: args.key } }; });
+    const { data } = await dispatch(tool, name, { _batch: 1, items: [
+      { args: { key: 'a' } }, { args: { key: 'b' } },
+    ] }, { readQuotaState: async () => ({ count: used }) });
+    expect(execute).not.toHaveBeenCalled();
+    expect(handler).toHaveBeenCalledOnce();
+    expect(data.results.map(item => item.ok)).toEqual([true, false]);
+    expect(data.results[1].error).toMatchObject({ code: 'quota_exceeded' });
+  });
+
+  it('never replays a throwing native executor through singleton handlers', async () => {
+    const execute = vi.fn<NonNullable<ToolBatchDeclaration['execute']>>(async () => { throw new Error('native failed'); });
+    const { tool, name, handler } = register({ execute });
+    const { data } = await dispatch(tool, name, { _batch: 1, items: [
+      { args: { key: 'a' } }, { args: { key: 'b' } },
+    ] });
+    expect(data.counts).toEqual({ ok: 0, failed: 2 });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('rechecks revocation after participants wait and excludes the revoked item', async () => {
+    const execute = vi.fn<NonNullable<ToolBatchDeclaration['execute']>>(async items => items.map(item => ({
+      itemId: item.itemId, response: { data: { key: (item.args as { key: string }).key } },
+    })));
+    const { tool, name, handler } = register({ execute });
+    const enforcements = new Map<string, number>();
+    const { data } = await dispatch(tool, name, { _batch: 1, items: [
+      { itemId: 'revoked', args: { key: 'revoked' } }, { itemId: 'ok', args: { key: 'ok' } },
+    ] }, { kernelEnforcement: request => {
+      if (request.phase === 'enforce') {
+        const key = (request.args as { key: string }).key;
+        const count = (enforcements.get(key) ?? 0) + 1;
+        enforcements.set(key, count);
+        if (key === 'revoked' && count === 2) return { decision: 'deny', reason: 'fixture revocation' };
+      }
+      return { decision: 'allow' };
+    } });
+    expect(execute.mock.calls[0][0].map(item => item.itemId)).toEqual(['ok']);
+    expect(data.results[0]).toMatchObject({ itemId: 'revoked', ok: false,
+      error: { code: 'authorization_denied' } });
+    expect(data.results[1].ok).toBe(true);
+    expect(enforcements.get('revoked')).toBe(2);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('cancels an uncooperative native read without replay or a new execution budget', async () => {
+    let started!: () => void;
+    const entered = new Promise<void>(resolve => { started = resolve; });
+    const execute = vi.fn<NonNullable<ToolBatchDeclaration['execute']>>((_items, parent) => {
+      expect(parent.signal.aborted).toBe(false);
+      started();
+      return new Promise(() => {});
+    });
+    const { tool, name, handler } = register({ execute });
+    const abort = new AbortController();
+    const pending = dispatch(tool, name, { _batch: 1, items: [
+      { args: { key: 'a' } }, { args: { key: 'b' } },
+    ] }, {}, { ...context(), signal: abort.signal });
+    await entered;
+    abort.abort();
+    const { data } = await pending;
+    expect(data.counts).toEqual({ ok: 0, failed: 2 });
+    expect(data.results.every(item => item.status === 'cancelled')).toBe(true);
+    expect(execute.mock.calls[0][1].signal.aborted).toBe(true);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('selects fallback for mutation and stream declarations before calling the native hook', async () => {
+    const execute = vi.fn<NonNullable<ToolBatchDeclaration['execute']>>(async () => []);
+    const { tool, name, handler } = register({ execute });
+    for (const declaration of [{ ...tool, effect: 'write' as const }, { ...tool, events: {} }]) {
+      const { data } = await dispatch(declaration, name, { key: 'a' });
+      expect(data.counts).toEqual({ ok: 1, failed: 0 });
+    }
+    expect(execute).not.toHaveBeenCalled();
+    expect(handler).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('permanent shallow batch normalization', () => {
   it('keeps marked, unmarked, object-items and singleton operations equivalent', async () => {
     const args = { key: 'a', ids: ['x', 'y'] };
