@@ -1126,8 +1126,9 @@ const invokeStep: DispatchStep = {
           observedError = error;
           throw error;
         } finally {
-          if (invocationRef && observer) {
-            try { await trackPhase(handlerCtx.phases, 'invoke.observer-settle', () => observer.settle({ ...original, invocationRef,
+          const settledInvocationRef = invocationRef;
+          if (settledInvocationRef && observer) {
+            try { await trackPhase(handlerCtx.phases, 'invoke.observer-settle', () => observer.settle({ ...original, invocationRef: settledInvocationRef,
               result: observedResult, receipt: receipt ?? null,
               error: observedError, refusal: executionRefusal ?? null })); }
             catch { observationUnavailable(); }
