@@ -43,6 +43,82 @@ describe('original invocation observation', () => {
     }));
   });
 
+  it('separates original observation and execution time from the enclosing host wrapper', async () => {
+    let clock = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const { inline, handler } = fixture();
+    const observation = observer();
+    const recordInvocation = vi.fn();
+    observation.begin.mockImplementation(async () => { clock += 11; return 'tool-invocation:original'; });
+    handler.mockImplementation(async args => {
+      clock += 17;
+      return { content: [{ type: 'text', text: 'ok ' + args.value }] };
+    });
+    observation.settle.mockImplementation(async () => { clock += 23; });
+
+    const result = await inline({}, { invocationObserver: observation, recordInvocation,
+      aroundInvoke: async ({ invoke }) => {
+        clock += 7;
+        const [first, second] = await Promise.all([invoke(), invoke()]);
+        expect(second).toBe(first);
+        clock += 5;
+        return first;
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(handler).toHaveBeenCalledOnce();
+    expect(observation.begin).toHaveBeenCalledOnce();
+    expect(observation.settle).toHaveBeenCalledOnce();
+    const phases = recordInvocation.mock.calls[0][0].metadataJson.handlerPhases;
+    expect(phases).toMatchObject({
+      schemaVersion: 'handler-phases-v1', unit: 'ms', timing: 'wall-time-possibly-concurrent',
+      elapsedMs: 63, attributedMs: 63, completedAttributedMs: 63, pending: [],
+    });
+    expect(phases.phases.filter((phase: { phase: string }) => phase.phase.startsWith('invoke.'))).toEqual([
+      { phase: 'invoke.observer-begin', startMs: 7, durationMs: 11 },
+      { phase: 'invoke.execution', startMs: 18, durationMs: 17 },
+      { phase: 'invoke.observer-settle', startMs: 35, durationMs: 23 },
+      { phase: 'invoke.host-wrapper', startMs: 0, durationMs: 63 },
+    ]);
+  });
+
+  it.each(['begin', 'execution', 'settle'] as const)('retains subphase evidence when %s fails', async failure => {
+    let clock = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const { inline, handler } = fixture();
+    const observation = observer();
+    const recordInvocation = vi.fn();
+    observation.begin.mockImplementation(async () => {
+      clock += 11;
+      if (failure === 'begin') throw new Error('begin unavailable');
+      return 'tool-invocation:original';
+    });
+    handler.mockImplementation(async args => {
+      clock += 17;
+      if (failure === 'execution') throw new Error('execution failed');
+      return { content: [{ type: 'text', text: 'ok ' + args.value }] };
+    });
+    observation.settle.mockImplementation(async () => {
+      clock += 23;
+      if (failure === 'settle') throw new Error('settlement unavailable');
+    });
+    const result = await inline({}, { invocationObserver: observation, recordInvocation });
+
+    expect(result.ok).toBe(false);
+    expect(handler).toHaveBeenCalledTimes(failure === 'begin' ? 0 : 1);
+    expect(observation.settle).toHaveBeenCalledTimes(failure === 'begin' ? 0 : 1);
+    const phases = recordInvocation.mock.calls[0][0].metadataJson.handlerPhases;
+    const expected = [{ phase: 'invoke.observer-begin', startMs: 0, durationMs: 11 }];
+    if (failure !== 'begin') expected.push(
+      { phase: 'invoke.execution', startMs: 11, durationMs: 17 },
+      { phase: 'invoke.observer-settle', startMs: 28, durationMs: 23 },
+    );
+    expect(phases.phases.filter((phase: { phase: string }) => phase.phase.startsWith('invoke.'))).toEqual(expected);
+    expect(phases.pending).toEqual([]);
+    expect(phases.attributedMs).toBe(failure === 'begin' ? 11 : 51);
+  });
+
   for (const invalid of [null, '', '   ']) it('refuses an invalid persisted reference before effects: ' + String(invalid), async () => {
     const { inline, handler } = fixture();
     const observation = observer();
