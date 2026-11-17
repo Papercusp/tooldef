@@ -12,11 +12,168 @@ import { defineTool } from './define-tool';
 import { toJsonSchema } from './schema-adapter';
 import { standardValidate, type StandardSchemaV1 } from './standard-schema';
 import { lookupByMcpName, registerProjectedTool } from './tool-projection';
+import { dispatchProjectedTool } from './dispatch-projected';
+import type { ProjectedTool, UnifiedToolContext } from './tool-projection';
+import type { BatchResult } from './batch';
 
 const operation = z.strictObject({ key: z.string(), ids: z.array(z.string()).optional() });
 const contract = (declaration: ToolBatchDeclaration = {}) =>
   createToolBatchContract(operation, toJsonSchema(operation), declaration);
 const ajv = () => new Ajv2020({ strict: false });
+
+describe('batch coordinator through ordinary child dispatch', () => {
+  const context = (): UnifiedToolContext => ({
+    log: vi.fn(), signal: new AbortController().signal, progress: vi.fn(), emit: vi.fn(),
+    workspaceId: 'default', harnessSlug: 'batch-fixture', role: 'worker', runId: 'batch-fixture',
+  });
+  const fixture = (fn: ProjectedTool['fn'], schema: StandardSchemaV1 = operation): ProjectedTool => ({
+    pluginName: 'batch-fixture', description: 'batch fixture', inputSchema: toJsonSchema(schema),
+    capabilities: [], effect: 'write', expose: { mcp: { name: 'batch-fixture:write' } }, fn,
+    batchContract: createToolBatchContract(schema, toJsonSchema(schema)),
+  });
+  const invoke = async (tool: ProjectedTool, input: unknown, ctx = context()) => {
+    const result = await dispatchProjectedTool(tool, 'batch-fixture:write', input, ctx, {});
+    expect(result.ok).toBe(true);
+    return result.result!.structuredContent as unknown as BatchResult;
+  };
+
+  it('preserves equivalent singleton and one-item outputs and effects', async () => {
+    const effects: unknown[] = [];
+    const tool = fixture(async args => {
+      effects.push(args);
+      return { content: [{ type: 'text', text: JSON.stringify(args) }] };
+    });
+    const args = { key: 'a', ids: ['x', 'y'] };
+    const flat = await invoke(tool, args);
+    const marked = await invoke(tool, { _batch: 1, items: [{ args }] });
+    expect(flat.results).toEqual(marked.results);
+    expect(flat.counts).toEqual({ ok: 1, failed: 0 });
+    expect(effects).toEqual([args, args]);
+  });
+
+  it('isolates child failures while running authorization and telemetry per item', async () => {
+    const effects: string[] = [];
+    const authorize = vi.fn(async ({ input }) => (input as { key: string }).key === 'denied'
+      ? { allow: false, reason: 'fixture denial' } : { allow: true });
+    const recordInvocation = vi.fn();
+    const tool = fixture(async args => {
+      const { key } = args as { key: string };
+      if (key === 'throws') throw new Error('fixture failure');
+      effects.push(key);
+      return { content: [] };
+    });
+    tool.authorize = authorize;
+    const result = await dispatchProjectedTool(tool, 'batch-fixture:write', {
+      _batch: 1, items: ['denied', 'throws', 'ok'].map(key => ({ itemId: key, args: { key } })),
+    }, context(), { recordInvocation });
+    const data = result.result!.structuredContent as unknown as BatchResult;
+    expect(data.results.map(row => [row.itemId, row.ok])).toEqual([['denied', false], ['throws', false], ['ok', true]]);
+    expect(data.counts).toEqual({ ok: 1, failed: 2 });
+    expect(effects).toEqual(['ok']);
+    expect(authorize).toHaveBeenCalledTimes(3);
+    expect(recordInvocation).toHaveBeenCalledTimes(3);
+  });
+
+  it('rejects malformed envelope metadata before any child enters dispatch', async () => {
+    const fn = vi.fn(async (_args: unknown) => ({ content: [] }));
+    const onDispatchStart = vi.fn();
+    const result = await dispatchProjectedTool(fixture(fn), 'batch-fixture:write', {
+      _batch: 1, items: [{ itemId: 'same', args: { key: 'a' } }, { itemId: 'same', args: { key: 'b' } }],
+    }, context(), { onDispatchStart });
+    expect(result.error?.code).toBe('invalid_input');
+    expect(fn).not.toHaveBeenCalled();
+    expect(onDispatchStart).not.toHaveBeenCalled();
+  });
+
+  it('preserves a valid business items array as one dispatched operation', async () => {
+    const schema = z.strictObject({ items: z.array(operation) });
+    const fn = vi.fn(async (_args: unknown) => ({ content: [] }));
+    const args = { items: [{ key: 'a' }, { key: 'b' }] };
+    const data = await invoke(fixture(fn, schema), args);
+    expect(data.results).toHaveLength(1);
+    expect(fn).toHaveBeenCalledOnce();
+    expect(fn.mock.calls[0]?.[0]).toEqual(args);
+  });
+
+  it('negotiates an exact operation result independently of singleton or envelope syntax', async () => {
+    const output = { content: [{ type: 'text' as const, text: 'raw bytes\n' }],
+      _meta: { delta: { mode: 'not_modified', cursor: 'next' } }, isError: true };
+    const fn = vi.fn(async (_args: unknown) => output);
+    const tool = fixture(fn);
+    for (const input of [{ key: 'a' }, { _batch: 1, items: [{ args: { key: 'a' } }] }]) {
+      const result = await dispatchProjectedTool(tool, 'batch-fixture:write', input, context(),
+        { batchResponseVersion: 'operation-v0' });
+      expect(result).toEqual({ ok: true, result: output });
+    }
+    expect(fn).toHaveBeenCalledTimes(2);
+    const canonical = await invoke(tool, { key: 'a' });
+    expect(canonical.results[0]).toMatchObject({ ok: false, status: 'failed', output });
+  });
+
+  it('refuses multi-item legacy responses before gates or effects instead of dropping siblings', async () => {
+    const fn = vi.fn(async (_args: unknown) => ({ content: [] }));
+    const onDispatchStart = vi.fn();
+    const result = await dispatchProjectedTool(fixture(fn), 'batch-fixture:write', {
+      _batch: 1, items: [{ args: { key: 'a' } }, { args: { key: 'b' } }],
+    }, context(), { batchResponseVersion: 'operation-v0', onDispatchStart });
+    expect(result).toMatchObject({ ok: false, error: { code: 'invalid_input' } });
+    expect(fn).not.toHaveBeenCalled();
+    expect(onDispatchStart).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('runs registered tools through the public canonical path (principal=%s)', async principal => {
+    const name = 'batch-fixture:public-' + principal;
+    const effects: string[] = [];
+    const definition = { name, capability: 'test:write', args: operation,
+      handler: async (args: z.infer<typeof operation>) => { effects.push(args.key); return { data: { key: args.key } }; } };
+    if (principal) defineTool(definition);
+    else defineTool({ ...definition, requirePrincipal: false });
+    const tool = lookupByMcpName(name)!;
+    const ctx = { ...context(), requestedStructured: true,
+      principal: { slug: 'fixture', workspaceId: 'default', capabilities: new Set(['test:write']) } };
+    const results = [];
+    for (const input of [{ key: 'a' }, { _batch: 1, items: [{ args: { key: 'a' } }] }]) {
+      const out = await dispatchProjectedTool(tool, name, input, ctx, {});
+      expect(out.ok).toBe(true);
+      results.push(out.result!.structuredContent as unknown as BatchResult);
+    }
+    expect(results[0].results).toEqual(results[1].results);
+    expect(results[0].results[0].output?.structuredContent).toEqual({ key: 'a' });
+    expect(effects).toEqual(['a', 'a']);
+  });
+
+  it('keeps per-item validation failures and complete media/metadata beside successful siblings', async () => {
+    defineTool({ name: 'batch-fixture:media', requirePrincipal: false, capability: 'test:write', args: operation,
+      handler: async () => ({ content: [{ type: 'image', data: 'fixture', mimeType: 'image/png' }],
+        structuredContent: { found: false }, _meta: { nextCursor: 'page-2' } }) });
+    const tool = lookupByMcpName('batch-fixture:media')!;
+    const out = await dispatchProjectedTool(tool, 'batch-fixture:media', {
+      _batch: 1, items: [{ itemId: 'invalid', args: {} }, { itemId: 'media', args: { key: 'a' } }],
+    }, context(), {});
+    const data = out.result!.structuredContent as unknown as BatchResult;
+    expect(data.counts).toEqual({ ok: 1, failed: 1 });
+    expect(data.results[0]).toMatchObject({ itemId: 'invalid', ok: false, error: { code: 'invalid_input' } });
+    expect(data.results[1]).toMatchObject({ itemId: 'media', ok: true, output: {
+      content: [{ type: 'image', data: 'fixture', mimeType: 'image/png' }],
+      structuredContent: { found: false }, _meta: { nextCursor: 'page-2' },
+    } });
+  });
+
+  it.each(['json', 'toon'] as const)('classifies an explicit refusal after %s serialization', async requestedFormat => {
+    const name = 'batch-fixture:refusal-' + requestedFormat;
+    defineTool({ name, requirePrincipal: false, capability: 'test:write', args: operation,
+      handler: async () => ({ data: { ok: false, reason: 'fixture_refusal' } }) });
+    const out = await dispatchProjectedTool(lookupByMcpName(name)!, name, { key: 'a' },
+      { ...context(), transport: 'mcp', requestedFormat }, {});
+    const data = out.result!.structuredContent as unknown as BatchResult;
+    expect(data.results[0].output?.structuredContent).toBeUndefined();
+    if (requestedFormat === 'toon') expect(data.results[0].output?.content[0])
+      .toMatchObject({ type: 'text', text: expect.stringMatching(/^format: toon\n/) });
+    expect(data.counts).toEqual({ ok: 0, failed: 1 });
+    expect(data.results[0]).toMatchObject({ ok: false, status: 'failed' });
+    expect(out.result?.isError).toBe(true);
+  });
+});
 
 describe('permanent shallow batch normalization', () => {
   it('keeps marked, unmarked, object-items and singleton operations equivalent', async () => {

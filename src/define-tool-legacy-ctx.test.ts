@@ -18,7 +18,8 @@ import { dispatchProjectedTool, type DispatchProjectedDeps } from './dispatch-pr
 import { _resetProjectionRegistryForTests, lookupByMcpName, type UnifiedToolContext } from './tool-projection';
 import type { ToolContext } from './types';
 
-const DEPS: DispatchProjectedDeps = {};
+// These assertions inspect the negotiated operation payload, including its metadata.
+const DEPS: DispatchProjectedDeps = { batchResponseVersion: 'operation-v0' };
 
 const ctx = (over: Partial<UnifiedToolContext> = {}): UnifiedToolContext => ({
   log: vi.fn(),
@@ -50,7 +51,7 @@ describe.each(['legacy', 'role'] as const)('canonical data error metadata — %s
       lookupByMcpName(definition.name)!, definition.name, {},
       ctx({ role: 'operator', requestedFormat: 'json', requestedStructured: true,
         gateBypass: { role: true, capability: true, quota: true } }),
-      { recordInvocation },
+      { ...DEPS, recordInvocation },
     );
     expect(result.ok).toBe(true);
     expect(result.result?.structuredContent).toEqual(data);

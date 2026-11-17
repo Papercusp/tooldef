@@ -21,6 +21,7 @@
  */
 
 import type { ToolResult } from './wire';
+import { decode, isResultFormat } from '@papercusp/result-encoding';
 import { applySeeAlso } from './see-also';
 import { applyDenominator } from './denominator';
 import { applyResultAnnotator } from './result-annotator';
@@ -78,6 +79,8 @@ import { applyWorkspaceTxContract } from './workspace-tx';
 import { createPhaseTracker, type PhaseInterval, type PhaseTracker } from './phase-tracker';
 import { prepareDispatchPremises } from './dispatch-premises';
 import { dispatchWithToolExecution, selectToolExecution, type ToolExecutionReceipt, type ToolExecutionRefusal } from './execution-contract';
+import { type BatchItemResult, type BatchResult } from './batch';
+import { standardValidate } from './standard-schema';
 
 /* ─── Step names ─────────────────────────────────────────────────────── */
 
@@ -1920,20 +1923,29 @@ function objectRecord(value: unknown): Record<string, unknown> | null {
  * preserve `isError` and structured `ok:false`; an apparent success remains
  * subject to the abort-authoritative tier/idempotency checks below.
  *
- * This intentionally reads only the first JSON text item and only an exact
- * top-level `ok:false` object. It does not infer failure from nested fields,
- * prose, or arbitrary compact encodings.
+ * Structured content is authoritative. Otherwise decode only the first text
+ * item's JSON or self-identifying result format; never infer failure from
+ * nested fields, prose, or an arbitrary business flag such as found:false.
  */
-function hasExplicitFailurePayload(result: Pick<ToolResult, 'content'>): boolean {
+function hasExplicitFailurePayload(result: Pick<ToolResult, 'content' | 'structuredContent'>): boolean {
+  return resultOutcomeCandidate(result)?.ok === false;
+}
+
+function resultOutcomeCandidate(result: Pick<ToolResult, 'content' | 'structuredContent'>): Record<string, unknown> | null {
+  const structured = objectRecord(result.structuredContent);
+  if (structured) return structured;
   const firstText = result.content.find(
     (item): item is Extract<ToolResult['content'][number], { type: 'text' }> => item.type === 'text',
   );
-  if (!firstText) return false;
+  if (!firstText) return null;
   try {
-    const parsed = JSON.parse(firstText.text) as unknown;
-    return objectRecord(parsed)?.ok === false;
+    const marker = /^format: (\S+)\n/.exec(firstText.text);
+    if (marker && isResultFormat(marker[1]) && marker[1] !== 'md') {
+      return objectRecord(decode(firstText.text.slice(marker[0].length), marker[1]));
+    }
+    return objectRecord(JSON.parse(firstText.text));
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -1953,18 +1965,7 @@ function hasExplicitFailurePayload(result: Pick<ToolResult, 'content'>): boolean
  * unrecognized shape merely stays unclassified.
  */
 export function extractSoftFailureOutcome(result: Pick<ToolResult, 'content' | 'structuredContent'>): SoftFailureOutcomeMetadata | null {
-  let candidate = objectRecord(result.structuredContent);
-  if (!candidate) {
-    const firstText = result.content.find(
-      (item): item is Extract<ToolResult['content'][number], { type: 'text' }> => item.type === 'text',
-    );
-    if (!firstText) return null;
-    try {
-      candidate = objectRecord(JSON.parse(firstText.text));
-    } catch {
-      return null;
-    }
-  }
+  const candidate = resultOutcomeCandidate(result);
   if (!candidate || candidate.ok !== false) return null;
   const reason = typeof candidate.reason === 'string'
     ? candidate.reason.trim()
@@ -2396,6 +2397,98 @@ export async function runDispatchStack(
   ctx: UnifiedToolContext,
   deps: DispatchProjectedDeps,
   stack: ReadonlyArray<DispatchStep> = DEFAULT_DISPATCH_STACK,
+): Promise<DispatchProjectedResult> {
+  return tool.batchContract
+    ? runBatchDispatchStack(tool, toolName, input, ctx, deps, stack)
+    : runOperationDispatchStack(tool, toolName, input, ctx, deps, stack);
+}
+
+/** Canonical coordinator; every child still traverses the full operation stack. */
+export async function runBatchDispatchStack(
+  tool: ProjectedTool,
+  toolName: string,
+  input: unknown,
+  ctx: UnifiedToolContext,
+  deps: DispatchProjectedDeps,
+  stack: ReadonlyArray<DispatchStep> = DEFAULT_DISPATCH_STACK,
+): Promise<DispatchProjectedResult> {
+  let request;
+  try {
+    request = await tool.batchContract!.normalize(input);
+  } catch (error) {
+    return { ok: false, error: { code: 'invalid_input', message: error instanceof Error ? error.message : String(error) } };
+  }
+  const legacyResponse = deps.batchResponseVersion === 'operation-v0';
+  if (legacyResponse && request.items.length !== 1) {
+    return { ok: false, error: { code: 'invalid_input',
+      message: 'operation-v0 requires exactly one operation; use batch-v1 to receive every item outcome.' } };
+  }
+  const batchId = 'batch-' + nextCallId();
+  const deadlineAtMs = Math.min(
+    Date.now() + (tool.timeoutSec ?? 60) * 1000,
+    ctx.deadlineAtMs ?? Infinity,
+    ctx.executionDeadlineAtMs ?? Infinity,
+  );
+  const results: BatchItemResult[] = [];
+  for (const item of request.items) {
+    if (ctx.signal?.aborted || Date.now() >= deadlineAtMs) {
+      if (legacyResponse) return { ok: false, error: {
+        code: ctx.signal?.aborted ? 'aborted' : 'timeout', message: 'Operation did not start before cancellation or deadline.' } };
+      results.push({ itemId: item.itemId, ok: false, status: 'not-started', error: { code: ctx.signal?.aborted ? 'aborted' : 'timeout' } });
+      continue;
+    }
+    // Preserve context getters (including the transaction contract) without sharing
+    // a mutable context object between children. All children consume one budget.
+    const descriptors = Object.getOwnPropertyDescriptors(ctx);
+    descriptors.deadlineAtMs = { value: deadlineAtMs, enumerable: true, configurable: true, writable: true };
+    const childCtx = Object.defineProperties(Object.create(Object.getPrototypeOf(ctx)), descriptors) as UnifiedToolContext;
+    try {
+      let args: unknown = item.args;
+      if (tool.batch?.operation) {
+        const parsed = await standardValidate(tool.batch.operation, args);
+        if (!parsed.ok) {
+          if (legacyResponse) return { ok: false, error: { code: 'invalid_input', message: JSON.stringify(parsed.issues) } };
+          results.push({ itemId: item.itemId, ok: false, status: 'failed', error: { code: 'invalid_input', issues: parsed.issues } });
+          continue;
+        }
+        args = parsed.value;
+      }
+      if (tool.batch?.toHandlerArgs) args = tool.batch.toHandlerArgs(args);
+      const child = await runOperationDispatchStack(tool, toolName, args, childCtx, deps, stack);
+      // Version negotiation is independent of request syntax. Returning the
+      // original child preserves raw bytes, delta metadata and dispatch errors.
+      if (legacyResponse) return child;
+      if (child.ok && child.result) {
+        const failed = child.result.isError === true || objectRecord(child.result.structuredContent)?.ok === false || hasExplicitFailurePayload(child.result);
+        results.push({ itemId: item.itemId, ok: !failed, status: failed ? 'failed' : 'completed', output: child.result });
+      } else {
+        const receipt = objectRecord(child.error?.meta)?.abortCompletionReceipt;
+        const uncertain = (child.error?.code === 'timeout' || child.error?.code === 'aborted') &&
+          (tool.effectForCall?.(args) ?? tool.effect) === 'write' &&
+          child.error?.meta?.handlerEntered !== false && objectRecord(receipt)?.status !== 'not-recorded';
+        results.push({ itemId: item.itemId, ok: false,
+          status: uncertain ? 'unknown-effect' : child.error?.code === 'aborted' ? 'cancelled' : 'failed',
+          error: child.error, ...(receipt ? { receipt } : {}) });
+      }
+    } catch (error) {
+      if (legacyResponse) return { ok: false, error: { code: 'handler_error', message: error instanceof Error ? error.message : String(error) } };
+      results.push({ itemId: item.itemId, ok: false, status: 'failed', error: { code: 'handler_error', message: error instanceof Error ? error.message : String(error) } });
+    }
+  }
+  const succeeded = results.filter(item => item.ok).length;
+  const data: BatchResult = { ok: succeeded === results.length, batchId, results,
+    counts: { ok: succeeded, failed: results.length - succeeded } };
+  return { ok: true, result: { content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data,
+    ...(data.ok ? {} : { isError: true }) } };
+}
+
+async function runOperationDispatchStack(
+  tool: ProjectedTool,
+  toolName: string,
+  input: unknown,
+  ctx: UnifiedToolContext,
+  deps: DispatchProjectedDeps,
+  stack: ReadonlyArray<DispatchStep>,
 ): Promise<DispatchProjectedResult> {
   const exec = initExecution(tool, toolName, input, ctx, deps);
   armDispatchDeadline(exec);

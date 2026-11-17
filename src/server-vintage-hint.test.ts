@@ -16,7 +16,8 @@ import { dispatchProjectedTool, type DispatchProjectedDeps } from './dispatch-pr
 import { _resetProjectionRegistryForTests, lookupByMcpName, type UnifiedToolContext } from './tool-projection';
 import { resetServerVintageResolver, setServerVintageResolver } from './server-vintage';
 
-const DEPS: DispatchProjectedDeps = {};
+// These assertions inspect the negotiated operation payload, including its metadata.
+const DEPS: DispatchProjectedDeps = { batchResponseVersion: 'operation-v0' };
 
 const ctx = (over: Partial<UnifiedToolContext> = {}): UnifiedToolContext => ({
   log: () => {},

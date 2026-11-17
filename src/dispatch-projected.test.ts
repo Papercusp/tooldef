@@ -46,6 +46,7 @@ const MAKE_CTX = (over: Partial<UnifiedToolContext> = {}): UnifiedToolContext =>
 });
 
 const MAKE_DEPS = (over: Partial<DispatchProjectedDeps> = {}): DispatchProjectedDeps => ({
+  batchResponseVersion: 'operation-v0',
   readQuotaState: undefined,
   recordInvocation: undefined,
   ...over,

@@ -68,7 +68,7 @@ describe('unwrapToolResult (B-CX-1A dispatch binding)', () => {
       const dispatched = await dispatchProjectedTool(
         lookupByMcpName('t:projection-body')!, 't:projection-body', {},
         { log: vi.fn(), signal: new AbortController().signal, progress: vi.fn(),
-          emit: vi.fn(), workspaceId: 'w', runId: 'r', transport: 'mcp', codeMode: true }, {},
+          emit: vi.fn(), workspaceId: 'w', runId: 'r', transport: 'mcp', codeMode: true }, { batchResponseVersion: 'operation-v0' },
       );
       expect(dispatched.ok).toBe(true);
       expect(unwrapToolResult(dispatched.result)).toBe(`${advisory}\n${body}`);
@@ -104,7 +104,7 @@ describe('unwrapToolResult (B-CX-1A dispatch binding)', () => {
     try {
       const dispatched = await dispatchProjectedTool(lookupByMcpName('t:projected-json')!, 't:projected-json', {},
         { log: vi.fn(), signal: new AbortController().signal, progress: vi.fn(), emit: vi.fn(),
-          workspaceId: 'w', runId: 'r', transport: 'mcp', codeMode: true }, {});
+          workspaceId: 'w', runId: 'r', transport: 'mcp', codeMode: true }, { batchResponseVersion: 'operation-v0' });
       expect(dispatched.ok).toBe(true);
       expect(unwrapToolResult(dispatched.result)).toEqual({ ok: true, results: [{ section: { body: 'actual plan' } }] });
     } finally { _resetProjectionRegistryForTests(); }

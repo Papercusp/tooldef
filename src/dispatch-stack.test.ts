@@ -5,6 +5,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { encode } from '@papercusp/result-encoding';
 import {
   DEFAULT_DISPATCH_STACK,
   DISPATCH_ERROR_META_KEYS_MAX,
@@ -898,6 +899,17 @@ describe('runDispatchStack — custom stack', () => {
       resultOutcome: 'soft-failure',
       softFailureReason: 'x'.repeat(SOFT_FAILURE_REASON_MAX),
     });
+  });
+
+  it('recognizes self-identifying compact refusals while preserving structured precedence and business data', () => {
+    const content = [{ type: 'text' as const, text: 'format: toon\n' + encode({ ok: false, reason: 'scope_missing' }, 'toon') }];
+    expect(extractSoftFailureOutcome({ content })).toEqual({
+      resultOutcome: 'soft-failure', softFailureReason: 'scope_missing',
+    });
+    expect(extractSoftFailureOutcome({ content, structuredContent: { ok: true } })).toBeNull();
+    expect(extractSoftFailureOutcome({ content: [{ type: 'text',
+      text: 'format: toon\n' + encode({ found: false, reason: 'empty_query' }, 'toon') }] })).toBeNull();
+    expect(extractSoftFailureOutcome({ content: [{ type: 'text', text: 'format: unknown\nok: false' }] })).toBeNull();
   });
 
   it('falls back to the first JSON text result and rejects lookalike/nested/blank shapes', () => {

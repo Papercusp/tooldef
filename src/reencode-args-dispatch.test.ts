@@ -25,7 +25,8 @@ import {
 } from './tool-projection';
 import type { ArgReencoding } from './reencode-args';
 
-const DEPS: DispatchProjectedDeps = {};
+// These assertions inspect the negotiated operation payload, including its metadata.
+const DEPS: DispatchProjectedDeps = { batchResponseVersion: 'operation-v0' };
 
 const ctx = (over: Partial<UnifiedToolContext> = {}): UnifiedToolContext => ({
   log: vi.fn(),

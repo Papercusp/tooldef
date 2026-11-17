@@ -68,7 +68,8 @@ function defineSemanticTool(name: string, state: { rows: SemRow[] }, opts: { max
   });
 }
 
-const DEPS: DispatchProjectedDeps = {};
+// These assertions inspect the negotiated operation payload, including its metadata.
+const DEPS: DispatchProjectedDeps = { batchResponseVersion: 'operation-v0' };
 
 const ctx = (over: Partial<UnifiedToolContext> = {}): UnifiedToolContext => ({
   log: vi.fn(),

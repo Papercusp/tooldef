@@ -356,6 +356,13 @@ export type DispatchAuthorization =
     }>;
 
 export interface DispatchProjectedDeps {
+  /**
+   * Explicit transport compatibility negotiation. Canonical dispatch defaults to
+   * batch-v1 for either singleton shorthand or an envelope. An operation-v0
+   * consumer receives the original child result and must submit exactly one
+   * operation; it cannot silently discard siblings from a batch.
+   */
+  batchResponseVersion?: 'batch-v1' | 'operation-v0';
   /** Resolve declared fact premises in the caller's workspace. Never a model call. */
   resolvePremises?(refs: readonly string[], ctx: UnifiedToolContext): Promise<Array<{
     ref: string;

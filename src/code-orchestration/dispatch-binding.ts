@@ -207,7 +207,10 @@ export function isPreExecutionFailure(err: unknown): boolean {
 
 export function realDispatch(ctx: UnifiedToolContext, deps: DispatchProjectedDeps): FacadeDispatch {
   return async (tool: ProjectedTool, toolName: string, args: unknown): Promise<unknown> => {
-    const r = await dispatchProjectedTool(tool, toolName, args, ctx, deps);
+    // Existing facade consumers read the operation body. A migrated facade
+    // explicitly supplies batch-v1; request syntax never selects its version.
+    const r = await dispatchProjectedTool(tool, toolName, args, ctx,
+      { batchResponseVersion: 'operation-v0', ...deps });
     if (!r.ok) {
       throw new ToolDispatchError(
         toolName,
