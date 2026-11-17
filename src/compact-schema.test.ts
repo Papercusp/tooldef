@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod/v4';
 
 import {
@@ -600,6 +600,48 @@ describe('verbatim-repeated subschemas are hoisted into $defs', () => {
     expect(Buffer.byteLength(JSON.stringify(compactInputSchema(full))))
       .toBeLessThanOrEqual(Buffer.byteLength(JSON.stringify(compactInputSchema(input))));
     expect(factorInputSchema(full)).toEqual(full);
+  });
+
+  it('bounds repeated encoding work across full-schema budget trials', () => {
+    // Distinct full annotations collapse to the same compact shapes. These
+    // candidates exercise rejected full rewrites as well as accepted ones.
+    const properties = Object.fromEntries(Array.from({ length: 24 }, (_, index) => {
+      const leaf = { ...big(), description: `Explanation ${index}: ` + 'authored prose '.repeat(12) };
+      return [`field${index}`, { type: 'object', properties: { left: leaf, right: structuredClone(leaf) } }];
+    }));
+    const input = { type: 'object', properties };
+    const before = structuredClone(input);
+    const encoder = vi.spyOn(TextEncoder.prototype, 'encode');
+    let out: unknown;
+    let calls: number;
+    try {
+      out = factorInputSchema(input);
+      calls = encoder.mock.calls.length;
+    } finally { encoder.mockRestore(); }
+    expect(resolve(out)).toEqual(input);
+    expect(input).toEqual(before);
+    expect(Buffer.byteLength(JSON.stringify(compactInputSchema(out))))
+      .toBeLessThanOrEqual(Buffer.byteLength(JSON.stringify(compactInputSchema(input))));
+    // Work-count assertion, independent of CPU scheduling and machine speed.
+    expect(calls).toBeLessThan(1_000);
+  });
+
+  it('indexes a broad authored definitions map once instead of once per candidate', () => {
+    const input = { type: 'object', properties: { value: big() },
+      $defs: Object.fromEntries(Array.from({ length: 96 }, (_, index) =>
+        [`authored${index}`, { type: 'string', minLength: index + 1 }])) };
+    const entries = Object.entries;
+    let scans = 0;
+    const spy = vi.spyOn(Object, 'entries').mockImplementation((value: object) => {
+      if (Object.hasOwn(value, 'authored0')) scans++;
+      return entries(value);
+    });
+    let out: unknown;
+    try { out = compactInputSchema(input); }
+    finally { spy.mockRestore(); }
+    expect(out).toEqual(input);
+    // Copy, site collection, and one definition index; allow one extra pass.
+    expect(scans).toBeLessThanOrEqual(4);
   });
 
   it('leaves a small repeated leaf inline, so a short field never costs a reader a ref', () => {
