@@ -627,9 +627,11 @@ describe('verbatim-repeated subschemas are hoisted into $defs', () => {
   });
 
   it('indexes a broad authored definitions map once instead of once per candidate', () => {
+    // Keep authored bodies distinct from big()'s leaves: reusing a matching
+    // authored definition is valid, but this fixture measures map scans.
     const input = { type: 'object', properties: { value: big() },
       $defs: Object.fromEntries(Array.from({ length: 96 }, (_, index) =>
-        [`authored${index}`, { type: 'string', minLength: index + 1 }])) };
+        [`authored${index}`, { type: 'string', minLength: index + 1_000 }])) };
     const entries = Object.entries;
     let scans = 0;
     const spy = vi.spyOn(Object, 'entries').mockImplementation((value: object) => {
