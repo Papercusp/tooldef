@@ -1294,6 +1294,7 @@ export async function runToolOrchestration(
   const run = await (opts.executeScript ?? runOrchestrationScript)(script, facade, {
     ...(opts.kernel ? { kernel: opts.kernel } : {}),
     ...(timeoutMs ? { timeoutMs } : {}),
+    deadlineAtMs,
     ...(opts.timeoutGraceMs !== undefined ? { timeoutGraceMs: opts.timeoutGraceMs } : {}),
     onTimeout: settleOnTimeout,
     // The caller's abort terminates the worker too; aborting in-flight handlers alone would let

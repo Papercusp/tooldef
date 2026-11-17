@@ -208,6 +208,8 @@ export interface RunScriptOptions {
   /** Wall-clock budget for the whole script. Defaults to {@link DEFAULT_SCRIPT_TIMEOUT_MS} (30s).
    *  Sync loops are killed at this bound. */
   timeoutMs?: number;
+  /** Absolute caller budget shared with host dispatches; preparation consumes it too. */
+  deadlineAtMs?: number;
   /**
    * Called immediately before the worker is terminated by the wall-clock budget. Host-side tool
    * calls may still be awaiting their real handler after the worker is gone. The hook may return
@@ -1256,6 +1258,12 @@ export async function runOrchestrationScript(
   opts: RunScriptOptions = {},
 ): Promise<RunScriptResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_SCRIPT_TIMEOUT_MS;
+  const deadlineAtMs = Math.min(
+    Date.now() + timeoutMs,
+    typeof opts.deadlineAtMs === 'number' && Number.isFinite(opts.deadlineAtMs)
+      ? opts.deadlineAtMs
+      : Infinity,
+  );
   const maxLogLines = opts.maxLogLines ?? 200;
   const logs: string[] = [];
   const inputs = opts.inputs ?? {};
@@ -1266,6 +1274,9 @@ export async function runOrchestrationScript(
 
   // Nothing starts for a caller that already gave up.
   if (opts.signal?.aborted) return { ok: false, error: SCRIPT_ABORTED_ERROR, logs };
+  if (deadlineAtMs <= Date.now()) {
+    return { ok: false, error: 'script_timeout: shared deadline exhausted before worker start', logs };
+  }
 
   const kernel = opts.kernel ? kernels.get(opts.kernel.id) : undefined;
   if (opts.kernel && (!kernel || kernel.scope !== opts.kernel.scope || kernel.state !== 'live')) {
@@ -1365,7 +1376,10 @@ export async function runOrchestrationScript(
         finish({ ok: false, error }, true);
       });
     };
-    const timer = setTimeout(() => stop(`script_timeout after ${timeoutMs}ms`), timeoutMs);
+    // Arm before accepting worker messages, against the same deadline its child dispatches
+    // inherit. A fresh relative timer here lets a child expire first and settle the script
+    // as a tool error instead of cancelling the worker and preserving its timeout census.
+    const timer = setTimeout(() => stop(`script_timeout after ${timeoutMs}ms`), Math.max(0, deadlineAtMs - Date.now()));
     // A caller abort is the same kill switch as the wall-clock budget (D-009): terminating the
     // worker is what stops the script queueing more host work; the hook then settles the rest.
     function onAbort(): void {

@@ -6,6 +6,17 @@ import type { ToolFacade } from './tool-facade';
 const facade = (impl: Record<string, unknown>) => impl as unknown as ToolFacade;
 
 describe('runOrchestrationScript (B-CX-1A)', () => {
+  it('starts no worker calls after an inherited absolute deadline is exhausted', async () => {
+    const write = vi.fn(async () => ({ ok: true }));
+    const r = await runOrchestrationScript('await tools.write({}); return true;', facade({ write }), {
+      timeoutMs: 30_000,
+      deadlineAtMs: Date.now() - 1,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('script_timeout');
+    expect(write).not.toHaveBeenCalled();
+  });
+
   it('runs a multi-step script and returns ONLY its summary (intermediate stays in-runtime)', async () => {
     const fetchBig = vi.fn(async () => ({ rows: Array.from({ length: 5000 }, (_, i) => i) }));
     const r = await runOrchestrationScript(
