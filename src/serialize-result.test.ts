@@ -70,11 +70,13 @@ describe('serialized batch result recovery', () => {
     expect(Buffer.byteLength(JSON.stringify(projected), 'utf8')).toBeLessThanOrEqual(3_000);
   });
 
-  it('requires a recovery record before replacing successful write outputs with a status index', () => {
+  it.each([undefined, 'full-detail', 'unavailable'])('requires retained results before replacing successful write outputs with a status index (%s)', kind => {
     const batch = { ok: true, batchId: 'batch-without-recovery', counts: { ok: 1, failed: 0 },
       results: [{ itemId: 'write', ok: true, status: 'completed',
         receipt: { callId: 'keep-original' }, output: { content: [] } }] };
-    const projected = projectBoundedPayload(batch, { toolName: 'batch-fixture:write', tier: 'trimmed' });
+    const projected = projectBoundedPayload(batch, { toolName: 'batch-fixture:write', tier: 'trimmed',
+      ...(kind ? { recovery: { ...recovery, cursor: { kind, tool: 'batch-fixture:write', args: {} } } } : {}),
+    });
     expect(projected.results).toMatchObject([{ receipt: { callId: 'keep-original' } }]);
   });
 });
