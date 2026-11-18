@@ -1135,6 +1135,10 @@ export interface ProjectedTool {
    * top-level `oneOf`/`anyOf`.
    */
   inputSchema: Record<string, unknown>;
+  /** Original in-process argument schema, retained for entity-reference gates.
+   * JSON Schema alone cannot preserve runtime entity markers. Plugin tools that
+   * provide only JSON Schema may omit this field. Never published in listings. */
+  args?: unknown;
   /** Original handler input for operation-only adapters such as positional writes. */
   operationInputSchema?: Record<string, unknown>;
   /**

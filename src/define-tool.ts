@@ -3593,6 +3593,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     ...(definitionSite.bundled ? { bundledDefinitionSite: definitionSite.bundled } : {}),
     inputSchema,
     operationInputSchema: factorInputSchema(rawSchema) as Record<string, unknown>,
+    args: def.args,
     discoveryInputSchema: factorInputSchema(batchContract.requestJsonSchema) as Record<string, unknown>,
     capabilities: [def.capability as never],
     effect: def.effect,
@@ -3835,6 +3836,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     // Keep the complete branch requirements for discovery/introspection while
     // retaining the flattened schema above for strict OpenAI/MCP callers.
     operationInputSchema: factorInputSchema(rawSchema) as Record<string, unknown>,
+    args: def.args,
     discoveryInputSchema: factorInputSchema(batchContract.requestJsonSchema) as Record<string, unknown>,
     capabilities: [def.capability as never],
     effect: def.effect,
