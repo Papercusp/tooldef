@@ -399,6 +399,26 @@ describe('native execution at the validated host continuation', () => {
     expect(settle.mock.calls).toEqual([['commit']]);
   });
 
+  it('preserves completed effects and sibling results when quota settlement fails', async () => {
+    const { tool, name, handler } = register({});
+    tool.rolesQuota = { worker: { perRun: 2 } };
+    let admitted = 0;
+    const { data } = await dispatch(tool, name, { _batch: 1,
+      items: ['a', 'b'].map(key => ({ itemId: key, args: { key } })),
+    }, { reserveQuota: async () => {
+      const index = admitted++;
+      return { allowed: true, invocationRef: 'tool-invocation:quota-' + index,
+        settle: async () => { if (index === 0) throw new Error('settlement unavailable'); } };
+    } });
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(data.results.map(item => [item.itemId, item.ok])).toEqual([['a', true], ['b', true]]);
+    expect(data.results[0].output?.structuredContent).toEqual({ key: 'a' });
+    expect(data.results[0].output?._meta?.quotaSettlement).toMatchObject({
+      state: 'unconfirmed', invocationRef: 'tool-invocation:quota-0', retrySafe: false,
+    });
+    expect(data.results[1].output?._meta?.quotaSettlement).toBeUndefined();
+  });
+
   it('never replays a throwing native executor through singleton handlers', async () => {
     const execute = vi.fn<NonNullable<ToolBatchDeclaration['execute']>>(async () => { throw new Error('native failed'); });
     const { tool, name, handler } = register({ execute });
