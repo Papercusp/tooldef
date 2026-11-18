@@ -417,6 +417,8 @@ export interface DispatchProjectedDeps {
       callId: string;
       ctx: UnifiedToolContext;
       selection: ToolExecutionSelection;
+      /** A host-owned quota reservation already persisted this invocation. */
+      invocationRef?: string;
     }): Promise<string>;
     settle(request: {
       toolName: string;
@@ -457,6 +459,22 @@ export interface DispatchProjectedDeps {
     ctx: UnifiedToolContext,
     windowKey: string,
   ): Promise<{ count: number } | null>;
+  /** Atomically claim one slot, including other in-flight claims in the count.
+   * A supplied port fails closed on errors. Settlement is scoped to this call;
+   * committed means execution started, including uncertain/failed effects. */
+  reserveQuota?(request: {
+    toolName: string;
+    pluginName: string;
+    ctx: UnifiedToolContext;
+    windowKey: string;
+    limit: number;
+    callId: string;
+    signal: AbortSignal;
+  }): Promise<{ allowed: false; count: number } | {
+    allowed: true;
+    invocationRef?: string;
+    settle(outcome: 'commit' | 'release'): Promise<void>;
+  }>;
   /**
    * Per-call override. Consulted before tool.fn runs. Used by the
    * llm-testing framework's ToolDispatchOverride registry to inject

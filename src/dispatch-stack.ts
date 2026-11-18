@@ -137,6 +137,8 @@ export interface DispatchExecution {
   readonly windowKey: string | null;
   /** Quota ceiling within the window, or null when the call is unlimited. */
   readonly quotaLimit: number | null;
+  quotaReservation?: { settle(outcome: 'commit' | 'release'): Promise<void> };
+  quotaConsumed?: boolean;
 
   // ─── written by 'timeout' step ──────────────────────────────────────
   abort: AbortController;
@@ -645,9 +647,27 @@ const quotaStep: DispatchStep = {
     // The window key + ceiling were resolved at init by the host's
     // `computeQuotaWindow` policy (worker→chunk, power-user→session, …);
     // this step only enforces the count against the resolved limit.
-    if (!windowKey || quotaLimit == null || quotaLimit <= 0 || !deps.readQuotaState || quotaBypass) {
+    if (!windowKey || quotaLimit == null || quotaLimit <= 0 || quotaBypass) {
       return null;
     }
+    if (deps.reserveQuota) {
+      try {
+        const reservation = await deps.reserveQuota({ toolName, pluginName: exec.tool.pluginName,
+          ctx, windowKey, limit: quotaLimit, callId: exec.callId, signal: exec.abort.signal });
+        if (!reservation.allowed) return { ok: false, error: { code: 'quota_exceeded',
+          message: `Tool "${toolName}" exceeded quota (${reservation.count}/${quotaLimit}) in window "${windowKey}"` } };
+        // Admission may finish after runAdmissionStep answered cancellation. That
+        // late claim belongs to no running operation and must be released here.
+        if (exec.abort.signal.aborted) { await reservation.settle('release'); return null; }
+        exec.quotaReservation = reservation;
+        exec.invocationRef = reservation.invocationRef;
+        return null;
+      } catch {
+        return { ok: false, error: { code: 'quota_exceeded',
+          message: 'Atomic quota admission is unavailable; the operation did not start.' } };
+      }
+    }
+    if (!deps.readQuotaState) return null;
     try {
       const state = await deps.readQuotaState(toolName, ctx, windowKey);
       if (state && state.count >= quotaLimit) {
@@ -1043,13 +1063,14 @@ const invokeStep: DispatchStep = {
       const invoke = (): Promise<ToolResult> => invocation ??= Promise.resolve().then(async () => {
         if (deps.overrideTool) {
           const ov = await deps.overrideTool(toolName, input, handlerCtx);
-          if (ov !== PASS_THROUGH) return ov as ToolResult;
+          if (ov !== PASS_THROUGH) { exec.quotaConsumed = true; return ov as ToolResult; }
         }
         if (exec.nativeBatch && tool.prepareInvocation) {
           const prepared = await tool.prepareInvocation(input, handlerCtx);
           const response = await exec.nativeBatch.coordinator.arrive(exec.nativeBatch.itemId, exec, prepared);
           return prepared.finalize(response);
         }
+        exec.quotaConsumed = true;
         return tool.fn(input, handlerCtx);
       });
       const nowMs = Date.now();
@@ -1087,7 +1108,8 @@ const invokeStep: DispatchStep = {
       // must not call the adapter, even when that adapter admits before invoking fn.
       const execute = (): Promise<ToolResult> => execution ??= Promise.resolve().then(async () => {
         const original = { toolName, pluginName: tool.pluginName, ctx: handlerCtx,
-          callId: exec.callId, selection };
+          callId: exec.callId, selection,
+          ...(exec.invocationRef ? { invocationRef: exec.invocationRef } : {}) };
         const observer = deps.invocationObserver;
         if (observer) {
           try {
@@ -2523,6 +2545,7 @@ class NativeBatchCoordinator {
         const items = Object.freeze(active.map(([itemId, { exec, prepared }]) => Object.freeze({
           itemId, args: prepared.args, ctx: prepared.ctx, callId: exec.callId, signal: exec.abort.signal,
         })));
+        for (const [, participant] of active) participant.exec.quotaConsumed = true;
         const outcomes = await this.tool.batch!.execute!(items, { signal: this.abort.signal });
         if (!Array.isArray(outcomes)) throw new Error('Native batch must return an array of keyed outcomes');
         const expected = new Set(items.map(item => item.itemId));
@@ -2570,7 +2593,7 @@ function canUseNativeBatch(tool: ProjectedTool, toolName: string, items: readonl
       if ((tool.effectForCall?.(args) ?? tool.effect) !== 'read') return false;
       const roleQuota = ctx.role ? tool.rolesQuota?.[ctx.role] : undefined;
       const window = (deps.computeQuotaWindow ?? defaultComputeQuotaWindow)(ctx, roleQuota, toolName, args);
-      return ctx.gateBypass?.quota === true || !window.key || window.limit == null || window.limit <= 0;
+      return ctx.gateBypass?.quota === true || !window.key || window.limit == null || window.limit <= 0 || !!deps.reserveQuota;
     } catch { return false; }
   });
 }
@@ -2792,6 +2815,11 @@ async function runOperationDispatchStack(
         } : {}),
       };
     }
+    // Settlement is per operation, even when native execution grouped siblings.
+    // A started write consumes its slot regardless of response uncertainty.
+    let quotaSettlementFailed = false;
+    try { await exec.quotaReservation?.settle(exec.quotaConsumed ? 'commit' : 'release'); }
+    catch { quotaSettlementFailed = true; }
     await recordTelemetry(exec, settled);
     // Event-reaction observation point (D-001). Fired AFTER telemetry, on every
     // path. Best-effort + non-blocking: the host's postInvoke matches rules and
@@ -2833,5 +2861,6 @@ async function runOperationDispatchStack(
       cancelPendingCardsForRun(ctx.runId);
       closeRun(ctx.runId);
     }
+    if (quotaSettlementFailed) throw new Error('Quota settlement is unconfirmed; inspect ' + (exec.invocationRef ?? exec.callId));
   }
 }
