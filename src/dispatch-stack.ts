@@ -658,6 +658,7 @@ const quotaStep: DispatchStep = {
         const state = await deps.readQuotaState?.(toolName, ctx, windowKey);
         if (state) return state.count < quotaLimit ? null : { ok: false, error: {
           code: 'quota_exceeded', message: `Tool "${toolName}" exceeded quota (${state.count}/${quotaLimit}) in window "${windowKey}"`,
+          meta: { windowKey, used: state.count, limit: quotaLimit },
         } };
       } catch { /* Refuse an unavailable observation without reserving capacity. */ }
       return { ok: false, error: { code: 'quota_admission_unavailable',
@@ -669,7 +670,8 @@ const quotaStep: DispatchStep = {
         const reservation = await deps.reserveQuota({ toolName, pluginName: exec.tool.pluginName,
           ctx, windowKey, limit: quotaLimit, callId: exec.callId, signal: exec.abort.signal });
         if (!reservation.allowed) return { ok: false, error: { code: 'quota_exceeded',
-          message: `Tool "${toolName}" exceeded quota (${reservation.count}/${quotaLimit}) in window "${windowKey}"` } };
+          message: `Tool "${toolName}" exceeded quota (${reservation.count}/${quotaLimit}) in window "${windowKey}"`,
+          meta: { windowKey, used: reservation.count, limit: quotaLimit } } };
         let settlement: Promise<void> | undefined;
         exec.quotaReservation = { settle: outcome => settlement ??= reservation.settle(outcome) };
         exec.invocationRef = reservation.invocationRef;
