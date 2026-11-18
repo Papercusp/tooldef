@@ -343,7 +343,7 @@ describe('native execution at the validated host continuation', () => {
       reserveQuota: async () => { throw new Error('quota store unavailable'); },
     });
     expect(handler).not.toHaveBeenCalled();
-    expect(data.results[0]).toMatchObject({ ok: false, error: { code: 'quota_exceeded' } });
+    expect(data.results[0]).toMatchObject({ ok: false, error: { code: 'quota_admission_unavailable' } });
   });
 
   it('releases a late reservation once when cancellation wins quota admission', async () => {
@@ -364,6 +364,31 @@ describe('native execution at the validated host continuation', () => {
     resolve?.({ allowed: true, settle });
     await vi.waitFor(() => expect(settle).toHaveBeenCalledOnce());
     expect(settle).toHaveBeenCalledWith('release');
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('retains a recovery identity when cancellation precedes an unconfirmed late release', async () => {
+    const { tool, name, handler } = register({});
+    tool.rolesQuota = { worker: { perRun: 1 } };
+    const abort = new AbortController();
+    let entered!: () => void;
+    const started = new Promise<void>(done => { entered = done; });
+    let resolve!: (value: { allowed: true; invocationRef: string; settle: () => Promise<void> }) => void;
+    let callId: string | undefined;
+    const pending = dispatch(tool, name, { key: 'a' }, { reserveQuota: input => {
+      callId = input.callId;
+      entered();
+      return new Promise(done => { resolve = done; });
+    } }, { ...context(), signal: abort.signal });
+    await started;
+    abort.abort();
+    const { data } = await pending;
+    expect(data.results[0]).toMatchObject({ ok: false, error: { code: 'aborted', meta: {
+      quotaSettlement: { state: 'unconfirmed', callId, retrySafe: false },
+    } } });
+    const settle = vi.fn(async () => { throw new Error('release unavailable'); });
+    resolve({ allowed: true, invocationRef: 'tool-invocation:late', settle });
+    await vi.waitFor(() => expect(settle).toHaveBeenCalledOnce());
     expect(handler).not.toHaveBeenCalled();
   });
 
@@ -417,6 +442,46 @@ describe('native execution at the validated host continuation', () => {
       state: 'unconfirmed', invocationRef: 'tool-invocation:quota-0', retrySafe: false,
     });
     expect(data.results[1].output?._meta?.quotaSettlement).toBeUndefined();
+  });
+
+  it('isolates unconfirmed quota settlement for native siblings without replay', async () => {
+    const execute = vi.fn<NonNullable<ToolBatchDeclaration['execute']>>(async items => items.map(item => ({
+      itemId: item.itemId, response: { data: item.args },
+    })));
+    const { tool, name, handler } = register({ execute, maxConcurrency: 2, independent: true });
+    tool.rolesQuota = { worker: { perRun: 2 } };
+    let ordinal = 0;
+    const { data } = await dispatch(tool, name, { _batch: 1, items: ['a', 'b'].map(key => ({ args: { key } })) }, {
+      reserveQuota: async () => {
+        const index = ordinal++;
+        return { allowed: true, invocationRef: 'tool-invocation:native-' + index,
+          settle: async () => { if (index === 0) throw new Error('settlement unavailable'); } };
+      },
+    });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(handler).not.toHaveBeenCalled();
+    expect(data.results.map(item => item.ok)).toEqual([true, true]);
+    expect(data.results[0].output?._meta?.quotaSettlement).toMatchObject({ state: 'unconfirmed', retrySafe: false });
+    expect(data.results[1].output?._meta?.quotaSettlement).toBeUndefined();
+  });
+
+  it.each(['override', 'prepare'] as const)('conservatively consumes a reservation before a throwing %s seam', async seam => {
+    const execute = vi.fn<NonNullable<ToolBatchDeclaration['execute']>>(async () => []);
+    const { tool, name, handler } = register({ execute, independent: true, maxConcurrency: 2 });
+    tool.rolesQuota = { worker: { perRun: 2 } };
+    const effects: string[] = [];
+    const hook = vi.fn(async () => { effects.push(seam); throw new Error('hook response lost'); });
+    if (seam === 'prepare') tool.prepareInvocation = hook;
+    const settle = vi.fn(async () => {});
+    const { data } = await dispatch(tool, name, { key: 'a' }, {
+      reserveQuota: async () => ({ allowed: true, settle }),
+      ...(seam === 'override' ? { overrideTool: hook } : {}),
+    });
+    expect(effects).toEqual([seam]);
+    expect(data.results[0].ok).toBe(false);
+    expect(settle.mock.calls).toEqual([['commit']]);
+    expect(handler).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it('never replays a throwing native executor through singleton handlers', async () => {
