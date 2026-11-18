@@ -79,6 +79,7 @@ export type DispatchProjectedErrorCode =
   | 'missing_role'
   | 'harness_required'
   | 'quota_exceeded'
+  | 'quota_admission_unavailable'
   | 'invalid_input'
   | 'handler_error'
   | 'authorization_denied'
@@ -460,8 +461,11 @@ export interface DispatchProjectedDeps {
     windowKey: string,
   ): Promise<{ count: number } | null>;
   /** Atomically claim one slot, including other in-flight claims in the count.
-   * A supplied port fails closed on errors. Settlement is scoped to this call;
-   * committed means execution started, including uncertain/failed effects. */
+   * Required for a finite quota; missing identity or storage fails closed as
+   * quota_admission_unavailable, distinct from true exhaustion. Settlement is
+   * scoped to this call; committed includes override/preparation seams that may
+   * have effects. Unconfirmed/orphaned reservations consume this window until
+   * expiry; failed settlement cannot be retried in-process. */
   reserveQuota?(request: {
     toolName: string;
     pluginName: string;

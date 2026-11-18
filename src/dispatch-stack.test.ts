@@ -521,6 +521,18 @@ describe('preflightDispatchStack — gates without run ownership', () => {
     expect(readQuotaState).toHaveBeenCalledWith('fix.tool', expect.objectContaining({ runId: 'run_X' }), 'run:run_X');
   });
 
+  it('observes quota in preflight without reserving or releasing a live slot', async () => {
+    const reserveQuota = vi.fn();
+    const target = makeTool({ rolesQuota: { worker: { perRun: 2 } } });
+    const deps = { reserveQuota, readQuotaState: vi.fn(async () => ({ count: 1 })) };
+    expect(await preflightDispatchStack(target, 'fix.tool', {}, MAKE_CTX(), deps)).toMatchObject({ allowed: true });
+    deps.readQuotaState.mockRejectedValueOnce(new Error('unavailable'));
+    expect(await preflightDispatchStack(target, 'fix.tool', {}, MAKE_CTX(), deps)).toMatchObject({
+      allowed: false, error: { code: 'quota_admission_unavailable' },
+    });
+    expect(reserveQuota).not.toHaveBeenCalled();
+  });
+
   it('audits a failed prerequisite without auto-firing its corrective tool', async () => {
     const fire = vi.fn(), auditAuth = vi.fn();
     const result = await preflightDispatchStack(makeTool({

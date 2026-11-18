@@ -139,6 +139,9 @@ export interface DispatchExecution {
   readonly quotaLimit: number | null;
   quotaReservation?: { settle(outcome: 'commit' | 'release'): Promise<void> };
   quotaConsumed?: boolean;
+  quotaAdmissionPending?: boolean;
+  /** Preflight observes capacity without creating a live invocation claim. */
+  preflightOnly?: boolean;
 
   // ─── written by 'timeout' step ──────────────────────────────────────
   abort: AbortController;
@@ -650,40 +653,43 @@ const quotaStep: DispatchStep = {
     if (!windowKey || quotaLimit == null || quotaLimit <= 0 || quotaBypass) {
       return null;
     }
+    if (exec.preflightOnly) {
+      try {
+        const state = await deps.readQuotaState?.(toolName, ctx, windowKey);
+        if (state) return state.count < quotaLimit ? null : { ok: false, error: {
+          code: 'quota_exceeded', message: `Tool "${toolName}" exceeded quota (${state.count}/${quotaLimit}) in window "${windowKey}"`,
+        } };
+      } catch { /* Refuse an unavailable observation without reserving capacity. */ }
+      return { ok: false, error: { code: 'quota_admission_unavailable',
+        message: 'Quota capacity could not be observed; no reservation was created.' } };
+    }
     if (deps.reserveQuota) {
+      exec.quotaAdmissionPending = true;
       try {
         const reservation = await deps.reserveQuota({ toolName, pluginName: exec.tool.pluginName,
           ctx, windowKey, limit: quotaLimit, callId: exec.callId, signal: exec.abort.signal });
         if (!reservation.allowed) return { ok: false, error: { code: 'quota_exceeded',
           message: `Tool "${toolName}" exceeded quota (${reservation.count}/${quotaLimit}) in window "${windowKey}"` } };
-        // Admission may finish after runAdmissionStep answered cancellation. That
-        // late claim belongs to no running operation and must be released here.
-        if (exec.abort.signal.aborted) { await reservation.settle('release'); return null; }
-        exec.quotaReservation = reservation;
+        let settlement: Promise<void> | undefined;
+        exec.quotaReservation = { settle: outcome => settlement ??= reservation.settle(outcome) };
         exec.invocationRef = reservation.invocationRef;
+        // Retain recovery identity before attempting release. The response may
+        // already have returned cancellation with its stable callId join.
+        if (exec.abort.signal.aborted) {
+          await exec.quotaReservation.settle('release');
+          return admissionAbortResult(exec, 'quota');
+        }
         return null;
       } catch {
-        return { ok: false, error: { code: 'quota_exceeded',
+        if (exec.abort.signal.aborted) return admissionAbortResult(exec, 'quota');
+        return { ok: false, error: { code: 'quota_admission_unavailable',
           message: 'Atomic quota admission is unavailable; the operation did not start.' } };
+      } finally {
+        exec.quotaAdmissionPending = false;
       }
     }
-    if (!deps.readQuotaState) return null;
-    try {
-      const state = await deps.readQuotaState(toolName, ctx, windowKey);
-      if (state && state.count >= quotaLimit) {
-        return {
-          ok: false,
-          error: {
-            code: 'quota_exceeded' as DispatchProjectedErrorCode,
-            message: `Tool "${toolName}" exceeded quota (${state.count}/${quotaLimit}) in window "${windowKey}"`,
-            meta: { tool: toolName, role: ctx.role, windowKey, used: state.count, limit: quotaLimit },
-          },
-        };
-      }
-    } catch {
-      // fail-open on PG error — matches pre-refactor behavior
-    }
-    return null;
+    return { ok: false, error: { code: 'quota_admission_unavailable',
+      message: 'Atomic quota admission is required; the operation did not start.' } };
   },
 };
 
@@ -782,6 +788,10 @@ function admissionAbortResult(exec: DispatchExecution, stage: DispatchStepName):
         phase: 'admission', stage, handlerEntered: false, abortSource: exec.abortSource,
         elapsedMs: audit.elapsedMs, budgetMs: audit.budgetMs,
         ...(audit.kernelEnforcePartialAudit ? { kernelEnforcePartialAudit: audit.kernelEnforcePartialAudit } : {}),
+        ...(exec.quotaAdmissionPending ? { quotaSettlement: {
+          state: 'unconfirmed', callId: exec.callId,
+          ...(exec.invocationRef ? { invocationRef: exec.invocationRef } : {}), retrySafe: false,
+        } } : {}),
       },
     },
   };
@@ -1062,10 +1072,12 @@ const invokeStep: DispatchStep = {
       let invocation: Promise<ToolResult> | undefined;
       const invoke = (): Promise<ToolResult> => invocation ??= Promise.resolve().then(async () => {
         if (deps.overrideTool) {
+          exec.quotaConsumed = true;
           const ov = await deps.overrideTool(toolName, input, handlerCtx);
           if (ov !== PASS_THROUGH) { exec.quotaConsumed = true; return ov as ToolResult; }
         }
         if (exec.nativeBatch && tool.prepareInvocation) {
+          exec.quotaConsumed = true;
           const prepared = await tool.prepareInvocation(input, handlerCtx);
           const response = await exec.nativeBatch.coordinator.arrive(exec.nativeBatch.itemId, exec, prepared);
           return prepared.finalize(response);
@@ -1866,6 +1878,7 @@ export async function preflightDispatchStack(
   const exec = initExecution(tool, toolName, input, ctx, {
     ...deps, firePrecondition: undefined,
   });
+  exec.preflightOnly = true;
   for (const step of DEFAULT_DISPATCH_STACK) {
     if (!PREFLIGHT_STEP[step.name]) continue;
     const result = await step.run(exec);
