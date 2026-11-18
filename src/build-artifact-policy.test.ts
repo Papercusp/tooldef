@@ -1,7 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -23,6 +25,33 @@ function exportTargets(value: unknown): string[] {
 }
 
 describe("build artifact policy", () => {
+  it("emits executable JavaScript for explicit TypeScript imports with the package build config", () => {
+    const sandbox = mkdtempSync(resolve(tmpdir(), "tooldef-build-"));
+    try {
+      const configPath = resolve(PACKAGE_ROOT, "tsconfig.build.json");
+      const config = ts.readConfigFile(configPath, ts.sys.readFile);
+      expect(config.error).toBeUndefined();
+      const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, PACKAGE_ROOT);
+      expect(parsed.errors).toEqual([]);
+      writeFileSync(resolve(sandbox, "package.json"), JSON.stringify({ type: "module" }));
+      writeFileSync(resolve(sandbox, "dependency.ts"), "export const answer = 42;\n");
+      const entry = resolve(sandbox, "entry.ts");
+      writeFileSync(entry, 'export { answer } from "./dependency.ts";\n');
+      const program = ts.createProgram([entry], { ...parsed.options,
+        rootDir: sandbox, outDir: resolve(sandbox, "dist"), types: [] });
+      const diagnostics = ts.getPreEmitDiagnostics(program);
+      expect(diagnostics.map(diagnostic => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"))).toEqual([]);
+      expect(program.emit().emitSkipped).toBe(false);
+      const emitted = resolve(sandbox, "dist/entry.js");
+      expect(readFileSync(emitted, "utf8")).toContain('"./dependency.js"');
+      expect(execFileSync(process.execPath, ["--input-type=module", "--eval",
+        "const result = await import(process.argv[1]); process.stdout.write(String(result.answer));",
+        pathToFileURL(emitted).href], { encoding: "utf8" })).toBe("42");
+    } finally {
+      rmSync(sandbox, { recursive: true, force: true });
+    }
+  });
+
   it("keeps every package entrypoint source-backed", () => {
     const manifest = readPackageManifest();
     const entrypoints = [manifest.main, manifest.types, ...exportTargets(manifest.exports)];

@@ -4,6 +4,7 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "noEmit": false,
+    "rewriteRelativeImportExtensions": true,
     "declaration": false,
     "ignoreDeprecations": "6.0"
   },
