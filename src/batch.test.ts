@@ -285,19 +285,17 @@ describe('native execution at the validated host continuation', () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
-  it('chooses sequential fallback before admission for a two-child one-slot quota', async () => {
+  it('refuses finite quota execution when only a non-atomic reader exists', async () => {
     const execute = vi.fn<NonNullable<ToolBatchDeclaration['execute']>>(async () => []);
     const { tool, name, handler } = register({ execute });
     tool.rolesQuota = { worker: { perRun: 1 } };
-    let used = 0;
-    handler.mockImplementation(async args => { used++; return { data: { key: args.key } }; });
     const { data } = await dispatch(tool, name, { _batch: 1, items: [
       { args: { key: 'a' } }, { args: { key: 'b' } },
-    ] }, { readQuotaState: async () => ({ count: used }) });
+    ] }, { readQuotaState: async () => ({ count: 0 }) });
     expect(execute).not.toHaveBeenCalled();
-    expect(handler).toHaveBeenCalledOnce();
-    expect(data.results.map(item => item.ok)).toEqual([true, false]);
-    expect(data.results[1].error).toMatchObject({ code: 'quota_exceeded' });
+    expect(handler).not.toHaveBeenCalled();
+    expect(data.results.map(item => item.ok)).toEqual([false, false]);
+    for (const item of data.results) expect(item.error).toMatchObject({ code: 'quota_admission_unavailable' });
   });
 
   it('UTB-atomic-quota reserves the final slot across simultaneous parents', async () => {
