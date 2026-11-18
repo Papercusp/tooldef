@@ -2861,6 +2861,16 @@ async function runOperationDispatchStack(
       cancelPendingCardsForRun(ctx.runId);
       closeRun(ctx.runId);
     }
-    if (quotaSettlementFailed) throw new Error('Quota settlement is unconfirmed; inspect ' + (exec.invocationRef ?? exec.callId));
+    if (quotaSettlementFailed && result) {
+      // The effect's response remains authoritative even when accounting cannot
+      // settle. Keep the conservative reservation and its recovery identity;
+      // throwing here would erase a completed effect and encourage a replay.
+      const quotaSettlement = { state: 'unconfirmed', invocationRef: exec.invocationRef ?? exec.callId,
+        retrySafe: false };
+      if (result.result) result.result = { ...result.result,
+        _meta: { ...result.result._meta, quotaSettlement } };
+      else if (result.error) result.error = { ...result.error,
+        meta: { ...result.error.meta, quotaSettlement } };
+    }
   }
 }
