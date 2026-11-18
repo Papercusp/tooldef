@@ -7,6 +7,8 @@ import {
   projectReadColumns,
 } from '@papercusp/result-encoding';
 import { serializeToolResponse, formatOptsFromCtx } from './serialize-result';
+import { projectBoundedPayload } from './payload-tier';
+import type { BatchResult } from './batch';
 import type { ToolResponse } from './types';
 import type { UnifiedToolContext } from './tool-projection';
 
@@ -14,6 +16,68 @@ const flatRows = [
   { id: 1, name: 'a' },
   { id: 2, name: 'b' },
 ];
+
+describe('serialized batch result recovery', () => {
+  const recovery = {
+    cursor: { kind: 'scratch-page' as const, tool: 'capability:read',
+      args: { file_path: 'papercusp://scratch/batch-fixture/full', byte_offset: 0, byte_limit: 4096 } },
+    next: 'Read the complete original result through the cursor; do not repeat child operations.',
+  };
+
+  it.each([4, 20])('preserves all %i child dispositions when their status index fits', count => {
+    const batch: BatchResult = {
+      ok: false, batchId: 'batch-recovery-fixture', counts: { ok: count - 1, failed: 1 },
+      results: Array.from({ length: count }, (_, index) => ({
+        itemId: 'request-' + index, ok: index !== count - 1,
+        status: index === count - 1 ? 'unknown-effect' as const : 'completed' as const,
+        output: { content: [{ type: 'text' as const, text: 'é'.repeat(8_000) }] },
+        ...(index === count - 1 ? { receipt: { callId: 'original-write', retrySafe: false } } : {}),
+      })),
+    };
+    const original = JSON.stringify(batch);
+    const serialized = serializeToolResponse({ data: batch }, formatOptsFromCtx({
+      transport: 'mcp', requestedFormat: 'json', requestedStructured: true,
+    }, undefined));
+    const projected = projectBoundedPayload(serialized.structuredContent, {
+      toolName: 'batch-fixture:read', tier: 'trimmed', targetChars: 6_000, recovery,
+    });
+    expect(projected).toMatchObject({ ok: false, batchId: batch.batchId, counts: batch.counts });
+    expect((projected.results as BatchResult['results']).map(({ itemId, ok, status }) => ({ itemId, ok, status })))
+      .toEqual(batch.results.map(({ itemId, ok, status }) => ({ itemId, ok, status })));
+    expect(projected._projection).toMatchObject({ truncated: true, cursor: recovery.cursor });
+    expect(Buffer.byteLength(JSON.stringify(projected), 'utf8')).toBeLessThanOrEqual(6_000);
+    expect(JSON.stringify(batch)).toBe(original);
+  });
+
+  it('discloses exact omitted dispositions when even the UTF-8 status index exceeds the budget', () => {
+    const batch: BatchResult = {
+      ok: true, batchId: 'batch-large-index', counts: { ok: 100, failed: 0 },
+      results: Array.from({ length: 100 }, (_, index) => ({
+        itemId: 'é'.repeat(120) + index, ok: true, status: 'completed',
+        output: { content: [{ type: 'text', text: 'child output' }] },
+      })),
+    };
+    const projected = projectBoundedPayload(batch, {
+      toolName: 'batch-fixture:read', tier: 'trimmed', targetChars: 3_000, recovery,
+    });
+    const shown = projected.results as BatchResult['results'];
+    expect(shown.length).toBeGreaterThan(0);
+    expect(shown.length).toBeLessThan(100);
+    expect(shown).toEqual(batch.results.slice(0, shown.length).map(({ itemId, ok, status }) => ({ itemId, ok, status })));
+    expect(projected).toMatchObject({ _partial: true, counts: batch.counts,
+      _projection: { cursor: recovery.cursor, arrayTruncations: [{ path: '$.results',
+        shownCount: shown.length, renderedCount: shown.length, omittedCount: 100 - shown.length }] } });
+    expect(Buffer.byteLength(JSON.stringify(projected), 'utf8')).toBeLessThanOrEqual(3_000);
+  });
+
+  it('requires a recovery record before replacing successful write outputs with a status index', () => {
+    const batch = { ok: true, batchId: 'batch-without-recovery', counts: { ok: 1, failed: 0 },
+      results: [{ itemId: 'write', ok: true, status: 'completed',
+        receipt: { callId: 'keep-original' }, output: { content: [] } }] };
+    const projected = projectBoundedPayload(batch, { toolName: 'batch-fixture:write', tier: 'trimmed' });
+    expect(projected.results).toMatchObject([{ receipt: { callId: 'keep-original' } }]);
+  });
+});
 
 function elig(schema: z.ZodTypeAny) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

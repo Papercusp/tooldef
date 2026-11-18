@@ -26,6 +26,7 @@
  *     force-applies the smallest declared shaper regardless of the resolved tier.
  */
 import type { ToolResponse } from './types';
+import { BATCH_MAX_ITEMS, type BatchItemStatus, type BatchResult } from './batch';
 
 export type PayloadTier = 'trimmed' | 'standard' | 'full';
 export const PAYLOAD_TIERS: readonly PayloadTier[] = ['trimmed', 'standard', 'full'] as const;
@@ -1619,6 +1620,53 @@ function buildDefaultRecoveryNext(opts: ProjectBoundedPayloadOpts, argsTruncated
  * and points to the opt-in full-detail request. The returned value is always
  * an object so arrays/scalars can carry projection metadata too.
  */
+function projectBatchDispositionIndex(
+  data: unknown,
+  opts: ProjectBoundedPayloadOpts,
+  target: number,
+): BoundedPayloadProjection | undefined {
+  // Only an existing host recovery record can replace child outputs. A generic
+  // full-detail re-call could repeat writes rather than recover their receipts.
+  if (!opts.recovery || !data || typeof data !== 'object' || Array.isArray(data)) return undefined;
+  const batch = data as BatchResult;
+  const statuses = new Set<BatchItemStatus>(['completed', 'failed', 'cancelled', 'not-started', 'unknown-effect']);
+  if (Object.keys(data).some(key => !['ok', 'batchId', 'results', 'counts'].includes(key)) ||
+    typeof batch.batchId !== 'string' || !batch.batchId || typeof batch.ok !== 'boolean' ||
+    !Array.isArray(batch.results) || batch.results.length === 0 || batch.results.length > BATCH_MAX_ITEMS ||
+    !batch.results.every(row => row && typeof row.itemId === 'string' && typeof row.ok === 'boolean' &&
+      statuses.has(row.status) && row.ok === (row.status === 'completed')) ||
+    new Set(batch.results.map(row => row.itemId)).size !== batch.results.length ||
+    !batch.counts || batch.counts.ok !== batch.results.filter(row => row.ok).length ||
+    batch.counts.failed !== batch.results.filter(row => !row.ok).length ||
+    batch.ok !== (batch.counts.failed === 0)) return undefined;
+
+  const spine = batch.results.map(({ itemId, ok, status }) => ({ itemId, ok, status }));
+  const bodyOmissions = batch.results.filter(row => row.output !== undefined || row.error !== undefined ||
+    row.receipt !== undefined).length;
+  // The canonical index has at most 100 rows. Measure exact UTF-8 bytes, including
+  // the recovery metadata, before giving any space to bulky child details.
+  for (let shown = spine.length; shown >= 0; shown -= 1) {
+    const omitted = spine.length - shown;
+    const result: BoundedPayloadProjection = {
+      ok: batch.ok, batchId: batch.batchId, counts: batch.counts, results: spine.slice(0, shown), _partial: true,
+      _projection: {
+        kind: 'bounded-payload', truncated: true, tier: opts.tier, forced: opts.forced === true,
+        originalChars: opts.originalChars ?? jsonLen(data), returnedChars: 0,
+        omittedCount: Math.max(1, bodyOmissions + omitted),
+        omitted: [{ path: '$.results', reason: 'Child details remain in the original result recovery record.' }],
+        ...(omitted ? { arrayTruncationCount: 1, arrayTruncations: [{ path: '$.results',
+          omittedCount: omitted, shownCount: shown, renderedCount: shown }] } : {}),
+        cursor: opts.recovery.cursor, next: opts.recovery.next,
+      },
+    };
+    // returnedChars includes its own digit count; settle that small fixed point.
+    for (let pass = 0; pass < 3; pass += 1) result._projection.returnedChars = jsonLen(result);
+    if (new TextEncoder().encode(JSON.stringify(result)).byteLength <=
+      Math.min(target, PAYLOAD_TIER_HARD_CEILING_CHARS)) return result;
+  }
+  return undefined;
+}
+
 export function projectBoundedPayload(
   data: unknown,
   opts: ProjectBoundedPayloadOpts,
@@ -1628,6 +1676,8 @@ export function projectBoundedPayload(
   const target = typeof configuredTarget === 'number' && Number.isFinite(configuredTarget)
     ? Math.max(1_500, Math.floor(configuredTarget))
     : GENERIC_PROJECTION_TARGET_CHARS[projectionTier];
+  const batchIndex = projectBatchDispositionIndex(data, opts, target);
+  if (batchIndex) return batchIndex;
   const state: ProjectionState = {
     remaining: Math.max(1_000, target - 1_600),
     arrayTruncation: opts.arrayTruncation ?? 'marker',
