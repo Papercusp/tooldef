@@ -367,6 +367,38 @@ describe('native execution at the validated host continuation', () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
+  it('uses atomic quota reservations for finite native groups without replaying refused items', async () => {
+    const execute = vi.fn<NonNullable<ToolBatchDeclaration['execute']>>(async items => items.map(item => ({
+      itemId: item.itemId, response: { data: item.args },
+    })));
+    const { tool, name, handler } = register({ execute, maxConcurrency: 3, independent: true });
+    tool.rolesQuota = { worker: { perRun: 2 } };
+    let held = 0;
+    const settle = vi.fn(async () => {});
+    const { data } = await dispatch(tool, name, { _batch: 1,
+      items: ['a', 'b', 'c'].map(key => ({ itemId: key, args: { key } })),
+    }, { reserveQuota: async () => held++ < 2
+      ? { allowed: true, settle } : { allowed: false, count: 2 } });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute.mock.calls[0][0].map(item => item.itemId)).toEqual(['a', 'b']);
+    expect(handler).not.toHaveBeenCalled();
+    expect(data.results.map(item => item.ok)).toEqual([true, true, false]);
+    expect(settle.mock.calls).toEqual([['commit'], ['commit']]);
+  });
+
+  it('consumes the started child slot even when its handler fails', async () => {
+    const { tool, name, handler } = register({});
+    tool.rolesQuota = { worker: { perRun: 1 } };
+    handler.mockRejectedValueOnce(new Error('effect outcome uncertain'));
+    const settle = vi.fn(async () => {});
+    const { data } = await dispatch(tool, name, { key: 'a' }, {
+      reserveQuota: async () => ({ allowed: true, settle }),
+    });
+    expect(handler).toHaveBeenCalledOnce();
+    expect(data.results[0].ok).toBe(false);
+    expect(settle.mock.calls).toEqual([['commit']]);
+  });
+
   it('never replays a throwing native executor through singleton handlers', async () => {
     const execute = vi.fn<NonNullable<ToolBatchDeclaration['execute']>>(async () => { throw new Error('native failed'); });
     const { tool, name, handler } = register({ execute });
