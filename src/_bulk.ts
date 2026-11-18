@@ -41,15 +41,6 @@
  * This is the single implementation every bulk verb routes through — reuse it,
  * do NOT re-hand-roll the loop + envelope in each tool.
  */
-import { z } from 'zod';
-
-/** A Zod schema that accepts a scalar `item` OR an array of them; normalize the
- *  parsed value with `toList`. (The n=1 ergonomic seam for tools that take a
- *  single logical id field rather than `items`.) */
-export function scalarOrArray<T extends z.ZodTypeAny>(item: T) {
-  return z.union([item, z.array(item)]);
-}
-
 /** Normalize a scalar | array | nullish into a flat list. */
 export function toList<T>(v: T | readonly T[] | undefined | null): T[] {
   if (v === undefined || v === null) return [];
@@ -89,49 +80,6 @@ export interface BulkEnvelope<R extends BulkItemResult = BulkItemResult> {
   ok: boolean;
   results: R[];
   counts: { ok: number; failed: number };
-}
-
-/**
- * The `BulkEnvelope` interface above, as a runtime schema — so a bulk tool's
- * `result:` (and therefore its DERIVED `outputJsonSchema`) states the envelope
- * structurally instead of only describing it in `guidance.returns` prose.
- *
- * Why this lives here rather than in each tool: this module is already "the
- * single implementation every bulk verb routes through — reuse it, do NOT
- * re-hand-roll the loop + envelope in each tool". A per-tool hand-written
- * envelope schema is exactly that re-hand-rolling, one layer up, and it would
- * drift from `runBulk`'s actual output the moment either side changed. Declaring
- * it beside the interface and the producer keeps all three in one place.
- *
- * The per-item schema is deliberately OPEN (`.passthrough()`). That is a
- * description, not a shortcut: `runBulk` results are assembled from per-tool
- * spreads (work_items:release alone spreads delta / stranding / completion /
- * claimHoldFailure / reasonDisclosure), so the only fields every bulk result is
- * guaranteed to carry are `ok`, the self-describing correlation key, and `error`
- * on failure. Pinning more here would assert a shape the producer does not
- * promise. Pass a concrete `item` schema when a specific tool's per-item result
- * genuinely is closed.
- */
-export function bulkEnvelopeSchema<T extends z.ZodTypeAny>(item?: T) {
-  return z.object({
-    // Mirrors BulkEnvelope.ok: DERIVED (`counts.failed === 0`), so a partial failure is
-    // representable here. A `z.literal(true)` would also publish an outputJsonSchema that
-    // promises every consumer a truthiness the producer cannot honour.
-    ok: z.boolean(),
-    results: z.array(
-      item ??
-        z
-          .object({
-            ok: z.boolean(),
-            error: z.string().optional(),
-          })
-          .passthrough(),
-    ),
-    counts: z.object({
-      ok: z.number().int().nonnegative(),
-      failed: z.number().int().nonnegative(),
-    }),
-  });
 }
 
 /**

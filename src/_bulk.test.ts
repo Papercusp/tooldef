@@ -1,7 +1,26 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { mergeBulkEnvelopes, runBulk } from './_bulk';
 
 describe('shared bulk executor', () => {
+  it('loads and executes without the Zod authoring adapter', async () => {
+    vi.resetModules();
+    vi.doMock('zod', () => {
+      throw new Error('The neutral bulk executor must not load Zod.');
+    });
+    try {
+      const neutral = await import('./_bulk');
+      expect(neutral.toList('a')).toEqual(['a']);
+      expect(await neutral.runBulk(['a'], async id => ({ ok: true, id }))).toEqual({
+        ok: true,
+        results: [{ ok: true, id: 'a' }],
+        counts: { ok: 1, failed: 0 },
+      });
+    } finally {
+      vi.doUnmock('zod');
+      vi.resetModules();
+    }
+  });
+
   it('isolates a thrown operation and retains repeated business keys', async () => {
     const calls: number[] = [];
     const result = await runBulk([1, 1, 2], async (id, index) => {
