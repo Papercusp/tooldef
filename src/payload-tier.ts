@@ -1627,7 +1627,9 @@ function projectBatchDispositionIndex(
 ): BoundedPayloadProjection | undefined {
   // Only an existing host recovery record can replace child outputs. A generic
   // full-detail re-call could repeat writes rather than recover their receipts.
-  if (!opts.recovery || !data || typeof data !== 'object' || Array.isArray(data)) return undefined;
+  if (!opts.recovery || opts.recovery.cursor.tool !== 'capability:read' ||
+    !['scratch-page', 'volatile-scratch-page', 'durable-scratch-page'].includes(opts.recovery.cursor.kind) ||
+    !data || typeof data !== 'object' || Array.isArray(data)) return undefined;
   const batch = data as BatchResult;
   const statuses = new Set<BatchItemStatus>(['completed', 'failed', 'cancelled', 'not-started', 'unknown-effect']);
   if (Object.keys(data).some(key => !['ok', 'batchId', 'results', 'counts'].includes(key)) ||

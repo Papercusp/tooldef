@@ -75,7 +75,8 @@ describe('serialized batch result recovery', () => {
       results: [{ itemId: 'write', ok: true, status: 'completed',
         receipt: { callId: 'keep-original' }, output: { content: [] } }] };
     const projected = projectBoundedPayload(batch, { toolName: 'batch-fixture:write', tier: 'trimmed',
-      ...(kind ? { recovery: { ...recovery, cursor: { kind, tool: 'batch-fixture:write', args: {} } } } : {}),
+      ...(kind ? { recovery: { ...recovery, cursor: { kind,
+        tool: kind === 'unavailable' ? 'capability:read' : 'batch-fixture:write', args: {} } } } : {}),
     });
     expect(projected.results).toMatchObject([{ receipt: { callId: 'keep-original' } }]);
   });
