@@ -805,7 +805,9 @@ describe('dispatchProjectedTool', () => {
       const parent = new AbortController();
       let handlerSawAbort = false;
       const tool = makeTool({
-        timeoutSec: 60,
+        // Keep lost parent propagation distinguishable from the dispatcher's
+        // eventual timeout without waiting beyond the test runner's budget.
+        timeoutSec: 1,
         fn: async (_input, ctx) => {
           await new Promise<void>((resolve, reject) => {
             const finish = () => {
@@ -835,7 +837,7 @@ describe('dispatchProjectedTool', () => {
       clearTimeout(abortTimer);
 
       expect(handlerSawAbort).toBe(true);
-      expect(Date.now() - startedAt).toBeLessThan(5_000); // far below the configured 60s deadline
+      expect(Date.now() - startedAt).toBeLessThan(1_000);
       expect(r.ok).toBe(false);
       expect(r.error?.code).toBe('aborted');
       expect(r.error?.meta).toMatchObject({ abortSource: 'parent-signal' });
