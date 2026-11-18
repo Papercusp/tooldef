@@ -198,13 +198,15 @@ describe('dispatchProjectedTool', () => {
 
   it('gateBypass.quota skips the quota gate', async () => {
     const tool = makeTool({ rolesQuota: { worker: { perRun: 1 } } });
-    const deps = MAKE_DEPS({ readQuotaState: vi.fn(async () => ({ count: 1 })) });
+    const reserveQuota = vi.fn(async () => ({ allowed: false as const, count: 1 }));
+    const deps = MAKE_DEPS({ reserveQuota });
     const denied = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), deps);
     expect(denied.error?.code).toBe('quota_exceeded');
     const bypassed = await dispatchProjectedTool(
       tool, 'fix.tool', {}, MAKE_CTX({ gateBypass: { quota: true } }), deps,
     );
     expect(bypassed.ok).toBe(true);
+    expect(reserveQuota).toHaveBeenCalledOnce();
   });
 
   // ── harness-required gate (P-020) ──────────────────────────────────────
@@ -258,7 +260,7 @@ describe('dispatchProjectedTool', () => {
   it('rejects quota_exceeded when count is at the limit', async () => {
     const tool = makeTool({ rolesQuota: { worker: { perRun: 1 } } });
     const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
-      readQuotaState: vi.fn(async () => ({ count: 1 })),
+      reserveQuota: vi.fn(async () => ({ allowed: false as const, count: 1 })),
     }));
     expect(r.ok).toBe(false);
     expect(r.error?.code).toBe('quota_exceeded');
@@ -267,18 +269,34 @@ describe('dispatchProjectedTool', () => {
 
   it('allows when count under limit', async () => {
     const tool = makeTool({ rolesQuota: { worker: { perRun: 5 } } });
+    const settle = vi.fn(async () => {});
     const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
-      readQuotaState: vi.fn(async () => ({ count: 2 })),
+      reserveQuota: vi.fn(async () => ({ allowed: true as const, invocationRef: 'tool-invocation:1', settle })),
     }));
     expect(r.ok).toBe(true);
+    expect(settle).toHaveBeenCalledExactlyOnceWith('commit');
   });
 
-  it('fails-open when readQuotaState throws', async () => {
-    const tool = makeTool({ rolesQuota: { worker: { perRun: 1 } } });
+  it('refuses unavailable atomic admission without misreporting exhaustion or starting an effect', async () => {
+    const fn = vi.fn(async () => ({ content: [{ type: 'text' as const, text: 'started' }] }));
+    const tool = makeTool({ rolesQuota: { worker: { perRun: 1 } }, fn });
     const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({
-      readQuotaState: vi.fn(async () => { throw new Error('pg down'); }),
+      reserveQuota: vi.fn(async () => { throw new Error('pg down'); }),
     }));
-    expect(r.ok).toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe('quota_admission_unavailable');
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it('requires atomic admission rather than authorizing an effect from an observed count', async () => {
+    const fn = vi.fn(async () => ({ content: [{ type: 'text' as const, text: 'started' }] }));
+    const readQuotaState = vi.fn(async () => ({ count: 0 }));
+    const tool = makeTool({ rolesQuota: { worker: { perRun: 1 } }, fn });
+    const r = await dispatchProjectedTool(tool, 'fix.tool', {}, MAKE_CTX(), MAKE_DEPS({ readQuotaState }));
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe('quota_admission_unavailable');
+    expect(readQuotaState).not.toHaveBeenCalled();
+    expect(fn).not.toHaveBeenCalled();
   });
 
   it('honors a host-supplied computeQuotaWindow (window key + ceiling)', async () => {
@@ -288,7 +306,10 @@ describe('dispatchProjectedTool', () => {
       // Host policy: key on the chunk, cap by perChunk — the engine reads
       // neither field name itself.
       computeQuotaWindow: (ctx, rq) => ({ key: `chunk:${ctx.chunkId}`, limit: rq?.perChunk ?? null }),
-      readQuotaState: vi.fn(async (_t, _c, windowKey) => { seen.push(windowKey); return { count: 1 }; }),
+      reserveQuota: vi.fn(async ({ windowKey }) => {
+        seen.push(windowKey);
+        return { allowed: false as const, count: 1 };
+      }),
     }));
     expect(r.ok).toBe(false);
     expect(r.error?.code).toBe('quota_exceeded');
@@ -302,16 +323,19 @@ describe('dispatchProjectedTool', () => {
       const read = input?.op === 'status';
       return { key: `run:run_X:${read ? 'read' : 'write'}`, limit: read ? null : roleQuota?.perRun ?? null };
     });
-    const readQuotaState = vi.fn(async () => ({ count: 1 }));
-    const deps = MAKE_DEPS({ computeQuotaWindow, readQuotaState });
+    const reserveQuota = vi.fn(async () => ({ allowed: false as const, count: 1 }));
+    const deps = MAKE_DEPS({ computeQuotaWindow, reserveQuota });
 
     const status = await dispatchProjectedTool(tool, 'fix.tool', { op: 'status' }, MAKE_CTX(), deps);
     const write = await dispatchProjectedTool(tool, 'fix.tool', { op: 'run' }, MAKE_CTX(), deps);
 
     expect(status.ok).toBe(true);
     expect(write.error?.code).toBe('quota_exceeded');
-    expect(readQuotaState).toHaveBeenCalledOnce();
-    expect(readQuotaState).toHaveBeenCalledWith('fix.tool', expect.anything(), 'run:run_X:write');
+    expect(reserveQuota).toHaveBeenCalledOnce();
+    expect(reserveQuota).toHaveBeenCalledWith(expect.objectContaining({
+      toolName: 'fix.tool', windowKey: 'run:run_X:write', limit: 1,
+      ctx: expect.objectContaining({ role: 'worker' }),
+    }));
     expect(computeQuotaWindow.mock.calls.map((call) => call[3])).toEqual([{ op: 'status' }, { op: 'run' }]);
   });
 
