@@ -300,6 +300,73 @@ describe('native execution at the validated host continuation', () => {
     expect(data.results[1].error).toMatchObject({ code: 'quota_exceeded' });
   });
 
+  it('UTB-atomic-quota reserves the final slot across simultaneous parents', async () => {
+    const { tool, name, handler } = register({});
+    tool.rolesQuota = { worker: { perRun: 1 } };
+    let held = 0;
+    const settlements = vi.fn();
+    const reserveQuota = vi.fn(async () => {
+      if (held === 1) return { allowed: false as const, count: held };
+      held++;
+      await Promise.resolve();
+      return { allowed: true as const, settle: settlements };
+    });
+    const deps = { readQuotaState: async () => ({ count: 0 }), reserveQuota };
+    const results = await Promise.all(['a', 'b'].map(key => dispatch(tool, name, { key }, deps)));
+    expect(handler).toHaveBeenCalledOnce();
+    expect(results.flatMap(result => result.data.results).map(item => item.ok).sort()).toEqual([false, true]);
+    expect(reserveQuota).toHaveBeenCalledTimes(2);
+    expect(settlements.mock.calls).toEqual([['commit']]);
+  });
+
+  it('releases only a refused child reservation and commits its admitted sibling', async () => {
+    const { tool, name, handler } = register({});
+    tool.rolesQuota = { worker: { perRun: 2 } };
+    tool.authorize = async ({ input }) => ({ allow: (input as { key: string }).key !== 'denied' });
+    const settlements: string[] = [];
+    const reserveQuota = vi.fn(async ({ callId }: { callId: string }) => ({ allowed: true as const,
+      settle: async (outcome: string) => { settlements.push(callId + ':' + outcome); } }));
+    const { data } = await dispatch(tool, name, { _batch: 1, items: [
+      { args: { key: 'denied' } }, { args: { key: 'ok' } },
+    ] }, { readQuotaState: async () => ({ count: 0 }), reserveQuota });
+    expect(handler).toHaveBeenCalledOnce();
+    expect(data.results.map(item => item.ok)).toEqual([false, true]);
+    const ids = reserveQuota.mock.calls.map(([request]) => request.callId);
+    expect(new Set(ids).size).toBe(2);
+    expect(settlements).toEqual([ids[0] + ':release', ids[1] + ':commit']);
+  });
+
+  it('fails closed when atomic quota admission is unavailable', async () => {
+    const { tool, name, handler } = register({});
+    tool.rolesQuota = { worker: { perRun: 1 } };
+    const { data } = await dispatch(tool, name, { key: 'a' }, {
+      reserveQuota: async () => { throw new Error('quota store unavailable'); },
+    });
+    expect(handler).not.toHaveBeenCalled();
+    expect(data.results[0]).toMatchObject({ ok: false, error: { code: 'quota_exceeded' } });
+  });
+
+  it('releases a late reservation once when cancellation wins quota admission', async () => {
+    const { tool, name, handler } = register({});
+    tool.rolesQuota = { worker: { perRun: 1 } };
+    const abort = new AbortController();
+    const settle = vi.fn(async () => {});
+    let resolve!: (value: { allowed: true; settle: typeof settle }) => void;
+    let entered!: () => void;
+    const started = new Promise<void>(done => { entered = done; });
+    const pending = dispatch(tool, name, { key: 'a' }, { reserveQuota: () => {
+      entered(); return new Promise(done => { resolve = done; });
+    } }, { ...context(), signal: abort.signal });
+    // Before the reservation port exists the handler completes instead of waiting.
+    await Promise.race([started, pending]);
+    abort.abort();
+    await pending;
+    resolve?.({ allowed: true, settle });
+    await vi.waitFor(() => expect(settle).toHaveBeenCalledOnce());
+    expect(settle).toHaveBeenCalledWith('release');
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it('never replays a throwing native executor through singleton handlers', async () => {
     const execute = vi.fn<NonNullable<ToolBatchDeclaration['execute']>>(async () => { throw new Error('native failed'); });
     const { tool, name, handler } = register({ execute });
