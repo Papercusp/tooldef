@@ -371,6 +371,23 @@ describe('native execution at the validated host continuation', () => {
 });
 
 describe('permanent shallow batch normalization', () => {
+  it('enforces the complete UTF-8 input budget before operation validation', async () => {
+    const validate = vi.fn((input: unknown) => ({ value: input }));
+    const operation: StandardSchemaV1 = { '~standard': { version: 1, vendor: 'byte-budget', validate } };
+    for (const input of [{ key: 'éé' }, { _batch: 1, items: [{ args: { key: 'éé' } }] }]) {
+      const bytes = new TextEncoder().encode(JSON.stringify(input)).byteLength;
+      await expect(normalizeBatchRequest(input, operation, { maxInputBytes: bytes })).resolves.toBeDefined();
+      validate.mockClear();
+      await expect(normalizeBatchRequest(input, operation, { maxInputBytes: bytes - 1 }))
+        .rejects.toThrow(/input.*byte/i);
+      expect(validate).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each([0, -1, 1.5, Infinity, 4 * 1024 * 1024 + 1])('rejects invalid batch input-byte ceiling %s', maxInputBytes => {
+    expect(() => resolveToolBatchDeclaration({ maxInputBytes })).toThrow(/maxInputBytes/);
+  });
+
   it('keeps marked, unmarked, object-items and singleton operations equivalent', async () => {
     const args = { key: 'a', ids: ['x', 'y'] };
     const normalize = contract().normalize;

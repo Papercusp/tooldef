@@ -7,6 +7,8 @@ import type { ToolResult } from './wire';
 
 export const BATCH_MAX_ITEMS = 100;
 export const BATCH_ITEM_ID_MAX_LENGTH = 128;
+// Match the existing MCP input-frame ceiling; every transport shares this guard.
+const BATCH_MAX_INPUT_BYTES = 4 * 1024 * 1024;
 
 export interface BatchRequestItem<TArgs = Record<string, unknown>> {
   readonly itemId?: string;
@@ -62,6 +64,8 @@ export type NativeBatchResult =
 
 export interface ToolBatchDeclaration<TArgs = unknown, TContext = UnifiedToolContext> {
   readonly maxItems?: number;
+  /** UTF-8 JSON bytes for the whole request, before validation or admission. May lower the 4 MiB ceiling. */
+  readonly maxInputBytes?: number;
   /** More than one requires an explicit independence declaration. */
   readonly maxConcurrency?: number;
   readonly independent?: boolean;
@@ -83,6 +87,7 @@ export interface ToolBatchDeclaration<TArgs = unknown, TContext = UnifiedToolCon
 export type ResolvedToolBatchDeclaration<TArgs = unknown, TContext = UnifiedToolContext> =
   ToolBatchDeclaration<TArgs, TContext> & {
     readonly maxItems: number;
+    readonly maxInputBytes: number;
     readonly maxConcurrency: number;
     readonly independent: boolean;
   };
@@ -105,9 +110,13 @@ export function resolveToolBatchDeclaration<TArgs, TContext>(
   declaration: ToolBatchDeclaration<TArgs, TContext> = {},
 ): ResolvedToolBatchDeclaration<TArgs, TContext> {
   const maxItems = declaration.maxItems ?? BATCH_MAX_ITEMS;
+  const maxInputBytes = declaration.maxInputBytes ?? BATCH_MAX_INPUT_BYTES;
   const maxConcurrency = declaration.maxConcurrency ?? 1;
   if (!Number.isInteger(maxItems) || maxItems < 1 || maxItems > BATCH_MAX_ITEMS) {
     throw new Error('batch.maxItems must be an integer between 1 and ' + BATCH_MAX_ITEMS);
+  }
+  if (!Number.isInteger(maxInputBytes) || maxInputBytes < 1 || maxInputBytes > BATCH_MAX_INPUT_BYTES) {
+    throw new Error('batch.maxInputBytes must be an integer between 1 and ' + BATCH_MAX_INPUT_BYTES);
   }
   if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1 || maxConcurrency > maxItems) {
     throw new Error('batch.maxConcurrency must be an integer between 1 and batch.maxItems');
@@ -115,7 +124,7 @@ export function resolveToolBatchDeclaration<TArgs, TContext>(
   if (maxConcurrency > 1 && declaration.independent !== true) {
     throw new Error('batch.maxConcurrency > 1 requires batch.independent:true');
   }
-  return Object.freeze({ ...declaration, maxItems, maxConcurrency, independent: declaration.independent === true });
+  return Object.freeze({ ...declaration, maxItems, maxInputBytes, maxConcurrency, independent: declaration.independent === true });
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -166,8 +175,15 @@ export async function normalizeBatchRequest(
   operation: StandardSchemaV1,
   declaration: ToolBatchDeclaration = {},
 ): Promise<NormalizedBatchRequest> {
-  const { maxItems } = resolveToolBatchDeclaration(declaration);
+  const { maxItems, maxInputBytes } = resolveToolBatchDeclaration(declaration);
   if (!isObject(input)) throw new BatchEnvelopeError('Tool input must be an operation object or batch envelope.');
+  let serialized: string | undefined;
+  try { serialized = JSON.stringify(input); }
+  catch { throw new BatchEnvelopeError('Tool input must be JSON serializable.'); }
+  if (serialized === undefined) throw new BatchEnvelopeError('Tool input must be JSON serializable.');
+  if (new TextEncoder().encode(serialized).byteLength > maxInputBytes) {
+    throw new BatchEnvelopeError('Tool input exceeds the ' + maxInputBytes + ' byte input limit.');
+  }
   if (Object.hasOwn(input, '_batch')) {
     if (input._batch !== 1) throw new BatchEnvelopeError('The reserved root _batch marker must equal 1.');
     return Object.freeze({ source: 'envelope', items: envelopeItems(input, maxItems) });
