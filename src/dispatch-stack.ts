@@ -2253,6 +2253,7 @@ async function recordTelemetry(
       // carries the full case). Derive the status from the result the handler actually
       // returned, not merely from the fact that it returned.
       const refusal = selfReportedFailure ? extractRefusalDetails(r) : null;
+      // notify-classification: {"id":"libs/generic/tooldef/src/dispatch-stack.ts#<module>/recordTelemetry:1666becb123b4c253327:1","classification":"durable","reason":"Unresolved callback branches reach notification roots at this exact source site. No loss-tolerance or terminal-delivery proof is established; preserve the delivery requirement through wrappers. Delivery remains unverified.","durablePath":"UNVERIFIED requirement: plan:dbos-durability-right-sizing-2026-10-21#P-009","deliveryState":"unverified"}
       await deps.recordInvocation({
         toolName,
         pluginName: tool.pluginName,
@@ -2282,6 +2283,7 @@ async function recordTelemetry(
         ...kernelFields,
       });
     } else {
+      // notify-classification: {"id":"libs/generic/tooldef/src/dispatch-stack.ts#<module>/recordTelemetry:2eb7150519f987e8c2a6:1","classification":"durable","reason":"Unresolved callback branches reach notification roots at this exact source site. No loss-tolerance or terminal-delivery proof is established; preserve the delivery requirement through wrappers. Delivery remains unverified.","durablePath":"UNVERIFIED requirement: plan:dbos-durability-right-sizing-2026-10-21#P-009","deliveryState":"unverified"}
       await deps.recordInvocation({
         toolName,
         pluginName: tool.pluginName,
@@ -2453,7 +2455,9 @@ export async function runDispatchStack(
   stack: ReadonlyArray<DispatchStep> = DEFAULT_DISPATCH_STACK,
 ): Promise<DispatchProjectedResult> {
   return tool.batchContract
+    // notify-classification: {"id":"libs/generic/tooldef/src/dispatch-stack.ts#<module>/runDispatchStack:82cd708f01135cba0d20:1","classification":"durable","reason":"Unresolved callback branches reach notification roots at this exact source site. No loss-tolerance or terminal-delivery proof is established; preserve the delivery requirement through wrappers. Delivery remains unverified.","durablePath":"UNVERIFIED requirement: plan:dbos-durability-right-sizing-2026-10-21#P-009","deliveryState":"unverified"}
     ? runBatchDispatchStack(tool, toolName, input, ctx, deps, stack)
+    // notify-classification: {"id":"libs/generic/tooldef/src/dispatch-stack.ts#<module>/runDispatchStack:5db14e14e140ee6b7b04:1","classification":"durable","reason":"Unresolved callback branches reach notification roots at this exact source site. No loss-tolerance or terminal-delivery proof is established; preserve the delivery requirement through wrappers. Delivery remains unverified.","durablePath":"UNVERIFIED requirement: plan:dbos-durability-right-sizing-2026-10-21#P-009","deliveryState":"unverified"}
     : runOperationDispatchStack(tool, toolName, input, ctx, deps, stack);
 }
 
@@ -2672,6 +2676,7 @@ export async function runBatchDispatchStack(
     descriptors.deadlineAtMs = { value: deadlineAtMs, enumerable: true, configurable: true, writable: true };
     const childCtx = Object.defineProperties(Object.create(Object.getPrototypeOf(ctx)), descriptors) as UnifiedToolContext;
     try {
+      // notify-classification: {"id":"libs/generic/tooldef/src/dispatch-stack.ts#<module>/runBatchDispatchStack/invokeItem:3f5fe03d519b8065a17a:1","classification":"durable","reason":"Unresolved callback branches reach notification roots at this exact source site. No loss-tolerance or terminal-delivery proof is established; preserve the delivery requirement through wrappers. Delivery remains unverified.","durablePath":"UNVERIFIED requirement: plan:dbos-durability-right-sizing-2026-10-21#P-009","deliveryState":"unverified"}
       return await runOperationDispatchStack(tool, toolName, args, childCtx, deps, stack,
         coordinator ? { itemId: item.itemId, coordinator } : undefined);
     } catch (error) {
@@ -2684,7 +2689,9 @@ export async function runBatchDispatchStack(
   try {
     const children: DispatchProjectedResult[] = [];
     if (coordinator) children.push(...await Promise.all(preparedItems.map(item =>
+      // notify-classification: {"id":"libs/generic/tooldef/src/dispatch-stack.ts#<module>/runBatchDispatchStack/<callback>:f14a1a8aa23ea6f684e6:1","classification":"durable","reason":"Unresolved callback branches reach notification roots at this exact source site. No loss-tolerance or terminal-delivery proof is established; preserve the delivery requirement through wrappers. Delivery remains unverified.","durablePath":"UNVERIFIED requirement: plan:dbos-durability-right-sizing-2026-10-21#P-009","deliveryState":"unverified"}
       invokeItem(item).finally(() => coordinator.terminal(item.item.itemId)))));
+    // notify-classification: {"id":"libs/generic/tooldef/src/dispatch-stack.ts#<module>/runBatchDispatchStack:f14a1a8aa23ea6f684e6:1","classification":"durable","reason":"Unresolved callback branches reach notification roots at this exact source site. No loss-tolerance or terminal-delivery proof is established; preserve the delivery requirement through wrappers. Delivery remains unverified.","durablePath":"UNVERIFIED requirement: plan:dbos-durability-right-sizing-2026-10-21#P-009","deliveryState":"unverified"}
     else for (const item of preparedItems) children.push(await invokeItem(item));
     // Negotiation is independent of request syntax and preserves original bytes.
     if (legacyResponse) return children[0];
@@ -2835,6 +2842,7 @@ async function runOperationDispatchStack(
     let quotaSettlementFailed = false;
     try { await exec.quotaReservation?.settle(exec.quotaConsumed ? 'commit' : 'release'); }
     catch { quotaSettlementFailed = true; }
+    // notify-classification: {"id":"libs/generic/tooldef/src/dispatch-stack.ts#<module>/runOperationDispatchStack:56581e55ce71b6f260bc:1","classification":"durable","reason":"Unresolved callback branches reach notification roots at this exact source site. No loss-tolerance or terminal-delivery proof is established; preserve the delivery requirement through wrappers. Delivery remains unverified.","durablePath":"UNVERIFIED requirement: plan:dbos-durability-right-sizing-2026-10-21#P-009","deliveryState":"unverified"}
     await recordTelemetry(exec, settled);
     // Event-reaction observation point (D-001). Fired AFTER telemetry, on every
     // path. Best-effort + non-blocking: the host's postInvoke matches rules and
@@ -2852,6 +2860,7 @@ async function runOperationDispatchStack(
               ...(exec.executionRevision ? { appliedExecutionRevision: exec.executionRevision } : {}),
             }
           : ctx;
+        // notify-classification: {"id":"libs/generic/tooldef/src/dispatch-stack.ts#<module>/runOperationDispatchStack:ce5c20ae870fae48d713:1","classification":"durable","reason":"Unresolved callback branches reach notification roots at this exact source site. No loss-tolerance or terminal-delivery proof is established; preserve the delivery requirement through wrappers. Delivery remains unverified.","durablePath":"UNVERIFIED requirement: plan:dbos-durability-right-sizing-2026-10-21#P-009","deliveryState":"unverified"}
         deps.postInvoke({
           toolName,
           pluginName: tool.pluginName,

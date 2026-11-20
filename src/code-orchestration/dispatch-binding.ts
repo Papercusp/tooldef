@@ -209,6 +209,7 @@ export function realDispatch(ctx: UnifiedToolContext, deps: DispatchProjectedDep
   return async (tool: ProjectedTool, toolName: string, args: unknown): Promise<unknown> => {
     // Existing facade consumers read the operation body. A migrated facade
     // explicitly supplies batch-v1; request syntax never selects its version.
+    // notify-classification: {"id":"libs/generic/tooldef/src/code-orchestration/dispatch-binding.ts#<module>/realDispatch/<callback>:fa5f531ceffca540d75b:1","classification":"durable","reason":"Unresolved callback branches reach notification roots at this exact source site. No loss-tolerance or terminal-delivery proof is established; preserve the delivery requirement through wrappers. Delivery remains unverified.","durablePath":"UNVERIFIED requirement: plan:dbos-durability-right-sizing-2026-10-21#P-009","deliveryState":"unverified"}
     const r = await dispatchProjectedTool(tool, toolName, args, ctx,
       { batchResponseVersion: 'operation-v0', ...deps });
     if (!r.ok) {

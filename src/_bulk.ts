@@ -116,6 +116,7 @@ export async function runBulk<I, R extends BulkItemResult>(
   const runOne = async (i: number): Promise<void> => {
     let r: R;
     try {
+      // notify-classification: {"id":"libs/generic/tooldef/src/_bulk.ts#<module>/runBulk/runOne:e863cb116ec55a1220f2:1","classification":"durable","reason":"Unresolved callback branches reach notification roots at this exact source site. No loss-tolerance or terminal-delivery proof is established; preserve the delivery requirement through wrappers. Delivery remains unverified.","durablePath":"UNVERIFIED requirement: plan:dbos-durability-right-sizing-2026-10-21#P-009","deliveryState":"unverified"}
       r = await op(items[i], i);
     } catch (e) {
       r = {
@@ -131,11 +132,13 @@ export async function runBulk<I, R extends BulkItemResult>(
     while (nextIndex < items.length) {
       const i = nextIndex;
       nextIndex += 1;
+      // notify-classification: {"id":"libs/generic/tooldef/src/_bulk.ts#<module>/runBulk/worker:44a3f70aa04266f405d5:1","classification":"durable","reason":"Unresolved callback branches reach notification roots at this exact source site. No loss-tolerance or terminal-delivery proof is established; preserve the delivery requirement through wrappers. Delivery remains unverified.","durablePath":"UNVERIFIED requirement: plan:dbos-durability-right-sizing-2026-10-21#P-009","deliveryState":"unverified"}
       await runOne(i);
     }
   };
 
   const workerCount = Math.min(items.length, maxConcurrency);
+  // notify-classification: {"id":"libs/generic/tooldef/src/_bulk.ts#<module>/runBulk/<callback>:4a51423666628fcb012e:1","classification":"durable","reason":"Unresolved callback branches reach notification roots at this exact source site. No loss-tolerance or terminal-delivery proof is established; preserve the delivery requirement through wrappers. Delivery remains unverified.","durablePath":"UNVERIFIED requirement: plan:dbos-durability-right-sizing-2026-10-21#P-009","deliveryState":"unverified"}
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
 
   const ok = results.filter((result) => result.ok).length;

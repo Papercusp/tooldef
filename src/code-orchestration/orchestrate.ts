@@ -1202,11 +1202,14 @@ export async function runToolOrchestration(
       const childCtx = childIdempotencyKey
         ? { ...callCtx, idempotencyKey: childIdempotencyKey }
         : callCtx;
+      // notify-classification: {"id":"libs/generic/tooldef/src/code-orchestration/orchestrate.ts#<module>/runToolOrchestration/dispatch/call:176b4f0d18fb8a4b1584:1","classification":"durable","reason":"Unresolved callback branches reach notification roots at this exact source site. No loss-tolerance or terminal-delivery proof is established; preserve the delivery requirement through wrappers. Delivery remains unverified.","durablePath":"UNVERIFIED requirement: plan:dbos-durability-right-sizing-2026-10-21#P-009","deliveryState":"unverified"}
       return realDispatch(childCtx, callDeps)(tool, name, callArgs);
     };
     try {
       const result = await (wrapDispatch
+        // notify-classification: {"id":"libs/generic/tooldef/src/code-orchestration/orchestrate.ts#<module>/runToolOrchestration/dispatch:90953e3d2c04c67b360b:1","classification":"durable","reason":"Unresolved callback branches reach notification roots at this exact source site. No loss-tolerance or terminal-delivery proof is established; preserve the delivery requirement through wrappers. Delivery remains unverified.","durablePath":"UNVERIFIED requirement: plan:dbos-durability-right-sizing-2026-10-21#P-009","deliveryState":"unverified"}
         ? wrapDispatch(tool, name, args, dispatchCtx, call)
+        // notify-classification: {"id":"libs/generic/tooldef/src/code-orchestration/orchestrate.ts#<module>/runToolOrchestration/dispatch:2b53c11d69fd85c79263:1","classification":"durable","reason":"Unresolved callback branches reach notification roots at this exact source site. No loss-tolerance or terminal-delivery proof is established; preserve the delivery requirement through wrappers. Delivery remains unverified.","durablePath":"UNVERIFIED requirement: plan:dbos-durability-right-sizing-2026-10-21#P-009","deliveryState":"unverified"}
         : call(dispatchCtx));
       // P-008: measure the exact serialized payload the script receives. Tool
       // results are JSON transport values; keep telemetry fail-soft if a custom
